@@ -1,0 +1,16 @@
+{
+  "name": "@xsb/protocol",
+  "version": "0.1.0",
+  "description": "The wire layer of xsb: JSON-RPC, the slice of ACP it uses, and its ACP extensions",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

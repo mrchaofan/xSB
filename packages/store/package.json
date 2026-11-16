@@ -1,0 +1,17 @@
+{
+  "name": "@xsb/store",
+  "version": "0.1.0",
+  "description": "Append-only JSONL event logs with a write-ahead log for multi-file changes",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/store.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node test/store.test.ts",
+    "typecheck": "tsc --noEmit"
+  }
+}

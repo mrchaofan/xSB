@@ -1,0 +1,12 @@
+{
+  "description": "Sets the film's visual standards, produces candidate looks for casting the main characters, and creates character sheets and look references so that every shot looks like it belongs to the same film",
+  "mcpServers": {
+    "media": {
+      "command": "xsb-media-mcp",
+      "env": {
+        "IMAGE_PROVIDER": "seedream",
+        "VIDEO_PROVIDER": "seedance"
+      }
+    }
+  }
+}

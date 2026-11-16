@@ -1,0 +1,58 @@
+/** Turns `session/update` notifications into terminal output. */
+import { OriginExt } from "@xsb/protocol";
+import type { OriginMeta, SessionUpdate } from "@xsb/protocol";
+import { t } from "./text.ts";
+
+const tty = process.stdout.isTTY;
+const dim = (s: string): string => (tty ? `\x1b[2m${s}\x1b[0m` : s);
+const bold = (s: string): string => (tty ? `\x1b[1m${s}\x1b[0m` : s);
+
+export class Printer {
+  /** sessionId -> agent id, shown in front of output when several sessions are on screen. */
+  readonly labels = new Map<string, string>();
+  showLabels = false;
+  /** The stream that owns the current, unfinished line. */
+  private open: string | null = null;
+
+  line(text: string): void {
+    this.endLine();
+    process.stdout.write(text + "\n");
+  }
+
+  endLine(): void {
+    if (this.open) process.stdout.write("\n");
+    this.open = null;
+  }
+
+  private stream(key: string, prefix: string, text: string, style: (s: string) => string = (s) => s): void {
+    if (this.open !== key) {
+      this.endLine();
+      process.stdout.write(prefix);
+      this.open = key;
+    }
+    process.stdout.write(style(text));
+  }
+
+  update(sessionId: string, update: SessionUpdate): void {
+    const who = this.labels.get(sessionId) ?? sessionId;
+    const label = this.showLabels ? bold(`[${who}] `) : "";
+    const body = update.content?.type === "text" ? (update.content.text as string) : `[${update.content?.type}]`;
+    switch (update.sessionUpdate) {
+      case "agent_message_chunk":
+        return this.stream(`${sessionId}:message`, label, body);
+      case "agent_thought_chunk":
+        return this.stream(`${sessionId}:thought`, label + dim(t.thinking), body, dim);
+      case "tool_call":
+        return this.line(`${label}${dim(`  ⚙ ${update.title ?? update.name ?? t.tool}`)}`);
+      case "tool_call_update":
+        if (update.status === "failed") this.line(`${label}${dim(`  ✗ ${t.toolFailed(update.title ?? update.toolCallId)}`)}`);
+        return;
+      case "user_message_chunk": {
+        const origin = update._meta?.[OriginExt.key] as OriginMeta | undefined;
+        const from = origin?.kind === "agent" ? origin.agentId : origin?.kind === "system" ? "xsb" : t.user;
+        const how = origin?.steered ? t.interjected : "";
+        return this.line(`${label}${dim(`← ${from}${how}: ${body}`)}`);
+      }
+    }
+  }
+}

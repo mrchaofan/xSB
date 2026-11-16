@@ -1,0 +1,28 @@
+{
+  "name": "@xsb/hub",
+  "version": "0.1.0",
+  "description": "The xsb hub daemon: an ACP agent to clients, an ACP client to every backend",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "xsb-hub": "bin/xsb-hub",
+    "xsb-mcp-bridge": "bin/xsb-mcp-bridge"
+  },
+  "dependencies": {
+    "@xsb/protocol": "0.1.0",
+    "@xsb/store": "0.1.0"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node test/e2e.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@xsb/adapter": "0.1.0"
+  }
+}

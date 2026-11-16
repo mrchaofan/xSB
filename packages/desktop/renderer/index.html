@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-t="app.title"></title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="titlebar">
+  <button class="icon-btn" id="toggle-rail" data-t-title="titlebar.rail.toggle" data-t-aria-label="titlebar.rail.toggle">
+    <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11"/></svg>
+  </button>
+  <div class="workspace">
+    <button id="ws" data-t-title="titlebar.workspace.open"><strong id="ws-name"></strong><span id="ws-path"></span></button>
+  </div>
+  <button class="icon-btn" id="toggle-artifact" data-t-title="titlebar.artifacts.toggle" data-t-aria-label="titlebar.artifacts.toggle">
+    <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10 2.5v11"/></svg>
+  </button>
+</header>
+
+<!-- 窗口没有工作区时只显示这一块 -->
+<section class="welcome form" id="welcome"></section>
+
+<main class="main">
+  <nav class="rail" data-t-aria-label="rail.label">
+    <h2><span data-t="rail.agents"></span> <button class="icon-btn" id="new-agent" data-t-title="agent.new.title" data-t-aria-label="agent.new.title"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></button></h2>
+    <div id="agents"></div>
+    <h2><span data-t="rail.roles"></span> <button class="icon-btn" id="new-role" data-t-title="role.new.title" data-t-aria-label="role.new.title"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></button></h2>
+    <div id="roles"></div>
+    <h2 data-t="rail.tasks"></h2>
+    <div id="tasks"></div>
+  </nav>
+
+  <!-- 角色编辑、产出总览：打开时占用对话栏和制品栏的位置 -->
+  <section class="page form" id="page"></section>
+
+  <div class="blank" id="blank"></div>
+  <div class="lanes" id="lanes"></div>
+
+  <div class="divider" id="divider" role="separator" aria-orientation="vertical"></div>
+
+  <aside class="artifact" data-t-aria-label="side.label">
+    <!-- 标签：制品，以及打开的每个网页（pages.js） -->
+    <nav class="tabs" id="tabs" data-t-aria-label="side.label"></nav>
+
+    <section class="side" id="side-artifacts">
+    <header class="bar">
+      <button class="icon-btn" id="artifact-list" data-t-title="artifact.list.all" data-t-aria-label="artifact.list.all">
+        <svg viewBox="0 0 16 16"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+      </button>
+      <div class="artifact-title"><strong id="artifact-name"></strong><small id="artifact-meta"></small></div>
+      <div class="segmented" id="artifact-modes" role="group" data-t-aria-label="artifact.mode.label">
+        <button data-mode="preview" data-t="artifact.mode.preview"></button>
+        <button data-mode="source" data-t="artifact.mode.source"></button>
+      </div>
+    </header>
+    <div class="artifact-body" id="artifact-body"></div>
+    </section>
+
+    <section class="side" id="side-web" hidden>
+    <header class="bar">
+      <button class="icon-btn" id="web-back" data-t-title="web.back" data-t-aria-label="web.back"><svg viewBox="0 0 16 16"><path d="M9.5 3.5L5 8l4.5 4.5"/></svg></button>
+      <button class="icon-btn" id="web-forward" data-t-title="web.forward" data-t-aria-label="web.forward"><svg viewBox="0 0 16 16"><path d="M6.5 3.5L11 8l-4.5 4.5"/></svg></button>
+      <button class="icon-btn" id="web-reload" data-t-title="web.reload" data-t-aria-label="web.reload"><svg viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.5-3.5M13 2.5v3h-3"/></svg></button>
+      <input class="web-url" id="web-url" type="text" spellcheck="false" data-t-placeholder="web.url.placeholder" data-t-aria-label="web.url.label">
+      <button class="icon-btn" id="web-external" data-t-title="web.external" data-t-aria-label="web.external"><svg viewBox="0 0 16 16"><path d="M9 3h4v4M13 3L7.5 8.5M11 9.5V13H3V5h3.5"/></svg></button>
+      <button class="icon-btn" id="web-detach" data-t-title="web.detach" data-t-aria-label="web.detach"><svg viewBox="0 0 16 16"><rect x="1.5" y="4.5" width="9" height="9" rx="1.5"/><path d="M5.5 4.5v-2h9v9h-4"/></svg></button>
+    </header>
+    <div class="web-body" id="web-body"></div>
+    </section>
+  </aside>
+</main>
+
+<!-- window.xsb 在 Electron 里由 preload 提供。在浏览器里直接打开这个文件时没有它，改用 mock.js 的假数据。 -->
+<script>if (!window.xsb) document.write('<script src="mock.js"><\/script>');</script>
+<!-- main.js 是打包后的界面代码（rolldown.config.js），源文件是这个目录下的各个模块。 -->
+<script src="main.js"></script>
+</body>
+</html>

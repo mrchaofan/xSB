@@ -1,0 +1,733 @@
+/**
+ * End to end: a real hub, real sockets, the real MCP bridge, and scripted
+ * agents in place of models: test/mock-agent.ts speaks ACP itself, and
+ * test/third-party-agent.ts does not and is wrapped with @xsb/adapter.
+ */
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { Agents, Assets, Backends, Connection, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
+import type { Language, Task } from "@xsb/protocol";
+import { Hub } from "../src/hub.ts";
+import { Paths } from "../src/paths.ts";
+import { readRole } from "../src/roles.ts";
+import { teamRoles, teams } from "../src/teams.ts";
+import { setTimeout as sleep } from "node:timers/promises";
+
+const MOCK = fileURLToPath(new URL("./mock-agent.ts", import.meta.url));
+const GENERATOR = fileURLToPath(new URL("./mock-generator.ts", import.meta.url));
+const THIRD_PARTY = fileURLToPath(new URL("./third-party-agent.ts", import.meta.url));
+const project = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "xsb-e2e-")));
+const paths = new Paths(project);
+fs.mkdirSync(paths.dir);
+// Backends are machine settings: they live in the global directory, here a scratch one.
+process.env.XSB_HOME = path.join(project, "home");
+fs.mkdirSync(process.env.XSB_HOME);
+const node = process.execPath;
+fs.writeFileSync(
+  path.join(process.env.XSB_HOME, "config.json"),
+  JSON.stringify({
+    version: 1,
+    backends: {
+      mock: { command: node, args: [MOCK] },
+      wrapped: { command: node, args: [THIRD_PARTY] },
+      steerable: { command: node, args: [MOCK, "--steering"] },
+      bare: { command: node, args: [MOCK, "--no-system-prompt"] },
+      "signed-out": { command: node, args: [MOCK, "--auth-required"] },
+      "from-the-future": { command: node, args: [MOCK, "--protocol", "9"] },
+      crashing: { command: node, args: ["-e", "console.error('license expired'); process.exit(3)"] },
+      missing: { command: "xsb-no-such-command" },
+    },
+  }),
+);
+
+/** What a client saw, per session. */
+const said = new Map<string, string>();
+const inputs = new Map<string, { text: string; origin: any }[]>();
+let permissionAsked = 0;
+const removed: string[] = [];
+/** Role changes the hub announced: the role's name and description, or its name alone once removed. */
+const roleEvents: string[] = [];
+/** Asset versions the hub announced. */
+const assetEvents: string[] = [];
+
+async function connect(): Promise<Connection> {
+  const socket = net.connect(paths.socket("acp"));
+  await new Promise((resolve) => socket.once("connect", resolve));
+  const conn = new Connection(socket, socket, "test");
+  conn.onNotification("session/update", ({ sessionId, update }) => {
+    if (update.sessionUpdate === "agent_message_chunk") said.set(sessionId, (said.get(sessionId) ?? "") + update.content.text);
+    if (update.sessionUpdate === "user_message_chunk") {
+      const list = inputs.get(sessionId) ?? [];
+      list.push({ text: update.content.text, origin: update._meta[OriginExt.key] });
+      inputs.set(sessionId, list);
+    }
+  });
+  conn.onNotification(Agents.removed, ({ id }) => removed.push(id));
+  conn.onNotification(Roles.update, ({ role }) => roleEvents.push(`${role.name}: ${role.description}`));
+  conn.onNotification(Assets.update, ({ asset }) => assetEvents.push(`${asset.id}@${asset.version}`));
+  conn.onNotification(Roles.removed, ({ name }) => roleEvents.push(name));
+  conn.onRequest("session/request_permission", (p) => {
+    permissionAsked++;
+    return { outcome: { outcome: "selected", optionId: p.options[0].optionId } };
+  });
+  const init = await conn.request("initialize", {
+    protocolVersion: 1,
+    clientCapabilities: { _meta: { [Agents.capability]: {} } },
+  });
+  assert.equal(init.protocolVersion, 1);
+  assert.equal(init._meta[Steering.metaKey].supported, true);
+  return conn;
+}
+
+async function until<T>(what: string, probe: () => T | Promise<T>, ms = 8000): Promise<NonNullable<T>> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const value = await probe();
+    if (value) return value;
+    if (Date.now() > end) throw new Error(`timed out waiting for: ${what}`);
+    await sleep(25);
+  }
+}
+
+let hub = new Hub(project);
+await hub.start();
+let conn = await connect();
+
+const prompt = (sessionId: string, text: string) =>
+  conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+const newSession = async (agentId: string): Promise<string> =>
+  (await conn.request("session/new", { cwd: project, mcpServers: [], _meta: { [Agents.sessionKey]: agentId } })).sessionId;
+const tasks = async (): Promise<Task[]> => (await conn.request(Tasks.list, {})).tasks;
+const idle = (agentId: string) =>
+  until(`${agentId} idle`, async () =>
+    (await conn.request(Agents.list)).agents.find((a: any) => a.id === agentId).state === "idle",
+  );
+
+for (const [id, backend] of [["a", "mock"], ["b", "mock"], ["c", "steerable"], ["d", "bare"]]) {
+  await conn.request(Agents.put, { agent: { id, backend, description: `agent ${id}` }, instructions: `You are ${id}.` });
+}
+const a = await newSession("a");
+
+// 1. A plain turn. Without `_meta` a client reaches the default (first) agent.
+{
+  const plain = (await conn.request("session/new", { cwd: project, mcpServers: [] })).sessionId;
+  assert.equal((await prompt(plain, "hello")).stopReason, "end_turn");
+  assert.match(said.get(plain)!, /echo: hello/);
+  console.log("ok 1 plain turn");
+}
+
+// 2. Dispatch returns at once; the result comes back as a turn of its own, marked with its origin.
+{
+  await prompt(a, `!call dispatch_task {"to":"b","title":"key light","instructions":"!say WARM-KEY","topic":"scene 3 lighting"}`);
+  assert.match(said.get(a)!, /"status": "dispatched"/);
+  const result = await until("task result in a", () => inputs.get(a)?.find((i) => i.text.includes("<xsb-task-result")));
+  assert.match(result.text, /by="b"[^>]*status="completed">\nWARM-KEY/);
+  assert.deepEqual([result.origin.kind, result.origin.agentId, result.origin.role], ["agent", "b", "task_result"]);
+  await idle("a");
+  console.log("ok 2 dispatch and result");
+}
+
+// 3. A gate: results of several tasks arrive together, and meanwhile the user's message is an ordinary turn.
+{
+  const before = inputs.get(a)!.length;
+  await prompt(
+    a,
+    [
+      `!call dispatch_task {"to":"b","title":"t-b","instructions":"!sleep 1500\\n!say B-DONE","topic":"gate"}`,
+      `!call dispatch_task {"to":"c","title":"t-c","instructions":"!say C-DONE","topic":"gate"}`,
+      `!await {"mode":"all","note":"merge both"}`,
+    ].join("\n"),
+  );
+  assert.match(said.get(a)!, /Registered \(\d\/2 finished\)/);
+  // The finished half of a join is not readable early; it would arrive twice.
+  const early = (await until("t-c done", async () => (await tasks()).find((t) => t.title === "t-c" && t.status === "completed"))).id;
+  await prompt(a, `!call get_task {"task_id":"${early}"}`);
+  assert.match(said.get(a)!, /"result_delivery": "Held for your await_tasks/);
+  assert.doesNotMatch(said.get(a)!, /"result": "C-DONE/);
+  const reply = await prompt(a, "are you there?");
+  assert.equal(reply.stopReason, "end_turn");
+  assert.match(said.get(a)!, /echo: are you there\?/);
+  const together = await until("joined results", () => inputs.get(a)!.find((i) => i.text.includes("<xsb-task-results")));
+  assert.match(together.text, /B-DONE/);
+  assert.match(together.text, /C-DONE/);
+  assert.match(together.text, /merge both/);
+  assert.equal(together.origin.kind, "system");
+  // c finished long before b, yet nothing arrived on its own.
+  const fresh = inputs.get(a)!.slice(before).filter((i) => i.origin.kind !== "user");
+  assert.equal(fresh.length, 1, "exactly one delivery for the gate");
+  await idle("a");
+  console.log("ok 3 gate, user turn while waiting");
+}
+
+// 4. A task held back until another finished receives that task's result.
+{
+  await prompt(
+    a,
+    [
+      `!call dispatch_task {"to":"b","title":"script","instructions":"!sleep 300\\n!say SCRIPT-V1","topic":"dep"}`,
+      `!call dispatch_task {"to":"c","title":"storyboard","instructions":"draw it","topic":"dep","after":["$last"]}`,
+    ].join("\n"),
+  );
+  const held = (await tasks()).find((t) => t.title === "storyboard")!;
+  assert.equal(held.status, "blocked");
+  const done = await until("storyboard done", async () => (await tasks()).find((t) => t.title === "storyboard" && t.status === "completed"));
+  assert.match(done.result!, /SCRIPT-V1/);
+  await until("both results in a", () => inputs.get(a)!.filter((i) => i.text.includes('topic="dep"')).length === 2);
+  await idle("a");
+  console.log("ok 4 dependency");
+}
+
+// 5. Steering a backend that cannot be steered: the hub interrupts and continues, still one turn.
+{
+  const started = Date.now();
+  const turn = prompt(a, "!sleep 5000\n!say TOO-LATE");
+  await until("a running", () => hub.session(a).current?.started);
+  const answer = await conn.request(Steering.method, { sessionId: a, prompt: [{ type: "text", text: "use blue instead" }] });
+  assert.equal(answer.outcome, "injected");
+  assert.equal((await turn).stopReason, "end_turn");
+  assert.ok(Date.now() - started < 4000, "did not wait for the sleep");
+  assert.match(said.get(a)!, /echo: \[xsb\] A new message arrived.*use blue instead/);
+  assert.doesNotMatch(said.get(a)!, /TOO-LATE/);
+  console.log("ok 5 steering by interrupt");
+}
+
+// 6. Steering a backend that serves the extension: passed through, the turn runs on.
+{
+  const c = await newSession("c");
+  const turn = prompt(c, "!sleep 400\n!say END");
+  await until("c running", () => hub.session(c).current?.started);
+  const answer = await conn.request(Steering.method, { sessionId: c, prompt: [{ type: "text", text: "!say MID" }] });
+  assert.equal(answer.outcome, "injected");
+  assert.equal((await turn).stopReason, "end_turn");
+  assert.match(said.get(c)!, /MID\nEND/);
+  // Idle: the caller may ask to keep the message and send it as a prompt itself.
+  const idleAnswer = await conn.request(Steering.method, {
+    sessionId: c,
+    prompt: [{ type: "text", text: "x" }],
+    _meta: { [Steering.metaKey]: { idleBehavior: "promptRequired" } },
+  });
+  assert.deepEqual(idleAnswer, { outcome: "promptRequired", reason: "noRunningTurn" });
+  console.log("ok 6 native steering");
+}
+
+// 7. An agent interjects into a peer's running turn.
+{
+  const bMain = (await conn.request(Agents.list)).agents.find((x: any) => x.id === "b").mainSessionId;
+  await conn.request("session/resume", { sessionId: bMain, cwd: project, mcpServers: [] });
+  const busy = prompt(bMain, "!sleep 5000\n!say B-SLOW");
+  await until("b running", () => hub.session(bMain).current?.started);
+  await prompt(a, `!call send_message {"to":"b","content":"stop, plan changed","topic":"scene 3 lighting","interject":true}`);
+  assert.match(said.get(a)!, /"delivery": "interjected"/);
+  assert.equal((await busy).stopReason, "end_turn");
+  const got = inputs.get(bMain)!.find((i) => i.text.includes("plan changed"))!;
+  assert.equal(got.origin.steered, true);
+  assert.equal(got.origin.agentId, "a");
+  assert.doesNotMatch(said.get(bMain)!, /B-SLOW/);
+  console.log("ok 7 agent interjects");
+}
+
+// 8. Memory: the hub knows who handled a topic, the agent keeps notes, both survive.
+{
+  await prompt(a, `!call send_message {"to":"c","content":"dim the key","topic":"Scene 3 Lighting"}`);
+  assert.match(said.get(a)!, /has so far been handled with b \(\d+x/);
+  await prompt(a, `!call remember {"topic":"scene 3 lighting","content":"warm key, owner b"}`);
+  await prompt(a, `!call recall {"query":"scene 3"}`);
+  assert.match(said.get(a)!, /"content": "warm key, owner b"/);
+  await prompt(a, `!call list_agents {}`);
+  assert.match(said.get(a)!, /"topics_with_you": \[\s*"scene 3 lighting"/);
+  await idle("c");
+  console.log("ok 8 memory and continuity");
+}
+
+// 9. Permission: the hub decides nothing; a backend that asks is answered by a human.
+{
+  assert.equal(permissionAsked, 0);
+  await prompt(a, "!perm");
+  assert.equal(permissionAsked, 1);
+  assert.match(said.get(a)!, /perm: selected yes/);
+  console.log("ok 9 permissions go to a human");
+}
+
+// 10. A backend without the system prompt capability gets its instructions on the first prompt.
+{
+  const d = await newSession("d");
+  await prompt(d, "hi");
+  assert.match(said.get(d)!, /echo: # Who you are.*You are d\..*\| hi$/m);
+  said.set(d, "");
+  await prompt(d, "again");
+  assert.equal(said.get(d), "echo: again\n");
+  console.log("ok 10 instructions without capability");
+}
+
+// 11. Restart: state is rebuilt from the logs, history replays, unfinished work runs again.
+{
+  await prompt(a, `!call dispatch_task {"to":"b","title":"survivor","instructions":"!sleep 600\\n!say AGAIN","topic":"restart"}`);
+  await until("survivor running", async () => (await tasks()).find((t) => t.title === "survivor" && t.status === "running"));
+  await hub.shutdown();
+  hub = new Hub(project);
+  await hub.start();
+  conn = await connect();
+
+  const { agents } = await conn.request(Agents.list);
+  assert.deepEqual(agents.map((x: any) => x.id), ["a", "b", "c", "d"]);
+  inputs.delete(a);
+  await conn.request("session/load", { sessionId: a, cwd: project, mcpServers: [] });
+  assert.ok(inputs.get(a)!.some((i) => i.text.includes("are you there?")), "history replayed");
+  const survivor = await until("survivor completed", async () => (await tasks()).find((t) => t.title === "survivor" && t.status === "completed"));
+  assert.match(survivor.result!, /AGAIN/);
+  await until("result reached a after restart", () => inputs.get(a)!.some((i) => i.text.includes("AGAIN")));
+  await prompt(a, `!call recall {"query":"scene 3"}`);
+  assert.match(said.get(a)!.split("result(recall)").at(-1)!, /warm key, owner b[\s\S]*"agent": "b"/);
+  console.log("ok 11 restart");
+}
+
+// 12. Backend failures carry a code and a reason, and name the agent.
+{
+  const fails = async (backend: string, code: number, reason: string, message: RegExp, turn = false): Promise<void> => {
+    let error: any;
+    try {
+      if (backend === "nowhere") await conn.request(Agents.put, { agent: { id: "x", backend } });
+      else {
+        await conn.request(Agents.put, { agent: { id: `x-${backend}`, backend } });
+        const sid = await newSession(`x-${backend}`);
+        if (turn) await prompt(sid, "hi");
+      }
+    } catch (e) {
+      error = e;
+    }
+    assert.ok(error, `${backend} should fail`);
+    assert.deepEqual([error.code, error.data?.reason], [code, reason], error.message);
+    assert.match(error.message, message);
+  };
+  await fails("nowhere", -33103, "backend_unknown", /no backend named "nowhere".*Known: claude, codex, gemini, grok/);
+  await fails("missing", -33101, "backend_not_installed", /"xsb-no-such-command".*does not install/);
+  await fails("crashing", -33102, "backend_start_failed", /exited \(3\).*license expired/);
+  await fails("from-the-future", -33104, "backend_incompatible", /speaks ACP v9/);
+  await fails("signed-out", -32000, "auth_required", /agent "x-signed-out".*not signed in.*Log in with the mock CLI/, true);
+  console.log("ok 12 error codes");
+}
+
+// 13. A dispatcher can cancel a task. It ends like any other: the result comes back, as "cancelled".
+{
+  await idle("a");
+  await prompt(
+    a,
+    [
+      `!call dispatch_task {"to":"b","title":"first","instructions":"!sleep 300\\n!say FIRST","topic":"cancel"}`,
+      `!call dispatch_task {"to":"b","title":"second","instructions":"!say NEVER","topic":"cancel"}`,
+      `!call cancel_task {"task_id":"$last"}`,
+    ].join("\n"),
+  );
+  assert.match(said.get(a)!, /cancelled before it ran/);
+  const result = (title: string) =>
+    until(`result of ${title}`, () => inputs.get(a)!.find((i) => i.text.includes(`title="${title}"`) && i.text.includes("<xsb-task-result")));
+  assert.match((await result("second")).text, /status="cancelled"/);
+  assert.match((await result("first")).text, /status="completed">\nFIRST/);
+  await idle("a");
+  console.log("ok 13 cancel a task");
+}
+
+// 14. An agent without ACP, wrapped with @xsb/adapter, goes through the same chain as the others.
+{
+  await conn.request(Agents.put, { agent: { id: "e", backend: "wrapped", description: "agent e" }, instructions: "You are e." });
+  const e = await newSession("e");
+  await prompt(e, "hello");
+  assert.match(said.get(e)!, /third party \(instructed\) heard: hello/);
+
+  // It has no steering of its own; the hub makes up for it as for any backend.
+  const turn = prompt(e, "wait 5000");
+  await until("e running", () => hub.session(e).current?.started);
+  const answer = await conn.request(Steering.method, { sessionId: e, prompt: [{ type: "text", text: "change of plan" }] });
+  assert.deepEqual(answer, { outcome: "injected" });
+  assert.equal((await turn).stopReason, "end_turn");
+  assert.match(said.get(e)!, /heard: \[xsb\][^\n]*\nchange of plan/);
+
+  // And it is a peer like the others: a task from an ACP agent, the result back.
+  await prompt(a, `!call dispatch_task {"to":"e","title":"wrapped work","instructions":"do the thing","topic":"wrapped"}`);
+  const result = await until("result from e", () => inputs.get(a)!.find((i) => i.text.includes('title="wrapped work"')));
+  assert.match(result.text, /by="e"[^>]*status="completed">\nthird party \(instructed\) heard: [\s\S]*do the thing/);
+  await idle("a");
+  console.log("ok 14 wrapped third-party agent");
+}
+
+// 15. A role gives its agents their instructions, their MCP servers and their skills.
+const call = (tool: string, args: unknown): string => `!call ${tool} ${JSON.stringify(args)}`;
+const roleDir = paths.roleDir("painter");
+fs.mkdirSync(path.join(roleDir, "skills", "shots"), { recursive: true });
+fs.mkdirSync(path.join(roleDir, "skills", "grading"));
+fs.writeFileSync(
+  path.join(roleDir, "role.json"),
+  JSON.stringify({
+    description: "paints shots",
+    backend: "bare",
+    workspace: "project",
+    mcpServers: { gen: { command: node, args: [GENERATOR], env: { GEN_KEY: "k1" } } },
+  }),
+);
+fs.writeFileSync(path.join(roleDir, "instructions.md"), "ROLE-RULES: keep to the house style.");
+fs.writeFileSync(
+  path.join(roleDir, "skills", "shots", "SKILL.md"),
+  "---\ndescription: How to break a scene into shots\nproduces: shot_list\ninputs: character, script\n---\nSHOT-PROCEDURE: one line per shot.",
+);
+fs.writeFileSync(path.join(roleDir, "skills", "grading", "SKILL.md"), "# Grading a shot\nGRADE-PROCEDURE: match the reference.");
+const { agent: painter } = await conn.request(Agents.put, { agent: { id: "p1", role: "painter" }, instructions: "You are p1." });
+const p = await newSession("p1");
+{
+  // What the role says of a new agent: its description, its backend, where it works.
+  assert.deepEqual([painter.role, painter.backend, painter.description, painter.workspace], ["painter", "bare", "paints shots", project]);
+  await assert.rejects(conn.request(Agents.put, { agent: { id: "p2", role: "nope" } }), /no role "nope" \(roles: painter\)/);
+
+  await prompt(p, "hi");
+  const first = said.get(p)!;
+  assert.match(first, /ROLE-RULES: keep to the house style\..*You are p1\./);
+  assert.match(first, /- grading: Grading a shot.*- shots: How to break a scene into shots \(arrives with tasks that produce "shot_list"\)/);
+  await prompt(p, "!servers");
+  assert.match(said.get(p)!, /servers: xsb, gen\n/);
+  await prompt(p, call("load_skill", { name: "grading" }));
+  assert.match(said.get(p)!, /GRADE-PROCEDURE/);
+
+  // The team is what the roles of its agents declare: every agent is told who makes what from what.
+  assert.match(first, /# The team .* - shot_list: you, from character, script \|/);
+  const { systemPrompt: told } = await conn.request(Agents.get, { id: "a" });
+  assert.match(told, /\n- shot_list: p1, from character, script\n/);
+  await prompt(a, call("list_agents", {}));
+  assert.match(said.get(a)!.split("result(list_agents)").at(-1)!, /"id": "p1",[\s\S]*?"produces": \[\s*"shot_list"\s*\]/);
+  console.log("ok 15 roles");
+}
+
+// 16. A job: a slow tool call runs in the background and its result comes back like a task's.
+{
+  const job = (title: string, prompt: string, ms: number) =>
+    call("start_job", { server: "gen", tool: "render", arguments: { prompt, ms }, title, topic: "jobs" });
+  const resultOf = (title: string) =>
+    until(`result of ${title}`, () => inputs.get(p)?.find((i) => i.text.includes(`title="${title}"`)));
+
+  await prompt(p, job("shot 1", "sunset", 400));
+  assert.match(said.get(p)!, /"status": "started/);
+  assert.ok(!inputs.get(p)?.some((i) => i.text.includes('title="shot 1"')), "the turn ended before the tool did");
+  const done = await resultOf("shot 1");
+  assert.match(done.text, /by="gen\/render"[^>]*status="completed">\nrendered: sunset \(key k1\)/);
+  assert.equal(done.origin.kind, "system");
+
+  await prompt(p, job("shot 2", "fail", 0));
+  assert.match((await resultOf("shot 2")).text, /status="failed">\nthe renderer refused/);
+  await prompt(p, [job("shot 3", "never", 5000), call("cancel_task", { task_id: "$last" })].join("\n"));
+  assert.match((await resultOf("shot 3")).text, /status="cancelled"/);
+  await prompt(p, call("start_job", { server: "nope", tool: "render", title: "x" }));
+  assert.match(said.get(p)!, /your role has no MCP server "nope"/);
+  await idle("p1");
+  console.log("ok 16 jobs");
+}
+
+// 17. Assets: one library, ids and versions; a task says what it works from and what it must deliver.
+{
+  await prompt(a, call("put_asset", { type: "character", name: "lin", description: "the lead", content: "LIN: red coat" }));
+  assert.match(said.get(a)!, /"id": "character\/lin",\s*"version": 1/);
+
+  const work = [call("put_asset", { type: "shot_list", name: "scene-1", description: "shots of scene 1", content: "SHOT A" }), "!say SHOTS-DONE"];
+  await prompt(
+    a,
+    call("dispatch_task", { to: "p1", title: "shots", instructions: work.join("\n"), topic: "scene 1", inputs: ["character/lin"], produces: "shot_list" }),
+  );
+  const given = await until("task in p1", () => inputs.get(p)?.find((i) => i.text.includes('title="shots"')));
+  assert.match(given.text, /<xsb-asset id="character\/lin" version="1" by="a"[^>]*>\nthe lead\n---\nLIN: red coat/);
+  assert.match(given.text, /has to produce a "shot_list" asset/);
+  assert.match(given.text, /<xsb-skill name="shots">\n[\s\S]*SHOT-PROCEDURE/);
+  // The dispatcher is told what the contract asks for and the task did not come with.
+  assert.match(said.get(a)!, /p1\\" produces \\"shot_list\\" from character, script, but `inputs` has no script asset/);
+  const delivered = await until("shots result", () => inputs.get(a)!.find((i) => i.text.includes('title="shots"')));
+  assert.match(delivered.text, /SHOTS-DONE[\s\S]*<xsb-asset id="shot_list\/scene-1" version="1" by="p1"/);
+  assert.doesNotMatch(delivered.text, /No "shot_list" asset/);
+
+  // The contract is checked by the hub: a task that did not deliver says so in its result.
+  await prompt(a, call("dispatch_task", { to: "p1", title: "board", instructions: "!say nothing made", topic: "scene 1", produces: "storyboard" }));
+  const empty = await until("board result", () => inputs.get(a)!.find((i) => i.text.includes('title="board"')));
+  assert.match(empty.text, /No "storyboard" asset was registered/);
+  assert.match(said.get(a)!, /p1\\" has no procedure for producing \\"storyboard\\" and works without one\. Nobody on this team has one/);
+  await prompt(a, call("dispatch_task", { to: "b", title: "shots by b", instructions: "!say no", topic: "scene 1b", produces: "shot_list" }));
+  assert.match(said.get(a)!, /b\\" has no procedure for producing \\"shot_list\\" and works without one\. On this team it is produced by: p1\./);
+  await until("shots by b result", () => inputs.get(a)!.find((i) => i.text.includes('title="shots by b"')));
+  await prompt(a, call("dispatch_task", { to: "p1", title: "x", instructions: "x", inputs: ["character/nobody"] }));
+  assert.match(said.get(a)!, /no asset "character\/nobody"/);
+
+  // A changed definition is a new version of the same id; a file is copied into the library.
+  await prompt(a, call("put_asset", { type: "character", name: "lin", description: "the lead", content: "LIN: blue coat" }));
+  await prompt(a, call("get_asset", { id: "character/lin@1" }));
+  assert.match(said.get(a)!.split("result(get_asset)").at(-1)!, /red coat/);
+  await prompt(a, call("get_asset", { id: "character/lin" }));
+  assert.match(said.get(a)!.split("result(get_asset)").at(-1)!, /version="2"[\s\S]*blue coat/);
+  fs.writeFileSync(path.join(paths.defaultWorkspace("a"), "frame.png"), "PNG");
+  await prompt(a, call("put_asset", { type: "image", name: "frame-1", description: "first frame", path: "frame.png" }));
+  const { assets } = await conn.request(Assets.list, {});
+  assert.deepEqual(assets.map((x: any) => `${x.id}@${x.version}`), ["character/lin@2", "shot_list/scene-1@1", "image/frame-1@1"]);
+  // Observers heard of every version as it was registered.
+  assert.deepEqual(assetEvents, ["character/lin@1", "shot_list/scene-1@1", "character/lin@2", "image/frame-1@1"]);
+  assert.equal(fs.readFileSync(assets[2].path, "utf8"), "PNG");
+  assert.ok(assets[2].path.startsWith(paths.assets) && assets[2].path.endsWith("v1.png"));
+  await idle("a");
+  console.log("ok 17 assets and what a task delivers");
+}
+
+// 18. A job the hub did not see the end of is not run again: it may have cost money already.
+{
+  await prompt(p, call("start_job", { server: "gen", tool: "render", arguments: { prompt: "long", ms: 5000 }, title: "shot 4" }));
+  await hub.shutdown();
+  hub = new Hub(project);
+  await hub.start();
+  conn = await connect();
+  const lost = await until("shot 4 failed", async () => (await tasks()).find((t) => t.title === "shot 4" && t.status === "failed"));
+  assert.match(lost.result!, /not run again/);
+  assert.equal((await conn.request(Assets.list, { type: "character" })).assets[0].version, 2);
+  await idle("p1");
+  console.log("ok 18 jobs and assets across a restart");
+}
+
+// 19. What an editor of roles and agents needs: read, write, preview, check, apply.
+{
+  const { roles } = await conn.request(Roles.list);
+  assert.deepEqual(roles.map((r: any) => [r.name, r.agents, r.skills.map((s: any) => s.name)]), [["painter", ["p1"], ["grading", "shots"]]]);
+  assert.deepEqual(roles[0].skills.map((s: any) => [s.produces, s.inputs]), [[undefined, []], ["shot_list", ["character", "script"]]]);
+  assert.equal(roles[0].workspace, "project");
+  assert.equal(roles[0].mcpServers.gen.env.GEN_KEY, "k1");
+
+  const mcpServers = { gen: { command: node, args: [GENERATOR] }, broken: { command: "xsb-no-such-command" } };
+  const skills = [{ name: "script", content: "# Writing a scene\nSCRIPT-PROCEDURE" }];
+  await conn.request(Roles.put, { role: { name: "writer", description: "writes", instructions: "WRITER-RULES", mcpServers, skills } });
+  const { role: writer } = await conn.request(Roles.get, { name: "writer" });
+  assert.deepEqual([writer.description, writer.instructions, writer.agents], ["writes", "WRITER-RULES", []]);
+  assert.deepEqual(writer.skills, [{ name: "script", description: "Writing a scene", inputs: [], content: skills[0].content }]);
+  // A field left out stays; a set that is given is the whole set.
+  const { role: fewer } = await conn.request(Roles.put, { role: { name: "writer", description: "writes dialogue", skills: [] } });
+  assert.deepEqual([fewer.description, fewer.skills, Object.keys(fewer.mcpServers)], ["writes dialogue", [], ["gen", "broken"]]);
+  assert.equal((await conn.request(Roles.get, { name: "writer" })).role.instructions, "WRITER-RULES");
+  await assert.rejects(conn.request(Roles.put, { role: { name: "writer", backend: "nope" } }), /no backend named "nope"/);
+  await assert.rejects(conn.request(Roles.put, { role: { name: "../x" } }), /role name must be/);
+  await assert.rejects(conn.request(Roles.put, { role: { name: "writer", workspace: "elsewhere" } }), /workspace must be "project" or "own"/);
+
+  const { servers } = await conn.request(Roles.check, { name: "writer" });
+  assert.deepEqual(servers[0], { server: "gen", tools: [{ name: "render", description: "Render a shot." }] });
+  assert.match(servers[1].error, /cannot start MCP server "broken"/);
+
+  const shown = await conn.request(Agents.get, { id: "p1" });
+  assert.equal(shown.instructions, "You are p1.");
+  assert.match(shown.systemPrompt, /You are "p1"[\s\S]*ROLE-RULES[\s\S]*You are p1\.[\s\S]*- shots: How to break a scene into shots/);
+
+  // A changed role reaches a running agent once its backend is restarted.
+  await prompt(p, "!servers");
+  await conn.request(Roles.put, { role: { name: "painter", mcpServers: {} } });
+  await conn.request(Agents.restart, { id: "p1" });
+  await until("p1 backend gone", () => !hub.session(p)["backend"]);
+  await prompt(p, "!servers");
+  assert.match(said.get(p)!, /servers: xsb\n$/);
+
+  await assert.rejects(conn.request(Roles.remove, { name: "painter" }), /in use by p1/);
+  await conn.request(Agents.put, { agent: { id: "w1", role: "writer", backend: "mock" } });
+  await conn.request(Agents.remove, { id: "w1" });
+  await until("removal announced", () => removed.includes("w1"));
+  await conn.request(Roles.remove, { name: "writer" });
+  assert.deepEqual((await conn.request(Roles.list)).roles.map((r: any) => r.name), ["painter"]);
+  // Observers hear of every change made through the hub, and of none that was refused.
+  await until("role changes announced", () => roleEvents.length === 4);
+  assert.deepEqual(roleEvents, ["writer: writes", "writer: writes dialogue", "painter: paints shots", "writer"]);
+
+  // The backends an agent can be given, as the hub (which starts them) sees them.
+  const { backends } = await conn.request(Backends.list);
+  const backend = (name: string): any => backends.find((b: any) => b.name === name);
+  assert.deepEqual(backend("steerable"), { name: "steerable", command: node, args: [MOCK, "--steering"], installed: true });
+  assert.equal(backend("missing").installed, false);
+  assert.equal(backend("claude").installHint, "npm i -g @agentclientprotocol/claude-agent-acp");
+  console.log("ok 19 editing roles and agents");
+}
+
+// 20. A client that shows transcripts opts in to its own input: it learns when its message became a turn.
+{
+  const socket = net.connect(paths.socket("acp"));
+  await new Promise((resolve) => socket.once("connect", resolve));
+  const echoing = new Connection(socket, socket, "echoing");
+  const seen: string[] = [];
+  echoing.onNotification("session/update", ({ update }) => {
+    if (update.sessionUpdate === "user_message_chunk") seen.push(`in ${update.messageId}${update._meta[OriginExt.key].steered ? " steered" : ""}`);
+    if (update.sessionUpdate === "agent_message_chunk" && /ONE|TWO/.test(update.content.text)) seen.push(`out ${update.content.text.trim()}`);
+  });
+  await echoing.request("initialize", { protocolVersion: 1, clientCapabilities: { _meta: { [OriginExt.capability]: {} } } });
+  const sessionId = (await echoing.request("session/new", { cwd: project, mcpServers: [], _meta: { [Agents.sessionKey]: "c" } })).sessionId;
+  const mine = (messageId: string, text: string) => ({ sessionId, prompt: [{ type: "text", text }], _meta: { [OriginExt.key]: { messageId } } });
+  const first = echoing.request("session/prompt", mine("mine-1", "!sleep 300\n!say ONE"));
+  const second = echoing.request("session/prompt", mine("mine-2", "!say TWO")); // waits behind the first
+  await until("first turn running", () => seen.includes("in mine-1"));
+  assert.deepEqual(seen, ["in mine-1"]); // the waiting message is not announced yet
+  assert.equal((await echoing.request(Steering.method, mine("mine-3", "!say MID"))).outcome, "injected");
+  await Promise.all([first, second]);
+  assert.deepEqual(seen, ["in mine-1", "in mine-3 steered", "out ONE", "in mine-2", "out TWO"]);
+  // A message that waits for its turn can be sent now instead: steered under its own id, it joins the running turn and never has one of its own.
+  seen.length = 0;
+  const running = echoing.request("session/prompt", mine("mine-4", "!sleep 300\n!say ONE"));
+  const waiting = echoing.request("session/prompt", mine("mine-5", "!say TWO"));
+  await until("the turn running", () => seen.includes("in mine-4"));
+  assert.equal((await echoing.request(Steering.method, mine("mine-5", "!say TWO"))).outcome, "injected");
+  assert.deepEqual([await running, await waiting], [{ stopReason: "end_turn" }, { stopReason: "cancelled" }]);
+  assert.deepEqual(seen.filter((line) => line.startsWith("in")), ["in mine-4", "in mine-5 steered"]);
+  assert.equal(seen.filter((line) => line === "out TWO").length, 1, "said once, not again as a turn of its own");
+  // A client that did not opt in is not sent its own input, as in plain ACP.
+  const quiet = await newSession("c");
+  await prompt(quiet, "!say THREE");
+  assert.equal(inputs.get(quiet), undefined);
+  echoing.close();
+  console.log("ok 20 own input, echoed when it becomes a turn");
+}
+
+// 21. Input is content blocks, not only text. An image reaches a backend that reads images as it is; another is told one was there.
+{
+  const picture = [{ type: "text", text: "look" }, { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" }, { type: "resource_link", uri: "file:///tmp/notes.md", name: "notes.md" }];
+  const sighted = await newSession("c");
+  await conn.request("session/prompt", { sessionId: sighted, prompt: picture });
+  assert.match(said.get(sighted)!, /echo: look \| <image image\/png> \| <resource_link file:\/\/\/tmp\/notes\.md>/);
+  const blind = await newSession("b");
+  await conn.request("session/prompt", { sessionId: blind, prompt: picture });
+  assert.match(said.get(blind)!, /echo: look \| \[An image \(image\/png\) was attached here; you cannot see images\.\] \| <resource_link/);
+  // What was sent is what the transcript keeps, whatever the backend could read.
+  const kept = hub.state.store.read(Paths.transcript("b", blind)).map((r: any) => r.update).filter((u: any) => u.sessionUpdate === "user_message_chunk");
+  assert.deepEqual(kept.map((u: any) => u.content.type), ["text", "image", "resource_link"]);
+  assert.equal(new Set(kept.map((u: any) => u.messageId)).size, 1);
+  console.log("ok 21 images and files in input");
+}
+
+// 22. Preset teams: a project uses a team's roles as they ship, without a copy. A role it changes is its own; removing that brings the team's back.
+{
+  const roleOf = async (name: string) => (await conn.request(Roles.list)).roles.find((r: any) => r.name === name);
+  const { teams: shipped } = await conn.request(Teams.list);
+  const software = shipped.find((t: any) => t.id === "software");
+  assert.equal(software.used, false);
+  assert.ok(software.roles.some((r: any) => r.role.name === "reviewer" && r.role.instructions && r.role.skills.length));
+  await assert.rejects(conn.request(Agents.put, { agent: { id: "r1", role: "reviewer", backend: "mock" } }), /no role "reviewer"/);
+  await assert.rejects(conn.request(Teams.use, { id: "nope" }), /no team "nope"/);
+
+  roleEvents.length = 0;
+  await conn.request(Teams.use, { id: "software" });
+  await conn.request(Teams.use, { id: "software" }); // using it again changes nothing
+  await until("the team's roles announced", () => roleEvents.length === software.roles.length);
+  assert.deepEqual((await roleOf("reviewer")).preset, { team: "software", teamTitle: "Software Development", own: false, title: "Code Reviewer" });
+  assert.ok(!fs.existsSync(paths.roleDir("reviewer")), "nothing was copied into the project");
+  const { agent: r1 } = await conn.request(Agents.put, { agent: { id: "r1", role: "reviewer", backend: "mock" } });
+  assert.equal(r1.workspace, project);
+  const shippedText = (await conn.request(Roles.get, { name: "reviewer" })).role.instructions;
+  assert.match((await conn.request(Agents.get, { id: "r1" })).systemPrompt, /- review: you, from prd, architecture, change/);
+
+  // A team's role cannot be removed, and the team cannot be dropped while an agent has a role only it gives.
+  await assert.rejects(conn.request(Roles.remove, { name: "reviewer" }), /is the team "software"'s/);
+  await assert.rejects(conn.request(Teams.drop, { id: "software" }), /team "software" is in use by r1/);
+  assert.equal((await conn.request(Teams.list)).teams.find((t: any) => t.id === "software").used, true);
+
+  // Changing it makes it the project's own, with everything the team's had; removing that brings the team's back, agents or not.
+  await conn.request(Roles.put, { role: { name: "reviewer", instructions: "OWN-RULES" } });
+  const own = (await conn.request(Roles.get, { name: "reviewer" })).role;
+  assert.deepEqual([own.preset, own.instructions, own.skills.length], [{ team: "software", teamTitle: "Software Development", own: true, title: "Code Reviewer" }, "OWN-RULES", 2]);
+  assert.ok(fs.existsSync(path.join(paths.roleDir("reviewer"), "skills", "review", "SKILL.md")));
+  await conn.request(Roles.remove, { name: "reviewer" });
+  const back = (await conn.request(Roles.get, { name: "reviewer" })).role;
+  assert.deepEqual([back.preset, back.instructions], [{ team: "software", teamTitle: "Software Development", own: false, title: "Code Reviewer" }, shippedText]);
+
+  // Dropped, the team's roles are gone; a role the project made its own stays, as an ordinary role.
+  await conn.request(Roles.put, { role: { name: "qa", description: "ours" } });
+  await conn.request(Agents.remove, { id: "r1" });
+  await conn.request(Teams.drop, { id: "software" });
+  const left = (await conn.request(Roles.list)).roles.map((r: any) => [r.name, r.preset]);
+  assert.deepEqual(left, [["painter", undefined], ["qa", undefined]]);
+  await until("the drop announced", () => roleEvents.includes("reviewer") && roleEvents.includes("qa: ours"));
+  console.log("ok 22 preset teams");
+}
+
+// 23. Language: the project works in the language of the first client that declares one; the teams ship once per language.
+{
+  assert.deepEqual(
+    [["zh-Hans-CN", "en-US"], ["zh_CN.UTF-8"], ["fr-FR", "en-GB"], ["C", undefined], []].map(languageOf),
+    ["zh-CN", "zh-CN", "en", "en", "en"],
+  );
+
+  // Every language has the same teams, roles, skills, contracts and tools; only the words differ.
+  const shape = (language: Language) =>
+    teams(language).map((team) => [
+      team.id,
+      Object.keys(team.assets ?? {}),
+      team.roles.map((entry) => {
+        const role = readRole(path.join(teamRoles(team.id, language), entry.role), entry.role);
+        const programs = (entry.requires ?? []).map((program) => program.command);
+        return [entry.role, programs, role.servers, role.workspace, role.skills.map((skill) => [skill.name, skill.produces, skill.inputs])];
+      }),
+    ]);
+  for (const language of LANGUAGES) assert.deepEqual(shape(language), shape("en"), `the ${language} teams differ from the English ones in more than words`);
+  // What a team makes is named: every type one of its skills produces.
+  for (const language of LANGUAGES) {
+    for (const team of teams(language)) {
+      const made = team.roles.flatMap((entry) => readRole(path.join(teamRoles(team.id, language), entry.role), entry.role).skills.flatMap((skill) => skill.produces ?? []));
+      assert.deepEqual(Object.keys(team.assets ?? {}).sort(), [...new Set(made)].sort(), `${language}/${team.id}: asset names`);
+    }
+  }
+
+  const declare = async (language: string): Promise<Connection> => {
+    const socket = net.connect(paths.socket("acp"));
+    const client = new Connection(socket, socket, `client-${language}`);
+    await client.request("initialize", { protocolVersion: 1, clientCapabilities: { _meta: { [LanguageExt.key]: language } } });
+    return client;
+  };
+  assert.match((await conn.request(Agents.get, { id: "a" })).systemPrompt, /# Language\nThe user reads English\./);
+  const chinese = await declare("zh-CN");
+  assert.equal(JSON.parse(fs.readFileSync(paths.config, "utf8")).language, "zh-CN");
+  (await declare("en")).close(); // a later client does not move the project
+  (await declare("tlh")).close(); // nor does a language xsb has no words in
+  assert.equal(JSON.parse(fs.readFileSync(paths.config, "utf8")).language, "zh-CN");
+
+  // The agents are told, and the teams are the Chinese ones.
+  assert.match((await conn.request(Agents.get, { id: "a" })).systemPrompt, /The user reads Simplified Chinese/);
+  const film = (await chinese.request(Teams.list)).teams.find((t: any) => t.id === "film");
+  assert.deepEqual([film.title, film.roles[0].name, film.assets.casting], ["电影制作", "导演", "选角"]);
+  await chinese.request(Teams.use, { id: "film" });
+  assert.equal((await chinese.request(Roles.get, { name: "director" })).role.preset.title, "导演");
+  await chinese.request(Agents.put, { agent: { id: "ad", role: "art-director", backend: "mock" } });
+  assert.match((await chinese.request(Agents.get, { id: "ad" })).systemPrompt, /- casting: you, from brief, script, style_guide\n- character: you, from brief, script, casting/);
+
+  // An error says why in a way a client can word for its reader.
+  const refused = await chinese.request(Teams.drop, { id: "film" }).then(() => undefined, (e) => e);
+  assert.deepEqual([refused.data.reason, refused.data.agents], ["team_in_use", ["ad"]]);
+  assert.equal(explain(refused, "zh-CN"), "团队“film”正在被 ad 使用");
+  assert.equal(explain(refused, "en"), refused.message);
+  assert.equal(explain(new Error("plain"), "zh-CN"), "plain");
+  chinese.close();
+  console.log("ok 23 language");
+}
+
+// 24. A stop that gives up the unfinished: nothing runs again on the next start, and what had not ended is cancelled.
+{
+  const a = await newSession("a");
+  await prompt(a, `!call dispatch_task {"to":"b","title":"dropped","instructions":"!sleep 600\\n!say NEVER-AGAIN","topic":"quit"}`);
+  await prompt(a, `!call dispatch_task {"to":"b","title":"dropped too","instructions":"!say NOR-THIS","topic":"quit"}`); // waits behind the first
+  await until("dropped running", async () => (await tasks()).find((t) => t.title === "dropped" && t.status === "running"));
+  await hub.shutdown();
+  fs.writeFileSync(paths.abandonMark, ""); // what `stopHub(paths, true)` leaves
+  hub = new Hub(project);
+  await hub.start();
+  conn = await connect();
+  assert.ok(!fs.existsSync(paths.abandonMark), "the mark is for one start");
+  assert.equal(hub.state.mail.size, 0);
+  await sleep(900); // longer than the task would have taken
+  const after = (await tasks()).filter((t) => t.topic === "quit");
+  assert.deepEqual(after.map((t) => t.status), ["cancelled", "cancelled"]);
+  assert.match(after[0].result!, /chose not to have it continued/);
+  const { agents } = await conn.request(Agents.list);
+  assert.ok(agents.every((x: any) => x.state === "idle"), "nobody was set to work again");
+  // The start after that is an ordinary one.
+  await hub.shutdown();
+  hub = new Hub(project);
+  await hub.start();
+  conn = await connect();
+  console.log("ok 24 a stop that gives up the unfinished");
+}
+
+await hub.shutdown();
+fs.rmSync(project, { recursive: true, force: true });
+console.log("e2e: ok");
+process.exit(0);

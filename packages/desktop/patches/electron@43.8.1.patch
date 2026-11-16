@@ -1,0 +1,293 @@
+diff --git a/index.js b/index.js
+index a7d044d5188657fe20ed71c43c302e499f1d1ca9..91bf55e20b78ce588e8a6458c3c95be00973b797 100644
+--- a/index.js
++++ b/index.js
+@@ -4,6 +4,19 @@ const path = require('path');
+ 
+ const pathFile = path.join(__dirname, 'path.txt');
+ 
++// Re-run install.js when the existing dist came from a different mirror than
++// the one .electron.mirror.{json,js,cjs,mjs} (or the default) now selects.
++function isFromExpectedSource() {
++  const { version } = require('./package');
++  const { getTarget, sourceTag } = require('./mirror-config');
++  const { platform, arch } = getTarget();
++  try {
++    return fs.readFileSync(path.join(__dirname, 'dist', '.mirror-source'), 'utf-8') === sourceTag(version, platform, arch);
++  } catch {
++    return false;
++  }
++}
++
+ function downloadElectron() {
+   console.log('Downloading Electron binary...');
+   const result = spawnSync(process.execPath, [path.join(__dirname, 'install.js')], {
+@@ -32,8 +45,9 @@ function getElectronPath() {
+   }
+   if (executablePath) {
+     const fullPath = path.join(__dirname, 'dist', executablePath);
+-    if (!fs.existsSync(fullPath)) {
++    if (!fs.existsSync(fullPath) || !isFromExpectedSource()) {
+       downloadElectron();
++      return path.join(__dirname, 'dist', fs.readFileSync(pathFile, 'utf-8'));
+     }
+     return fullPath;
+   } else {
+diff --git a/install.js b/install.js
+index 1d0f70202c3a2349d40075eb7dc3f3136fc54080..5224e836e89b79f4af035e27f7fcda7f8fea8be2 100755
+--- a/install.js
++++ b/install.js
+@@ -2,38 +2,31 @@
+ 
+ const { downloadArtifact } = require('@electron/get');
+ 
+-const childProcess = require('child_process');
+ const fs = require('fs');
+ const os = require('os');
+ const path = require('path');
+ 
+ const { version } = require('./package');
++const mirrorConfig = require('./mirror-config');
+ 
+ const platformPath = getPlatformPath();
+ 
++const { platform, arch } = mirrorConfig.getTarget();
++const override = mirrorConfig.resolveMirror(version, platform, arch);
++const sourceTag = mirrorConfig.sourceTag(version, platform, arch, override);
++
+ if (isInstalled()) {
+   process.exit(0);
+ }
+ 
+-const platform = process.env.ELECTRON_INSTALL_PLATFORM || process.env.npm_config_platform || process.platform;
+-let arch = process.env.ELECTRON_INSTALL_ARCH || process.env.npm_config_arch || process.arch;
+-
+-if (
+-  platform === 'darwin' &&
+-  process.platform === 'darwin' &&
+-  arch === 'x64' &&
+-  process.env.npm_config_arch === undefined
+-) {
+-  // When downloading for macOS ON macOS and we think we need x64 we should
+-  // check if we're running under rosetta and download the arm64 version if appropriate
+-  try {
+-    const output = childProcess.execSync('sysctl -in sysctl.proc_translated');
+-    if (output.toString().trim() === '1') {
+-      arch = 'arm64';
++if (override) {
++  // @electron/get prefers these env vars over mirrorOptions; a matched override must win.
++  for (const key of Object.keys(process.env)) {
++    if (mirrorConfig.isMirrorEnvKey(key)) {
++      delete process.env[key];
+     }
+-  } catch {
+-    // Ignore failure
+   }
++  console.log(`Using Electron mirror override for ${platform}-${arch}: ${JSON.stringify(override.mirrorOptions)}`);
+ }
+ 
+ // downloads if not cached
+@@ -43,9 +36,11 @@ downloadArtifact({
+   force: process.env.force_no_cache === 'true',
+   cacheRoot: process.env.electron_config_cache,
+   checksums:
+-    process.env.electron_use_remote_checksums || process.env.npm_config_electron_use_remote_checksums
++    override || process.env.electron_use_remote_checksums || process.env.npm_config_electron_use_remote_checksums
+       ? undefined
+       : require('./checksums.json'),
++  mirrorOptions: override?.mirrorOptions,
++  unsafelyDisableChecksums: override ? !override.verifyChecksums : false,
+   platform,
+   arch
+ })
+@@ -64,6 +59,10 @@ function isInstalled() {
+     if (fs.readFileSync(path.join(__dirname, 'path.txt'), 'utf-8') !== platformPath) {
+       return false;
+     }
++
++    if (fs.readFileSync(path.join(__dirname, 'dist', '.mirror-source'), 'utf-8') !== sourceTag) {
++      return false;
++    }
+   } catch {
+     return false;
+   }
+@@ -83,6 +82,9 @@ function extractFile(zipPath) {
+ 
+   const distPath = process.env.ELECTRON_OVERRIDE_DIST_PATH || path.join(__dirname, 'dist');
+ 
++  // Clear any previous build so files from another mirror don't linger.
++  fs.rmSync(path.join(__dirname, 'dist'), { recursive: true, force: true });
++
+   return extract(zipPath, { dir: path.join(__dirname, 'dist') }).then(() => {
+     // If the zip contains an "electron.d.ts" file,
+     // move that up
+@@ -94,6 +96,8 @@ function extractFile(zipPath) {
+       fs.renameSync(srcTypeDefPath, targetTypeDefPath);
+     }
+ 
++    fs.writeFileSync(path.join(distPath, '.mirror-source'), sourceTag);
++
+     // Write a "path.txt" file.
+     return fs.promises.writeFile(path.join(__dirname, 'path.txt'), platformPath);
+   });
+diff --git a/mirror-config.js b/mirror-config.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..28c5d4805174edaa5acac37ec615e5098dca8471
+--- /dev/null
++++ b/mirror-config.js
+@@ -0,0 +1,155 @@
++// Per-project mirror override for selected platform/arch builds.
++// Looks for `.electron.mirror.{json,js,cjs,mjs}` next to a package.json, walking up
++// from the current working directory (then from this package's location). JSON holds
++// the fields directly; a JS config must default-export a function (sync or async) that
++// returns the same object, so it can derive fields (e.g. `version` from package.json). Targets not
++// listed in the config keep Electron's default download behaviour, including
++// ELECTRON_MIRROR / ELECTRON_CUSTOM_DIR and the official checksums.
++
++const childProcess = require('child_process');
++const fs = require('fs');
++const path = require('path');
++
++const CONFIG_FILES = ['.electron.mirror.json', '.electron.mirror.js', '.electron.mirror.cjs', '.electron.mirror.mjs'];
++
++// Env vars @electron/get reads before mirrorOptions (see mirrorVar in @electron/get).
++const MIRROR_ENV_KEY = /^(npm_config_electron_|npm_package_config_electron_|electron_)(nightly_?mirror|mirror|custom_?(dir|filename|version))$/i;
++
++function isMirrorEnvKey(key) {
++  return MIRROR_ENV_KEY.test(key);
++}
++
++function getTarget() {
++  const platform = process.env.ELECTRON_INSTALL_PLATFORM || process.env.npm_config_platform || process.platform;
++  let arch = process.env.ELECTRON_INSTALL_ARCH || process.env.npm_config_arch || process.arch;
++
++  if (
++    platform === 'darwin' &&
++    process.platform === 'darwin' &&
++    arch === 'x64' &&
++    process.env.npm_config_arch === undefined
++  ) {
++    // When downloading for macOS ON macOS and we think we need x64 we should
++    // check if we're running under rosetta and download the arm64 version if appropriate
++    try {
++      const output = childProcess.execSync('sysctl -in sysctl.proc_translated');
++      if (output.toString().trim() === '1') {
++        arch = 'arm64';
++      }
++    } catch {
++      // Ignore failure
++    }
++  }
++
++  return { platform, arch };
++}
++
++function findConfigFile() {
++  for (const start of [process.cwd(), __dirname]) {
++    let dir = path.resolve(start);
++    while (true) {
++      if (fs.existsSync(path.join(dir, 'package.json'))) {
++        const files = CONFIG_FILES.map(name => path.join(dir, name)).filter(file => fs.existsSync(file));
++        if (files.length > 1) throw new Error(`Ambiguous Electron mirror config, keep exactly one of: ${files.join(', ')}`);
++        if (files.length === 1) return files[0];
++      }
++      const parent = path.dirname(dir);
++      if (parent === dir) break;
++      dir = parent;
++    }
++  }
++  return null;
++}
++
++// JSON is parsed in-process. JS is evaluated once per read in a child process (this file
++// run as a script, see the bottom), which awaits the default-exported factory so it may be
++// sync or async while every consumer (`require('electron')`, install.js, builders) stays
++// synchronous. The child inherits cwd and env and reports the JSON config on stdout.
++function loadConfig(file) {
++  if (file.endsWith('.json')) return JSON.parse(fs.readFileSync(file, 'utf-8'));
++  const result = childProcess.spawnSync(process.execPath, [__filename, file], {
++    encoding: 'utf-8',
++    stdio: ['ignore', 'pipe', 'pipe'],
++    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
++  });
++  if (result.error) throw result.error;
++  let report;
++  try {
++    report = JSON.parse(result.stdout.trim().split('\n').pop());
++  } catch {
++    throw new Error(`config evaluation failed (exit ${result.status})${result.stderr ? `: ${result.stderr.trim()}` : ''}`);
++  }
++  if (!report.ok) throw new Error(report.error);
++  return report.config;
++}
++
++// Child-process entry for loadConfig(): evaluate one JS config file and report the result.
++async function evaluateConfig(file) {
++  const loaded = require(file);
++  const factory = typeof loaded === 'function' ? loaded
++    : loaded && typeof loaded.default === 'function' ? loaded.default : null;
++  if (!factory) throw new Error('JS config must default-export a function returning the config object');
++  return await factory();
++}
++
++// Read the single project contract for installation and build-time consumers.
++function readConfig() {
++  const file = findConfigFile();
++  if (!file) return null;
++  try {
++    const config = loadConfig(file);
++    if (!config || typeof config !== 'object') throw new Error('config must export an object');
++    if (typeof config.mirror !== 'string') throw new Error('"mirror" must be a directory URL');
++    if (typeof config.version !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:alpha|beta|nightly)\.(0|[1-9]\d*))?$/.test(config.version)) {
++      throw new Error('"version" must be one exact Electron version string');
++    }
++    if (!config.platforms || typeof config.platforms !== 'object' || Array.isArray(config.platforms)
++      || Object.values(config.platforms).some(arches => !Array.isArray(arches)
++        || arches.some(arch => typeof arch !== 'string' || !arch))) {
++      throw new Error('"platforms" must map platforms to architecture arrays');
++    }
++    if (config.verifyChecksums !== undefined && typeof config.verifyChecksums !== 'boolean') {
++      throw new Error('"verifyChecksums" must be a boolean');
++    }
++    const directory = new URL(config.mirror);
++    if (!['http:', 'https:'].includes(directory.protocol) || directory.search || directory.hash || directory.username || directory.password) {
++      throw new Error('"mirror" must be an HTTP(S) directory URL without credentials, query or fragment');
++    }
++    // Downloaders append customDir; an empty value would append v<version> instead.
++    directory.pathname = directory.pathname.replace(/\/+$/, '');
++    const mirrorOptions = {
++      mirror: new URL('.', directory).href,
++      customDir: directory.pathname.split('/').pop() || '.',
++    };
++    return { version: config.version, platforms: config.platforms, mirrorOptions, verifyChecksums: config.verifyChecksums === true };
++  } catch (err) {
++    throw new Error(`Invalid ${file}: ${err.message}`);
++  }
++}
++
++function configuredVersion() {
++  return readConfig()?.version ?? null;
++}
++
++// Targets not listed in the project contract retain Electron's default downloader.
++function resolveMirror(version, platform, arch) {
++  const config = readConfig();
++  if (!config || config.version !== version || !config.platforms[platform]?.includes(arch)) return null;
++  return {
++    mirrorOptions: config.mirrorOptions,
++    verifyChecksums: config.verifyChecksums,
++  };
++}
++
++function sourceTag(version, platform, arch, override = resolveMirror(version, platform, arch)) {
++  return JSON.stringify({ ...(override ? override.mirrorOptions : { mirror: 'default' }), version, platform, arch });
++}
++
++module.exports = { getTarget, configuredVersion, resolveMirror, sourceTag, isMirrorEnvKey };
++
++if (require.main === module) {
++  evaluateConfig(path.resolve(process.argv[2])).then(
++    config => { process.stdout.write(`${JSON.stringify({ ok: true, config: config === undefined ? null : config })}\n`); },
++    err => { process.stdout.write(`${JSON.stringify({ ok: false, error: err && err.message ? err.message : String(err) })}\n`); },
++  );
++}

@@ -1,0 +1,19 @@
+{
+  "name": "@xsb/adapter",
+  "version": "0.1.0",
+  "description": "Serve any agent as an ACP agent on stdio: the one wrapper for agents without an ACP entry point",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@xsb/protocol": "0.1.0"
+  }
+}

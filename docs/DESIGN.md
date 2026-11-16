@@ -1,0 +1,475 @@
+# xsb 设计说明
+
+xsb 是一个多主 Agent 协作系统。每个 Agent 是一个长期存在、有自己工作区和记忆的"主 Agent"；用户可以和任何一个直接对话，Agent 之间也可以直接对话、派发任务。系统里没有任何角色的概念，"编剧 / 导演 / 灯光师"只是 `xsb agent add` 时写进去的名字、描述和说明文字。
+
+## 1. 总体结构
+
+```
+ 编辑器 / 其他 ACP 客户端 ──stdio──▶ xsb acp ─┐
+ xsb chat / send / watch ───────────────────┤  ACP v1 + 扩展
+                                            ▼
+                                   ┌─────────────────┐
+                                   │    Hub 守护进程   │  .xsb/ 下的 jsonl + wal
+                                   │  会话 · 邮箱 · 任务 │
+                                   └──┬───────────▲──┘
+                         ACP v1 + 扩展 │           │ MCP（协作工具）
+                                      ▼           │
+                              后端 Agent 进程（claude / codex / gemini / grok …）
+```
+
+- **Hub** 是唯一的常驻进程，持有所有后端进程和全部状态，按需自动启动。
+- **对外**它是一个标准 ACP agent。不懂扩展的客户端把它当普通 agent 用；懂扩展的可以选 Agent、插话、观察任务。
+- **对内**它是每个后端的标准 ACP client。Agent loop 完全由后端自己跑，Hub 不实现。
+- **协作工具**通过 ACP 标准的 `mcpServers` 注入给后端，是一个普通的 stdio MCP server。
+
+同一份 JSON-RPC 实现（[jsonrpc.ts](../packages/protocol/src/jsonrpc.ts)）承载这三条链路。
+
+### 1.1 代码结构：依赖只向下
+
+```
+@xsb/cli        xsb 命令。只是 Hub 的一个 ACP 客户端
+@xsb/desktop    桌面应用（Electron）。同样只是 Hub 的一个 ACP 客户端，见 GUI.md
+   │
+@xsb/hub        Hub 守护进程：会话与回合、后端进程、邮件与任务、权限、协作工具
+   │      │
+   │   @xsb/store      只追加的 JSONL + 预写日志，不了解 Hub 的任何概念
+   │
+   │   @xsb/adapter    把没有 ACP 入口的 agent 封装成后端；Hub 不依赖它，只通过 ACP 与它启动的进程对话
+   │      │
+@xsb/protocol   线上的一切：JSON-RPC、用到的 ACP 类型、ACP 扩展及其数据形状、错误码
+```
+
+| 库 | 职责 | 不做什么 |
+| - | - | - |
+| [@xsb/protocol](../packages/protocol) | 两个进程之间说的每一句话的定义 | 不含任何行为；不依赖其他库 |
+| [@xsb/store](../packages/store) | 事件日志的持久化与跨文件原子性 | 不知道日志里记的是什么 |
+| [@xsb/adapter](../packages/adapter) | 三方 agent 的唯一封装：`AgentAdapter` → stdio 上的 ACP | 不补能力；缺的由 Hub 统一补 |
+| [@xsb/hub](../packages/hub) | 系统的全部行为 | 不实现 agent loop；不依赖 CLI |
+| [@xsb/desktop](../packages/desktop) | 窗口里的交互（[GUI.md](GUI.md)） | 与 CLI 相同；也不依赖 CLI |
+| [@xsb/cli](../packages/cli) | 终端上的交互 | 不读写 `.xsb/` 下的状态，一切经 ACP |
+
+约束：下层不引用上层。Hub 需要另起进程的两处（守护进程自身、给后端用的 MCP 桥）都是 `@xsb/hub` 自己的入口（`xsb-hub`、`xsb-mcp-bridge`），不经过 CLI。CLI 与 Hub 之间共享的数据形状（`AgentInfo`、`Task`）定义在 `@xsb/protocol`，因为它们是 ACP 扩展的一部分。
+
+Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src)）：
+
+| 模块 | 拥有 |
+| - | - |
+| `hub.ts` | 组合根：Agent、会话、已连接客户端的登记，两个 socket 的生命周期 |
+| `acp-server.ts` | 对外的 ACP agent：一个已连接客户端的全部请求处理 |
+| `session.ts` | 一个会话的回合引擎：排队、运行、插话、取消，与后端会话的绑定。不区分后端 |
+| `backend.ts` / `backends.ts` | 一个后端进程：链路末端，握手、能力、补齐缺的能力，对上提供统一的 `prompt` / `steer` / `cancel` / 每个 Agent 至多一个进程的进程池 |
+| `mailroom.ts` | Agent 间的一切：消息、任务、后台任务（job）、结果的投递、确认与事务 |
+| `roles.ts` | 角色：按名字查找（项目自己的优先，再找所用的预设团队），读取说明、MCP 配置和 skills |
+| `teams.ts` | 预设团队：随 Hub 发布的几套角色（`presets/<团队>/`） |
+| `assets.ts` | 资产库：登记、版本、查找 |
+| `mcp-client.ts` | 调用一次 stdio MCP server 的一个工具（后台任务用） |
+| `permissions.ts` | 把后端的权限请求转给人 |
+| `tools.ts` / `mcp.ts` / `mcp-bridge.ts` | 协作工具面向模型的一侧（参数与措辞）/ MCP server / 桥接进程 |
+| `prompts.ts` | Hub 对模型说的所有文字 |
+| `state.ts` | 内存状态 = 对事件日志的折叠 |
+| `daemon.ts` | 后台进程：独占一个项目、启动、停止 |
+| `config.ts` / `paths.ts` | 两个配置文件 / `.xsb/` 的布局 |
+
+## 2. 接入后端
+
+### 2.1 配置：两个文件，没有共同字段
+
+| 文件 | 字段 | 含义 |
+| - | - | - |
+| `~/.xsb/config.json`（这台机器） | `backends.<名称>.command` | 启动该后端的可执行文件，按 PATH 查找 |
+| | `backends.<名称>.args` | 启动参数 |
+| `<项目>/.xsb/config.json`（这个项目） | `defaultAgent` | 普通 ACP 客户端不指定时连到哪个 Agent |
+| | `teams` | 项目使用的预设团队 |
+| | `language` | Agent 的工作语言（`en` 或 `zh-CN`），见 3.4 |
+
+两个文件各有一个 `version`，只表示该文件自身的格式。后端只在全局定义，项目不能覆盖；Agent 用后端的**名称**引用它（`agents.jsonl` 的 `backend`）。两个文件都是每次使用时读取，修改后不必重启 Hub。
+
+### 2.2 优先用官方 ACP 封装
+
+内置四个后端，都是各家自己的 ACP 入口（见 ACP 官方 Registry）：
+
+| 名称 | 命令 | 来自 |
+| - | - | - |
+| claude | `claude-agent-acp` | `@agentclientprotocol/claude-agent-acp` |
+| codex | `codex-acp` | `@agentclientprotocol/codex-acp` |
+| gemini | `gemini --acp` | `@google/gemini-cli` 自带 |
+| grok | `grok agent stdio` | `@xai-official/grok` 自带 |
+
+代码里没有按厂商分支。Hub 只看后端在 `initialize` 里报告的能力，缺什么补什么。**差异只存在于链路末端**：补齐发生在 `backend.ts` 和会话绑定处，再往上（回合引擎、邮件、工具、对外的 ACP）对所有后端是同一条路径：
+
+| 能力 | 有 | 没有 |
+| - | - | - |
+| `_meta.steering.supported` | 插话直接转发 | Hub 取消当前 prompt 再续接 |
+| `sessionCapabilities.systemPrompt` | 说明文字作为系统提示词追加 | 拼在该会话第一条 prompt 前面 |
+| `sessionCapabilities.resume` / `loadSession` | 进程重启后恢复原会话 | 新开会话，并告知模型上下文已丢失、去查记忆 |
+| `sessionCapabilities.additionalDirectories` | 把共享目录挂进去 | 只在说明文字里给出绝对路径 |
+| `promptCapabilities.image` | 图片原样送达 | 换成一句"这里附了一张图片，你看不到"，其余内容照常；对话记录里保留原图 |
+
+### 2.3 没有 ACP 入口的三方 agent：同一条链路，只有末端不同
+
+```
+Hub ── Backend ──ACP──▶ claude-agent-acp / codex-acp / …              官方 ACP agent
+                └─ACP──▶ serveAdapter(AgentAdapter 的实现) ──▶ 三方 agent
+```
+
+- **一个**通用封装，不按 agent 各写一个：[@xsb/adapter](../packages/adapter) 的 `serveAdapter` 在 stdio 上提供 ACP v1，把请求映射到 `AgentAdapter`（`newSession`、`prompt`、`cancel`，可选的 `resume`、`steer`，和一组能力声明）。agent 之间的差别放在这个接口的实现和它的配置里。
+- 封装出来的程序在 `~/.xsb/config.json` 里登记为一个普通后端（`command`、`args`）。
+- Hub 不知道它是封装。对 Hub 来说后端只有一个契约："一条在 stdio 上说 ACP 的命令"。官方入口和封装由同一份代码启动、调度、报错（[backend.ts](../packages/hub/src/backend.ts)），配置里也没有区分两者的字段。
+- 封装不补能力：适配器没声明的能力不通告，Hub 按 2.2 的表同样补齐。所以"补能力"的代码只有一份，对官方 agent 和三方 agent 都生效。
+
+### 2.4 xsb 不管的事，以及错误码
+
+xsb 只负责启动后端，**不安装、不登录、不决定权限**：
+
+- 不安装：命令不在 PATH 上就报错，不会 `npx` 下载。（桌面应用同样不安装；它自带 claude 和 codex 的 ACP 封装，并在启动 Hub 之前把它们放到 PATH 上，见 GUI.md 第 8 节。）
+- 不处理凭据：配置里没有 env 或密钥字段，后端进程原样继承启动 Hub 时的环境，登录状态用各后端自己的 CLI 和设置。
+- 不决定权限：是否询问、是否 bypass 是后端自己的设置。后端若发来权限请求，Hub 一律转给人（见 6）。
+
+后端相关的失败都带错误码（[errors.ts](../packages/protocol/src/errors.ts)），消息里写明是哪个 Agent、哪个后端：
+
+| `error.code` | `error.data.reason` | CLI 退出码 | 何时 |
+| - | - | - | - |
+| -32000 | `auth_required` | 10 | 后端报告未登录（ACP 标准码） |
+| -33101 | `backend_not_installed` | 11 | 启动命令不存在 |
+| -33102 | `backend_start_failed` | 12 | 进程在握手完成前退出；附退出码和 stderr 末尾几行 |
+| -33103 | `backend_unknown` | 13 | Agent 引用的后端名在全局配置里没有 |
+| -33104 | `backend_incompatible` | 14 | 后端的 ACP 协议版本不是 v1 |
+
+判断请用 `data.reason`：`-331xx` 这一段在 ACP 里没有保留给扩展的约定，将来可能与别的扩展重号。
+
+### 2.5 给人看的报错：原因加事实
+
+Hub 不知道读报错的人用什么语言，所以它不负责措辞。凡是要给人看的报错（上表的五种，以及"没有这个角色""团队还有人在用""角色名不合法"等，共二十来种）都带 `data.reason` 和这件事的事实（是哪个角色、被哪些 Agent 占用……）；`message` 是英文措辞，留给不认识 `reason` 的客户端。
+
+原因、每种语言的措辞、以及把一个错误按语言说出来的函数 `explain(e, language)` 都在 [errors.ts](../packages/protocol/src/errors.ts)，CLI 和桌面应用共用这一份。调用方用错了协议的报错（参数形状不对之类）不带 `reason`，保持英文：它们是写给开发者的。写给模型的报错（协作工具的返回）同样保持英文。
+
+## 3. ACP 扩展
+
+规则：**一种功能一个扩展，所有 ACP 链路共用同一份定义**（[ext.ts](../packages/protocol/src/ext.ts)）。已有业界约定的直接采用，不重复发明。线上约定遵循 ACP Extensibility：自定义方法以 `_` 开头，自定义数据放 `_meta`，能力在 `initialize` 的 `_meta` 里通告。
+
+| 功能 | 扩展 | 对外（客户端 → Hub） | 对内（Hub → 后端） |
+| - | - | - | - |
+| 插话 | `_session/steering` | 用户插话 | 转发给支持它的后端 |
+| 多 Agent 寻址与目录 | `dev.xsb/agents` | 选 Agent、增删查、状态通知 | 不适用（后端是单个 agent） |
+| 角色编辑 | `dev.xsb/roles` | 读写、检查 MCP server、变更通知 | 不适用 |
+| 预设团队 | `dev.xsb/teams` | 有哪些团队、项目用了哪些、使用与停用 | 不适用 |
+| 后端清单 | `dev.xsb/backends` | 这台机器有哪些后端、是否已安装 | 不适用 |
+| 任务观察 | `dev.xsb/tasks` | 列表、状态通知 | 不适用 |
+| 资产库 | `dev.xsb/assets` | 列表、新版本通知 | 不适用 |
+| 消息来源 | `_meta["dev.xsb/origin"]` | 标在 `user_message_chunk` 上 | 标在 `session/prompt` 和插话上 |
+| 语言 | `_meta["dev.xsb/language"]` | 客户端声明用户读哪种语言 | 不适用（写进系统说明，见 3.4） |
+
+### 3.1 插话：`_session/steering`
+
+这个扩展不是 xsb 定义的，是 claude-agent-acp 已经在用的 steering 线协议，xsb 原样采用并在对外一侧同样提供：
+
+```
+请求  _session/steering { sessionId, prompt: ContentBlock[],
+                          _meta?: { steering?: { idleBehavior?: "promptRequired" } } }
+响应  { outcome: "injected" }                               已进入正在运行的那一轮
+      { outcome: "startedNewTurn" }                         会话空闲，另起了一轮
+      { outcome: "promptRequired", reason: "noRunningTurn" } 空闲，且调用方要求自己发 prompt
+通告  InitializeResponse._meta.steering.supported = true
+```
+
+后端不支持时，兜底在链路末端（`Backend.steer`），回合引擎不知道走的是哪条路：`session/cancel` 当前 prompt → 等它返回 → 立刻发一条"你被这条消息打断了，处理完继续原来的工作"加上插话内容的续接 prompt。对调用方来说这仍然是**同一轮**：原来那次 `session/prompt` 不会以 `cancelled` 返回，而是等续接结束后正常返回；如果这一轮是在做某个任务，任务结果也取续接之后的最终输出。
+
+**排队的消息可以改成插话。** 一条还在排队的消息，用它自己的 `messageId`（`dev.xsb/origin`）再经 `_session/steering` 发一次，Hub 认它是同一条：把它从队列里拿出来、插进当前这一轮，原来那次 `session/prompt` 以 `cancelled` 返回，因为它要的那一轮不会再有。插话没送到时它留在队列里。
+
+**默认不是插话。** 对一个正在工作的会话再发 `session/prompt`，是排队成为下一轮。只有显式调用 `_session/steering`（CLI 的 `/i`、`--interject`，或工具参数 `interject: true`）才会进入运行中的那一轮。
+
+### 3.2 多 Agent：`dev.xsb/agents`
+
+```
+通告   agentCapabilities._meta["dev.xsb/agents"] = { version: 1 }
+选择   session/new 的 params._meta["dev.xsb/agent"] = "<agentId>"；不带则用默认 Agent
+标注   SessionInfo._meta["dev.xsb/agent"]、_meta["dev.xsb/main"]
+请求   _dev.xsb/agents/list | get | put | remove | restart
+通知   _dev.xsb/agents/update { agent }、_dev.xsb/agents/removed { id }
+```
+
+`get` 除了 Agent 本身，还返回它自己的说明和 `systemPrompt`：一个新会话会被告知的全部文字（角色说明 + 自己的说明 + skill 目录 + 协作说明 + 记忆摘要），用于预览和调试。`restart` 停掉它的后端进程，使改过的说明、工具、skills 从下一轮起生效；正在运行的那一轮会失败。
+
+角色是另一个扩展 `dev.xsb/roles`，供编辑界面使用：
+
+```
+请求   _dev.xsb/roles/list | get | put | remove | check
+通知   _dev.xsb/roles/update { role }、_dev.xsb/roles/removed { name }
+```
+
+通知只在经 `put` / `remove` 修改时发出。直接改角色目录里的文件仍然会在下次使用时生效，但没有人被告知。
+
+预设团队是 `dev.xsb/teams`（见 5.6）。使用或停用一支团队后，来去的角色同样以上面两个通知告知：
+
+```
+请求   _dev.xsb/teams/list | use | drop
+```
+
+这台机器有哪些后端是 `dev.xsb/backends`：
+
+```
+请求   _dev.xsb/backends/list -> { backends: [{ name, command, args, installed, installHint? }] }
+```
+
+是否已安装由 Hub 回答，因为启动后端的是 Hub：客户端（尤其是桌面应用）的 PATH 可能与它不同。
+
+客户端在 `clientCapabilities._meta["dev.xsb/agents"]` 声明后成为"观察者"：收到上面的通知，并且会收到**无人值守会话**的权限请求（见 6）。
+
+不认识扩展的编辑器可以为每个 Agent 配一个入口：`xsb acp --agent <id>`。
+
+### 3.3 来源标注：`dev.xsb/origin`
+
+一个会话的输入可能来自用户、别的 Agent 或 Hub 自己，而 ACP v1 只有一种输入（`user_message_chunk`）。来源写在 `_meta["dev.xsb/origin"]` 里：`{ kind: "user" | "agent" | "system", agentId?, sessionId?, messageId?, taskId?, role?, steered? }`。不认识它的一方看到的就是一条普通用户消息。
+
+**自己的输入何时成为一轮。** 按 ACP 的惯例，客户端不会收到自己发出的输入。但显示对话记录的客户端需要知道另一件事：对一个正在忙的会话发的 `session/prompt` 是排队，它什么时候真正开始？在 `clientCapabilities._meta["dev.xsb/origin"]` 声明后，客户端自己的输入也会像别人的一样送给它，时机是这条输入开始一轮（或经插话进入了进行中的一轮）的那一刻。客户端在 `session/prompt` / `_session/steering` 的 `_meta["dev.xsb/origin"].messageId` 里给消息起名，回来的 `user_message_chunk` 带同一个 `messageId`，据此认出是自己的哪一条。没有声明的客户端行为不变。
+
+（ACP 的 Subagent Sessions RFD 里有 `session_message` 更新，语义相近，但仍是 Preview 且面向父子会话。等它稳定后，这个扩展可以换成它，改动集中在一处。）
+
+### 3.4 语言：`dev.xsb/language`
+
+语言有两处，各归各管：
+
+| | 是什么 | 由谁决定 |
+| - | - | - |
+| 界面语言 | 窗口、命令输出、报错用什么语言 | 每个客户端自己：桌面应用取系统语言，CLI 取终端的 `LC_ALL` / `LC_MESSAGES` / `LANG`。没有对应文字表的语言用英文 |
+| 工作语言 | Agent 对用户说话、互相派任务、写交付物用什么语言；预设团队读哪一份 | 项目：`.xsb/config.json` 的 `language` |
+
+```
+声明   clientCapabilities._meta["dev.xsb/language"] = "zh-CN"
+```
+
+- 项目还没有工作语言时，取第一个声明了语言的客户端的；之后不再跟着客户端变，要改就改配置文件。这样在英文终端里跑一次 `xsb status`，不会把一个中文项目的 Agent 切成英文。
+- 工作语言写在每个 Agent 系统说明的 "Language" 一节：给人看的文字用这种语言，标识符（资产 id 与类型、工具和参数名、路径、代码）保持原样。Hub 自己写给模型的协作说明仍是英文。
+- 这不涉及后端的任何设置：模型、接口、会话模式仍由用户在各后端里自己决定，xsb 只是在系统说明里多说一句话。
+- 目前支持 `en` 和 `zh-CN`（[ext.ts](../packages/protocol/src/ext.ts) 的 `LANGUAGES`）。加一种语言要补三处：`errors.ts` 的措辞、CLI 和桌面应用各自的文字表、预设团队的一份目录。
+
+## 4. Agent 之间：工具调用
+
+Hub 给每个后端会话注入名为 `xsb` 的 MCP server（工具定义在 [tools.ts](../packages/hub/src/tools.ts)，行为在 [mailroom.ts](../packages/hub/src/mailroom.ts)）：
+
+| 工具 | 作用 |
+| - | - |
+| `list_agents` | 团队里有谁、各自能产出哪些资产类型、是否在忙、和自己已经对接过哪些话题 |
+| `send_message` | 给另一个 Agent 发消息；`interject: true` 时插话 |
+| `dispatch_task` | 派发任务，立即返回；`after` 指定前置任务。与团队的契约不符时在返回里提示（见 5.6） |
+| `await_tasks` | 登记"这几个任务的结果要一起拿到"，然后结束本轮 |
+| `start_job` | 把一次慢的工具调用放到后台执行（见 5.4） |
+| `put_asset` / `find_assets` / `get_asset` | 读写共享资产库（见 5.5） |
+| `load_skill` | 读取本角色的一个 skill（见 5.6） |
+| `get_task` / `cancel_task` | 查看 / 取消自己派发的任务。取消的任务和其他任务一样结束：结果照常送回，状态为 `cancelled` |
+| `remember` / `recall` | 按话题读写长期记忆 |
+
+身份不靠参数：每个会话有一个 Hub 发的 token（Hub 运行期间不变，重启后重发），它的桥接进程 `xsb-mcp-bridge` 带着这个 token 连回 Hub，工具调用天然知道是谁在调，也无法冒充别人。
+
+### MCP 表达不了的部分
+
+MCP 只能"应答一次调用"，不能事后再对模型说话。任务结果、别人发来的消息、凑齐的一批结果，都发生在调用返回之后。这部分不走 MCP，而是回到 ACP：Hub 把它们作为一条带来源标注的 prompt（或插话）送进会话。也就是说，"工具调用返回一个句柄，结果稍后以消息形式到达"是通用机制，由邮箱 + `origin` + `steering` 组成，没有为它再造一个专用扩展。
+
+因此 **`dispatch_task` 从不阻塞**。没有"同步等待结果"的工具：一个卡在工具调用里的 Agent 无法响应用户，还会带来互相等待的死锁。
+
+## 5. 约束、汇合与记忆
+
+### 5.1 派发后等多方响应
+
+```
+导演这一轮： dispatch_task → 编剧
+            dispatch_task → 灯光师1
+            await_tasks([t1, t2], mode: "all", note: "两份都到了再定分镜；若剧本没定稿先退回")
+            结束本轮                           ← 导演此时是空闲的
+用户 → 导演： "进度怎么样？"                    ← 普通的一轮，不是插话
+t1 完成                                        ← 结果被门扣住，不打扰导演
+t2 完成                                        ← 门满足：两份结果 + note 合成一条消息，成为导演的下一轮
+```
+
+- **确定性的部分由 Hub 做**：`all` / `any` 的判定、结果的扣留与合并、崩溃后不丢不重。
+- **需要判断的部分交给模型**：`note` 是 Agent 写给自己的提醒和条件，随结果一起回来，由它推理"条件是否满足、要不要再派发"。
+- 没有登记门的任务，结果完成一个送达一个。两者是同一种邮件：单个结果就是"只含一个任务、没有汇合条件"的结果集。
+
+### 5.2 任务的启动约束
+
+`dispatch_task` 的 `after: [taskId…]` 表示"这些任务结束之前不要开始"。任务先处于 `blocked`，前置全部结束时 Hub 才投递，并把前置任务的结果作为输入附上。前置失败了也会投递，由接到任务的模型判断输入是否足够、是否该在结果里说明。
+
+### 5.3 记忆与"找对人"
+
+两层，互相补充：
+
+- **话题账本（Hub 自动维护）**：每条消息、每个任务都带 `topic`。Hub 从实际流过邮箱的记录里维护"Agent → 话题 → 对接过的 Agent、次数、最后时间"。它不依赖模型自觉，重启后由日志重建。
+- **笔记（Agent 自己维护）**：`remember(topic, content)` 是**覆盖写**，一个话题一条当前结论，不是无限追加；`recall(query)` 同时查笔记、账本和相关任务。
+
+它们在这些地方起作用：
+
+- `list_agents` 给每个同事列出"你和它对接过的话题"。
+- 往一个有历史的话题里发消息 / 派任务，而对象不是之前对接的人时，工具结果里会明确提示"这个话题之前是和 灯光师1 对接的，你发给了 灯光师2"。这是提示而不是拦截，是否换人由模型决定。
+- 收到带话题的消息时，Hub 把接收方自己关于这个话题的笔记附在后面。
+- 新会话开始时（包括后端上下文丢失后重建），记忆摘要进入系统说明。
+
+### 5.4 后台任务（job）：慢的工具调用不占住 Agent
+
+生成一段视频要几分钟，而 MCP 调用只能阻塞等待。`start_job { server, tool, arguments, title }` 让 Hub 代 Agent 去调它**所属角色的 MCP server** 里的那个工具，调用立即返回任务号。
+
+job 不是新机制，它就是"执行者是工具而不是 Agent 的任务"（`Task.tool`）：结果以普通的 `<xsb-task-result>` 送回，可以 `await_tasks` 汇合、`cancel_task` 取消、在 `xsb tasks` / `watch` 里看到。MCP server 不需要做任何配合。
+
+- Hub 为每个 job 单独启动一次该 MCP server，调用完即关闭，所以只适合无状态的工具（提交生成、渲染、转码）。只支持 stdio 的 server。
+- **job 不重跑**。Hub 停止或崩溃时还在跑的 job，重启后标为 `failed` 并告知"结果未知、没有重跑"，由派发它的模型决定是否再提交。这与 Agent 任务的"至少一次"相反，因为一次生成可能已经花了钱。
+- job 没有 `after`；需要先后顺序时由模型在拿到前一个结果后再提交。
+- job 由 Hub 发起，不经过后端的权限询问。后端只看得到 `start_job` 这一次调用。
+
+### 5.5 资产库与产物契约：一致性的唯一事实来源
+
+角色形象、画风、场景、剧本、镜头表、成片，凡是团队要达成一致的东西，都是**资产**：一个有 id 的文件，id 为 `<类型>/<名称>`（如 `character/lin`）。
+
+- `put_asset` 把文件（或一段文本）**复制**进 `.xsb/assets/<类型>/<名称>/v<n>`，库里的文件不再被改写。对已有 id 再登记是新增一个版本，旧版本保留，可用 `character/lin@1` 引用。
+- 索引是事件日志 `assets.jsonl`，与其他状态一样重启后重建。
+- Agent 之间传 id，不传各自工作目录里的路径。
+
+任务用两个字段把资产变成契约，两者都由 Hub 执行，不靠模型自觉：
+
+| `dispatch_task` 的字段 | Hub 做什么 |
+| - | - |
+| `inputs: [资产 id…]` | 派发时校验存在；送达时把这些资产（描述、路径，小的文本资产连同正文）附在任务后面，并说明"以它们为准，不要重新定义" |
+| `produces: 类型` | 送达时告知必须登记一个该类型的资产；任务结束时，结果里自动列出它登记的资产，**没有登记该类型时明确写出"没有交付"** |
+
+确定性的部分（有没有交、交了什么）由 Hub 核对；交的东西好不好由派发者的模型判断。
+
+### 5.6 角色：Agent 之间的差异从哪来
+
+一个角色能做什么，是它**声明**出来、由 Hub 执行的东西，不是说明文字里的人设。四层各回答一个问题，下层不重复上层：
+
+| 层 | 回答 | 内容 | 在哪 |
+| - | - | - | - |
+| 系统 | Agent 之间怎么协作 | 协作工具、资产机制、通用约定 | `prompts.ts`，只此一份 |
+| 团队 | 这类工作怎么流转 | 每种资产由谁产出、依据什么 | 不存储：由各角色的契约推导（`Hub.team`） |
+| 角色 | 这个岗位贡献什么 | 产出契约、工具、职责 | `.xsb/roles/<角色>/` |
+| Agent | 谁来做 | 后端、工作目录、记忆 | `AgentSpec` |
+
+角色是用户写的一个目录，Agent 是角色的实例（`xsb agent add gaffer1 --role gaffer`），多个 Agent 可以共用一个角色：
+
+```
+.xsb/roles/<角色>/
+  role.json                 { "description", "backend", "workspace", "mcpServers": { 名称: { command, args, env } } }
+  instructions.md           这个角色是谁、怎么工作
+  skills/<名称>/SKILL.md     做某一类工作的步骤；旁边可以放它引用的文件
+```
+
+| 角色给什么 | 怎么到达模型 | 何时读取 |
+| - | - | - |
+| `description`、`backend`、`workspace` | 新建 Agent 时的默认值，之后是 Agent 自己的字段（两个同角色的 Agent 可以用不同后端）。`workspace` 为 `project` 时新 Agent 在项目目录里工作，否则在自己的目录里；同一目录里还有谁在工作，写在各自的系统说明里 | 仅在 `agent add` 时 |
+| `instructions.md` | 系统说明里，排在 Agent 自己的说明之前 | 每次会话绑定 |
+| `mcpServers` | ACP `session/new` 的标准字段，与协作工具并列。对所有后端一致，包括封装的三方 agent | 每次会话绑定 |
+| skills | 见下 | 每次使用 |
+
+`mcpServers` 的格式与 `.mcp.json` 相同。生成服务的密钥写在对应 server 的 `env` 里，只有这个角色的 Agent 拿得到。
+
+角色可以直接改文件，也可以经 `dev.xsb/roles` 扩展读写（`xsb role ...` 用的就是它）。`put` 里没给的字段保持不变；`mcpServers` 和 `skills` 给了就是全集，不在其中的被删除。有 Agent 在用的角色不能删除。`check` 启动角色的 MCP server 并列出各自的工具，配置错误在这里暴露，而不是等到模型"不会用工具"。
+
+**预设团队：引用，不复制。** xsb 自带几支团队（`packages/hub/presets/<团队>/`：`team.json` 加上若干角色目录，格式与项目自己的完全相同）。项目在 `.xsb/config.json` 的 `teams` 里写上团队的名字就是在用它，没有任何文件被复制。角色按名字查找，只在 `loadRole` 一处：
+
+1. 项目自己的 `.xsb/roles/<角色>/`；
+2. 项目所用各团队里的同名角色。
+
+由此得到的行为不需要额外的机制：
+
+- 用着预设的项目，升级 xsb 之后角色就是新的；同一支团队可以随时再用、反复"建立"。
+- `roles/put` 改的永远是项目自己的角色。改一个团队的角色时，先把它整个目录复制成项目自己的再改（skill 旁边的文件一并带上），此后以项目的为准。
+- `roles/remove` 删的也是项目自己的角色。团队里有同名角色时，这就是"恢复预设"，有 Agent 在用也可以；只属于团队的角色不能单独删，随团队一起停用。
+- 停用一支团队时，若有 Agent 的角色只有它才有，则拒绝。
+
+`RoleInfo.preset = { team, own }` 告诉客户端一个角色与预设的关系：来自哪支团队，项目是否已有自己的版本。
+
+**skill 怎么被用上。** 模型不需要"知道去找 Hub"：
+
+- **确定性注入（主路径）**：`SKILL.md` 的 front matter 里写了 `produces: <资产类型>` 的 skill，就是"如何产出这种资产"的步骤。任务带 `produces: shot_list` 且接收方的角色有一个声明 `produces: shot_list` 的 skill 时，Hub 把它的正文直接附在任务后面。与送达消息时附上话题笔记是同一个做法，不依赖模型判断。skill 的名称没有语义。
+- **按需加载（辅路径）**：所有 skill 的名称和一句话说明列在系统说明里（声明了 `produces` 的会注明），模型用 `load_skill` 取正文。这条路依赖模型自觉。
+
+skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为一致。
+
+**契约与团队。** 声明了 `produces` 的 skill 是一条产出契约，四个要素各有着落：
+
+| 要素 | 写在哪 | Hub 做什么 |
+| - | - | - |
+| 产出哪种资产 | front matter 的 `produces` | 任务结束时核对是否登记（5.5） |
+| 依据哪些资产 | front matter 的 `inputs: 类型, 类型` | 派发时核对 `inputs` 里有没有这些类型的资产 |
+| 怎么做 | skill 正文 | 随任务注入 |
+| 用什么工具 | 角色的 `mcpServers` | 只给这个角色的 Agent |
+
+预设团队（[packages/hub/presets/](../packages/hub/presets)）每种语言一份：`presets/<语言>/<团队>/`，读哪一份由项目的工作语言决定。各语言之间只有文字不同，团队、角色、skill、契约、工具必须相同，测试逐项比对。`team.json` 里除了角色还有 `assets`：每种资产类型的显示名，界面用它代替 `shot_list` 这样的标识符。
+
+团队不是一个存储的对象：项目里各 Agent 的角色所声明的全部契约就是团队（`Hub.team`）。它有三个去处，对任何团队都一样，代码里没有按角色或预设的分支：
+
+- 每个 Agent 的系统说明里有一节 "The team"，逐行列出"资产类型：谁能产出，依据什么"。负责统筹的角色不必在说明里手写流程。
+- `list_agents` 返回每个 Agent 能产出的类型。
+- `dispatch_task` 带了 `produces` 而对方没有这条契约（并指出谁有，或提示可能拼错了类型），或契约要求的某类输入不在 `inputs` 里时，在返回里提示。和话题提示一样，是提示而不是拦截。
+
+系统说明里的那一节在会话绑定时生成，角色或成员变了要到下次绑定才更新；后两处每次调用时现算。
+
+## 6. 会话、回合与权限
+
+- 每个 Agent 有一个**主会话**，同事的消息都进这里，所以它对用户说过的和对同事说过的是同一份上下文。用户也可以另开会话（`--new`）。
+- 一个会话一次只做一件事。用户输入、同事消息、任务、结果都进同一个队列，依次成为一轮。
+- 任务的结果 = 处理该任务那一轮里，最后一次工具调用之后模型说的话。
+- 后端请求权限时，Hub 不做任何决定，一律转给人：先给正挂在该会话上的客户端，没有就给任意观察者，都没有就挂起等下一个客户端连上，期间该 Agent 状态显示为 `requires_action`。这包括对 xsb 自己协作工具的请求。想无人值守，在后端自己的设置里放开。
+
+## 7. 存储
+
+全部在 `.xsb/` 下，都是只追加的 JSONL 事件日志，内存状态是对日志的折叠（[state.ts](../packages/hub/src/state.ts)）：
+
+```
+.xsb/
+  config.json                       项目设置（机器设置在 ~/.xsb/config.json）
+  agents.jsonl                      Agent 及其 workspace
+  sessions.jsonl                    会话 ↔ 后端会话
+  tasks.jsonl  gates.jsonl          任务、汇合门
+  mailbox.jsonl                     Agent 间消息：enqueue / ack
+  wal.jsonl                         预写日志
+  agents/<id>/instructions.md       这个 Agent 是谁、怎么工作（可手改）
+  agents/<id>/memory.jsonl          它的笔记
+  agents/<id>/sessions/<sid>.jsonl  会话记录（用于 session/load 回放）
+  agents/<id>/workspace/            默认工作目录
+  shared/                           Agent 之间交接的零散文件
+  assets.jsonl  assets/             资产库：索引与文件
+  roles/<角色>/                      项目自己的角色：role.json、instructions.md、skills/（用户编写）。所用预设团队的角色不在这里
+  run/                              pid、socket、日志
+```
+
+- 单文件的修改就是追加一行；崩溃留下的半行在下次打开时丢弃。
+- 跨文件的修改走 WAL（[store.ts](../packages/store/src/store.ts)）：先把整组记录写进 `wal.jsonl` 并落盘，再逐个追加（每条带事务标记），最后写 commit。重启时对没有 commit 的事务补写缺失的记录。例如"任务完成"是一个事务：任务状态、确认原邮件、关门、投递合并结果、释放被它挡住的任务，要么全有要么全无。
+- 邮件是**至少一次**投递：一轮结束才 ack。Hub 停止或崩溃时没跑完的任务，重启后会重新执行。插话投递失败时退回为排队的下一轮，不会丢。
+- **也可以让它不接着做。** 停止 Hub 的一方可以留下一个标记（`run/abandon`，`stopHub(paths, true)`）：下一次启动的 Hub 看到它，就把没做完的一切放弃再开始（[mailroom.ts](../packages/hub/src/mailroom.ts) 的 `abandon`），标记随即删除。放弃是一个事务：未确认的邮件全部确认掉，没结束的任务记为 `cancelled`，还开着的汇合门关掉。不给派发者送结果，因为那本身就是一轮；它用 `get_task` 能看到。标记是留给下一个 Hub 的，不是对当前这个的请求，所以不管当前这个怎么结束（包括被直接杀掉）都算数。桌面应用在用户确认"仍然退出"时用它（GUI.md）；`xsb hub stop` 不用，仍是下次接着做。
+- 一个项目只有一个 Hub：`run/hub.json` 以独占方式创建，同时启动的第二个 Hub 在碰到 socket 和日志之前就退出。
+
+## 8. 已验证与未验证
+
+`npm test`（三个库各有自己的测试）：
+
+- `@xsb/store`：在事务的每一步模拟崩溃，恢复后全有或全无，恢复可重复执行。
+- `@xsb/hub`，端到端（真实 Hub、真实 socket、真实 MCP 桥，后端用脚本化的 mock ACP agent）：派发与结果回传、汇合门及等待期间的用户对话、`after` 依赖、两种插话路径、Agent 间插话、话题对口提示与记忆、权限转给人、无系统提示词能力的后端、重启后状态重建 / 历史回放 / 未完成任务重跑；五种后端错误码；取消任务；经 `@xsb/adapter` 封装的三方 agent（对话、被兜底插话、与 ACP agent 互派任务）；角色（说明、MCP server、skill 目录与 `load_skill`）；后台任务（成功、失败、取消、重启后不重跑）；资产库（版本、文件复制、`inputs` 注入、`produces` 的 skill 注入与未交付提示）；角色的读写、删除保护、MCP 检查、系统说明预览、重启后新配置生效、删除 Agent 的通知、角色变更的通知、后端清单、资产新版本的通知；语言（项目取第一个声明的语言且之后不变、系统说明里的语言一节、预设团队按语言读取且各语言结构一致、报错带原因与事实并能按语言措辞）；声明了 `dev.xsb/origin` 的客户端在自己的输入成为一轮时收到回显（排队的、插话的），未声明的不收到；排队的消息按自己的标识改成插话后只执行一次；带放弃标记的启动不重跑任何东西、没结束的任务记为已取消。
+- `@xsb/cli`：真实的后台 Hub。按需启动、经桥调用工具、开关参数解析、退出码、同一项目拒绝第二个 Hub、停止后状态保留。
+
+真实后端（claude-agent-acp 0.107.0，经 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` 环境变量接入）手工跑过一遍：四个 Agent，派发两个任务并 `await_tasks`、等待期间与派发者对话、结果合并送达、Hub 重启后 `session/resume` 恢复上下文、同话题的后续工作仍派给原来的同事、原生插话、`remember` 覆盖写笔记。这些只各跑了一次，没有自动化。那次是在后来的改动（配置拆分、去掉 `npx`、去掉权限策略、拆分为五个库、插话兜底下沉到 `Backend`）之前，改动后没有再用真实后端跑过。
+
+未验证：
+
+- codex、gemini、grok 本机未安装，没有实际启动过。
+- 话题与另一位同事不符时的提示：真实模型一直选对了人，提示只在 mock 测试里触发过。
+- 角色、后台任务、资产库只用 mock 后端和 mock 生成服务验证过。真实模型是否会按说明使用 `start_job`、`inputs`、`produces`，是否会在该用时调用 `load_skill`，是否会照系统说明里 "The team" 一节派发，没有验证。
+- 没有接过真实的生成服务（图像、视频）。
+- 电影团队改过流程（选角、分镜画面、动态分镜、试拍、三轮审剪辑、五处用户确认），新流程只核对了契约能被读取、各语言一致，没有用真实模型从头跑过一部片子。
+- 工作语言只验证了写进系统说明；真实模型是否始终用它写交付物，没有验证。
+- `@xsb/adapter` 只用测试里的玩具 agent 验证过，没有接过真实的三方 agent；它目前不支持权限请求。
+
+## 9. 已知取舍
+
+- Hub 对后端不提供 `fs/*` 和 `terminal/*`，Agent 用自己的文件和命令工具。
+- 项目的工作语言定下后不随客户端变化；换语言要手改 `.xsb/config.json`，并重启 Agent 才对已有会话生效。用户直接写的角色和说明不翻译，写的是什么语言就是什么语言。
+- CLI 的语言取自终端的环境变量，可能与系统语言不同（不少终端固定为 `en_US.UTF-8`）。
+- 对外 `session/new` 的 `cwd` 不改变 Agent 的工作目录，Agent 始终在自己的 workspace 里工作。
+- Hub 面向本机单用户：能连上 socket 的客户端可以操作任何会话。
+- 在不支持原生 steering 的后端上插话，会中断它正在执行的工具调用。
+- 工具隔离只到 xsb 这一层：角色决定给哪些 MCP server，但后端自带的 shell / 文件工具和用户级配置（如 `~/.claude` 里登记的 MCP）对同后端的所有 Agent 都生效。要真正隔离，生成能力必须只能经角色的 MCP server 到达。
+- Agent 之间只传文本。图像、视频以资产路径传递，能不能"看"取决于后端模型和它自己的读文件工具。
+- 资产库没有删除和垃圾回收，每个版本都保留；视频会占空间。
+- 角色的 `description`、`backend`、`workspace` 在新建 Agent 时复制，之后改 `role.json` 不影响已有 Agent；其余内容随改随生效。
+- `mailbox.jsonl`、`tasks.jsonl` 不压缩：话题账本靠重放全部邮件重建，所以日志只增不减。笔记日志会在加载时压缩。
+- 删除 Agent 不删除它的目录和会话记录；同名重建会接上原来的主会话。
+- 角色的修改不向其他客户端广播；两个编辑界面同时打开时，另一个要重新读取。
+- `role.json` 里 MCP server 的 `env`（含密钥）是明文，`roles/get` 也原样返回；掩码显示是客户端的事。

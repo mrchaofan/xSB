@@ -1,0 +1,24 @@
+{
+  "name": "@xsb/cli",
+  "version": "0.1.0",
+  "description": "The xsb command: an ACP client of the hub for the terminal",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/cli.ts"
+  },
+  "bin": {
+    "xsb": "bin/xsb"
+  },
+  "dependencies": {
+    "@xsb/hub": "0.1.0",
+    "@xsb/protocol": "0.1.0"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node test/cli.test.ts",
+    "typecheck": "tsc --noEmit"
+  }
+}

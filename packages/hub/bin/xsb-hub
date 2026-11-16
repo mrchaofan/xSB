@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// The hub daemon: `xsb-hub <project dir>`. Normally started on demand by a client.
+import("../src/daemon.ts").then((m) => m.main(process.argv.slice(2)));

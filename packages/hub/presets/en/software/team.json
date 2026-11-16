@@ -1,0 +1,38 @@
+{
+  "title": "Software Development",
+  "description": "A delivery team that takes a requirement to a releasable change: the Tech Lead breaks down the work and acts as gatekeeper, while product, architecture, development, review, and QA each deliver one kind of asset in a defined format. The workflow draws on the role breakdown of BMAD-METHOD and MetaGPT.",
+  "roles": [
+    {
+      "role": "tech-lead",
+      "name": "Tech Lead"
+    },
+    {
+      "role": "product-manager",
+      "name": "Product Manager"
+    },
+    {
+      "role": "architect",
+      "name": "Architect"
+    },
+    {
+      "role": "developer",
+      "name": "Developer"
+    },
+    {
+      "role": "reviewer",
+      "name": "Code Reviewer"
+    },
+    {
+      "role": "qa",
+      "name": "QA Engineer"
+    }
+  ],
+  "assets": {
+    "prd": "Requirements document",
+    "architecture": "Technical design",
+    "change": "Code change",
+    "review": "Code review",
+    "test_plan": "Test plan",
+    "test_report": "Test report"
+  }
+}

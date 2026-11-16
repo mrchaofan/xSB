@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// The stdio MCP server a backend starts to reach the hub's tools. Started by the hub.
+import("../src/mcp-bridge.ts").then((m) => m.main());

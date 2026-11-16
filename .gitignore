@@ -1,0 +1,12 @@
+# 依赖与构建产物
+node_modules/
+packages/desktop/dist/
+packages/desktop/release/
+
+# 本仓库自己被当作工作区打开时留下的状态
+/.xsb/
+
+# 本机工具的配置
+/.claude/
+.DS_Store
+*.log

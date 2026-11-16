@@ -1,0 +1,192 @@
+/**
+ * Hub state: a fold over the event logs.
+ *
+ * `apply` is the only code that changes state. Loading replays every record
+ * through it; a live change is `commit(ops)`, which writes the records (under
+ * the WAL when there are several) and then applies the same records. What is
+ * in memory is therefore always what a restart would rebuild.
+ */
+import type { Addr, AgentSpec, Asset, Origin, Task } from "@xsb/protocol";
+import type { Op, Record_, Store } from "@xsb/store";
+import { Paths } from "./paths.ts";
+
+export type SessionRec = {
+  id: string;
+  agentId: string;
+  /** The backend's own session id, once one exists. */
+  backendSessionId?: string;
+  /** The session peers' messages go to. One per agent. */
+  main: boolean;
+  title?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** The results of some tasks, handed over together. */
+export type Results = {
+  taskIds: string[];
+  mode?: "all" | "any";
+  /** The owner's own reminder of what to do, or what to check, once the results are in. */
+  note?: string;
+};
+
+/** A join: hold the results of `taskIds` and hand them over together. */
+export type Gate = {
+  id: string;
+  owner: Addr;
+  taskIds: string[];
+  mode: "all" | "any";
+  note?: string;
+  createdAt: string;
+};
+
+export type MailItem = {
+  id: string;
+  to: Addr;
+  from: Origin;
+  kind: "message" | "task" | "results";
+  topic?: string;
+  /** Of a message. */
+  content?: string;
+  /** Of a task. */
+  taskId?: string;
+  /** Of results: whose they are. With `mode`, they answer a join; without, it is one task's own result. */
+  results?: Results;
+  /** Put it into the recipient's running turn instead of queueing behind it. */
+  steer?: boolean;
+  ts: string;
+};
+
+export type Note = { topic: string; content: string; peers: string[]; updatedAt: string };
+
+export type TopicPeer = { count: number; lastAt: string };
+
+export const topicKey = (topic: string): string => topic.trim().toLowerCase();
+
+export const F = {
+  agents: "agents.jsonl",
+  sessions: "sessions.jsonl",
+  tasks: "tasks.jsonl",
+  gates: "gates.jsonl",
+  mailbox: "mailbox.jsonl",
+  assets: "assets.jsonl",
+} as const;
+
+export const ops = {
+  putAgent: (agent: AgentSpec): Op => ({ file: F.agents, rec: { op: "put", agent } }),
+  removeAgent: (id: string): Op => ({ file: F.agents, rec: { op: "remove", id } }),
+  putSession: (session: SessionRec): Op => ({ file: F.sessions, rec: { op: "put", session } }),
+  putTask: (task: Task): Op => ({ file: F.tasks, rec: { op: "put", task } }),
+  openGate: (gate: Gate): Op => ({ file: F.gates, rec: { op: "open", gate } }),
+  closeGate: (id: string): Op => ({ file: F.gates, rec: { op: "close", id } }),
+  enqueue: (item: MailItem): Op => ({ file: F.mailbox, rec: { op: "enqueue", item } }),
+  ack: (id: string): Op => ({ file: F.mailbox, rec: { op: "ack", id } }),
+  putAsset: (asset: Asset): Op => ({ file: F.assets, rec: { op: "put", asset } }),
+  putNote: (agentId: string, note: Note): Op => ({ file: Paths.memory(agentId), rec: { op: "put", note } }),
+  removeNote: (agentId: string, topic: string): Op => ({ file: Paths.memory(agentId), rec: { op: "remove", topic } }),
+};
+
+export class State {
+  readonly store: Store;
+  agents = new Map<string, AgentSpec>();
+  sessions = new Map<string, SessionRec>();
+  tasks = new Map<string, Task>();
+  gates = new Map<string, Gate>();
+  /** Mail not yet acknowledged, in arrival order. */
+  mail = new Map<string, MailItem>();
+  /** Asset id -> its versions, oldest first. */
+  assets = new Map<string, Asset[]>();
+  /** agent -> topic key -> note. Maintained by the agent itself. */
+  notes = new Map<string, Map<string, Note>>();
+  /**
+   * agent -> topic key -> peer -> how often. Maintained by the hub from the
+   * mail that actually flowed, so it is right even if an agent forgets to take
+   * notes. This is what keeps a topic with the peer who already handled it.
+   */
+  ledger = new Map<string, Map<string, { topic: string; peers: Map<string, TopicPeer> }>>();
+
+  constructor(store: Store) {
+    this.store = store;
+  }
+
+  load(): void {
+    this.store.recover();
+    for (const file of [F.agents, F.sessions, F.tasks, F.gates, F.mailbox, F.assets]) {
+      for (const rec of this.store.read(file)) this.apply(file, rec);
+    }
+    for (const id of this.agents.keys()) {
+      const file = Paths.memory(id);
+      const recs = this.store.read(file);
+      for (const rec of recs) this.apply(file, rec);
+      // Notes are rewritten in place, so the log is mostly superseded lines.
+      const live = [...(this.notes.get(id)?.values() ?? [])];
+      if (recs.length > 4 * live.length + 64) {
+        this.store.rewrite(file, live.map((note) => ({ op: "put", note })));
+      }
+    }
+  }
+
+  commit(list: Op[]): void {
+    this.store.tx(list);
+    for (const op of list) this.apply(op.file, op.rec);
+  }
+
+  private apply(file: string, rec: Record_): void {
+    switch (file) {
+      case F.agents:
+        if (rec.op === "put") this.agents.set(rec.agent.id, rec.agent);
+        else this.agents.delete(rec.id);
+        return;
+      case F.sessions:
+        this.sessions.set(rec.session.id, rec.session);
+        return;
+      case F.tasks:
+        this.tasks.set(rec.task.id, rec.task);
+        return;
+      case F.gates:
+        if (rec.op === "open") this.gates.set(rec.gate.id, rec.gate);
+        else this.gates.delete(rec.id);
+        return;
+      case F.mailbox:
+        if (rec.op === "enqueue") {
+          this.mail.set(rec.item.id, rec.item);
+          this.recordTopic(rec.item);
+        } else this.mail.delete(rec.id);
+        return;
+    }
+    if (file === F.assets) {
+      const versions = this.assets.get(rec.asset.id);
+      if (versions) versions.push(rec.asset);
+      else this.assets.set(rec.asset.id, [rec.asset]);
+      return;
+    }
+    const memory = /^agents\/([^/]+)\/memory\.jsonl$/.exec(file);
+    if (memory) {
+      let notes = this.notes.get(memory[1]);
+      if (!notes) this.notes.set(memory[1], (notes = new Map()));
+      if (rec.op === "put") notes.set(topicKey(rec.note.topic), rec.note);
+      else notes.delete(topicKey(rec.topic));
+    }
+  }
+
+  private recordTopic(item: MailItem): void {
+    if (item.from.kind !== "agent" || !item.topic || (item.kind !== "message" && item.kind !== "task")) return;
+    const pairs = [
+      [item.from.agentId, item.to.agentId],
+      [item.to.agentId, item.from.agentId],
+    ];
+    for (const [self, peer] of pairs) {
+      let topics = this.ledger.get(self);
+      if (!topics) this.ledger.set(self, (topics = new Map()));
+      let entry = topics.get(topicKey(item.topic));
+      if (!entry) topics.set(topicKey(item.topic), (entry = { topic: item.topic, peers: new Map() }));
+      const seen = entry.peers.get(peer);
+      entry.peers.set(peer, { count: (seen?.count ?? 0) + 1, lastAt: item.ts });
+    }
+  }
+
+  mainSession(agentId: string): SessionRec | undefined {
+    for (const s of this.sessions.values()) if (s.agentId === agentId && s.main) return s;
+    return undefined;
+  }
+}

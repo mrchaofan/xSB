@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// A stdio MCP server: image and video generation. Started by a backend or by the hub, as a role's MCP server.
+import("../src/server.ts").then((m) => m.main());

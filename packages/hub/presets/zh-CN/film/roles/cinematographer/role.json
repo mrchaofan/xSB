@@ -1,0 +1,12 @@
+{
+  "description": "按镜头表用视频模型逐镜生成画面，保证人物与风格前后一致",
+  "mcpServers": {
+    "media": {
+      "command": "xsb-media-mcp",
+      "env": {
+        "IMAGE_PROVIDER": "seedream",
+        "VIDEO_PROVIDER": "seedance"
+      }
+    }
+  }
+}

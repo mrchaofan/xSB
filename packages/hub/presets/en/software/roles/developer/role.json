@@ -1,0 +1,5 @@
+{
+  "description": "Implements code changes according to the requirements and design, self-tests them, and reports honestly what was done and how it was verified",
+  "workspace": "project",
+  "mcpServers": {}
+}
