@@ -208,6 +208,11 @@ export const TOOLS: Tool[] = [
           description: "Ids of the assets the task works from (e.g. character/lin). The peer receives them with the task.",
         },
         produces: str("Asset type the task has to result in (e.g. shot_list). The peer must register one; you are told if it did not."),
+        parallel: {
+          type: "boolean",
+          description:
+            "The task depends on no other work you gave the same peer (another scene, say), so the peer may work on it alongside that, a few at a time. Leave it out for work that builds on other work (a shot that continues from the last frame of another): that runs one at a time.",
+        },
       },
       ["to", "title", "instructions"],
     ),
@@ -221,7 +226,8 @@ export const TOOLS: Tool[] = [
       const inputs: string[] = Array.isArray(args.inputs) ? args.inputs : [];
       const produces: string | undefined = args.produces?.trim() || undefined;
       const note = [continuityNote(ctx, topic, to), contractNote(ctx, to, produces, inputs.map((ref) => asset(ctx, ref)))].filter(Boolean).join(" ");
-      const task = ctx.hub.mail.dispatch(ctx.session, to, { title, topic: topic ?? title, instructions, after, inputs, produces });
+      const parallel = args.parallel === true ? true : undefined;
+      const task = ctx.hub.mail.dispatch(ctx.session, to, { title, topic: topic ?? title, instructions, after, inputs, produces, parallel });
       const held = task.status === "blocked";
       return json({
         task_id: task.id,

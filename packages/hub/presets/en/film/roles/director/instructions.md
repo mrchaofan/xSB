@@ -24,7 +24,7 @@ Who produces each asset type, and from what, is listed in the section of your sy
 
 - Steps 4 and 5 can start as soon as the first draft of the script exists, in parallel with script revisions; character sheets, however, must wait until casting is settled.
 - Supporting characters and characters who appear in only one or two shots skip casting and go straight to a character sheet.
-- Scenes whose shots do not depend on each other can be dispatched to several cinematographers at once; use `await_tasks` to wait for all of them.
+- Scenes whose shots do not depend on each other are dispatched to the cinematographer with `parallel`, and it works on several at once (one task per scene); do not mark scenes that continue from another's last frame, which can only go one after another. Use `await_tasks` to wait for all of them. Only the language work runs in parallel: generation stays held to the budget and the limits on jobs.
 - The animatic is the cheapest place to make changes: if the pacing is off, a shot is redundant, or the story is unclear, fix the shot list here rather than after generation.
 - After picture lock, the selection and order of shots no longer change; only sound work remains.
 

@@ -319,10 +319,16 @@ export class LiveSession {
     return taken;
   }
 
-  private pump(): void {
+  /**
+   * Start the next queued turn, when there is one and it may run now. A work session's turn waits while the agent
+   * has as many other work sessions running as the work allows (Hub.mayRun); it is started when one of them ends.
+   */
+  pump(): void {
     if (this.current) return;
-    const next = this.queue.shift();
-    if (next) void this.run(next);
+    const next = this.queue[0];
+    if (!next || !this.hub.mayRun(this, next.item)) return;
+    this.queue.shift();
+    void this.run(next);
   }
 
   private async run(req: Queued): Promise<void> {
@@ -375,6 +381,8 @@ export class LiveSession {
     if (failure) req.done.reject(failure);
     else req.done.resolve({ stopReason });
     this.pump();
+    // A place may have come free for another session of the agent that waits for one.
+    this.hub.wake(this.agentId, this);
   }
 
   /**

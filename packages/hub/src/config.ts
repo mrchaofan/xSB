@@ -57,8 +57,10 @@ export type GlobalConfig = { version: 1; backends?: Record<string, BackendSpec> 
  * `limits.jobsAtOnce`: how many calls of one tool run as jobs at a time; the others wait in the hub (default 2).
  * `limits.sessionTokens`: past how many tokens of context a work session takes no new work, which goes to a new
  * session handed its conversation (default 150000).
+ * `limits.sessionsAtOnce`: how many work sessions of one agent may run a turn at a time for tasks dispatched as
+ * `parallel` (default 2); other peer work of an agent runs one turn at a time.
  */
-export type ProjectConfig = { version: 1 | 2; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number } };
+export type ProjectConfig = { version: 1 | 2; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number; sessionsAtOnce?: number } };
 
 /**
  * The version of the project config this xsb writes. 2: the preset team "film" is the one that is bound to no
