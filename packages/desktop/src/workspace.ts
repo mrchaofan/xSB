@@ -19,6 +19,7 @@ import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, E
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
 import { roleInput, roleView } from "./roles.ts";
+import { artifactPath } from "./artifact-link.ts";
 
 export const ARTIFACT_SCHEME = "xsb-artifact";
 
@@ -629,13 +630,26 @@ export class Workspace {
 
   // ---- artifacts --------------------------------------------------------------
 
+  /** A file explicitly clicked in the transcript or another document. */
+  openArtifact(href: string, agentId?: string, baseFile?: string): Artifact {
+    if (baseFile && !this.artifacts.has(baseFile)) throw new Error("unknown source document");
+    const agent = agentId ? this.agents.get(agentId) : undefined;
+    const directory = baseFile ? path.dirname(baseFile) : agent?.workspace || this.paths.project;
+    let file = artifactPath(href, directory);
+    // Project-relative links also occur when the agent has its own working directory.
+    if (!baseFile && !fs.existsSync(file)) file = artifactPath(href, this.paths.project);
+    const artifact = this.artifact(file, agentId ?? "");
+    if (!artifact) throw new Error(`file not found: ${href}`);
+    return artifact;
+  }
+
   /** A file a tool call names, made showable. Not every path a tool names is a file. */
-  private artifact(file: string, agentId: string, name = path.basename(file), assetType?: string): Artifact | undefined {
+  private artifact(file: string, agentId: string, name = path.basename(file), assetType?: string, asset?: Asset): Artifact | undefined {
     const stat = fs.statSync(file, { throwIfNoEntry: false });
     if (!stat?.isFile()) return undefined;
     const updatedAt = stat.mtime.toISOString();
     const known = this.artifacts.get(file);
-    if (known?.updatedAt === updatedAt) return known;
+    if (known?.updatedAt === updatedAt && (!asset || known.assetId === asset.id)) return known;
     const artifact: Artifact = {
       id: file,
       name,
@@ -646,6 +660,7 @@ export class Workspace {
       url: `${ARTIFACT_SCHEME}://file/${encodeURIComponent(file)}?v=${stat.mtimeMs}`,
       updatedAt,
       assetType,
+      ...(asset ? { assetId: asset.id, assetVersion: asset.version, description: asset.description } : {}),
     };
     this.artifacts.set(file, artifact);
     this.emit({ artifact });
@@ -654,6 +669,6 @@ export class Workspace {
 
   /** A version of an asset of the library: what agents hand to each other. */
   private asset(asset: Asset): void {
-    this.artifact(asset.path, asset.by, `${asset.id}${path.extname(asset.path)}`, asset.type);
+    this.artifact(asset.path, asset.by, `${asset.id}${path.extname(asset.path)}`, asset.type, asset);
   }
 }

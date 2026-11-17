@@ -11,6 +11,7 @@ const METHODS = [
   "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "revealSkill",
   "backends", "locateProgram", "presets", "useTeam", "dropTeam", "buildTeam", "deriveTeam", "openFolder",
   "openPage", "page", "pageWindow",
+  "copyText", "openArtifact",
 ];
 
 /** Electron wraps a handler's error; the renderer shows only what main said, which is worded for the user (main.ts). */

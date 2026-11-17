@@ -218,6 +218,48 @@ body.paging .page { display: flex; }
 .artifact-title { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
 .artifact-title > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .artifact-title strong { font-weight: 600; }
+.artifact-back { display: flex; align-items: center; gap: 3px; color: var(--ink-2); font-size: 12px; flex: none; padding: 6px 5px; border-radius: 6px; }
+.artifact-back:hover { background: var(--wash); color: var(--accent); }
+.artifact-back[hidden], #artifact-navigation[hidden] { display: none; }
+.artifact-back + .artifact-title { margin-left: 4px; }
+.artifact-navigation { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.artifact-step { display: flex; align-items: center; gap: 3px; flex: none; border-radius: 6px; padding: 4px; color: var(--ink-2); }
+.artifact-step:last-child { flex-direction: row-reverse; }
+.artifact-step:hover:not(:disabled) { background: var(--wash); color: var(--accent); }
+.artifact-step:disabled { opacity: .35; cursor: default; }
+.artifact-position { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: center; color: var(--ink-3); white-space: nowrap; }
+.artifact-navigation select { max-width: 130px; }
+.artifact-browser { min-height: 100%; }
+.catalog-controls { position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column; gap: 10px; padding: 14px 14px 10px; background: var(--paper); border-bottom: 1px solid var(--line); }
+.artifact-search { width: 100%; min-width: 0; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--wash); color: var(--ink); padding: 0 10px; font: 12px var(--sans); }
+.artifact-search:focus { outline: 1px solid var(--accent); }
+.catalog-types { display: flex; flex-wrap: wrap; gap: 5px; }
+.catalog-types button { padding: 4px 10px; border-radius: 7px; font-size: 12px; color: var(--ink-2); }
+.catalog-types button:hover { background: var(--wash); }
+.catalog-types button[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); }
+.catalog-filters { display: flex; gap: 6px; }
+.catalog-filters select, .artifact-navigation select { min-width: 0; padding: 5px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink-2); font: 11px var(--sans); }
+.catalog-filters select { flex: 1; width: 0; }
+.catalog-summary { display: flex; justify-content: space-between; align-items: center; min-height: 18px; font-size: 11px; color: var(--ink-3); }
+.catalog-summary .link { font-size: 11px; }
+.catalog-summary [hidden] { display: none; }
+.artifact-results { padding: 6px 8px 12px; }
+.artifact-card { display: flex; width: 100%; align-items: flex-start; gap: 10px; padding: 10px 8px; border-radius: 9px; text-align: left; border: 1px solid transparent; }
+.artifact-card:hover { background: var(--wash); }
+.artifact-card[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-wash); }
+.artifact-thumb { position: relative; flex: none; width: 58px; height: 48px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--wash); color: var(--ink-3); }
+.artifact-thumb > svg { width: 22px; height: 22px; }
+.artifact-card .artifact-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border: 0; background: var(--wash); }
+.artifact-card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.artifact-card-text strong { font-weight: 500; overflow-wrap: anywhere; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.artifact-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--ink-3); }
+.artifact-card-meta > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.artifact-card-meta time { flex: none; }
+.artifact-description, .artifact-path { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.artifact-badges { display: flex; flex-wrap: wrap; gap: 4px; font-size: 10px; color: var(--ink-3); }
+.artifact-badges > span { border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.catalog-empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; padding: 36px 20px; color: var(--ink-3); }
+.catalog-empty strong { font-size: 13px; font-weight: 400; }
 .segmented { flex: none; display: flex; padding: 2px; border-radius: 8px; background: var(--wash); }
 .segmented button { height: 24px; padding: 0 10px; border-radius: 6px; font-size: 12px; color: var(--ink-3); }
 .segmented button[aria-pressed="true"] { background: var(--paper); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
@@ -263,6 +305,16 @@ body:has(.divider.dragging) webview2 { pointer-events: none; }
 /* ---------- 内容：对话和制品预览共用的 markdown 样式，以及文本以外的块 ---------- */
 .content { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; white-space: normal; }
 .content > .md { align-self: stretch; }
+.md, .content, .source { -webkit-user-select: text; user-select: text; }
+.content-actions { display: flex; align-self: stretch; }
+.copy { user-select: none; }
+.content-actions .copy { opacity: .55; }
+.content:hover .content-actions .copy, .copy:focus-visible { opacity: 1; }
+.content-error { color: var(--ink-2); font-size: 12px; }
+.code-block { margin-bottom: 10px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--wash); }
+.code-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 3px 8px; color: var(--ink-3); font: 11px var(--mono); border-bottom: 1px solid var(--line); }
+.md .code-block pre { margin: 0; border-radius: 0; }
+.md a { cursor: pointer; }
 .content img.part { max-width: min(100%, 360px); max-height: 280px; border-radius: 8px; border: 1px solid var(--line); background: #fff; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
