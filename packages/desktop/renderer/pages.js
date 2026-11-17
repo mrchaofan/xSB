@@ -1,6 +1,6 @@
 // 右栏的标签：第一个是制品，其余每个是一个网页。网页由主进程持有（../src/pages.ts），
 // 这里显示它们的标签和地址栏，并把当前的那个显示出来。网页也可以移到自己的窗口里（page-window.js）。
-import { state } from "./app.js";
+import { revealArtifacts, state } from "./app.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { t } from "./i18n.js";
 import { showWeb } from "./webview.js";
@@ -54,7 +54,7 @@ export function onPage(page) {
   else {
     state.pages.push(page);
     state.tab = page.id;
-    document.body.classList.remove("no-artifact");
+    revealArtifacts();
   }
   renderSide();
 }

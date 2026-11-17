@@ -8,8 +8,9 @@ import { contentView, createEditor, markdownHtml } from "./content.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { clock, t } from "./i18n.js";
 import { onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
-import { showPresets } from "./presets.js";
-import { editRole, showOverview } from "./team.js";
+import { refreshSettings, settingsShell, showSettings } from "./settings.js";
+import { onPreferencesChanged, workspacePreferences } from "./preferences.js";
+import { showOverview } from "./team.js";
 import { showWeb } from "./webview.js";
 
 export const state = {
@@ -22,6 +23,7 @@ export const state = {
   transcripts: {},      // agentId -> Entry[]
   open: [],             // 已打开对话栏的 agentId，按显示顺序。最多两个：第一栏，和分屏出来的第二栏
   pinned: false,        // 第一栏是否固定：固定后，再点别的智能体是分屏，而不是换掉它
+  settings: null,      // 全局或工作区设置中的当前分类
   page: null,           // 主区域显示的页面：null = 对话；"overview"；角色名；"+" = 新建角色
   artifactId: null,     // 右栏正在看的制品
   listing: false,       // 右栏在显示制品列表
@@ -76,6 +78,8 @@ function renderWelcome(candidate, error) {
 
 // ---------- 左栏 ----------
 
+export function refreshRail() { renderRail(); }
+
 function renderRail() {
   const talking = !state.page;
   fill($("#agents"), ...state.agents.map((a, i) =>
@@ -84,43 +88,39 @@ function renderRail() {
       h("span", { class: "row-text" }, h("strong", {}, a.name), h("small", {}, a.description)),
       h("i", { class: "state", "data-state": a.state, title: STATE_TEXT[a.state] }))));
 
-  fill($("#roles"), 
-    ...state.roles.map((r) => {
-      const count = state.agents.filter((a) => a.role === r.name).length;
-      return h("button", { class: "row", "aria-pressed": String(state.page === r.name), onclick: () => editRole(r) },
-        avatarImage(r),
-        h("span", { class: "row-text" }, h("strong", {}, roleTitle(r)),
-          h("small", {}, t("rail.role.meta", { count, preset: r.preset && (r.preset.own ? "own" : "as-is") }))));
-    }),
-    h("button", { class: "row", "aria-pressed": String(state.page === "overview"), onclick: showOverview },
-      h("span", { class: "row-text" }, h("strong", {}, t("overview.title")), h("small", {}, t("rail.overview.hint")))),
-    h("button", { class: "row", "aria-pressed": String(state.page === "presets"), onclick: showPresets },
-      h("span", { class: "row-text" }, h("strong", {}, t("presets.title")), h("small", {}, t("rail.presets.hint")))));
+  $("#agent-count").textContent = state.agents.length;
+  $("#settings").setAttribute("aria-pressed", String(!!state.settings));
+  $("#overview").setAttribute("aria-pressed", String(state.page === "overview"));
+  const showCompleted = workspacePreferences(state.workspace?.path).showCompleted;
+  const visibleTasks = state.tasks.filter((task) => showCompleted || !["completed", "cancelled"].includes(task.status));
 
-  fill($("#tasks"), ...state.tasks.map((task) =>
+  fill($("#tasks"), ...visibleTasks.map((task) =>
     h("button", { class: "row task", "data-over": OVER.includes(task.status), onclick: () => agentOf(task.to.agentId) && focusLane(task.to.agentId) },
       h("i", { class: "state", "data-state": TASK_GLYPH[task.status] }),
       h("span", { class: "row-text" },
         h("strong", {}, task.title),
         h("small", {}, t("rail.task.meta", { from: nameOf(task.from.agentId), to: nameOf(task.to.agentId), status: TASK_TEXT[task.status] }))))));
-  if (!state.tasks.length) $("#tasks").append(h("div", { class: "empty" }, t("rail.tasks.empty")));
+  if (!visibleTasks.length) $("#tasks").append(h("div", { class: "empty" }, t(state.tasks.length ? "rail.tasks.finished" : "rail.tasks.empty")));
 
   // 没有打开任何对话栏时，中间显示的内容
   fill($("#blank"), ...(state.agents.length
     ? [t("blank.pick")]
-    : [h("p", {}, t("blank.none")), h("button", { class: "btn primary", onclick: () => editAgent() }, t("agent.new.title"))]));
+    : [h("p", {}, t("blank.none")), h("button", { class: "btn primary", onclick: () => editAgent() }, t("agent.new.title")), h("small", {}, t("blank.setupHint"))]));
 }
 
 /** 主区域换成一个页面（角色编辑、产出总览）；closePage 回到对话。 */
 export function showPage(key, ...content) {
+  if (key === "overview") state.settings = null;
   state.page = key;
-  fill($("#page"), ...content);
+  fill($("#page"), ...(state.settings ? settingsShell(...content) : content));
+  document.body.classList.toggle("settings-open", !!state.settings);
   document.body.classList.add("paging");
   renderRail();
 }
 export function closePage() {
   state.page = null;
-  document.body.classList.remove("paging");
+  state.settings = null;
+  document.body.classList.remove("paging", "settings-open");
   renderRail();
 }
 
@@ -163,7 +163,6 @@ function openLane(agentId) {
       h("span", { class: "lane-avatar" }), h("strong", {}), h("small", {}),
       h("span", { class: "lane-state" }, h("i", { class: "state" }), h("span", {})),
       h("button", { class: "icon-btn pin", html: ICON.pin, onclick: () => { state.pinned = !state.pinned; state.open.forEach(syncLane); } }),
-      h("button", { class: "icon-btn", title: t("lane.edit"), "aria-label": t("lane.edit"), html: ICON.edit, onclick: () => editAgent(agentOf(agentId)) }),
       h("button", { class: "icon-btn", title: t("lane.close"), "aria-label": t("lane.close"), html: ICON.close, onclick: () => closeLane(agentId) })),
     h("div", { class: "transcript" }, h("div", { class: "entries" })),
     h("div", { class: "composer" },
@@ -294,7 +293,7 @@ function showArtifact(id) {
   state.artifactId = id;
   state.listing = false;
   state.tab = null;
-  document.body.classList.remove("no-artifact");
+  revealArtifacts();
   renderSide();
   renderArtifact();
 }
@@ -362,7 +361,9 @@ async function renderArtifact() {
 
 // ---------- 窗口级交互 ----------
 
-$("#ws").onclick = () => xsb.newWindow();
+$("#ws").onclick = () => showSettings(state.workspace ? "workspace" : "general");
+$("#settings").onclick = $("#title-settings").onclick = () => showSettings();
+$("#overview").onclick = showOverview;
 /** 与中枢的连接是否还在，画成工作区名字旁的圆点。 */
 function showHub(up, why) {
   const dot = $("#hub");
@@ -375,9 +376,17 @@ $("#hub").onclick = () => {
   if ($("#hub").dataset.up === "false") xsb.open(state.workspace.path).then(start, (e) => showHub(false, e.message));
 };
 $("#new-agent").onclick = () => editAgent();
-$("#new-role").onclick = () => editRole();
 $("#toggle-rail").onclick = () => document.body.classList.toggle("no-rail");
-$("#toggle-artifact").onclick = () => document.body.classList.toggle("no-artifact");
+export function revealArtifacts() {
+  document.body.classList.remove("no-artifact");
+  if (window.innerWidth <= 1000) document.body.classList.add("artifact-expanded");
+}
+$("#toggle-artifact").onclick = () => {
+  if (window.innerWidth <= 1000) {
+    document.body.classList.remove("no-artifact");
+    document.body.classList.toggle("artifact-expanded");
+  } else document.body.classList.toggle("no-artifact");
+};
 $("#artifact-list").onclick = () => { state.listing = !state.listing || !state.artifactId; renderArtifact(); };
 $("#artifact-modes").onclick = (e) => {
   if (!e.target.dataset.mode) return;
@@ -399,6 +408,9 @@ $("#divider").onpointerdown = (e) => {
 
 // ⌘1…⌘9：打开并聚焦第 n 个 Agent 的输入框
 window.onkeydown = (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === ",") { e.preventDefault(); showSettings(); return; }
+  if (e.key === "Escape" && state.settings && !document.querySelector("dialog[open]")) { closePage(); return; }
+  if (document.querySelector("dialog[open]")) return;
   const agent = (e.metaKey || e.ctrlKey) && state.agents[Number(e.key) - 1];
   if (!agent) return;
   e.preventDefault();
@@ -412,11 +424,13 @@ export function onAgent(agent) {
   upsert(state.agents, agent);
   state.transcripts[agent.id] ??= [];
   renderRail();
+  refreshSettings();
   syncLane(agent.id);
 }
 export function onRole(role) {
   upsert(state.roles, role, "name");
   renderRail();
+  refreshSettings();
   state.open.forEach(syncLane);
 }
 
@@ -425,9 +439,10 @@ xsb.on((event) => {
   else if (event.removedAgent) {
     state.agents = state.agents.filter((a) => a.id !== event.removedAgent);
     closeLane(event.removedAgent);
+    refreshSettings();
   }
   else if (event.role) onRole(event.role);
-  else if (event.removedRole) { state.roles = state.roles.filter((r) => r.name !== event.removedRole); renderRail(); state.open.forEach(syncLane); }
+  else if (event.removedRole) { state.roles = state.roles.filter((r) => r.name !== event.removedRole); renderRail(); refreshSettings(); state.open.forEach(syncLane); }
   else if (event.task) { upsert(state.tasks, event.task); renderRail(); }
   else if (event.artifact) {
     upsert(state.artifacts, event.artifact);
@@ -436,7 +451,7 @@ xsb.on((event) => {
   else if (event.page) onPage(event.page);
   else if (event.removedPage) onPageRemoved(event.removedPage);
   else if (event.hub === "down") showHub(false);
-  else if (event.revealPage) { document.body.classList.remove("no-artifact"); selectTab(event.revealPage); }
+  else if (event.revealPage) { revealArtifacts(); selectTab(event.revealPage); }
   else if (event.showAgent) { if (agentOf(event.showAgent)) focusLane(event.showAgent); }
   else if ("activity" in event) {
     if (event.activity) state.activities[event.agentId] = event.activity; else delete state.activities[event.agentId];
@@ -451,9 +466,9 @@ xsb.on((event) => {
 
 /** 读一次快照并画出整个窗口。打开工作区之后再调用一次。 */
 export async function start() {
-  Object.assign(state, { activities: {} }, await xsb.load(), { open: [], pinned: false, page: null, listing: false, tab: null });
+  Object.assign(state, { activities: {} }, await xsb.load(), { open: [], pinned: false, page: null, settings: null, listing: false, tab: null });
   document.body.classList.toggle("no-workspace", !state.workspace);
-  document.body.classList.remove("paging");
+  document.body.classList.remove("paging", "settings-open");
   $("#ws-name").textContent = document.title = state.workspace?.name ?? t("app.title");
   $("#ws-path").textContent = state.workspace?.path ?? "";
   if (!state.workspace) return renderWelcome();
@@ -466,3 +481,9 @@ export async function start() {
   renderSide();
   renderArtifact();
 }
+
+// Other workspace windows share global appearance and update immediately.
+onPreferencesChanged(() => {
+  refreshRail();
+  if (state.page === "settings") showSettings(state.settings);
+});

@@ -324,7 +324,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     language,
 
     // ---------- 工作区 ----------
-    load: async () => structuredClone(data ? { ...data, pages: null } : { workspace: null, recent: [sample.workspace] }),
+    load: async () => structuredClone(data ? { ...data, pages: null } : { workspace: null, recent: [sample.workspace], backends: BACKENDS }),
     pickFolder: async () => ({ path: "~/Films/new-short", initialized: false }),   // Electron：系统的选择文件夹对话框
     async open(path) {                                                             // 未初始化的文件夹会先创建 .xsb
       data = path === sample.workspace.path ? sample : blank(path);

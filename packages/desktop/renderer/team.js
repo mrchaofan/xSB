@@ -1,10 +1,11 @@
 // 角色的编辑，和团队的产出总览。两者都是占用主区域的页面（showPage）。
 import { confirmRestart, previewPrompt } from "./agent.js";
-import { assetName, closePage, nameOf, onRole, roleOf, roleTitle, showPage, state } from "./app.js";
+import { assetName, nameOf, onRole, roleOf, roleTitle, showPage, state } from "./app.js";
 import { avatarPicker } from "./avatars.js";
 import { ICON, fill, h } from "./dom.js";
 import { confirmDialog, field, input, select } from "./form.js";
 import { t } from "./i18n.js";
+import { settingsBack } from "./settings.js";
 
 /** 对几个智能体依次做的事停在了半路：做成了哪些，为什么停。全做成了就是 null。 */
 export const halted = ({ done, failed, error }) => (error ? t("progress.stopped", { count: done.length, failed: failed ? nameOf(failed) : "", names: done.map(nameOf).join(t("list.separator")), error }) : null);
@@ -12,10 +13,11 @@ export const halted = ({ done, failed, error }) => (error ? t("progress.stopped"
 export const pageHead = (title, subtitle, ...actions) => h("header", { class: "bar" },
   h("div", { class: "artifact-title" }, h("strong", {}, title), h("small", {}, subtitle)),
   ...actions,
-  h("button", { class: "icon-btn", title: t("page.close"), "aria-label": t("page.close"), html: ICON.close, onclick: closePage }));
+  h("button", { class: "icon-btn", title: t(state.settings ? "settings.back" : "page.close"), "aria-label": t(state.settings ? "settings.back" : "page.close"), html: state.settings ? ICON.back : ICON.close, onclick: settingsBack }));
 
 /** role 为空 = 新建。角色是模板：这里的修改影响它的所有 Agent。 */
 export function editRole(role) {
+  state.settings = "roles";
   const creating = !role;
   const draft = structuredClone(role ?? { name: "", preset: null, description: "", backend: "", workspace: "own", instructions: "", mcpServers: [], skills: [] });
   const users = () => (creating ? [] : state.agents.filter((a) => a.role === role.name));
@@ -119,7 +121,7 @@ export function editRole(role) {
   const remove = async () => {
     if (!await confirmDialog(t("role.delete.title", { name: roleTitle(role) }), [h("p", {}, t("role.delete.body", { role: role.name }))], t("role.delete"))) return;
     await xsb.removeRole(role.name);
-    closePage();
+    settingsBack();
   };
 
   function render() {

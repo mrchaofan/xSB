@@ -19,7 +19,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserWindow, app, dialog, ipcMain, net, protocol, session, shell, webContents } from "electron";
 import type { WebPreferences } from "electron";
-import { Paths, stopHub } from "@xsb/hub";
+import { Paths, describeBackends, stopHub } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
@@ -40,8 +40,9 @@ const PRELOAD = fileURLToPath(new URL("./preload.cjs", import.meta.url));
 let clis: Clis;
 
 /** The hub's backends, with which of them lack their program. */
-async function backends(workspace: Workspace): Promise<BackendView[]> {
-  return (await workspace.backends()).map((b) => ({ ...b, missing: AGENTS.has(b.name) && clis.missing(b.name) ? b.name : undefined }));
+async function backends(workspace?: Workspace): Promise<BackendView[]> {
+  const list = workspace ? await workspace.backends() : describeBackends().map((b) => ({ name: b.name, command: [b.command, ...b.args].join(" "), installed: b.installed }));
+  return list.map((b) => ({ ...b, missing: AGENTS.has(b.name) && clis.missing(b.name) ? b.name : undefined }));
 }
 
 /** The language the user's system is in: what the pages are worded in, and what the hub is told the user reads. */
@@ -296,13 +297,14 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       return pickFolder(win);
     case "open":
       return openWorkspace(win, args[0]);
+    case "backends":
+      return backends(workspace);
     case "locateProgram":
       return locateProgram(win, args[0]);
     case "newWindow":
       return createWindow();
   }
   if (!workspace) throw new Error("this window has no workspace open");
-  if (method === "backends") return backends(workspace);
   if (method === "presets") return workspace.teams((command) => clis.missing(command));
   if (method === "revealSkill") return workspace.skillDir(args[0], args[1]).then((dir) => dir && shell.openPath(dir));
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);
