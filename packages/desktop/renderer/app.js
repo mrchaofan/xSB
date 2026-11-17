@@ -33,10 +33,10 @@ export const state = {
 export const STATE_TEXT = { idle: t("state.idle"), running: t("state.running"), requires_action: t("state.requires_action") };
 export const TASK_TEXT = {
   blocked: t("task.status.blocked"), queued: t("task.status.queued"), running: t("task.status.running"),
-  completed: t("task.status.completed"), failed: t("task.status.failed"), cancelled: t("task.status.cancelled"),
+  completed: t("task.status.completed"), failed: t("task.status.failed"), cancelled: t("task.status.cancelled"), interrupted: t("task.status.interrupted"),
 };
-const TASK_GLYPH = { blocked: "idle", queued: "idle", running: "running", completed: "done", failed: "failed", cancelled: "failed" };
-export const OVER = ["completed", "failed", "cancelled"];
+const TASK_GLYPH = { blocked: "idle", queued: "idle", running: "running", completed: "done", failed: "failed", cancelled: "failed", interrupted: "failed" };
+export const OVER = ["completed", "failed", "cancelled", "interrupted"];
 
 export const agentOf = (id) => state.agents.find((a) => a.id === id);
 export const roleOf = (name) => state.roles.find((r) => r.name === name);

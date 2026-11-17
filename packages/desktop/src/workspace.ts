@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
-import { Agents, Assets, Backends, Boundaries, Connection, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Connection, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
 import type { AgentInfo, Asset, BackendInfo, Boundary, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
 import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
@@ -335,6 +335,15 @@ export class Workspace {
     if (boundary) {
       this.settle(agentId);
       return this.put(agentId, { id: this.newId(), kind: "boundary", boundary });
+    }
+    const failed = update.sessionUpdate === "session_info_update" ? (update._meta?.[TurnFailure.key] as { message: string; data?: unknown } | undefined) : undefined;
+    if (failed) {
+      // A turn that a task or a message started failed: nobody else would hear of it.
+      this.settle(agentId);
+      const text = this.say(new RpcError(-32603, failed.message, failed.data));
+      this.put(agentId, { id: this.newId(), kind: "error", text });
+      if (this.live) this.notify({ agentId, kind: "failed", detail: text });
+      return;
     }
     if (update.sessionUpdate === "agent_message_chunk") {
       this.does(agentId, "writing");

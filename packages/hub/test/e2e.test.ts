@@ -9,7 +9,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Agents, Assets, Backends, Boundaries, Connection, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Connection, TurnFailure, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
 import type { Language, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { bridgeServer } from "../src/mcp.ts";
@@ -542,17 +542,18 @@ const p = await newSession("p1");
   await idle("p1");
   assert.ok(!inputs.get(p)!.some((i) => i.text.includes('title="take 2"')), "p1 is not handed a result nobody wants");
 
-  // The same when the turn that awaited is stopped by the user: its task ends, and what it waited for with it.
-  const stoppable = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "noon", ms: 5000 }, title: "take 3" }), "!await {}", "!sleep 5000"];
+  // When the user stops the turn, that is not cancelling the work: the task stays open, what it awaits goes on,
+  // and the turn that brings the results ends it. Its dispatcher is told.
+  const stoppable = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "noon", ms: 700 }, title: "take 3" }), "!await {}", "!sleep 5000"];
   await prompt(a, call("dispatch_task", { to: "p1", title: "render once more", instructions: stoppable.join("\n"), topic: "scene 1" }));
   const third = await until("take 3 running", async () => (await tasks()).find((t) => t.title === "take 3" && t.status === "running"));
   conn.notify("session/cancel", { sessionId: p });
-  const ended = await until("take 3 cancelled", async () => (await tasks()).find((t) => t.id === third.id && t.status === "cancelled"));
-  assert.match(ended.result!, /render of noon was called off/);
-  assert.equal((await tasks()).find((t) => t.title === "render once more")!.status, "cancelled");
-  assert.equal([...hub.state.gates.values()].length, 0, "the join of an ended task is gone with it");
+  await until("a told of the stop", () => inputs.get(a)!.some((i) => i.text.includes('The user stopped p1\'s turn on your task "render once more"')));
+  const done = await until("take 3 done", async () => (await tasks()).find((t) => t.id === third.id && t.status === "completed"));
+  assert.match(done.result!, /rendered: noon/);
+  await until("render once more finished", async () => (await tasks()).find((t) => t.title === "render once more")?.status === "completed");
+  assert.equal([...hub.state.gates.values()].length, 0);
   await idle("p1");
-  assert.ok(!inputs.get(p)!.some((i) => i.text.includes('title="take 3"')), "nor is it handed this one");
   await idle("a");
   console.log("ok 17 assets and what a task delivers");
 }
@@ -824,10 +825,13 @@ const p = await newSession("p1");
   assert.equal(hub.state.mail.size, 0);
   await sleep(900); // longer than the task would have taken
   const after = (await tasks()).filter((t) => t.topic === "quit");
-  assert.deepEqual(after.map((t) => t.status), ["cancelled", "cancelled"]);
+  assert.deepEqual(after.map((t) => t.status), ["interrupted", "interrupted"]);
   assert.match(after[0].result!, /chose not to have it continued/);
   const { agents } = await conn.request(Agents.list);
   assert.ok(agents.every((x: any) => x.state === "idle"), "nobody was set to work again");
+  // The dispatcher hears of it with its next turn, not before: a turn of its own now would take the work up again.
+  await prompt(a, "anything new");
+  assert.match(said.get(a)!, /xsb was quit while work of yours was unfinished[^]*the task "dropped" \(t_\w+\) to b: interrupted/);
   // The start after that is an ordinary one.
   await hub.shutdown();
   hub = new Hub(project);
@@ -836,7 +840,51 @@ const p = await newSession("p1");
   console.log("ok 24 a stop that gives up the unfinished");
 }
 
-// 25. Context boundaries: a session that goes on in a new backend session is handed the conversation since the user
+// 25. Task lifecycle: jobs keep their task open; the user writing past a dispatcher is told to it; a turn that mail
+// started and that failed is recorded where the user sees it; the same wait asked for twice is one.
+{
+  await conn.request(Roles.put, { role: { name: "renderer", mcpServers: { gen: { command: node, args: [GENERATOR] } } } });
+  await conn.request(Agents.put, { agent: { id: "r9", role: "renderer", backend: "mock" } });
+  const p = await newSession("r9");
+  // Not awaited, a job still holds its task: the result is not complete while it is being made.
+  await prompt(a, call("dispatch_task", { to: "r9", title: "fire and forget", instructions: [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "rain", ms: 600 }, title: "rain take" }), "!say STARTED"].join("\n"), topic: "lifecycle" }));
+  const job = await until("rain take running", async () => (await tasks()).find((t) => t.title === "rain take" && t.status === "running"));
+  const parent = (await tasks()).find((t) => t.title === "fire and forget")!;
+  assert.equal(job.partOf, parent.id);
+  await until("its turn over", () => !hub.live.get(p)!.busy || (hub.state.tasks.get(parent.id)!.status === "running" && [...hub.state.gates.values()].some((g) => g.taskId === parent.id)));
+  assert.equal(hub.state.tasks.get(parent.id)!.status, "running", "still open while the job runs");
+  await until("finished with the job", async () => (await tasks()).find((t) => t.id === parent.id)?.status === "completed");
+  await idle("r9");
+  await idle("a");
+
+  // The user writes to p1 while it works on a's task: a is told, once for what is said within a short while.
+  hub.mail.ccDelayMs = 100;
+  await prompt(a, call("dispatch_task", { to: "r9", title: "long one", instructions: "!sleep 1200", topic: "lifecycle" }));
+  await until("long one running", async () => (await tasks()).find((t) => t.title === "long one")?.status === "running");
+  void prompt(p, "make it BLUE");
+  void prompt(p, "and wider");
+  await until("a told", () => inputs.get(a)!.some((i) => /The user wrote directly to r9, which works on your task "long one":\n"make it BLUE"\n"and wider"/.test(i.text)));
+  await idle("r9");
+  await idle("a");
+
+  // A message that cannot be run (the backend is not installed) is recorded as failed in the recipient's transcript.
+  await conn.request(Agents.put, { agent: { id: "m1", backend: "missing" } });
+  await prompt(a, call("send_message", { to: "m1", content: "hello", topic: "lifecycle" }));
+  const m1 = hub.state.mainSession("m1")!.id;
+  await until("failure recorded", () => hub.state.store.read(Paths.transcript("m1", m1)).some((r: any) => r.update?._meta?.[TurnFailure.key]?.data?.reason === "backend_not_installed"));
+  await idle("a");
+  await conn.request(Agents.remove, { id: "m1" });
+
+  // The same wait asked for twice is one gate, and one delivery.
+  const twice = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "dusk", ms: 400 }, title: "dusk take" }), call("await_tasks", { task_ids: ["$last"] }), call("await_tasks", { task_ids: ["$last"] })];
+  await prompt(p, twice.join("\n"));
+  assert.equal([...hub.state.gates.values()].filter((g) => g.owner.sessionId === p).length, 1);
+  await until("delivered once", () => inputs.get(p)!.filter((i) => i.text.includes('title="dusk take"')).length === 1);
+  await idle("r9");
+  console.log("ok 25 task lifecycle");
+}
+
+// 26. Context boundaries: a session that goes on in a new backend session is handed the conversation since the user
 // last cleared it; clearing leaves the transcript as it was, behind a boundary the model does not see past.
 {
   const boundaries = (sessionId: string): any[] =>
@@ -887,7 +935,7 @@ const p = await newSession("p1");
   assert.doesNotMatch(again, /ALPHA-REPLY/);
   assert.deepEqual(boundaries(s).map((b) => b.kind), ["backend_changed", "cleared", "backend_changed", "not_restored"]);
   await conn.request(Agents.put, { agent: { id: "h1", backend: "mock" } });
-  console.log("ok 25 context boundaries and handoffs");
+  console.log("ok 26 context boundaries and handoffs");
 }
 
 await hub.shutdown();
