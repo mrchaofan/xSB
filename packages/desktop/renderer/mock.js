@@ -116,7 +116,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
   /** 应用自带的一支预设团队（原型里只放了一个角色作示意）。 */
   const TEAM = { id: "film", title: "电影制作", description: "一支 AI 短片剧组（原型里只放了一个角色作示意）。", assets: { script: "剧本", brief: "创作简报" }, roles: [{
     name: "编剧",
-    role: { name: "screenwriter", preset: null, description: "把想法写成标准格式的剧本", backend: "", workspace: "own", instructions: "你是编剧。只写看得见、听得见的内容。",
+    role: { avatar: "person-screenwriter", name: "screenwriter", preset: null, description: "把想法写成标准格式的剧本", backend: "", workspace: "own", instructions: "你是编剧。只写看得见、听得见的内容。",
       mcpServers: [{ name: "media", command: "xsb-media-mcp", args: [], env: [] }],
       skills: [skill("script", "script", "写或改一场戏的剧本", "# 剧本\n\n- **场景标题**：场号、内或外、地点、时间\n- **动作**：现在时，一段一个节拍", "brief")] },
     missing: [{ command: "ffmpeg", install: "剪辑用 ffmpeg。请自行安装（如 brew install ffmpeg），或指定它的位置。" }] }] };
@@ -127,15 +127,15 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     teams: [],            // 这个工作区使用的预设团队
     assetNames: { script: "剧本", lighting_plan: "布光方案", storyboard: "分镜表" },      // 资产类型的显示名
     roles: [
-      { name: "director", preset: null, description: "统筹全片，拆解并派发工作", backend: "claude", workspace: "own",
+      { avatar: "person-director", name: "director", preset: null, description: "统筹全片，拆解并派发工作", backend: "claude", workspace: "own",
         instructions: "你是这部短片的导演。把用户的要求拆成任务派给合适的同事，等结果到齐后再做决定。不要自己写剧本或出布光方案。",
         mcpServers: [],
         skills: [skill("review", null, "评审同事交来的产出", "# 评审\n\n1. 对照任务要求逐条核对\n2. 指出与其他资产不一致的地方\n3. 不合格就退回，并写明要改什么")] },
-      { name: "writer", preset: null, description: "写剧本和对白", backend: "codex", workspace: "own",
+      { avatar: "person-screenwriter", name: "writer", preset: null, description: "写剧本和对白", backend: "codex", workspace: "own",
         instructions: "你是编剧。只改被要求改的那一场，改动之处在文末列出。",
         mcpServers: [],
         skills: [skill("script", "script", "写或改一场戏的剧本", "# 剧本\n\n1. 先读原稿和相关的人物资产\n2. 按「场景、人物、正文、改动说明」四段来写\n3. 用 put_asset 登记为 script/<场次>")] },
-      { name: "gaffer", preset: null, description: "设计布光方案", backend: "gemini", workspace: "own",
+      { avatar: "animal-deer", name: "gaffer", preset: null, description: "设计布光方案", backend: "gemini", workspace: "own",
         instructions: "你是灯光师。方案必须以剧本资产为准，实景光源要在图上标出色温。",
         mcpServers: [{ name: "render", command: "npx", args: ["-y", "@acme/light-render-mcp"], env: [{ name: "RENDER_API_KEY", value: "demo-key-not-real" }] }],
         skills: [

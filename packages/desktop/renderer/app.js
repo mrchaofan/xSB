@@ -2,6 +2,7 @@
 // 只通过 window.xsb 取数据和发指令，不知道背后是 mock 还是 Electron 的 preload。
 // Agent 的创建与编辑在 agent.js，角色与产出总览在 team.js。
 // xsb 是全局对象：Electron 里由 preload 注入，浏览器里直接打开时由 mock.js 提供。
+import { avatarImage } from "./avatars.js";
 import { editAgent } from "./agent.js";
 import { contentView, createEditor, markdownHtml } from "./content.js";
 import { $, ICON, fill, h } from "./dom.js";
@@ -43,7 +44,6 @@ export const roleTitle = (role) => role.preset?.title ?? role.name;
 /** 资产类型给人看的名字。 */
 export const assetName = (type) => state.assetNames[type] ?? type;
 const artifactOf = (id) => state.artifacts.find((a) => a.id === id);
-const monogram = (name) => name[0] + (name.match(/\d+$/)?.[0] ?? "");
 
 function upsert(list, item, key = "id") {
   const i = list.findIndex((x) => x[key] === item[key]);
@@ -80,7 +80,7 @@ function renderRail() {
   const talking = !state.page;
   fill($("#agents"), ...state.agents.map((a, i) =>
     h("button", { class: "row", "aria-pressed": String(talking && state.open.includes(a.id)), title: t("rail.agent.open", { n: i + 1 }), onclick: () => focusLane(a.id) },
-      h("span", { class: "monogram" }, monogram(a.name)),
+      avatarImage(a, roleOf(a.role)),
       h("span", { class: "row-text" }, h("strong", {}, a.name), h("small", {}, a.description)),
       h("i", { class: "state", "data-state": a.state, title: STATE_TEXT[a.state] }))));
 
@@ -88,6 +88,7 @@ function renderRail() {
     ...state.roles.map((r) => {
       const count = state.agents.filter((a) => a.role === r.name).length;
       return h("button", { class: "row", "aria-pressed": String(state.page === r.name), onclick: () => editRole(r) },
+        avatarImage(r),
         h("span", { class: "row-text" }, h("strong", {}, roleTitle(r)),
           h("small", {}, t("rail.role.meta", { count, preset: r.preset && (r.preset.own ? "own" : "as-is") }))));
     }),
@@ -159,7 +160,7 @@ function openLane(agentId) {
 
   const lane = h("section", { class: "lane", "data-agent": agentId },
     h("header", { class: "bar lane-head" },
-      h("span", { class: "monogram" }), h("strong", {}), h("small", {}),
+      h("span", { class: "lane-avatar" }), h("strong", {}), h("small", {}),
       h("span", { class: "lane-state" }, h("i", { class: "state" }), h("span", {})),
       h("button", { class: "icon-btn pin", html: ICON.pin, onclick: () => { state.pinned = !state.pinned; state.open.forEach(syncLane); } }),
       h("button", { class: "icon-btn", title: t("lane.edit"), "aria-label": t("lane.edit"), html: ICON.edit, onclick: () => editAgent(agentOf(agentId)) }),
@@ -196,7 +197,7 @@ function syncLane(agentId) {
   if (!lane) return;
   const { state: s, name, backend } = agentOf(agentId);
   lane.dataset.state = s;
-  lane.querySelector(".lane-head .monogram").textContent = monogram(name);
+  fill(lane.querySelector(".lane-avatar"), avatarImage(agentOf(agentId), roleOf(agentOf(agentId).role)));
   lane.querySelector(".lane-head strong").textContent = name;
   lane.querySelector(".lane-head small").textContent = backend;
   lane.querySelector(".lane-state .state").dataset.state = s;
@@ -258,7 +259,7 @@ function entryNode(agentId, entry) {
     const o = entry.origin;
     const tag = entry.queued ? t("entry.tag.queued") : o.steered ? t("entry.tag.interjected") : null;
     return h("div", { ...base, "data-origin": o.kind, "data-queued": entry.queued },
-      o.kind === "agent" && h("div", { class: "from" }, h("span", { class: "monogram" }, monogram(nameOf(o.agentId))),
+      o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId), roleOf(agentOf(o.agentId)?.role)),
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
       o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),
       h("div", { class: "said" }, contentView(entry.content)),
@@ -416,6 +417,7 @@ export function onAgent(agent) {
 export function onRole(role) {
   upsert(state.roles, role, "name");
   renderRail();
+  state.open.forEach(syncLane);
 }
 
 xsb.on((event) => {
@@ -425,7 +427,7 @@ xsb.on((event) => {
     closeLane(event.removedAgent);
   }
   else if (event.role) onRole(event.role);
-  else if (event.removedRole) { state.roles = state.roles.filter((r) => r.name !== event.removedRole); renderRail(); }
+  else if (event.removedRole) { state.roles = state.roles.filter((r) => r.name !== event.removedRole); renderRail(); state.open.forEach(syncLane); }
   else if (event.task) { upsert(state.tasks, event.task); renderRail(); }
   else if (event.artifact) {
     upsert(state.artifacts, event.artifact);

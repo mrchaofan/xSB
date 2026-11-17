@@ -7,6 +7,7 @@ const FRONT_MATTER = /^---\n[\s\S]*?\n---\n?/;
 export function roleView(role: Omit<RoleDetail, "agents">): RoleView {
   return {
     name: role.name,
+    avatar: role.avatar ?? "",
     preset: role.preset ?? null,
     description: role.description ?? "",
     backend: role.backend ?? "",
@@ -25,6 +26,7 @@ export function roleView(role: Omit<RoleDetail, "agents">): RoleView {
 export function roleInput(view: RoleView): RoleInput {
   return {
     name: view.name,
+    avatar: view.avatar,
     description: view.description,
     // The hub keeps a field that is left out; a default backend, once set, cannot be unset from here.
     backend: view.backend || undefined,

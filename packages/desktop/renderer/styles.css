@@ -1,4 +1,4 @@
-/* 两个颜色，其余都由它们混出来；深色模式只交换这两个值。 */
+/* 界面使用两个基色；头像保留插画本身的颜色。深色模式交换界面的两个基色。 */
 :root {
   --paper: #fff;
   --ink: #000;
@@ -43,11 +43,20 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .btn:hover { border-color: var(--ink); }
 .btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
 
-.monogram {
-  flex: none; width: 24px; height: 24px; border-radius: 6px;
-  display: grid; place-items: center;
-  border: 1px solid var(--ink); font-size: 11px; font-weight: 600; letter-spacing: -0.02em;
-}
+.avatar { flex: none; width: 32px; height: 32px; display: block; border-radius: 10px; object-fit: cover; background: #f7f4ef; }
+.lane-avatar { flex: none; }
+.lane-avatar .avatar { width: 28px; height: 28px; border-radius: 8px; }
+.avatar-picker { display: flex; flex-direction: column; gap: 10px; }
+.avatar-default { display: flex; }
+.avatar-group { display: flex; flex-direction: column; gap: 6px; }
+.avatar-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; max-width: 360px; }
+.avatar-choice { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 3px; border: 2px solid transparent; border-radius: 12px; }
+.avatar-choice .avatar { width: 38px; height: 38px; border-radius: 8px; }
+.avatar-choice:hover { background: var(--wash); }
+.avatar-choice[aria-pressed="true"] { border-color: var(--ink); }
+.avatar-default .avatar-choice { padding-right: 10px; }
+.card .preset-role-summary { align-items: center; }
+.preset-role-summary small { flex: 1; }
 
 /* 状态只靠形状区分：空心圈 = 空闲，实心点 = 工作中，实心菱形 = 等你批准，勾 = 已完成 */
 .state { flex: none; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--ink-3); }
@@ -69,7 +78,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .workspace button { min-width: 0; display: flex; align-items: baseline; gap: 8px; padding: 4px 8px; border-radius: 7px; white-space: nowrap; }
 .workspace button:hover { background: var(--wash); }
 .workspace span { color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
-/* 与中枢的连接：绿点连着，红点断了（这时点它重新连接）。界面里只有这两处用颜色。 */
+/* 与中枢的连接：绿点连着，红点断了（这时点它重新连接）。 */
 .workspace .hub { flex: none; align-items: center; cursor: default; }
 .workspace .hub::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #2da44e; }
 .workspace .hub[data-up="false"] { cursor: pointer; }
@@ -133,7 +142,7 @@ body.paging .page { display: flex; }
 /* 进入会话的话：你说的靠右成块，同事和系统送来的靠左带一道竖线 */
 .input { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .input .from { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); }
-.input .from .monogram { width: 18px; height: 18px; border-radius: 4px; font-size: 9px; color: var(--ink); }
+.input .from .avatar { width: 20px; height: 20px; border-radius: 6px; }
 .input .said { border-left: 2px solid var(--ink); padding-left: 12px; color: var(--ink-2); }
 .input[data-origin="user"] { align-items: flex-end; }
 .input[data-origin="user"] .said { border: 0; padding: 8px 14px; border-radius: 16px; background: var(--wash); color: var(--ink); max-width: 85%; }

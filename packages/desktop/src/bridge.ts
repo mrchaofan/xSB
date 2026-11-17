@@ -54,6 +54,7 @@ export type BackendView = { name: string; command: string; installed: boolean; m
 
 /** A role as it is edited: servers and variables as lists, a skill's front matter as fields. */
 export type RoleView = {
+  avatar?: string;
   name: string;
   /** The preset team the workspace uses that has this role, what it calls it, and whether the workspace has its own version in its place. */
   preset: { team: string; teamTitle: string; own: boolean; title: string } | null;
@@ -85,7 +86,7 @@ export type Pack = {
 export type AgentDetail = { instructions: string; systemPrompt: string };
 
 /** An agent to create or change. An empty `workspace` is the default one. */
-export type AgentInput = Pick<AgentInfo, "id" | "name" | "description" | "backend"> & { role: string; workspace: string; instructions: string };
+export type AgentInput = Pick<AgentInfo, "id" | "name" | "description" | "backend"> & { avatar?: string; role: string; workspace: string; instructions: string };
 
 /** Everything a window shows at first. A window without a workspace gets `{ workspace: null, recent }` instead. */
 export type Snapshot = {

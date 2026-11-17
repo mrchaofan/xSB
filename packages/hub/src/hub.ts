@@ -132,11 +132,13 @@ export class Hub {
 
   putAgent(input: Partial<AgentSpec> & { id: string }, instructions?: string): AgentInfo {
     if (!AGENT_ID.test(input.id ?? "")) throw failure("agent_id_invalid");
+    if (input.avatar !== undefined && (typeof input.avatar !== "string" || (input.avatar !== "" && !/^[a-z][a-z0-9-]{0,63}$/.test(input.avatar)))) throw RpcError.invalidParams("avatar must be a bundled avatar ID or empty");
     const prior = this.state.agents.get(input.id);
     const roleName = input.role ?? prior?.role;
     const role = roleName ? loadRole(this.paths, roleName) : undefined; // refuse a role that does not exist
     const agent: AgentSpec = {
       id: input.id,
+      avatar: input.avatar ?? prior?.avatar,
       name: input.name ?? prior?.name ?? input.id,
       description: input.description ?? prior?.description ?? role?.description ?? "",
       backend: input.backend ?? prior?.backend ?? role?.backend ?? DEFAULT_BACKEND,

@@ -33,7 +33,8 @@ const program = (name, entry) => ({
 const pages = {
   name: "pages",
   generateBundle() {
-    for (const fileName of ["index.html", "page.html", "styles.css", "mock.js"]) {
+    const avatars = fs.readdirSync("renderer/avatars").filter((name) => name.endsWith(".png")).map((name) => `avatars/${name}`);
+    for (const fileName of ["index.html", "page.html", "styles.css", "mock.js", ...avatars]) {
       this.emitFile({ type: "asset", fileName, source: fs.readFileSync(`renderer/${fileName}`) });
     }
   },
