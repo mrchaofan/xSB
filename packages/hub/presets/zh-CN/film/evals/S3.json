@@ -20,5 +20,6 @@
     {
       "noCalls": "start_job|generate_"
     }
-  ]
+  ],
+  "fixture": "film-basic"
 }

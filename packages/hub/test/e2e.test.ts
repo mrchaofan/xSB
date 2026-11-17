@@ -440,8 +440,9 @@ const p = await newSession("p1");
   const shown = (await conn.request(Agents.get, { id: "p1" })).systemPrompt;
   assert.match(shown, /# Where your tools come from\n[^#]*- xsb: the hub of this team[^#]*- gen: your role's\.[^#]*comes with the agent program itself/);
   assert.doesNotMatch(shown, /- browser:/);
-  process.env.XSB_MCP_SERVERS = JSON.stringify({ browser: { command: "xsb-browser-mcp" } });
-  assert.match((await conn.request(Agents.get, { id: "p1" })).systemPrompt, /- browser: given to every agent by the app the user runs xsb in\./);
+  process.env.XSB_MCP_SERVERS = JSON.stringify({ browser: { command: "xsb-browser-mcp", about: "The side-panel browser; IAB means this one." } });
+  // What the provider of a server says of it stands next to its name: agents choose between tools of several sources by it.
+  assert.match((await conn.request(Agents.get, { id: "p1" })).systemPrompt, /- browser: given to every agent by the app the user runs xsb in\. The side-panel browser; IAB means this one\./);
   delete process.env.XSB_MCP_SERVERS;
   assert.match(shown, /# How you work\n- Say how you checked\./);
   await prompt(p, call("load_skill", { name: "grading" }));
@@ -984,7 +985,7 @@ const p = await newSession("p1");
   assert.doesNotMatch(said.get(s9)!, /Spent on generation/);
   fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: "t", tool: "generate_video", output: "a.mp4", usage: "48437 tokens", amount: 2.23, basis: "test" }) + "\n");
   await prompt(s9, "and now");
-  assert.match(said.get(s9)!, /about 2\.23 yuan of the budget of 30\.00 yuan/);
+  assert.match(said.get(s9)!, /about 2\.23 yuan of the budget of 30\.00 yuan \(estimates\)\. So far generate_video up to about 2\.23 yuan a call\./);
 
   // Three jobs of one tool: two run, one waits; the one that waits is cancelled without the tool being asked.
   const job = (title: string) => call("start_job", { server: "gen", tool: "render", arguments: { prompt: title, ms: 500 }, title });

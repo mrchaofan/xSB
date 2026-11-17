@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import { RpcError } from "@xsb/protocol";
-import type { Connection, McpServer } from "@xsb/protocol";
+import type { Connection, McpServer, McpServerSpec } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
 import { shipped } from "./paths.ts";
 import { mcpServers } from "./roles.ts";
@@ -46,9 +46,11 @@ export function bridgeServer(socketPath: string, token: string): McpServer {
  */
 export const COMMON_SERVERS_ENV = "XSB_MCP_SERVERS";
 
-export function commonServers(): McpServer[] {
+export function commonServers(): { server: McpServer; about?: string }[] {
   const given = process.env[COMMON_SERVERS_ENV];
-  return given ? mcpServers(JSON.parse(given)) : [];
+  if (!given) return [];
+  const specs: Record<string, McpServerSpec> = JSON.parse(given);
+  return mcpServers(specs).map((server) => ({ server, about: specs[server.name]?.about }));
 }
 
 export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => LiveSession | undefined): void {

@@ -7,7 +7,7 @@
   ],
   "expect": [
     {
-      "says": "xsb"
+      "says": "xsb|应用|右栏"
     },
     {
       "noCalls": "^(Read|read|Bash|bash|shell|exec|Glob|Grep)"

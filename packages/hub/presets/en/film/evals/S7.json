@@ -12,5 +12,6 @@
     {
       "says": "cannot hear|can't hear|unable to listen|ffprobe|check it yourself|for you to check"
     }
-  ]
+  ],
+  "fixture": "film-basic"
 }

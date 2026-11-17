@@ -14,5 +14,6 @@
     {
       "says": "budget"
     }
-  ]
+  ],
+  "fixture": "film-basic"
 }
