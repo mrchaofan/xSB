@@ -312,6 +312,8 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
   /** 停止当前这一轮。重启后端进程在原型里也是它：正在进行的那一轮就此结束。 */
   function stop(agentId) {
     turns[agentId].cancelled = true;
+    // 排队中的消息随这一轮一起放弃：模型没看到过，标成已丢弃。一次停止就让 Agent 停下。
+    for (const { entry } of turns[agentId].queue.splice(0)) put(agentId, { ...entry, queued: false, discarded: true });
     if (agent(agentId).state !== "requires_action") return;
     const pending = data.transcripts[agentId].find((e) => e.kind === "permission" && !e.outcome);
     put(agentId, { ...pending, outcome: "cancelled" });

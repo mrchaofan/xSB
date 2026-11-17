@@ -20,7 +20,8 @@ import type { Content } from "./content.ts";
  * What was said, by the user, a peer or the agent, is content (content.ts).
  */
 export type Entry = { id: string } & (
-  | { kind: "input"; origin: OriginMeta; content: Content; queued?: boolean }
+  /** `queued`: it waits for its turn. `discarded`: its turn was stopped before the model saw it, and it never will. */
+  | { kind: "input"; origin: OriginMeta; content: Content; queued?: boolean; discarded?: boolean }
   | { kind: "output"; content: Content; streaming?: boolean }
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }

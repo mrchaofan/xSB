@@ -31,8 +31,8 @@ export type BackendCaps = {
 
 /** A `session/prompt` in flight, as the hub sees it: one turn, however often the backend is re-prompted. */
 type Run = {
-  /** Messages to hand over once the interrupted prompt has returned. */
-  steers: ContentBlock[][];
+  /** Messages to hand over once the interrupted prompt has returned. Until then the model has not seen them. */
+  steers: { prompt: ContentBlock[]; origin: OriginMeta }[];
   cancelled: boolean;
 };
 
@@ -89,7 +89,7 @@ export class Backend {
           });
         if (run.cancelled) return "cancelled";
         if (run.steers.length === 0) return stopReason;
-        prompt = [text(STEER_CONTINUATION), ...run.steers.splice(0).flat()];
+        prompt = [text(STEER_CONTINUATION), ...run.steers.splice(0).flatMap((s) => s.prompt)];
       }
     } finally {
       this.runs.delete(sessionId);
@@ -116,18 +116,21 @@ export class Backend {
       if (answer?.outcome === "injected") return "injected";
       if (this.runs.get(sessionId) !== run || run.cancelled) return "idle";
     }
-    run.steers.push(prompt);
+    run.steers.push({ prompt, origin });
     if (run.steers.length === 1) this.conn.notify("session/cancel", { sessionId });
     return "interrupted";
   }
 
-  /** Stop the running turn; `prompt` then answers "cancelled". */
-  cancel(sessionId: string): void {
+  /**
+   * Stop the running turn; `prompt` then answers "cancelled". Answers the origins of the messages steered in that
+   * the model has not been given: they never will be.
+   */
+  cancel(sessionId: string): OriginMeta[] {
     const run = this.runs.get(sessionId);
-    if (!run) return;
+    if (!run) return [];
     run.cancelled = true;
-    run.steers.length = 0;
     this.conn.notify("session/cancel", { sessionId });
+    return run.steers.splice(0).map((s) => s.origin);
   }
 
   /** Start the backend `backendName` for the agent `name` and shake hands. */

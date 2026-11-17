@@ -3,6 +3,7 @@
  *
  *   !say <text>           emit text
  *   !sleep <ms>           wait (a cancel ends the turn here)
+ *   !busy <ms>            wait, and finish waiting even if cancelled (a tool call that has to run out)
  *   !call <tool> <json>   call a tool of the "xsb" MCP server and emit its result;
  *                         "$last" in the JSON is the id of the task or job started last
  *   !await <json>         await_tasks on every task dispatched since the last !await
@@ -74,6 +75,8 @@ async function step(session: Session, line: string): Promise<void> {
   switch (directive) {
     case "say":
       return say(session, rest + "\n");
+    case "busy":
+      return void (await new Promise((resolve) => setTimeout(resolve, Number(rest))));
     case "sleep":
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, Number(rest));

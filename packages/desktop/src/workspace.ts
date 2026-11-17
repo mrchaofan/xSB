@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
-import { Agents, Assets, Backends, Boundaries, Connection, SpendExt, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Connection, Discarded, SpendExt, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
 import type { AgentInfo, Asset, BackendInfo, Boundary, Spend, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, PresetProblem, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
 import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
@@ -369,6 +369,14 @@ export class Workspace {
     if (boundary) {
       this.settle(agentId);
       return this.put(agentId, { id: this.newId(), kind: "boundary", boundary });
+    }
+    const discarded = update.sessionUpdate === "session_info_update" ? (update._meta?.[Discarded.key] as Discarded | undefined) : undefined;
+    if (discarded) {
+      // The turn it was for was stopped before the model saw it: shown where it was, or, if it waited for its turn, where the stop was.
+      const id = `${sessionId}:${discarded.messageId}`;
+      const prior = this.transcripts.get(agentId)!.find((e): e is Extract<Entry, { kind: "input" }> => e.id === id);
+      if (this.pending.delete(discarded.messageId)) this.drop(agentId, discarded.messageId);
+      return this.put(agentId, { id, kind: "input", origin: prior?.origin ?? discarded.origin, content: prior?.content ?? discarded.content, discarded: true });
     }
     const failed = update.sessionUpdate === "session_info_update" ? (update._meta?.[TurnFailure.key] as { message: string; data?: unknown } | undefined) : undefined;
     if (failed) {
