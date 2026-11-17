@@ -69,6 +69,12 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .workspace button { min-width: 0; display: flex; align-items: baseline; gap: 8px; padding: 4px 8px; border-radius: 7px; white-space: nowrap; }
 .workspace button:hover { background: var(--wash); }
 .workspace span { color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+/* 与中枢的连接：绿点连着，红点断了（这时点它重新连接）。界面里只有这两处用颜色。 */
+.workspace .hub { flex: none; align-items: center; cursor: default; }
+.workspace .hub::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #2da44e; }
+.workspace .hub[data-up="false"] { cursor: pointer; }
+.workspace .hub[data-up="false"]::before { background: #d1242f; }
+body.no-workspace .hub { display: none; }
 
 /* ---------- 三栏 ---------- */
 .main { flex: 1; min-height: 0; display: flex; }

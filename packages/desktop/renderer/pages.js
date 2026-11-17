@@ -76,7 +76,11 @@ $("#web-external").onclick = act("external");
 $("#web-detach").onclick = act("detach");
 $("#web-url").onkeydown = (e) => {
   const text = e.target.value.trim();
+  e.target.setCustomValidity("");
   if (e.key !== "Enter" || !text) return;
-  xsb.page(state.tab, "navigate", /^[a-z][a-z0-9+.-]*:/i.test(text) ? text : `https://${text}`);
-  e.target.blur();
+  // 地址怎么补全、哪些能打开，由主进程定（与智能体的浏览器工具是同一条规则）；打不开的原因就写在地址栏上。
+  xsb.page(state.tab, "navigate", text).then(() => e.target.blur(), (error) => {
+    e.target.setCustomValidity(error.message);
+    e.target.reportValidity();
+  });
 };

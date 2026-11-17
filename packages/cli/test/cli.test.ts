@@ -48,6 +48,10 @@ try {
   ok("agent", "add", "a", "--backend", "mock", "--desc", "first");
   ok("agent", "add", "b", "--backend", "mock", "--desc", "second");
   assert.match(ok("hub", "status"), /hub running, pid \d+/);
+  assert.match(ok("backends"), /mock\s+installed/); // now the running hub's word
+  const noValue = xsb("agent", "add", "z", "--backend");
+  assert.ok(noValue.code !== 0 && /--backend needs a value/.test(noValue.err), noValue.err);
+  assert.match(ok("--help"), /^xsb: /); // a switch: it needs no value
   assert.match(ok("agent", "list"), /a\s+idle\s+mock/);
   console.log("ok 1 hub starts on demand");
 
@@ -92,6 +96,25 @@ try {
   assert.match(ok("hub", "status"), /not running/);
   assert.match(ok("status"), /a\s+idle\s+mock/);
   console.log("ok 6 stop and restart");
+
+  // 7. Whether a hub runs is whether its lock is held, not what a file says. A hub that was killed leaves its file
+  // behind, and the process id in it may be another program's by now: here, this test's own.
+  const hubPid = Number(/pid (\d+)/.exec(ok("hub", "status"))![1]);
+  process.kill(hubPid, "SIGKILL");
+  for (let i = 0; i < 100; i++) {
+    try {
+      process.kill(hubPid, 0);
+      spawnSync("sleep", ["0.05"]);
+    } catch {
+      break;
+    }
+  }
+  fs.writeFileSync(path.join(project, ".xsb", "run", "hub.json"), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  assert.match(ok("hub", "status"), /not running/);
+  assert.doesNotMatch(ok("hub", "stop"), /hub stopped/); // and nothing is sent a signal: this test is still here
+  assert.match(ok("send", "a", "after the kill"), /echo: after the kill/);
+  assert.notEqual(Number(/pid (\d+)/.exec(ok("hub", "status"))![1]), process.pid);
+  console.log("ok 7 a killed hub, and a stale file");
 } finally {
   xsb("hub", "stop");
 }

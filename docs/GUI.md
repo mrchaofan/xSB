@@ -21,7 +21,7 @@ npm start -w @xsb/desktop
 | [src/preload.cjs](../packages/desktop/src/preload.cjs) | 真的 `window.xsb`：每个方法是一次到 main 的 IPC 调用 |
 | [src/main.ts](../packages/desktop/src/main.ts) | 窗口，以及只有操作系统能做的事（选文件夹、制品协议、在访达中显示） |
 | [src/bridge.ts](../packages/desktop/src/bridge.ts) | main 与界面之间的契约：`window.xsb` 返回的形状和事件。只有类型 |
-| [src/workspace.ts](../packages/desktop/src/workspace.ts) | 一个窗口到 Hub 的 ACP 连接，以及线上数据到界面数据的转换 |
+| [src/workspace.ts](../packages/desktop/src/workspace.ts) | 一个项目到 Hub 的 ACP 连接，以及线上数据到界面数据的转换 |
 | [src/content.ts](../packages/desktop/src/content.ts) | 内容：对话里"说了什么"的唯一形状，见第 3 节 |
 | [src/clis.ts](../packages/desktop/src/clis.ts) | 各家 agent 自己的程序：在 PATH 上检测、记住用户指定的路径、做成 Hub 能启动的后端，见第 8 节 |
 | [src/pages.ts](../packages/desktop/src/pages.ts) | 右栏的网页和它们的独立窗口，见第 3.1 节 |
@@ -92,7 +92,7 @@ dist/renderer/            页面：index.html、styles.css、打成一个文件�
 - **应用只运行一个。** 再启动一次不会开出第二个：已在运行的那个被带到前台；带着文件夹启动（`xsb <文件夹>`）则在它里面为这个文件夹开一个窗口。要打开的文件夹作为数据交给先启动的那个，不靠命令行：Chromium 会重排交过去的命令行。
 - **关窗口不等于退出。** 还有别的窗口时，关掉的那个真的关闭；只剩一个时，关它只是隐藏，工作区、对话、正在进行的任务都保持原样。再点程序坞图标或再启动一次，它回到前台。
 - **退出应用才结束。** 退出时，这次运行期间打开过的每个工作区的 Hub 都被通知停止（包括窗口已经关掉的那些）。
-- **有智能体在工作时，退出先问一句。** 对话框写明谁还在工作、退出的后果，默认按钮是"继续工作"。选"仍然退出"，没做完的工作就此放弃：再次打开时什么都不会自动重跑，没结束的任务记为已取消，派发它的智能体不会收到通知（那会是新的一轮），要用户重新交代（DESIGN.md 第 7 节）。只看有窗口的工作区；窗口已关掉的工作区不在询问范围内，它们的 Hub 按"下次接着做"的方式停止，除非这次退出本身是确认过放弃的。
+- **有智能体在工作时，退出先问一句。** 对话框写明谁还在工作、退出的后果，默认按钮是"继续工作"。选"仍然退出"，没做完的工作就此放弃：再次打开时什么都不会自动重跑，没结束的任务记为已取消，派发它的智能体不会收到通知（那会是新的一轮），要用户重新交代（DESIGN.md 第 7 节）。窗口已关掉、Hub 还在运行的工作区也在询问范围内：关窗口时到 Hub 的连接留着（只是不再回答权限请求），退出时据此知道那里还有谁在工作。
 - 因此换新版本时退出应用就够了，不会再有旧版 Hub 留在后台被新应用连上。由命令行（`xsb`）启动、应用从没打开过的工作区的 Hub 不归应用管。
 
 ### 打开工作区
@@ -104,10 +104,11 @@ dist/renderer/            页面：index.html、styles.css、打成一个文件�
 
 ## 2. 黑白下怎么区分东西
 
-只有两个颜色变量 `--paper` 和 `--ink`，其余灰度都由它们混出来，深色模式只是交换这两个值。信息靠形状和位置表达：
+只有两个颜色变量 `--paper` 和 `--ink`，其余灰度都由它们混出来，深色模式只是交换这两个值。信息靠形状和位置表达，唯一的例外是标题栏里工作区名字旁的连接圆点：
 
 | 要表达的 | 做法 |
 | - | - |
+| 与 Hub 的连接 | 工作区名字旁的圆点：绿色连着，红色断了。断了的时候点它重新连接（Hub 没在运行就启动它），窗口按最新的状态重画 |
 | Agent 是谁 | 方框里的名字首字（末尾有数字则带上：灯1、灯2） |
 | Agent 状态 | ○ 空闲　● 正在工作（呼吸）　◆ 在等你批准 |
 | 这句话是谁说的 | 你说的：靠右的灰底块。同事派来的任务、Hub 送回的任务结果：靠左、带一道竖线和来源。Agent 自己的输出：不加装饰 |
@@ -201,6 +202,7 @@ dist/renderer/            页面：index.html、styles.css、打成一个文件�
 右栏顶上是一排标签：第一个是制品，其余每个是一个网页。
 
 - **网页归主进程所有**（[pages.ts](../packages/desktop/src/pages.ts)）：用私有 Electron 的 `webContents.create({ type: "webview2" })` 创建，界面只用 `<webview2 web-contents-id>` 把它显示出来（[webview.js](../packages/desktop/renderer/webview.js)）。元素移走不影响网页，所以切换标签、收起右栏都不会让网页重新加载。
+- **地址**：地址栏和 Agent 的 `browser_navigate` 用同一条规则（`Pages.navigate`，补全由 `address.ts` 实现）：没写协议的按网站处理，补 `https://`（`localhost`、`127.0.0.1` 补 `http://`，本机服务通常没有证书）；支持 `http`、`https`、绝对路径和 `file://` 本地文件；其他协议不打开，原因显示在地址栏上。
 - **从哪来**：标签栏的"＋"；对话和文档里的 http(s) 链接（不再跳到系统浏览器，地址栏旁有"在浏览器中打开"）；网页自己打开的新窗口；Agent（见 3.2）。
 - **独立窗口**：地址栏旁的按钮把当前网页移到它自己的窗口里，是同一个网页，不刷新。此时标签的内容区显示"在主窗口中展示"和"显示窗口"；独立窗口的标题栏是网页标题、置顶、"在主窗口中显示"。关掉独立窗口就关掉了这个网页和它的标签。
 - **隔离**：网页用单独的持久分区（`persist:xsb-web`），与应用自己的页面不共用 cookie；沙箱、无 preload；网站申请权限（摄像头、定位、通知）一律拒绝。HTML 制品的预览是一个不进标签栏的网页，用另一个分区，只有它能读 `xsb-artifact://`，网站读不到制品。
@@ -292,7 +294,7 @@ agent ──stdio MCP──▶ xsb-browser-mcp（管道）──unix socket─�
 
 角色还可以声明它要用到的本机程序（`team.json` 里的 `requires`，每项带一段安装说明）。剪辑师要 `ffmpeg` 和 `ffprobe`，摄影师要 `ffmpeg`（把过大的参考图转成 jpeg），美术指导、分镜师和摄影师要 `arkcli`：与各家 agent 的程序一样，在 PATH 上找，找不到时角色卡片上提示并提供"指定路径…"，应用不安装（第 8 节）。
 
-电影那套的提示词写法（提示词结构、图1 / 【图片1】的参考图指代、首帧与参考图互斥、首帧时画幅跟随图片、对白放引号、出图不超过 300 字）取自火山方舟的 Seedance 与 Seedream 教程。角色划分参考了 BMAD-METHOD 和 MetaGPT（软件）以及常规的剧组分工（电影）；是凭我对它们的了解写的，没有逐条对照它们的仓库。角色内容没有经过真实模型、真实项目的检验。
+电影那套的提示词写法（提示词结构、图一 / 图片1 的参考图指代、首帧与参考图互斥、首帧时画幅跟随图片、对白放引号、出图使用简洁连贯的自然语言）取自火山方舟的 Seedance 与 Seedream 教程。角色划分参考了 BMAD-METHOD 和 MetaGPT（软件）以及常规的剧组分工（电影）；是凭我对它们的了解写的，没有逐条对照它们的仓库。角色内容没有经过真实模型、真实项目的检验。
 
 ### 4.2 火山方舟：只用来出图和出视频
 
@@ -341,7 +343,7 @@ Agent 的编辑对话框和角色页都有"预览系统说明"。它显示 Hub �
 renderer ──window.xsb──▶ preload.cjs ──ipc──▶ main.ts ──▶ Workspace ──ACP──▶ Hub
 ```
 
-- **main**：每个窗口一个 `BrowserWindow`，至多一个 `Workspace`。`electron . <文件夹>` 直接打开那个工作区。
+- **main**：每个窗口一个 `BrowserWindow`，记着它打开的项目；每个项目一个 `Workspace`，同一项目的窗口共享它。连接只在断了时重建，没有窗口显示它时仍保留，供退出检查。`electron . <文件夹>` 直接打开那个工作区。
 - **Workspace**：和 `@xsb/cli` 一样是 Hub 的一个 ACP 客户端（观察者）。找到或启动 Hub 用的是 `@xsb/hub` 的 `hubSocket`，与 CLI 同一份；Hub 由 Electron 自己的二进制以 Node 模式运行，不要求机器上另有 Node。
 - **preload**：暴露 `window.xsb`，与 `mock.js` 同形。
 - **renderer**：不读文件、不碰 Node，`contextIsolation` 和沙箱都是默认的开启状态。
@@ -352,7 +354,7 @@ renderer ──window.xsb──▶ preload.cjs ──ipc──▶ main.ts ──
 
 | 方法 | 含义 | main 里对应 |
 | - | - | - |
-| `load()` | 快照。没有工作区时是 `{ workspace: null, recent }`，否则是 workspace、backends、roles、agents、tasks、artifacts、transcripts | `backends/list`；`roles/list` + 每个 `roles/get`；`agents/list`；`tasks/list`；`assets/list`；各主会话 `session/load` |
+| `load()` | 快照。没有工作区时是 `{ workspace: null, recent }`，否则是 workspace、backends、roles、agents、tasks、artifacts、transcripts | `backends/list`；`roles/list`（一次带回每个角色的详情）；`agents/list`；`tasks/list`；`assets/list`；各主会话 `session/load` |
 | `pickFolder()` | 选一个文件夹，返回 `{ path, initialized }` | `dialog.showOpenDialog` + 检查 `.xsb/` |
 | `open(path)` | 让本窗口打开这个工作区，必要时先初始化 | `xsb init` 的逻辑 + 连接 Hub |
 | `newWindow()` | 开一个没有工作区的新窗口 | `new BrowserWindow` |
@@ -363,13 +365,13 @@ renderer ──window.xsb──▶ preload.cjs ──ipc──▶ main.ts ──
 | `send(agentId, content, interject)` / `cancel(agentId)` / `permit(entryId, allow)` | 发消息（内容，可插话）、停止当前一轮、回答权限请求 |
 | `pathOf(file)` | 粘贴或拖入的文件在磁盘上的路径。不经过 main，由 preload 直接回答 | `webUtils.getPathForFile` | `session/prompt` 或 `_session/steering`、`session/cancel`、回复 `session/request_permission` |
 | `putAgent(spec)` / `removeAgent(id)` | 新建或修改、删除 Agent | `agents/put { agent, instructions }`、`agents/remove` |
-| `restartAgent(id)` | 重启它的后端进程（"立即应用"对角色的每个 Agent 调一次） | `agents/restart` |
+| `applyRole(role, completed?)` / `syncRole(role)` | 对角色的每个 Agent：重启后端进程（"立即应用"）/ 把角色现在的描述和后端给它。逐个做，返回做成了哪些、停下的原因；再做一次只补剩下的 | `agents/restart`、`agents/put` |
+| `buildTeam(id, backend)` | 使用一支预设团队，并给还没有 Agent 的角色各建一个。返回建了哪些、停下的原因；角色和新建的 Agent 随事件到达 | `teams/use`、`agents/put` |
 | `inspectAgent(id)` | 它自己的补充说明，和系统说明全文。打开编辑或预览时才取，不随 Agent 的状态同步 | `agents/get` |
-| `roles()` | 工作区的全部角色：自己的，和所用预设团队的 | `roles/list` + 每个 `roles/get` |
-| `putRole(role)` / `removeRole(name)` | 新建或修改、删除角色。预设团队的角色修改后成为工作区自己的；删除工作区自己的版本就是恢复预设 | `roles/put`、`roles/remove` |
-| `presets()` / `useTeam(id)` / `dropTeam(id)` | 应用自带的预设团队及是否在用；使用、停止使用一支 | `teams/list`、`teams/use`、`teams/drop` |
+| `putRole(role)` / `removeRole(name)` | 新建或修改、删除角色。预设团队的角色修改后成为工作区自己的；删除工作区自己的版本就是恢复预设。角色因此的变化随事件到达，先于调用的返回 | `roles/put`、`roles/remove` |
+| `presets()` / `useTeam(id)` / `dropTeam(id)` | 应用自带的预设团队及是否在用；使用、停止使用一支；角色的来去随事件到达，先于调用的返回 | `teams/list`、`teams/use`、`teams/drop` |
 | `testMcp(role, server)` | 启动角色里已保存的一个 MCP server 并列出工具 | `roles/check { name, server }` |
-| `revealSkill(role, skill)` | 在访达中打开 skill 的文件夹 | `shell.openPath` |
+| `revealSkill(role, skill)` | 在访达中打开 skill 的文件夹。目录由 Hub 给出（`roles/get`），预设团队的角色同样能打开 | `shell.openPath` |
 
 事件按键覆盖（同一个键再次到达即更新）：
 
@@ -416,7 +418,7 @@ Hub 仍然"只启动、不安装"，一行没改：应用在 `userData/backends/
 - 程序在不在与登录无关；未登录时对话里会显示 Hub 的 `auth_required` 错误。
 - 指定路径后，已经在运行的 Hub 立刻能用（它每次启动后端时才找命令）；但由 `xsb` 命令行先启动的 Hub 没有这个 PATH，要先 `xsb hub stop`。
 - 指定的路径不能在界面里查看或改掉，只能在缺失时重新指定，或直接改 `paths.json`。
-- 从访达或程序坞启动的应用拿不到用户的 PATH（只有 `/usr/bin:/bin:/usr/sbin:/sbin`）。应用启动时向用户的登录 shell 问一次 PATH（`$SHELL -ilc`，只取 PATH，不取其他环境变量），找程序和启动 Hub 都用它；shell 没有回答时退回进程自己的 PATH。Windows 上进程的 PATH 就是用户的，不问。
+- **同步用户 shell 的全部环境变量**。从访达或程序坞启动的应用拿不到用户 shell 的环境：PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，shell 启动文件里设的变量（比如智能体自己的配置里指名的 API 密钥、代理设置）一个也没有。应用启动时向用户的登录 shell 问一次全部环境（`$SHELL -ilc 'env -0'`），找程序和启动 Hub 都用它，Hub 再把它传给各后端和 MCP server：PATH 用 shell 的，其余变量进程自己已有的不动、没有的补上；shell 没有回答时用进程自己的环境。这只是读取用户已经设好的环境，不改写任何 agent 的配置。Windows 上进程的环境就是用户的，不问。
 - 后端的包装程序（`claude-agent-acp`、`codex-acp`）是应用自带的；缺的是它包着的那个程序时，报错说的是"没有找到 claude 程序"并指向"指定路径…"，而不是 Hub 原话里的"安装 claude-agent-acp"。
 - 启动脚本是 POSIX shell，Windows 没有做。
 
@@ -453,7 +455,7 @@ Hub 仍然"只启动、不安装"，一行没改：应用在 `userData/backends/
 - "打开文件夹…"弹出的系统对话框无法脚本驱动，没有点过；MCP 测试、删除 Agent、删除角色、同步到实例只在 mock 数据的原型里点过。
 - 打包成应用（`npm run package`：`release/` 下的 mac arm64 与 win x64 压缩包）之后，只验证过"模拟从访达启动时能找到 claude"（用只有系统默认 PATH 的环境启动开发版）；打包出的 `.app` 本身没有由我启动验证过。没有签名和公证，Windows 版没有运行过。
 - Windows 和 Linux 没有试过。
-- Hub 断开后窗口不会提示，也不会重连。
+- Hub 断开后窗口不会自动重连：圆点变红，由用户点击重连（Hub 没在运行就启动它）。断开的那一刻所有 Agent 显示为空闲、没答复的权限请求作废：Hub 不在了，就没有东西在运行。
 - Agent 的思考过程（`agent_thought_chunk`）不显示。
 - 另开会话（`--new`）：每个 Agent 只显示主会话。
 - 角色的默认后端设过之后不能在界面里清空。

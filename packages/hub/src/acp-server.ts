@@ -10,8 +10,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Agents, Assets, Backends, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, errorMessage, failure } from "@xsb/protocol";
-import type { BackendInfo, Connection, McpServerCheck, OriginMeta, RoleDetail, RoleInfo, TeamInfo } from "@xsb/protocol";
-import { INSTALL_HINT, backends, findCommand, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
+import type { Connection, McpServerCheck, OriginMeta, RoleDetail, TeamInfo } from "@xsb/protocol";
+import { backends, describeBackends, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
 import { mcpRequest } from "./mcp-client.ts";
 import { Paths } from "./paths.ts";
@@ -172,41 +172,32 @@ export class Client {
 
     // ---- roles ------------------------------------------------------------
 
-    const roleInfo = (role: Role): RoleInfo => ({
-      name: role.name,
-      preset: role.preset,
-      description: role.description,
-      backend: role.backend,
-      workspace: role.workspace,
-      mcpServers: role.servers,
-      skills: role.skills.map(({ dir, ...skill }) => skill),
+    const roleDetail = (role: Role): RoleDetail => ({
+      ...describeRole(role),
       agents: [...hub.state.agents.values()].filter((a) => a.role === role.name).map((a) => a.id),
     });
     /** Tell the observers what became of these roles: as they are now, or gone. */
     const announceRoles = (names: string[]): void => {
       const now = roleNames(hub.paths);
       for (const name of new Set(names)) {
-        if (now.includes(name)) hub.broadcast(Roles.update, { role: roleInfo(loadRole(hub.paths, name)) });
+        if (now.includes(name)) hub.broadcast(Roles.update, { role: roleDetail(loadRole(hub.paths, name)) });
         else hub.broadcast(Roles.removed, { name });
       }
     };
-    conn.onRequest(Roles.list, () => ({ roles: roleNames(hub.paths).map((name) => roleInfo(loadRole(hub.paths, name))) }));
-    conn.onRequest(Roles.get, (p): { role: RoleDetail } => {
-      const role = loadRole(hub.paths, p.name);
-      return { role: { ...describeRole(role), agents: roleInfo(role).agents } };
-    });
+    conn.onRequest(Roles.list, () => ({ roles: roleNames(hub.paths).map((name) => roleDetail(loadRole(hub.paths, name))) }));
+    conn.onRequest(Roles.get, (p) => ({ role: roleDetail(loadRole(hub.paths, p.name)) }));
     conn.onRequest(Roles.put, (p) => {
       const known = Object.keys(backends());
       if (p.role?.backend && !known.includes(p.role.backend)) {
         throw failure("no_such_backend", { backend: p.role.backend, known });
       }
       saveRole(hub.paths, p.role ?? {});
-      const role = roleInfo(loadRole(hub.paths, p.role.name));
+      const role = roleDetail(loadRole(hub.paths, p.role.name));
       hub.broadcast(Roles.update, { role });
       return { role };
     });
     conn.onRequest(Roles.remove, (p) => {
-      const role = roleInfo(loadRole(hub.paths, p.name));
+      const role = roleDetail(loadRole(hub.paths, p.name));
       if (role.preset && !role.preset.own) {
         throw failure("role_of_team", { role: role.name, team: role.preset.team });
       }
@@ -236,14 +227,10 @@ export class Client {
     };
     /** Change which teams the project uses, unless that leaves an agent without its role. */
     const setTeams = (used: string[], changed: string): void => {
-      const config = loadProjectConfig(hub.paths);
-      saveProjectConfig(hub.paths, { ...config, teams: used });
-      const left = roleNames(hub.paths);
+      const left = roleNames(hub.paths, used);
       const stranded = [...hub.state.agents.values()].filter((a) => a.role && !left.includes(a.role)).map((a) => a.id);
-      if (stranded.length) {
-        saveProjectConfig(hub.paths, config);
-        throw failure("team_in_use", { team: changed, agents: stranded });
-      }
+      if (stranded.length) throw failure("team_in_use", { team: changed, agents: stranded });
+      saveProjectConfig(hub.paths, { ...loadProjectConfig(hub.paths), teams: used });
       announceRoles(team(changed).roles.map((entry) => entry.role));
     };
     conn.onRequest(Teams.list, (): { teams: TeamInfo[] } => {
@@ -277,15 +264,7 @@ export class Client {
 
     // ---- backends, assets and tasks ---------------------------------------
 
-    conn.onRequest(Backends.list, (): { backends: BackendInfo[] } => ({
-      backends: Object.entries(backends()).map(([name, spec]) => ({
-        name,
-        command: spec.command,
-        args: spec.args ?? [],
-        installed: findCommand(spec.command) !== null,
-        installHint: INSTALL_HINT[spec.command],
-      })),
-    }));
+    conn.onRequest(Backends.list, () => ({ backends: describeBackends() }));
     conn.onRequest(Assets.list, (p) => ({ assets: hub.assets.find(p.type) }));
     conn.onRequest(Tasks.list, (p) => ({
       tasks: [...hub.state.tasks.values()].filter(

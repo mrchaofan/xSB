@@ -62,5 +62,22 @@ for (const at of ["after-begin", "after-op-0", "after-op-1", "after-op-2"]) {
   assert.equal(store.read("wal.jsonl").length, 0);
 }
 
+// A transaction that failed half way (a full disk, say) while the process went on: later transactions, however
+// large, do not empty the log that still has to finish it.
+{
+  const root = path.join(dir, "failed-then-busy");
+  const store = new Store(root);
+  store.failpoint = (p) => {
+    if (p === "after-op-0") throw new Error("disk full");
+  };
+  assert.throws(() => store.tx(ops));
+  store.failpoint = undefined;
+  const big = "x".repeat(600_000);
+  store.tx([{ file: "d.jsonl", rec: { big } }, { file: "e.jsonl", rec: { big } }]);
+  const reopened = new Store(root);
+  assert.equal(reopened.recover(), 1);
+  assert.deepEqual(strip(reopened.read("sub/c.jsonl")), [{ n: 3 }]);
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log("store: ok");

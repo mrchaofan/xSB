@@ -19,7 +19,10 @@ for (let i = 0; i < argv.length; i++) {
 const flag = (name) => (Array.isArray(flags[name]) ? flags[name].at(-1) : flags[name]);
 const state = (name, fallback) => (fs.existsSync(path.join(dir, name)) ? JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) : fallback);
 const keep = (name, value) => fs.writeFileSync(path.join(dir, name), JSON.stringify(value));
-const answer = (value) => { process.stdout.write(JSON.stringify(value)); process.exit(0); };
+const answer = (value) => {
+  if (process.env.FAKE_ARK_PREAMBLE) process.stdout.write('Preparing {input} [1]\n{not-json}\n');
+  process.stdout.write(JSON.stringify(value, null, 2)); process.exit(0);
+};
 const fail = (message) => answer({ ok: false, error: { type: "error", message } });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -28,7 +31,13 @@ if (flag("format") !== "json") fail("the caller did not ask for --format json");
 
 if (process.env.FAKE_ARK_SIGNED_OUT) answer({ ok: false, error: { type: "auth", message: "not configured", hint: "run `arkcli auth login` and retry" } });
 // The real one can also rewrite the configuration of the agents on the machine. Nothing here may ask it to.
-if (!["+gen", "gen"].includes(words[0])) fail(`the fake arkcli was asked for something that is not generation: ${words.join(" ")}`);
+if (!["+gen", "gen", "api"].includes(words[0])) fail(`the fake arkcli was asked for something that is not generation: ${words.join(" ")}`);
+
+if (words[0] === "api") {
+  if (words[1] !== "arkruntime.get_content_generation_task") fail("only a raw generation-task read is allowed");
+  const { id } = JSON.parse(flag("params"));
+  answer({ id, status: "succeeded", seed: 7, content: process.env.FAKE_ARK_NO_LAST_FRAME ? {} : { last_frame_url: "data:text/plain,LAST-FRAME" } });
+}
 
 if (words[0] === "+gen") {
   const tasks = state("tasks.json", []);
@@ -55,7 +64,7 @@ if (words[0] === "gen") {
   if (/^(slow|already running)$/.test(task.prompt)) answer({ task_id: words[2], status: { phase: "queued" } });
   if (task.polls < 2) answer({ task_id: words[2], status: { phase: "running" } });
   if (task.prompt === "refused") answer({ task_id: words[2], status: { phase: "failed", message: "the prompt was refused" } });
-  const done = { task_id: words[2], status: { phase: "succeeded" }, seed: 7, last_frame_url: `data:text/plain,LAST-FRAME` };
+  const done = { task_id: words[2], status: { phase: "succeeded" } };
   if (!flag("save-to")) answer(done);
   const file = path.join(flag("save-to"), `${words[2]}.mp4`);
   fs.writeFileSync(file, "MP4-BYTES");

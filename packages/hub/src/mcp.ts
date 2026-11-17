@@ -29,6 +29,9 @@ export function bridgeServer(socketPath: string, token: string): McpServer {
     command: process.execPath,
     args: [BRIDGE],
     env: [
+      // process.execPath is Electron in the desktop app. MCP hosts may filter
+      // inherited variables, so the bridge must explicitly request Node mode.
+      { name: "ELECTRON_RUN_AS_NODE", value: "1" },
       { name: BRIDGE_SOCKET_ENV, value: socketPath },
       { name: BRIDGE_TOKEN_ENV, value: token },
     ],

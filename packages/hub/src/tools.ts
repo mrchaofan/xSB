@@ -195,7 +195,7 @@ export const TOOLS: Tool[] = [
       {
         to: str("Agent id."),
         title: str("Short title."),
-        instructions: str("Everything the peer needs: goal, inputs, constraints, what to return."),
+        instructions: str("Everything the peer needs, for it sees nothing of your conversation: the goal, what you already know or decided, the constraints, what done looks like, and what to report back."),
         topic: TOPIC,
         after: {
           type: "array",
@@ -233,10 +233,10 @@ export const TOOLS: Tool[] = [
   {
     name: "await_tasks",
     description:
-      "Register that you need the results of several tasks you dispatched before continuing, then END YOUR TURN. You receive them together in one message once all (or any) have finished. Meanwhile you remain available to the user.",
+      "Register that you need the results of several tasks you dispatched or jobs you started before continuing, then end your turn. You receive them together in one message once all (or any) have finished; they cannot reach you while your turn is still running. Meanwhile you remain available to the user. Called while you work on a task, it keeps that task open until the results are in.",
     inputSchema: schema(
       {
-        task_ids: { type: "array", items: { type: "string" }, description: "Tasks you dispatched." },
+        task_ids: { type: "array", items: { type: "string" }, description: "Ids of tasks you dispatched or jobs you started, from this session." },
         mode: { type: "string", enum: ["all", "any"], description: "Wait for all of them (default) or for the first one." },
         note: str("A reminder to yourself, returned with the results: what to do next, and any condition to check before going on."),
       },
@@ -251,9 +251,10 @@ export const TOOLS: Tool[] = [
       }
       const note = typeof args.note === "string" ? args.note : undefined;
       const mode = args.mode === "any" ? "any" : "all";
-      const { satisfied, finished } = ctx.hub.mail.join(ctx.session, tasks, mode, note);
+      const { satisfied, finished, keeps } = ctx.hub.mail.join(ctx.session, tasks, mode, note);
       if (satisfied) return `Nothing to wait for, the results are in:\n${renderResults(ctx.hub.state, { taskIds: ids, mode, note })}`;
-      return `Registered (${finished}/${tasks.length} finished). End your turn now; the results arrive together in one message.`;
+      const open = keeps ? ` The task you are working on (${keeps.id}) stays open until then; you finish it in the turn that brings them.` : "";
+      return `Registered (${finished}/${tasks.length} finished). End your turn now; the results arrive together in one message.${open}`;
     },
   },
   {
@@ -280,7 +281,7 @@ export const TOOLS: Tool[] = [
     run(ctx, args) {
       const task = ownTask(ctx, need(args, "task_id"), true);
       if (isTerminal(task.status)) return `Task ${task.id} already ${task.status}.`;
-      return ctx.hub.mail.cancel(task) === "stopping" ? `Task ${task.id} is being stopped.` : `Task ${task.id} cancelled before it ran.`;
+      return ctx.hub.mail.cancel(task) === "stopping" ? `Task ${task.id} is being stopped.` : `Task ${task.id} cancelled.`;
     },
   },
   {
@@ -312,13 +313,13 @@ export const TOOLS: Tool[] = [
   {
     name: "put_asset",
     description:
-      "Register something the team will build on in the shared asset library: a character, a style, a script, a shot list, a finished shot. Registering an id that exists adds a new version. Give a file by path, or text as content.",
+      "Register something the team will build on in the shared asset library: a requirement, a design, a character, a script, a finished piece of work. Registering an id that exists adds a new version. Give a file by path, or text as content.",
     inputSchema: schema(
       {
-        type: str("Kind of asset, one word: character, style, location, script, shot_list, image, video, ..."),
+        type: str("Kind of asset, one word. Use the type a task or your team names (see The team in your instructions); otherwise a plain noun such as character, script, image."),
         name: str("Its name within the type, one word. Type and name form the id, e.g. character/lin."),
         description: str("One or two sentences: what it is and what it is for. This is what others find it by."),
-        path: str("A file to register. It is copied into the library."),
+        path: str("A file to register, absolute or relative to your working directory. It is copied into the library."),
         content: str("Text to register, instead of a file."),
       },
       ["type", "name", "description"],

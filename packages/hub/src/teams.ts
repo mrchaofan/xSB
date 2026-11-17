@@ -6,7 +6,8 @@
  *                                            roles, in order, what to call an agent of each, the programs of the
  *                                            machine a role works with (`requires`: [{ command, install }], where
  *                                            `install` tells the user how to get it; xsb installs nothing), and
- *                                            what to call each asset type the team makes (`assets`: type -> name)
+ *                                            what to call each asset type the team makes (`assets`: type -> name), the ones its
+ *                                            skills register on the way included
  *   presets/<language>/<team>/roles/<role>/  a role, exactly as a project has it in .xsb/roles/
  *
  * The languages differ in their words only: the same teams, roles, skills,

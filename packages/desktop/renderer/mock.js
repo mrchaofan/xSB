@@ -335,7 +335,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     on(listener) { listeners.add(listener); },
     // 网页由 Electron 的主进程持有，浏览器里没有：标签栏不出现，HTML 制品退回到 iframe 预览
     openPage: async () => null,
-    page() {},
+    async page() {},
 
     // ---------- 对话 ----------
     send(agentId, content, interject) { deliver(agentId, fromUser(content), reply(agentId), interject); },
@@ -388,7 +388,6 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     },
 
     // ---------- 角色 ----------
-    roles: async () => structuredClone(data.roles),
     /** 保存的总是工作区自己的角色：预设团队的角色保存后，工作区改用自己的版本。 */
     async putRole(role) {
       const next = { ...structuredClone(role), preset: role.preset && { ...role.preset, own: true } };      // title 随之保留
@@ -405,7 +404,29 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
       else emit({ removedRole: name });
     },
     /** 重启一个 Agent 的后端进程，让改过的角色从下一轮起生效。 */
-    async restartAgent(agentId) { stop(agentId); },
+    async applyRole(roleName, completed = []) {
+      const done = data.agents.filter((a) => a.role === roleName).map((a) => a.id);
+      done.filter((id) => !completed.includes(id)).forEach(stop);
+      return { done };
+    },
+    /** 把角色现在的描述和后端给它的每个智能体。 */
+    async syncRole(roleName) {
+      const role = data.roles.find((r) => r.name === roleName);
+      const done = [];
+      for (const a of data.agents.filter((x) => x.role === roleName)) { await this.putAgent({ ...a, description: role.description, backend: role.backend || a.backend }); done.push(a.id); }
+      return { done };
+    },
+    /** 使用一支团队，并给还没有智能体的角色各建一个。 */
+    async buildTeam(teamId, backend) {
+      await this.useTeam(teamId);
+      const done = [];
+      for (const { name, role } of TEAM.roles) {
+        if (agent(role.name)) continue;
+        await this.putAgent({ id: role.name, name, description: role.description, backend, role: role.name, workspace: "", instructions: "" });
+        done.push(role.name);
+      }
+      return { done };
+    },
     /** 启动角色里已保存的一个 MCP server 并列出它的工具。 */
     async testMcp(roleName, serverName) {
       await sleep(700);
@@ -421,9 +442,10 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
       data.teams.push(teamId);
       Object.assign(data.assetNames, TEAM.assets);
       for (const { role } of TEAM.roles) {
-        const mine = data.roles.find((r) => r.name === role.name);
+        let mine = data.roles.find((r) => r.name === role.name);
         if (mine) mine.preset = presetOf(role.name, true);
-        else data.roles.push({ ...structuredClone(role), preset: presetOf(role.name, false) });
+        else data.roles.push(mine = { ...structuredClone(role), preset: presetOf(role.name, false) });
+        emit({ role: structuredClone(mine) });
       }
     },
     async dropTeam(teamId) {
@@ -432,7 +454,8 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
       if (users.length) throw new Error(say(`团队“${TEAM.title}”还有智能体在用：${users.join("、")}。`, `The team “${TEAM.title}” is still in use by ${users.join(", ")}.`));
       data.teams = data.teams.filter((t) => t !== teamId);
       data.roles = data.roles.filter((r) => !gone.includes(r.name));
-      for (const r of data.roles) if (r.preset?.team === teamId) r.preset = null;
+      gone.forEach((name) => emit({ removedRole: name }));
+      for (const r of data.roles) if (r.preset?.team === teamId) { r.preset = null; emit({ role: structuredClone(r) }); }
     },
     backends: async () => structuredClone(BACKENDS),
     async locateProgram(command) {       // Electron：系统的选择文件对话框

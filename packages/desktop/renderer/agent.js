@@ -43,7 +43,6 @@ export async function editAgent(agent) {
 
   const idError = () =>
     !draft.id ? t("agent.id.missing") :
-    !/^[\w-]+$/.test(draft.id) ? t("agent.id.invalid") :
     agentOf(draft.id) ? t("agent.id.taken", { agent: draft.id }) : "";
 
   // 选定角色：把它的描述和默认后端填进还没动过的字段

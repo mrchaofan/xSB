@@ -41,7 +41,7 @@ const en = {
   no_such_backend: (d: Facts) => `no backend named "${d.backend}". Known: ${list(d.known, "none")}`,
   no_agents: () => "there are no agents yet; add one with `xsb agent add`",
   agent_unknown: (d: Facts) => `unknown agent "${d.agent}" (agents: ${list(d.known, "none")})`,
-  agent_id_invalid: () => "agent id must be letters, digits, '-' or '_'",
+  agent_id_invalid: () => "agent id must be letters, digits, '-' or '_', and start with a letter or a digit",
   role_unknown: (d: Facts) =>
     `no role "${d.role}" (roles: ${list(d.known, "none")}). A role is the directory ${d.dir} with a role.json, or a role of a team the project uses.`,
   role_name_invalid: () => "role name must be letters, digits, '-' or '_'",
@@ -55,6 +55,7 @@ const en = {
   invalid_json: (d: Facts) => `${d.file} is not valid JSON: ${d.detail}`,
   not_a_project: (d: Facts) => `no .xsb here (${d.project}); run "xsb init" first`,
   hub_not_started: (d: Facts) => `the hub did not start; see ${d.log}`,
+  hub_gone: () => "the hub stopped before this was done",
 };
 
 export type Reason = keyof typeof en;
@@ -71,7 +72,7 @@ const zh: Record<Reason, (d: Facts) => string> = {
   no_such_backend: (d) => `没有名为“${d.backend}”的后端。已有：${list(d.known, "无")}`,
   no_agents: () => "还没有智能体；用 `xsb agent add` 添加一个",
   agent_unknown: (d) => `没有标识为“${d.agent}”的智能体（已有：${list(d.known, "无")}）`,
-  agent_id_invalid: () => "智能体的标识只能用字母、数字、- 和 _",
+  agent_id_invalid: () => "智能体的标识只能用字母、数字、- 和 _，并以字母或数字开头",
   role_unknown: (d) => `没有角色“${d.role}”（已有：${list(d.known, "无")}）。角色是带有 role.json 的目录 ${d.dir}，或项目所用团队里的角色。`,
   role_name_invalid: () => "角色名只能用字母、数字、- 和 _",
   role_of_team: (d) => `角色“${d.role}”属于团队“${d.team}”，不是项目自己的；项目不再使用该团队时它才会消失`,
@@ -84,6 +85,7 @@ const zh: Record<Reason, (d: Facts) => string> = {
   invalid_json: (d) => `${d.file} 不是合法的 JSON：${d.detail}`,
   not_a_project: (d) => `这里没有 .xsb（${d.project}）；请先执行 "xsb init"`,
   hub_not_started: (d) => `中枢没有启动；详见 ${d.log}`,
+  hub_gone: () => "中枢在这件事做完之前停止了",
 };
 
 const TEXT: Record<Language, Record<Reason, (d: Facts) => string>> = { en, "zh-CN": zh };

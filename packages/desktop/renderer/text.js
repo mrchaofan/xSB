@@ -29,6 +29,8 @@ export const TEXT = {
     // 标题栏
     "titlebar.rail.toggle": "显示或隐藏智能体栏",
     "titlebar.workspace.open": "在新窗口打开其他工作区",
+    "titlebar.hub.up": "已连接中枢",
+    "titlebar.hub.down": "与中枢的连接断开了，智能体都已停下。点击重新连接。",
     "titlebar.artifacts.toggle": "显示或隐藏制品",
 
     // 欢迎页
@@ -137,7 +139,7 @@ export const TEXT = {
     "agent.role.hint": "角色提供说明、工具和技能。选定后会填入它的描述和默认后端，你可以再改。",
     "agent.id": "标识",
     "agent.id.missing": "需要一个标识。",
-    "agent.id.invalid": "标识只能用字母、数字、- 和 _。",
+    "agent.id.invalid": "标识只能用字母、数字、- 和 _，并以字母或数字开头。",
     "agent.id.taken": "已经有一个标识为 {agent} 的智能体。",
     "agent.name": "名字",
     "agent.name.placeholder": "灯光师1",
@@ -187,6 +189,7 @@ export const TEXT = {
     "role.saved": "已保存。",
     "role.saved.pending": "已保存。说明、工具服务和技能目录要到 {names} 下次会话开始时才生效；技能正文下一次使用时生效。",
     "role.applied": "已应用，{names} 的后端进程已重启。",
+    "progress.stopped": ({ count, names, failed, error }) => `${count ? `已完成：${names}。之后` : ""}${failed ? `${failed} ` : ""}出错了：${error}　修正后再做一次即可，已完成的不会重复。`,
     "role.defaults.title": "新建智能体时的默认值",
     "role.defaults.hint": "只在新建智能体时使用，修改不影响已有的智能体。",
     "role.backend": "默认后端",
@@ -313,6 +316,8 @@ export const TEXT = {
     // Title bar
     "titlebar.rail.toggle": "Show or hide the sidebar",
     "titlebar.workspace.open": "Open another workspace in a new window",
+    "titlebar.hub.up": "Connected to the hub",
+    "titlebar.hub.down": "The connection to the hub was lost, and the agents have stopped. Click to reconnect.",
     "titlebar.artifacts.toggle": "Show or hide artifacts",
 
     // Welcome
@@ -421,7 +426,7 @@ export const TEXT = {
     "agent.role.hint": "A role provides instructions, tools, and skills. Choosing one fills in its description and default backend, which you can still change.",
     "agent.id": "ID",
     "agent.id.missing": "Enter an ID.",
-    "agent.id.invalid": "An ID can only contain letters, digits, - and _.",
+    "agent.id.invalid": "An ID can only contain letters, digits, - and _, and starts with a letter or a digit.",
     "agent.id.taken": "An agent with the ID {agent} already exists.",
     "agent.name": "Name",
     "agent.name.placeholder": "Gaffer 1",
@@ -471,6 +476,7 @@ export const TEXT = {
     "role.saved": "Saved.",
     "role.saved.pending": "Saved. Instructions, tool servers, and the skill list take effect when the next session of {names} starts. Skill bodies take effect the next time they're used.",
     "role.applied": "Applied. Restarted the backend processes of {names}.",
+    "progress.stopped": ({ count, names, failed, error }) => `${count ? `Done: ${names}. Then it` : "It"} failed${failed ? ` on ${failed}` : ""}: ${error} Fix that and do it again; what is done is not repeated.`,
     "role.defaults.title": "Defaults for new agents",
     "role.defaults.hint": "Used only when creating an agent. Changes don't affect existing agents.",
     "role.backend": "Default backend",

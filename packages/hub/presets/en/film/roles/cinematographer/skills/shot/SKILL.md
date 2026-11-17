@@ -10,9 +10,9 @@ inputs: shot_list, storyboard, style_guide, character
 1. Read the inputs: `shot_list`, `storyboard`, `style_guide`, and the `character` of everyone in the scene. Copy down the style suffix and each character's appearance description; use `get_asset` to get the file paths of the storyboard frames and reference images you need.
 2. Order by dependency: shots with no "continue from last frame" dependency can be submitted together.
 3. Write a prompt for each shot (see below) and submit it with `start_job`: `server: "media"`, `tool: "generate_video"`, at draft resolution.
-4. `await_tasks`. When the results come back, check the files, then adjust and reshoot any that fail.
-5. Hand the drafts to the director for review. For approved shots, produce the final resolution with **exactly the same prompt and inputs**.
-6. Use `put_asset` to register each as `shot/<shot>` (with `path` pointing to the video file), with the prompt and parameters in the description.
+4. `await_tasks`, then end your turn: the task stays open, and you carry on when the results come back. Check the files then, and adjust and reshoot any that fail (submit again, `await_tasks` again).
+5. Use `put_asset` to register each draft as `shot/<shot>` (with `path` pointing to the video file), with the prompt and parameters in the description, marked as a draft. Hand them to the director for review in your result; this task ends here.
+6. Once the director approves, a new task asks for the finals: generate them with **exactly the same prompt and inputs** at the final resolution, and register each as a new version of the same `shot/<shot>`, marked as final.
 
 ## Prompts
 
@@ -26,9 +26,9 @@ Write one coherent paragraph; do not pile up keywords. The order is fixed:
 6. **Sound** (shots with sound): who says what, in quotation marks; what the ambient sound is.
 7. **Style suffix** (copied verbatim).
 
-Example (【图片1】, 【图片2】 are the labels the video model expects for reference images; keep them as written):
+Example (图片1, 图片2 are the labels the video model expects for reference images; keep them as written):
 
-> A thirty-year-old woman with shoulder-length black hair and a lean face, wearing a long dark gray trench coat over a white shirt, carrying a faded dark green canvas bag (see 【图片1】). Dragging a suitcase, she jogs from the left of the frame to the ticket booth window, stops, and raises a hand to knock twice on the glass. A ferry landing late at night, fog over the river, a single dim yellow light on in the ticket booth (scene reference: 【图片2】). Medium shot, eye level, static camera. The only light source is the ticket booth, casting warm light on the side of her face. She says: "Is there still a boat tonight?" The ambient sound is water in the distance. Realistic cinematic look, low-key lighting, warm tungsten light with teal shadows, shallow depth of field, film grain, slow and steady camera movement, restrained color, no text in frame.
+> A thirty-year-old woman with shoulder-length black hair and a lean face, wearing a long dark gray trench coat over a white shirt, carrying a faded dark green canvas bag (see 图片1). Dragging a suitcase, she jogs from the left of the frame to the ticket booth window, stops, and raises a hand to knock twice on the glass. A ferry landing late at night, fog over the river, a single dim yellow light on in the ticket booth (scene reference: 图片2). Medium shot, eye level, static camera. The only light source is the ticket booth, casting warm light on the side of her face. She says: "Is there still a boat tonight?" The ambient sound is water in the distance. Realistic cinematic look, low-key lighting, warm tungsten light with teal shadows, shallow depth of field, film grain, slow and steady camera movement, restrained color, no text in frame.
 
 Key points:
 
@@ -37,11 +37,11 @@ Key points:
 - **Use specific words**: not "a beautiful night scene" but "a river in fog, a row of blurred orange lights on the far bank".
 - **Dialogue**: put the exact words in quotation marks and state who speaks; one person, one line per shot. For a silent shot, set `audio` to false and do not write any lines.
 - **Text in the frame**: when it is needed, put the exact words in quotation marks and say where they appear.
-- When something must change within a shot, write it by time range ("0–3 s ..., 3–6 s ..."); but prefer having the storyboard artist split it into two shots.
+- When something must change within a shot, prefer having the storyboard artist split it into two shots. When it has to be one prompt, write it the way the tool's description says this model follows: some versions follow only numbered shots ("shot 1 ..., shot 2 ..."), others whole-second time ranges ("0–3 s ..., 3–6 s ...").
 
 ## Writing about reference images
 
-The images in `reference_images` are, in order, 【图片1】, 【图片2】, and so on. In the prompt, **say for each image what to borrow from it**: the person, the costume, the setting, or the composition. If you pass an image without explanation, the model does not know how to use it.
+The images in `reference_images` are, in order, 图片1, 图片2, and so on. In the prompt, **say for each image what to borrow from it**: the person, the costume, the setting, or the composition. If you pass an image without explanation, the model does not know how to use it.
 
 ## Parameters for the five generation methods
 
@@ -50,7 +50,7 @@ The images in `reference_images` are, in order, 【图片1】, 【图片2】, an
 | First frame | `first_frame`: this shot's storyboard frame, `frame/<shot>`. Start the prompt from what happens after this frame; there is no need to describe the composition already in the image |
 | Text-to-video | `prompt` only |
 | Reference images | `reference_images`: character reference images first, scene reference images after |
-| Continue from last frame | Submit the previous shot with `last_frame_output: "shots/<previous-shot>_last.jpg"` (the last frame is a JPEG); use that file as this shot's `first_frame` |
+| Continue from last frame | Submit the previous shot with `last_frame_output: "shots/<previous-shot>_last.jpg"` (the last frame is a JPEG); use that file as this shot's `first_frame`. The previous shot's result says whether its last frame was saved; when it was not, do not use the file |
 | First and last frames | `first_frame` and `last_frame`: `frame/<shot>` and `frame/<shot>-end`, as registered by the storyboard artist |
 
 Limits:
@@ -58,6 +58,7 @@ Limits:
 - `reference_images` and `first_frame` cannot be used together. When using `first_frame`, do not pass `ratio`; the aspect ratio follows the first-frame image.
 - How many reference images a call may carry depends on the model version; the number is in the tool description of `generate_video`. Use only what the shot needs: one front view per character plus one scene image, usually two or three in all.
 - Images are sent inside the request, and all the images of one call together must stay under a size limit (also in the tool description). When a look reference is a very large PNG, make a JPEG copy first with `ffmpeg -i original.png -q:v 2 copy.jpg` and pass that; the copy is for generating only and is not registered as an asset.
+- The video model does not accept images that show a real person's face; it trusts only the original images generated by models under this account. Pass reference images with faces as the files they were generated to where you can; when a converted copy is refused as "contains a real person's face", pass the original and use fewer images. A photo of a real person supplied by the user does not pass: say so to the director in your result, so that the user registers and authorises the portrait in their Ark account, or a generated look is used instead.
 
 ## Other parameters
 

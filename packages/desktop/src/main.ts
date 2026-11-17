@@ -17,12 +17,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { BrowserWindow, app, dialog, ipcMain, net, protocol, session, shell } from "electron";
+import { BrowserWindow, app, dialog, ipcMain, net, protocol, session, shell, webContents } from "electron";
 import type { WebPreferences } from "electron";
 import { Paths, stopHub } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Language } from "@xsb/protocol";
-import type { BackendView } from "./bridge.ts";
+import { BadAddress } from "./address.ts";
+import type { BackendView, Event } from "./bridge.ts";
 import { serveBrowser } from "./browser.ts";
 import { AGENTS, Clis, wrapped } from "./clis.ts";
 import { PREVIEW_PARTITION, Pages } from "./pages.ts";
@@ -33,12 +34,12 @@ const APP_SCHEME = "app";
 const RENDERER = fileURLToPath(new URL("../renderer/", import.meta.url));
 const PRELOAD = fileURLToPath(new URL("./preload.cjs", import.meta.url));
 
-// Before any hub is started: the hub inherits the PATH this sets up, and finds the agents' programs on it.
-const clis = new Clis(path.join(app.getPath("userData"), "backends"));
+/** Set up once this is known to be the one running app, and before any hub is started: the hub inherits the PATH it sets up, and finds the agents' programs on it. */
+let clis: Clis;
 
 /** The hub's backends, with which of them lack their program. */
 async function backends(workspace: Workspace): Promise<BackendView[]> {
-  return (await workspace.backends()).map((b) => ({ ...b, missing: AGENTS[b.name] && clis.missing(AGENTS[b.name]) ? AGENTS[b.name] : undefined }));
+  return (await workspace.backends()).map((b) => ({ ...b, missing: AGENTS.has(b.name) && clis.missing(b.name) ? b.name : undefined }));
 }
 
 /** The language the user's system is in: what the pages are worded in, and what the hub is told the user reads. */
@@ -49,6 +50,7 @@ type Words = {
   locate: (command: string) => string;
   notRunnable: (file: string) => string;
   noProgram: (agent: string, program: string) => string;
+  badAddress: string;
   /** Asking before a quit that cuts agents short: `names` are theirs. */
   quit: (names: string[]) => { message: string; detail: string; quit: string; stay: string };
 };
@@ -58,6 +60,7 @@ const TEXT: Record<Language, Words> = {
     locate: (command) => `Locate the ${command} program`,
     notRunnable: (file) => `${file} is not a program that can be run`,
     noProgram: (agent, program) => `Agent "${agent}" runs on ${program}, and the ${program} program was not found on your PATH. Install it, or open this agent's settings and use "Locate…" next to its backend.`,
+    badAddress: "Enter a valid address: http, https, file://, or an absolute file path.",
     quit: (names) => ({
       message: names.length === 1 ? `${names[0]} is still working` : `${names.length} agents are still working`,
       detail: `${names.length > 1 ? `${names.join(", ")}. ` : ""}Quitting stops the work in progress. It will not continue when you open xsb again: unfinished tasks are cancelled, and you will have to ask for them again.`,
@@ -69,6 +72,7 @@ const TEXT: Record<Language, Words> = {
     locate: (command) => `选择 ${command} 程序`,
     notRunnable: (file) => `${file} 不是可执行文件`,
     noProgram: (agent, program) => `智能体“${agent}”要用 ${program}，但在 PATH 中没有找到 ${program} 程序。请安装它，或打开这个智能体的设置，在后端旁点“指定路径…”。`,
+    badAddress: "请输入有效地址，支持 http、https、file:// 或绝对文件路径。",
     quit: (names) => ({
       message: names.length === 1 ? `${names[0]}还在工作` : `还有 ${names.length} 个智能体在工作`,
       detail: `${names.length > 1 ? `${names.join("、")}。` : ""}退出会中断正在进行的工作。再次打开 xsb 时它不会自动继续：未完成的任务记为已取消，需要你重新交代。`,
@@ -97,10 +101,20 @@ async function locateProgram(win: BrowserWindow, command: string): Promise<boole
   return true;
 }
 
-/** webContents id -> the workspace its window has open. */
-const workspaces = new Map<number, Workspace>();
-/** Every project opened since the app started: the hubs to stop when it quits. */
-const opened = new Set<string>();
+/** webContents id -> the project its window has open. */
+const windows = new Map<number, string>();
+/**
+ * Project -> its workspace: the app's connection to the project's hub. It stays while the app runs, whether or not
+ * a window shows it, for quitting asks every hub the app started whether agents are at work.
+ */
+const projects = new Map<string, Workspace>();
+/** Projects whose connection is being made: a window that opens one meanwhile waits for the same. */
+const connecting = new Map<string, Promise<Workspace>>();
+
+const workspaceOf = (id: number): Workspace | undefined => projects.get(windows.get(id) ?? "");
+
+/** Tell a project's workspace whether a window shows it: with none, nobody is there to answer its agents' questions. */
+const showing = (project: string): void => projects.get(project)?.setShown([...windows.values()].includes(project));
 /** The user asked the app to quit: from then on a window that closes is closed. */
 let quitting = false;
 /** The user quit while agents were at work, having been asked: their hubs give that work up. */
@@ -162,8 +176,9 @@ async function createWindow(project?: string): Promise<void> {
   });
   win.on("closed", () => {
     leaving.delete(id);
-    workspaces.get(id)?.close();
-    workspaces.delete(id);
+    const project = windows.get(id);
+    windows.delete(id);
+    if (project) showing(project);
     pages.dispose();
     panels.delete(id);
   });
@@ -171,15 +186,38 @@ async function createWindow(project?: string): Promise<void> {
   await win.loadURL(`${APP_SCHEME}://xsb/index.html`);
 }
 
+/** The project's workspace, connected: the one there is, or a new connection when there is none or it was lost. */
+function connect(paths: Paths): Promise<Workspace> {
+  const { project } = paths;
+  const current = projects.get(project);
+  if (current?.connected) return Promise.resolve(current);
+  let pending = connecting.get(project);
+  if (!pending) {
+    const send = (event: Event): void => {
+      for (const [id, shown] of windows) if (shown === project) webContents.fromId(id)?.send("xsb:event", event);
+    };
+    pending = Workspace.open(paths, language(), say, send)
+      .then((created) => {
+        current?.close();
+        projects.set(project, created);
+        return created;
+      })
+      .finally(() => connecting.delete(project));
+    connecting.set(project, pending);
+  }
+  return pending;
+}
+
 async function openWorkspace(win: BrowserWindow, project: string): Promise<void> {
   const paths = new Paths(project);
-  const workspace = await Workspace.open(paths, language(), say, (event) => {
-    if (!win.isDestroyed()) win.webContents.send("xsb:event", event);
-  });
-  workspaces.get(win.webContents.id)?.close();
-  workspaces.set(win.webContents.id, workspace);
-  opened.add(paths.project);
-  remember(paths.project);
+  await connect(paths);
+  if (!win.isDestroyed()) {
+    const previous = windows.get(win.webContents.id);
+    windows.set(win.webContents.id, paths.project);
+    if (previous) showing(previous);
+    remember(paths.project);
+  }
+  showing(paths.project);
 }
 
 async function pickFolder(win: BrowserWindow): Promise<{ path: string; initialized: boolean } | null> {
@@ -191,7 +229,7 @@ async function pickFolder(win: BrowserWindow): Promise<{ path: string; initializ
 // ---- window.xsb -------------------------------------------------------------
 
 /** The calls that are a method of the window's workspace, arguments and all. */
-const WORKSPACE_CALLS = new Set(["send", "sendNow", "cancel", "permit", "putAgent", "removeAgent", "restartAgent", "inspectAgent", "putRole", "removeRole", "testMcp", "roles", "useTeam", "dropTeam"]);
+const WORKSPACE_CALLS = new Set(["send", "sendNow", "cancel", "permit", "putAgent", "removeAgent", "inspectAgent", "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "useTeam", "dropTeam", "buildTeam"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();
@@ -208,7 +246,7 @@ ipcMain.handle("xsb", async (event, method: string, ...args: any[]) => {
 
 function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): unknown {
   const win = BrowserWindow.fromWebContents(event.sender)!;
-  const workspace = workspaces.get(event.sender.id);
+  const workspace = workspaceOf(event.sender.id);
   // The caller's pages: those of its side panel, or, for a page's own window, those the page is among.
   const pages = panels.get(event.sender.id) ?? [...panels.values()].find((p) => p.shownIn(event.sender));
   if (!pages) throw new Error("this window is closing");
@@ -216,7 +254,11 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
     case "openPage":
       return Pages.supported ? pages.open(args[0], { embedded: args[1] === true }) : null;
     case "page":
-      return pages.call(args[0], args[1], args[2]);
+      try {
+        return pages.call(args[0], args[1], args[2]);
+      } catch (e) {
+        throw e instanceof BadAddress ? new Error(TEXT[language()].badAddress) : e;
+      }
     case "pageWindow":
       return pages.shownIn(event.sender);
     case "load":
@@ -235,7 +277,7 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
   if (!workspace) throw new Error("this window has no workspace open");
   if (method === "backends") return backends(workspace);
   if (method === "presets") return workspace.teams((command) => clis.missing(command));
-  if (method === "revealSkill") return shell.openPath(path.join(workspace.paths.roleDir(args[0]), "skills", args[1]));
+  if (method === "revealSkill") return workspace.skillDir(args[0], args[1]).then((dir) => dir && shell.openPath(dir));
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);
   throw new Error(`unknown method ${method}`);
 }
@@ -259,7 +301,8 @@ const RANGED: Record<string, string> = { ".mp4": "video/mp4", ".m4v": "video/mp4
 function serveFile(file: string, request: Request): Response | Promise<Response> {
   const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get("range") ?? "");
   if (!range || !(range[1] || range[2])) return net.fetch(pathToFileURL(file).href);
-  const size = fs.statSync(file).size;
+  const size = fs.statSync(file, { throwIfNoEntry: false })?.size;
+  if (size === undefined) return new Response(null, { status: 404 });
   // "a-b", "a-" (from a to the end) or "-n" (the last n bytes)
   const start = range[1] ? Number(range[1]) : Math.max(size - Number(range[2]), 0);
   const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
@@ -302,6 +345,7 @@ app.on("second-instance", (_event, _argv, _cwd, asked) => {
 
 void app.whenReady().then(() => {
   if (!first) return;
+  clis = new Clis(path.join(app.getPath("userData"), "backends"));
   protocol.handle(APP_SCHEME, (request) => {
     const file = path.join(RENDERER, decodeURIComponent(new URL(request.url).pathname));
     const inside = !path.relative(RENDERER, file).startsWith("..");
@@ -311,13 +355,13 @@ void app.whenReady().then(() => {
   for (const served of [protocol, session.fromPartition(PREVIEW_PARTITION).protocol]) {
     served.handle(ARTIFACT_SCHEME, (request) => {
       const file = decodeURIComponent(new URL(request.url).pathname.slice(1));
-      const shown = [...workspaces.values()].some((w) => w.artifacts.has(file));
+      const shown = [...projects.values()].some((w) => w.artifacts.has(file));
       return shown ? serveFile(file, request) : new Response(null, { status: 404 });
     });
   }
   // Agents reach the browser of the side panel here (browser.ts): each the one of the window its workspace is open in.
   const browser = serveBrowser(clis.browserSocket, (cwd) => {
-    const [id] = [...workspaces].find(([, workspace]) => workspace.worksIn(cwd)) ?? [];
+    const [id] = [...windows].find(([, project]) => projects.get(project)?.worksIn(cwd)) ?? [];
     return id === undefined ? undefined : panels.get(id);
   });
   app.on("will-quit", () => browser.close());
@@ -328,7 +372,7 @@ app.on("activate", reveal);
 // Quitting in the middle of work is the user's to decide, knowing what it costs.
 app.on("before-quit", (event) => {
   if (quitting) return;
-  const names = [...workspaces.values()].flatMap((workspace) => workspace.working());
+  const names = [...projects.values()].flatMap((workspace) => workspace.working());
   if (names.length) {
     const text = TEXT[language()].quit(names);
     const stay = dialog.showMessageBoxSync({ type: "warning", message: text.message, detail: text.detail, buttons: [text.quit, text.stay], defaultId: 1, cancelId: 1 }) === 1;
@@ -340,7 +384,10 @@ app.on("before-quit", (event) => {
 // The hubs go with the app. Each stops in its own time. What a hub was in the middle of runs again when it is
 // next started, unless the user was asked and quit all the same: then it is given up.
 app.on("will-quit", () => {
-  for (const project of opened) stopHub(new Paths(project), abandoning);
+  for (const [project, workspace] of projects) {
+    workspace.close();
+    stopHub(new Paths(project), abandoning);
+  }
 });
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

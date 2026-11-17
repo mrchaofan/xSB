@@ -16,8 +16,9 @@ conn.onRequest("initialize", (p) => ({
 conn.onRequest("tools/list", () => ({
   tools: [{ name: "render", description: "Render a shot.", inputSchema: { type: "object", properties: {} } }],
 }));
-conn.onRequest("tools/call", async (p) => {
-  await sleep(Number(p.arguments?.ms ?? 0));
+conn.onRequest("tools/call", async (p, { signal }) => {
+  await sleep(Number(p.arguments?.ms ?? 0), undefined, { signal }).catch(() => {});
+  if (signal.aborted) return { content: [{ type: "text", text: `render of ${p.arguments?.prompt} was called off and is not billed` }], isError: true };
   const failed = p.arguments?.prompt === "fail";
   const text = failed ? "the renderer refused" : `rendered: ${p.arguments?.prompt} (key ${process.env.GEN_KEY})`;
   return { content: [{ type: "text", text }], isError: failed };

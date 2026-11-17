@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { Agents, Assets, Backends, Connection, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
 import type { Language, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
+import { bridgeServer } from "../src/mcp.ts";
 import { Paths } from "../src/paths.ts";
 import { readRole } from "../src/roles.ts";
 import { teamRoles, teams } from "../src/teams.ts";
@@ -22,6 +23,9 @@ const GENERATOR = fileURLToPath(new URL("./mock-generator.ts", import.meta.url))
 const THIRD_PARTY = fileURLToPath(new URL("./third-party-agent.ts", import.meta.url));
 const project = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "xsb-e2e-")));
 const paths = new Paths(project);
+// MCP hosts can filter inherited variables. Electron must still run the bridge
+// as Node when only the explicitly declared MCP environment is forwarded.
+assert.equal(bridgeServer(paths.socket("mcp"), "test-token").env?.find((e) => e.name === "ELECTRON_RUN_AS_NODE")?.value, "1");
 fs.mkdirSync(paths.dir);
 // Backends are machine settings: they live in the global directory, here a scratch one.
 process.env.XSB_HOME = path.join(project, "home");
@@ -249,6 +253,27 @@ const a = await newSession("a");
   await prompt(a, "!perm");
   assert.equal(permissionAsked, 1);
   assert.match(said.get(a)!, /perm: selected yes/);
+
+  // A client that cannot answer (a script: it serves no such request) is passed over for one that can.
+  const socket = net.connect(paths.socket("acp"));
+  await new Promise((resolve) => socket.once("connect", resolve));
+  const script = new Connection(socket, socket, "script");
+  await script.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
+  let heard = "";
+  script.onNotification("session/update", ({ update }) => {
+    if (update.sessionUpdate === "agent_message_chunk") heard += update.content.text;
+  });
+  const own = (await script.request("session/new", { cwd: project, mcpServers: [], _meta: { [Agents.sessionKey]: "b" } })).sessionId;
+  await script.request("session/prompt", { sessionId: own, prompt: [{ type: "text", text: "!perm" }] });
+  assert.equal(permissionAsked, 2);
+  assert.match(heard, /perm: selected yes/);
+  // With nobody connected who can, the turn the script waits for is not left hanging: its request is declined.
+  conn.close();
+  await sleep(50);
+  await script.request("session/prompt", { sessionId: own, prompt: [{ type: "text", text: "!perm" }] });
+  assert.match(heard, /perm: cancelled/);
+  script.close();
+  conn = await connect();
   console.log("ok 9 permissions go to a human");
 }
 
@@ -256,7 +281,7 @@ const a = await newSession("a");
 {
   const d = await newSession("d");
   await prompt(d, "hi");
-  assert.match(said.get(d)!, /echo: # Who you are.*You are d\..*\| hi$/m);
+  assert.match(said.get(d)!, /echo: \[xsb\] Your standing instructions.*<xsb-instructions> \| # Who you are.*You are d\..*<\/xsb-instructions> \| hi$/m);
   said.set(d, "");
   await prompt(d, "again");
   assert.equal(said.get(d), "echo: again\n");
@@ -322,7 +347,7 @@ const a = await newSession("a");
       `!call cancel_task {"task_id":"$last"}`,
     ].join("\n"),
   );
-  assert.match(said.get(a)!, /cancelled before it ran/);
+  assert.match(said.get(a)!, /Task t_\w+ cancelled\./);
   const result = (title: string) =>
     until(`result of ${title}`, () => inputs.get(a)!.find((i) => i.text.includes(`title="${title}"`) && i.text.includes("<xsb-task-result")));
   assert.match((await result("second")).text, /status="cancelled"/);
@@ -416,7 +441,8 @@ const p = await newSession("p1");
   await prompt(p, job("shot 2", "fail", 0));
   assert.match((await resultOf("shot 2")).text, /status="failed">\nthe renderer refused/);
   await prompt(p, [job("shot 3", "never", 5000), call("cancel_task", { task_id: "$last" })].join("\n"));
-  assert.match((await resultOf("shot 3")).text, /status="cancelled"/);
+  // Cancelling is asked of the tool itself, and what it says became of the call is the result.
+  assert.match((await resultOf("shot 3")).text, /status="cancelled">\nCancelled by the dispatcher\. render of never was called off and is not billed/);
   await prompt(p, call("start_job", { server: "nope", tool: "render", title: "x" }));
   assert.match(said.get(p)!, /your role has no MCP server "nope"/);
   await idle("p1");
@@ -468,6 +494,49 @@ const p = await newSession("p1");
   assert.deepEqual(assetEvents, ["character/lin@1", "shot_list/scene-1@1", "character/lin@2", "image/frame-1@1"]);
   assert.equal(fs.readFileSync(assets[2].path, "utf8"), "PNG");
   assert.ok(assets[2].path.startsWith(paths.assets) && assets[2].path.endsWith("v1.png"));
+
+  // A task that awaits a job of its own stays open: its result, and what it delivered, are those of the turn the job's result starts.
+  const then = [call("put_asset", { type: "shot", name: "s1", description: "the take", content: "TAKE" }), "!say TAKE-DONE"];
+  const take = [
+    call("start_job", { server: "gen", tool: "render", arguments: { prompt: "dawn", ms: 500 }, title: "take 1" }),
+    `!await ${JSON.stringify({ note: `\n${then.join("\n")}` })}`,
+  ];
+  await prompt(a, call("dispatch_task", { to: "p1", title: "render", instructions: take.join("\n"), topic: "scene 1", produces: "shot" }));
+  await until("p1 waiting", () => said.get(p)!.includes("The task you are working on"));
+  await idle("p1");
+  assert.equal((await tasks()).find((t) => t.title === "render")!.status, "running");
+  assert.ok(!inputs.get(a)!.some((i) => i.text.includes('title="render"')), "no result while the task waits");
+  const rendered = await until("render result", () => inputs.get(a)!.find((i) => i.text.includes('title="render"')));
+  assert.match(rendered.text, /status="completed">\n[\s\S]*TAKE-DONE[\s\S]*<xsb-asset id="shot\/s1" version="1" by="p1"/);
+  assert.doesNotMatch(rendered.text, /No "shot" asset/);
+  assert.match(inputs.get(p)!.at(-1)!.text, /rendered: dawn[\s\S]*You awaited these for the task "render" \(t_\w+\) from a, which is still open/);
+
+  // Cancelling a task that waits cancels what it waits for: nobody wants that any more.
+  const slow = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "dusk", ms: 5000 }, title: "take 2" }), "!await {}"];
+  await prompt(a, call("dispatch_task", { to: "p1", title: "render again", instructions: slow.join("\n"), topic: "scene 1" }));
+  const waiting = await until("p1 waiting again", async () => (await tasks()).find((t) => t.title === "take 2" && t.status === "running"));
+  await idle("p1");
+  const again = (await tasks()).find((t) => t.title === "render again")!;
+  await prompt(a, call("cancel_task", { task_id: again.id }));
+  const gone = await until("take 2 cancelled", async () => (await tasks()).find((t) => t.id === waiting.id && t.status === "cancelled"));
+  assert.match(gone.result!, /render of dusk was called off/);
+  assert.equal((await tasks()).find((t) => t.id === again.id)!.status, "cancelled");
+  assert.ok(![...hub.state.gates.values()].some((gate) => gate.taskId === again.id), "cancelled task leaves no join to resume it");
+  await until("a told", () => inputs.get(a)!.some((i) => i.text.includes('title="render again"') && i.text.includes('status="cancelled"')));
+  await idle("p1");
+  assert.ok(!inputs.get(p)!.some((i) => i.text.includes('title="take 2"')), "p1 is not handed a result nobody wants");
+
+  // The same when the turn that awaited is stopped by the user: its task ends, and what it waited for with it.
+  const stoppable = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "noon", ms: 5000 }, title: "take 3" }), "!await {}", "!sleep 5000"];
+  await prompt(a, call("dispatch_task", { to: "p1", title: "render once more", instructions: stoppable.join("\n"), topic: "scene 1" }));
+  const third = await until("take 3 running", async () => (await tasks()).find((t) => t.title === "take 3" && t.status === "running"));
+  conn.notify("session/cancel", { sessionId: p });
+  const ended = await until("take 3 cancelled", async () => (await tasks()).find((t) => t.id === third.id && t.status === "cancelled"));
+  assert.match(ended.result!, /render of noon was called off/);
+  assert.equal((await tasks()).find((t) => t.title === "render once more")!.status, "cancelled");
+  assert.equal([...hub.state.gates.values()].length, 0, "the join of an ended task is gone with it");
+  await idle("p1");
+  assert.ok(!inputs.get(p)!.some((i) => i.text.includes('title="take 3"')), "nor is it handed this one");
   await idle("a");
   console.log("ok 17 assets and what a task delivers");
 }
@@ -499,7 +568,8 @@ const p = await newSession("p1");
   await conn.request(Roles.put, { role: { name: "writer", description: "writes", instructions: "WRITER-RULES", mcpServers, skills } });
   const { role: writer } = await conn.request(Roles.get, { name: "writer" });
   assert.deepEqual([writer.description, writer.instructions, writer.agents], ["writes", "WRITER-RULES", []]);
-  assert.deepEqual(writer.skills, [{ name: "script", description: "Writing a scene", inputs: [], content: skills[0].content }]);
+  // A skill says where its files are: the hub's to know, whether the role is the project's own or a team's.
+  assert.deepEqual(writer.skills, [{ name: "script", description: "Writing a scene", inputs: [], dir: path.join(paths.roleDir("writer"), "skills", "script"), content: skills[0].content }]);
   // A field left out stays; a set that is given is the whole set.
   const { role: fewer } = await conn.request(Roles.put, { role: { name: "writer", description: "writes dialogue", skills: [] } });
   assert.deepEqual([fewer.description, fewer.skills, Object.keys(fewer.mcpServers)], ["writes dialogue", [], ["gen", "broken"]]);
@@ -533,6 +603,12 @@ const p = await newSession("p1");
   // Observers hear of every change made through the hub, and of none that was refused.
   await until("role changes announced", () => roleEvents.length === 4);
   assert.deepEqual(roleEvents, ["writer: writes", "writer: writes dialogue", "painter: paints shots", "writer"]);
+
+  // A newly created role may have no skills; put returns the detail observers need without another get.
+  const { role: empty } = await conn.request(Roles.put, { role: { name: "empty-role", instructions: "empty skill set", skills: [] } });
+  assert.equal(empty.instructions, "empty skill set");
+  assert.deepEqual(empty.skills, []);
+  await conn.request(Roles.remove, { name: "empty-role" });
 
   // The backends an agent can be given, as the hub (which starts them) sees them.
   const { backends } = await conn.request(Backends.list);
@@ -660,11 +736,12 @@ const p = await newSession("p1");
       }),
     ]);
   for (const language of LANGUAGES) assert.deepEqual(shape(language), shape("en"), `the ${language} teams differ from the English ones in more than words`);
-  // What a team makes is named: every type one of its skills produces.
+  // What a team makes is named: every type one of its skills produces (and the types registered on the way, which no task asks for).
   for (const language of LANGUAGES) {
     for (const team of teams(language)) {
       const made = team.roles.flatMap((entry) => readRole(path.join(teamRoles(team.id, language), entry.role), entry.role).skills.flatMap((skill) => skill.produces ?? []));
-      assert.deepEqual(Object.keys(team.assets ?? {}).sort(), [...new Set(made)].sort(), `${language}/${team.id}: asset names`);
+      const unnamed = made.filter((type) => !team.assets?.[type]);
+      assert.deepEqual(unnamed, [], `${language}/${team.id}: asset types without a name`);
     }
   }
 

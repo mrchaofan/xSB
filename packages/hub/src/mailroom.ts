@@ -1,8 +1,10 @@
 /**
  * Mail and tasks: everything one agent's session sends to another's.
  *
- * A task is either an agent's turn or a job: one tool call the hub makes for
- * the dispatcher. A message, a task and the results of tasks (one task's own, or a joined
+ * A task is either an agent's work or a job: one tool call the hub makes for
+ * the dispatcher. An agent's task is one turn, unless that turn ends waiting
+ * for a join (`await_tasks`): then the task stays open, and ends with the turn
+ * that receives the joined results. A message, a task and the results of tasks (one task's own, or a joined
  * set) are all mail items. An item is first recorded in the mailbox log, then handed to the
  * recipient's session as a turn (or steered into its running turn), and
  * acknowledged when that turn ends. Delivery is therefore at least once: an
@@ -24,6 +26,9 @@ import type { LiveSession, Turn } from "./session.ts";
 import type { Gate, MailItem } from "./state.ts";
 import { ops } from "./state.ts";
 import { newId, now } from "./util.ts";
+
+/** How long a cancelled job's tool has to call off what it started and say so, before its server is stopped. */
+const JOB_CANCEL_GRACE_MS = 15_000;
 
 function taskMail(task: Task): MailItem {
   return {
@@ -120,10 +125,15 @@ export class Mailroom {
     this.saveTask(task);
     const abort = new AbortController();
     this.jobs.set(task.id, abort);
-    mcpRequest(server, "tools/call", { name: input.tool, arguments: input.arguments }, agent.workspace, abort.signal)
+    mcpRequest(server, "tools/call", { name: input.tool, arguments: input.arguments }, agent.workspace, abort.signal, JOB_CANCEL_GRACE_MS)
       .then(
-        (r): [TaskStatus, string] => [r.isError ? "failed" : "completed", textOf(r.content ?? [])],
-        (e): [TaskStatus, string] => (abort.signal.aborted ? ["cancelled", "Cancelled by the dispatcher."] : ["failed", errorMessage(e)]),
+        // A cancelled call is still answered: what the tool says became of it is the result. One that finished all the same did finish.
+        (r): [TaskStatus, string] => {
+          const said = textOf(r.content ?? []);
+          return abort.signal.aborted && r.isError ? ["cancelled", `Cancelled by the dispatcher. ${said}`] : [r.isError ? "failed" : "completed", said];
+        },
+        (e): [TaskStatus, string] =>
+          abort.signal.aborted ? ["cancelled", "Cancelled by the dispatcher. The tool did not say what became of the call."] : ["failed", errorMessage(e)],
       )
       .then(([status, result]) => {
         this.jobs.delete(task.id);
@@ -136,16 +146,19 @@ export class Mailroom {
    * Join: the owner wants the results of `tasks` in one message. Results that
    * arrived but were not read yet are taken back into the join. Returns whether
    * it was already satisfied: then nothing is registered and the caller hands
-   * the results over itself.
+   * the results over itself. Otherwise `keeps` is the task the owner is working
+   * on, which the join keeps open until its results are in.
    */
-  join(owner: LiveSession, tasks: Task[], mode: "all" | "any", note: string | undefined): { satisfied: boolean; finished: number } {
+  join(owner: LiveSession, tasks: Task[], mode: "all" | "any", note: string | undefined): { satisfied: boolean; finished: number; keeps?: Task } {
     const ids = tasks.map((t) => t.id);
+    const keeps = this.openTask(owner.current?.req.item);
     const gate: Gate = {
       id: newId("g"),
       owner: { agentId: owner.agentId, sessionId: owner.id },
       taskIds: ids,
       mode,
       note,
+      taskId: keeps?.id,
       createdAt: now(),
     };
     const unread = owner.withdraw((m) => m.kind === "results" && !m.results!.mode && ids.includes(m.results!.taskIds[0]));
@@ -153,7 +166,7 @@ export class Mailroom {
     const finished = tasks.filter((t) => isTerminal(t.status)).length;
     const satisfied = mode === "any" ? finished > 0 : finished === tasks.length;
     this.hub.state.commit(satisfied ? acks : [...acks, ops.openGate(gate)]);
-    return { satisfied, finished };
+    return { satisfied, finished, keeps: satisfied ? undefined : keeps };
   }
 
   /**
@@ -171,8 +184,10 @@ export class Mailroom {
       target.cancel(); // ends as "cancelled" through `turnEnded`
       return "stopping";
     }
-    const queued = target?.withdraw((m) => m.kind === "task" && m.taskId === task.id) ?? [];
-    this.finishTask(task, "cancelled", "Cancelled by the dispatcher before it ran.", queued.map((m) => ops.ack(m.id)));
+    // No turn is working on it: it has not run yet, or it waits for a join.
+    const queued = target?.withdraw((m) => m.taskId === task.id) ?? [];
+    const result = task.status === "running" ? "Cancelled by the dispatcher while it waited for results." : "Cancelled by the dispatcher before it ran.";
+    this.finishTask(task, "cancelled", result, queued.map((m) => ops.ack(m.id)));
     return "cancelled";
   }
 
@@ -234,7 +249,7 @@ export class Mailroom {
     const origin: OriginMeta = {
       ...item.from,
       messageId: item.id,
-      taskId: item.taskId ?? (item.results?.mode ? undefined : item.results?.taskIds[0]),
+      taskId: item.results ? (item.results.mode ? undefined : item.results.taskIds[0]) : item.taskId,
       role: item.kind === "results" ? "task_result" : item.kind,
     };
     const queue = (): void => void session.enqueue({ origin, prompt, item });
@@ -261,13 +276,22 @@ export class Mailroom {
     if (task) this.saveTask({ ...task, status: "running" });
   }
 
-  /** A turn ended: acknowledge its mail and, for a task, route the result. */
+  /** The task a mail item's turn works on, while that task has not ended. */
+  private openTask(item: MailItem | undefined): Task | undefined {
+    const task = item?.taskId ? this.hub.state.tasks.get(item.taskId) : undefined;
+    return task && !isTerminal(task.status) ? task : undefined;
+  }
+
+  /** A turn ended: acknowledge its mail and, when it worked on a task, route the result. */
   turnEnded(session: LiveSession, turn: Turn, stopReason: StopReason, failure: unknown): void {
     const item = turn.req.item;
     if (!item) return;
-    if (item.kind === "task") {
-      const task = this.hub.state.tasks.get(item.taskId!)!;
+    const task = this.openTask(item);
+    if (task) {
       const status = failure ? "failed" : stopReason === "cancelled" ? "cancelled" : "completed";
+      // A join the turn left behind keeps the task open: the turn that receives the joined results ends it.
+      const waits = status === "completed" && [...this.hub.state.gates.values()].some((g) => g.taskId === task.id);
+      if (waits) return this.hub.state.commit([ops.ack(item.id)]);
       const result = failure
         ? `The agent could not run the task: ${errorMessage(failure)}`
         : turn.lastText.trim() || `(the turn ended with "${stopReason}" and no text)`;
@@ -309,6 +333,10 @@ export class Mailroom {
    * result to whoever dispatched it (on its own, or with the others once the
    * join that waits for it is satisfied), and release the tasks that were held
    * back until this one finished.
+   *
+   * A task that ends takes what it waited for with it: nobody wants those
+   * results any more, so its joins swallow them, and what still runs of them
+   * is cancelled, for it would only cost.
    */
   private finishTask(task: Task, status: TaskStatus, result: string, acks: Op[] = []): void {
     const { state } = this.hub;
@@ -324,13 +352,16 @@ export class Mailroom {
     const gate = [...state.gates.values()].find(
       (g) => g.owner.sessionId === task.from.sessionId && g.taskIds.includes(task.id),
     );
+    const unwanted = gate?.taskId !== undefined && this.finished(gate.taskId);
     if (!gate) {
       const from: MailItem["from"] = task.tool ? { kind: "system" } : { kind: "agent", ...task.to };
       send({ id: newId("m"), to: task.from, from, kind: "results", topic: task.topic, results: { taskIds: [task.id] }, ts: now() });
+    } else if (unwanted) {
+      if (gate.taskIds.every((id) => this.finished(id, done))) list.push(ops.closeGate(gate.id));
     } else if (gate.mode === "any" || gate.taskIds.every((id) => this.finished(id, done))) {
-      const { taskIds, mode, note } = gate;
+      const { taskIds, mode, note, taskId } = gate;
       list.push(ops.closeGate(gate.id));
-      send({ id: newId("m"), to: gate.owner, from: { kind: "system" }, kind: "results", results: { taskIds, mode, note }, ts: now() });
+      send({ id: newId("m"), to: gate.owner, from: { kind: "system" }, kind: "results", results: { taskIds, mode, note }, taskId, ts: now() });
     }
 
     for (const held of state.tasks.values()) {
@@ -345,5 +376,8 @@ export class Mailroom {
     state.commit(list);
     for (const t of changed) this.hub.broadcast(Tasks.update, { task: t });
     for (const item of outgoing) this.deliver(item);
+
+    const awaited = [...state.gates.values()].filter((g) => g.taskId === task.id).flatMap((g) => g.taskIds);
+    for (const id of new Set(awaited)) if (!this.finished(id)) this.cancel(state.tasks.get(id)!);
   }
 }

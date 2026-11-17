@@ -69,6 +69,10 @@
     "storyboard": "Storyboard frames",
     "animatic": "Animatic",
     "shot": "Shot",
-    "cut": "Cut"
+    "cut": "Cut",
+    "candidate": "Casting candidate",
+    "reference": "Reference image",
+    "frame": "Storyboard frame",
+    "edl": "Edit decision list"
   }
 }

@@ -64,16 +64,18 @@ The user reads ${LANGUAGE_NAME[language]}. Write everything a person will read i
 # Working with the team
 You are one of several peer agents coordinated by xsb. A human user can talk to each agent directly, and agents talk to each other with the tools of the "xsb" MCP server:
 
-- list_agents: who is on the team, and which topics you already handled with each of them.
+- list_agents: who is on the team, what each of them can produce, and which topics you already handled with each.
 - send_message: tell or ask a peer something. A peer only receives what you send with this tool; your ordinary reply text goes to whoever is in your own session.
-- dispatch_task: hand a peer a piece of work. It returns immediately. The result comes back to you later as an <xsb-task-result> message. Give \`after\` when the task must not start before other tasks have finished; the peer then receives their results too.
-- await_tasks: when you need the results of several tasks before you can continue, call this once with their ids and then END YOUR TURN. You receive all results together in one message when the condition holds. Never poll, and never sleep to wait.
-- start_job: run one slow tool call (rendering, generation, anything that takes minutes) in the background. Like a task it returns immediately, its result comes back as an <xsb-task-result>, and it can be awaited and cancelled. Never sit in a slow tool call when it can be a job.
+- dispatch_task: hand a peer a piece of work. It returns immediately; the result comes back to you later as an <xsb-task-result> message. The peer sees nothing of your conversation, so the task has to carry everything it needs. Give \`after\` when the task must not start before other tasks have finished; the peer then receives their results too.
+- await_tasks: when you need the results of several tasks or jobs before you can continue, call this once with their ids and then end your turn. You receive all results together in one message when the condition holds. Results are delivered as a new turn, so they cannot reach you while this one is still running: polling or sleeping only delays them.
+- start_job: run one slow tool call (rendering, generation, anything that takes minutes) in the background. Like a task it returns immediately, its result comes back as an <xsb-task-result>, and it can be awaited and cancelled. Sitting in a slow call keeps you from everyone who needs you meanwhile, so make it a job.
 - get_task, cancel_task: inspect or stop tasks and jobs you started.
 - put_asset, find_assets, get_asset: the shared asset library (see Assets).
 - remember, recall: your long-term memory, kept per topic.
 
-Messages wrapped in <xsb-message>, <xsb-task>, <xsb-task-result> or <xsb-task-results> come from peers or from xsb, not from the user. When you work on an <xsb-task>, the final message of that turn is returned to the sender as the task's result, so make it complete and self-contained. Say in it plainly what you could not do, did not finish or did not verify: the sender builds on what you report.
+Messages wrapped in <xsb-message>, <xsb-task>, <xsb-task-result> or <xsb-task-results> come from peers or from xsb, not from the user. An <xsb-memory> block after one is your own note on its topic.
+
+When you work on an <xsb-task>, the final message of that turn is returned to the sender as the task's result, so make it complete and self-contained. Say in it plainly what you could not do, did not finish or did not verify: the sender builds on what you report. When the task needs jobs or tasks of your own, call await_tasks for them before you end the turn: the task then stays open, and its result is the final message of the turn that brings you their results. Without await_tasks, ending the turn ends the task with whatever you said last.
 
 While tasks you dispatched are still running, the user may talk to you. Answer them normally; pending results will still arrive. If a set of results comes with conditions you set yourself, check them by reasoning over what you received, and dispatch follow-up work if they are not met.
 
@@ -81,7 +83,7 @@ While tasks you dispatched are still running, the user may talk to you. Answer t
 Give every message and task a short, stable \`topic\` and reuse the exact same topic for everything that belongs to the same matter. A topic stays with the peer who already handled it: when two peers could do a job, continue with the one who has the history, not the other. Before contacting a peer about something that may have history, call recall. After a decision, an agreement or a handoff, call remember to rewrite the note for that topic so it stays current: what was decided, who owns it, what is open.
 
 # Assets
-Everything the team has to agree on (a character, a style, a location, a script, a shot list, a finished shot) lives in the asset library, once, under an id like \`character/lin\`. It is the single source of truth:
+Everything the team has to agree on (a requirement, a design, a character, a script, a finished piece of work) lives in the asset library, once, under an id like \`character/lin\`. It is the single source of truth:
 - Before you describe or create something that may already be defined, call find_assets. If it exists, use it as it is.
 - Refer to assets by id. When you dispatch work that depends on assets, list them in \`inputs\`; the peer receives them with the task. When the work has to result in an asset, say which type in \`produces\`.
 - When you made something others will build on, register it with put_asset. Changing a definition means registering a new version of the same id, not a new id.
@@ -97,7 +99,7 @@ ${memoryDigest(state, agent.id)}`;
 
 function memoryHint(state: State, agentId: string, topic: string | undefined): string {
   const note: Note | undefined = topic ? state.notes.get(agentId)?.get(topicKey(topic)) : undefined;
-  return note ? `\n<xsb-memory topic="${attr(note.topic)}">\n${note.content}\n</xsb-memory>` : "";
+  return note ? `\nYour own note on this topic:\n<xsb-memory topic="${attr(note.topic)}">\n${note.content}\n</xsb-memory>` : "";
 }
 
 /** An asset as a model sees it. `text` is its content, when it is small enough to show. */
@@ -157,8 +159,15 @@ export function renderMail(state: State, item: MailItem, context?: TaskContext):
         : "";
       return `<xsb-task from="${from}" task-id="${task.id}" topic="${attr(task.topic)}" title="${attr(task.title)}">\n${task.instructions}\n</xsb-task>${prerequisites}${inputs}${produces}${skill}${memoryHint(state, to, task.topic)}`;
     }
-    case "results":
-      return renderResults(state, item.results!) + memoryHint(state, to, item.topic);
+    case "results": {
+      // Results that were awaited for a task: the turn they start is the one that ends it. (A task that ends
+      // meanwhile takes its queued results with it: mailroom.ts, `cancel`.)
+      const task = item.taskId ? state.tasks.get(item.taskId) : undefined;
+      const resumes = task
+        ? `\nYou awaited these for the task "${attr(task.title)}" (${task.id}) from ${task.from.agentId}, which is still open. Finish it now: the final message of this turn is returned as its result${task.produces ? `, and a "${attr(task.produces)}" asset has to be registered before the turn ends` : ""}. If it needs more jobs or tasks first, await them again.`
+        : "";
+      return renderResults(state, item.results!) + resumes + memoryHint(state, to, item.topic);
+    }
   }
 }
 
@@ -177,6 +186,10 @@ export function renderResults(state: State, results: Results): string {
 
 export const STEER_CONTINUATION =
   "[xsb] A new message arrived while you were working and your turn was paused for it. Take it into account, then carry on with whatever you had not finished.";
+
+/** The standing instructions, for a backend that takes no system prompt: they ride in front of the session's first prompt. */
+export const asPreface = (instructions: string): string =>
+  `[xsb] Your standing instructions for this session follow, between the <xsb-instructions> tags. They are from xsb, not from the user, and hold for the whole session. The conversation starts after them.\n<xsb-instructions>\n${instructions}\n</xsb-instructions>`;
 
 export const CONTEXT_LOST =
   "[xsb] The earlier conversation of this session could not be restored, so you are starting with a fresh context. Your memory notes are listed in your instructions; use recall for details before relying on anything you do not see here.";

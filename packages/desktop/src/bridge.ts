@@ -47,7 +47,10 @@ export type PageView = { id: string; contentsId: number; url: string; title: str
  * `missing` is set when the backend is one of the known agents and its
  * program cannot be found: the program's name, for the user to say where it is (`locateProgram`, clis.ts).
  */
-export type BackendView = { name: string; command: string; installed: boolean; hint?: string; missing?: string };
+/** How far something done to several agents got: their ids, and why it stopped if it did. */
+export type Progress = { done: string[]; failed?: string; error?: string };
+
+export type BackendView = { name: string; command: string; installed: boolean; missing?: string };
 
 /** A role as it is edited: servers and variables as lists, a skill's front matter as fields. */
 export type RoleView = {
@@ -111,6 +114,8 @@ export type Event =
   | { artifact: Artifact }
   | { page: PageView }
   | { removedPage: string }
+  /** The connection to the workspace's hub is gone. Opening the workspace again makes a new one. */
+  | { hub: "down" }
   /** Make this page's tab the current one of the side panel. */
   | { revealPage: string }
   /** What the agent is doing now; `null` when its turn is over. */

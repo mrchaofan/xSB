@@ -63,17 +63,17 @@ export class Backend {
     this.sessions.set(backendSessionId, session);
   }
 
-  /**
-   * Run one turn to its end. Messages steered in on the way are part of it:
-   * with a backend that cannot take them mid-prompt, the prompt is interrupted
-   * and followed by a continuation, and the caller still sees one turn.
-   */
   /** What this backend can read of some input: an image it cannot see is named instead, so the model knows one was there. */
   private readable(prompt: ContentBlock[]): ContentBlock[] {
     if (this.caps.image) return prompt;
     return prompt.map((block) => (block.type === "image" ? text(`[An image (${block.mimeType}) was attached here; you cannot see images.]`) : block));
   }
 
+  /**
+   * Run one turn to its end. Messages steered in on the way are part of it:
+   * with a backend that cannot take them mid-prompt, the prompt is interrupted
+   * and followed by a continuation, and the caller still sees one turn.
+   */
   async prompt(sessionId: string, prompt: ContentBlock[], origin: OriginMeta): Promise<StopReason> {
     prompt = this.readable(prompt);
     const run: Run = { steers: [], cancelled: false };
