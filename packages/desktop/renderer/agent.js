@@ -79,13 +79,13 @@ export async function editAgent(agent) {
     field(t("agent.role"), select(draft, "role", [["", t("agent.role.none")], ...state.roles.map((r) => [r.name, roleTitle(r)])], pickRole),
       creating ? t("agent.role.hint") : RESTARTS),
     creating && field(t("agent.id"), input(draft, "id", { placeholder: "gaffer1", oninput: () => { idHint.textContent = (draft.id && idError()) || ID_HINT; } }), idHint),
-    field(t("avatar.title"), avatarPicker(draft, () => roleOf(draft.role)), t("avatar.agent.hint")),
     field(t("agent.name"), input(draft, "name", { placeholder: t("agent.name.placeholder") })),
     field(t("agent.description"), input(draft, "description", { rows: 2, oninput: () => edited.add("description") }),
       creating ? t("agent.description.hint") : t("agent.description.hint") + t("sentence.gap") + t("agent.description.effect")),
     field(t("agent.backend"), backends(), !creating && RESTARTS),
-    field(t("agent.instructions"), input(draft, "instructions", { rows: 4, placeholder: t("agent.instructions.placeholder") }), !creating && t("agent.instructions.effect")),
-    h("details", {}, h("summary", {}, t("agent.advanced")),
+    h("details", { class: "agent-advanced" }, h("summary", {}, t("agent.advanced")),
+      field(t("avatar.title"), avatarPicker(draft, () => roleOf(draft.role)), t("avatar.agent.hint")),
+      field(t("agent.instructions"), input(draft, "instructions", { rows: 4, placeholder: t("agent.instructions.placeholder") }), !creating && t("agent.instructions.effect")),
       field(t("agent.workspace"), input(draft, "workspace", { placeholder: t("agent.workspace.placeholder") }), !creating && RESTARTS)),
   );
 

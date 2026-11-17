@@ -13,7 +13,10 @@ const opened = new Set();         // 展开着的角色：页面重画后保持�
 let notice = [];                  // 上一次操作的结果，一行一条
 
 export async function showPresets() {
+  const category = state.settings;
+  const page = state.page;
   const packs = await xsb.presets();
+  if (state.settings !== category || state.page !== page) return;
   const top = body.scrollTop;
   showPage("presets", pageHead(t("presets.title"), t("presets.hint")), body);
   fill(body,
