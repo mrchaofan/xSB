@@ -1238,6 +1238,17 @@ const p = await newSession("p1");
   const record = hub.state.store.read(Paths.transcript("a", s)).map((r: any) => r.update._meta?.[Discarded.key]?.messageId).filter(Boolean);
   assert.deepEqual(record, ["stop-2"], "the transcript keeps what was discarded");
 
+  // The dispatcher's cancel is not Esc: the turn goes on with what the user steered in, the task ends as cancelled.
+  await watching.request("session/prompt", mine(s, "stop-6", `!call dispatch_task {"to":"b","title":"esc","instructions":"!busy 600\\n!say WORK","topic":"esc"}`));
+  const work = await until("b at work", () => [...hub.live.values()].find((l) => l.agentId === "b" && l.current?.started));
+  const task = [...hub.state.tasks.values()].find((t) => t.title === "esc")!;
+  assert.equal((await work.steer([{ type: "text", text: "!say STEERED" }], { kind: "user" }, "start")).outcome, "injected");
+  hub.mail.cancel(task);
+  await until("the task cancelled", () => hub.state.tasks.get(task.id)!.status === "cancelled");
+  assert.match(answered("b"), /STEERED/);
+  await idle("b");
+  await idle("a");
+
   // With steering of its own: what it took is seen, nothing is discarded.
   seen.length = 0;
   const c = await open("c");
