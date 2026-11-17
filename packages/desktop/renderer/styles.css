@@ -168,6 +168,8 @@ body.paging .page { display: flex; }
 .entry.boundary { display: flex; align-items: center; gap: 10px; color: var(--ink-3); font-size: 12px; white-space: normal; }
 .entry.boundary::before, .entry.boundary::after { content: ""; flex: 1 1 24px; min-width: 24px; border-top: 1px dashed var(--ink-3); opacity: .5; }
 .entry.boundary span { flex: 0 1 auto; max-width: 70%; text-align: center; }
+/* 换了会话：一行小标题，标出接下来是哪个工作会话或主对话。 */
+.entry.thread { color: var(--ink-3); font-size: 12px; font-weight: 600; letter-spacing: .02em; white-space: normal; padding-top: 4px; border-top: 1px solid var(--line); }
 
 /* 进入会话的话：你说的靠右成块，同事和系统送来的靠左带一道竖线 */
 .input { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }

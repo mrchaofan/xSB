@@ -261,6 +261,8 @@ function entryNode(agentId, entry) {
 
   if (entry.kind === "output") return h("div", { ...base, "data-streaming": entry.streaming }, contentView(entry.content));
   if (entry.kind === "error") return h("div", base, entry.text);
+  // 同一个智能体在不同会话里干活：主对话是用户和它的对话，工作会话是它替别人做某个话题的工作。换了会话就标一行。
+  if (entry.kind === "thread") return h("div", base, h("span", {}, entry.topic ? t("entry.thread.work", { topic: entry.topic }) : t("entry.thread.main")));
   // 上下文的边界：对话记录都还在，分隔线告诉用户模型从哪里起看不到上面的内容。
   if (entry.kind === "boundary") {
     return h("div", { ...base, role: "separator", "data-boundary": entry.boundary.kind },

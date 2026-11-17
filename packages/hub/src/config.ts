@@ -53,8 +53,12 @@ export type GlobalConfig = { version: 1; backends?: Record<string, BackendSpec> 
  * `language` is the language the project's agents speak and write, and the one its preset teams are read in.
  * It is set once, from the first client that says which language its user reads (`LanguageExt`), and is the user's to edit.
  */
-/** `limits.jobsAtOnce`: how many calls of one tool run as jobs at a time; the others wait in the hub (default 2). */
-export type ProjectConfig = { version: 1; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number } };
+/**
+ * `limits.jobsAtOnce`: how many calls of one tool run as jobs at a time; the others wait in the hub (default 2).
+ * `limits.sessionTokens`: past how many tokens of context a work session takes no new work, which goes to a new
+ * session handed its conversation (default 150000).
+ */
+export type ProjectConfig = { version: 1; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number } };
 
 /** Agents whose spec names no backend get this one. */
 export const DEFAULT_BACKEND = "claude";

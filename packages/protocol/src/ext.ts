@@ -97,6 +97,8 @@ export type AgentInfo = AgentSpec & {
   state: AgentState;
   /** The session the agent receives its peers' messages in, once it has one. */
   mainSessionId?: string;
+  /** The sessions the agent works on its peers' tasks in, one per topic (the latest of a topic last). */
+  workSessions?: { sessionId: string; topic: string; retired: boolean }[];
 };
 
 export const Agents = {
@@ -326,8 +328,9 @@ export const Tasks = {
  * decides what a model sees reads a transcript from its end and stops at the first `cleared`. The other kinds
  * mark where the backend session was replaced without the user asking for it (another backend, or one that could
  * not be restored): the model is given a handoff instead, made from what precedes them up to the last `cleared`.
+ * `renewed` starts a work session that takes over from one that grew too long; its handoff is made from that one.
  */
-export type BoundaryKind = "cleared" | "backend_changed" | "not_restored";
+export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed";
 export type Boundary = {
   kind: BoundaryKind;
   /** The backend the session continues on. */

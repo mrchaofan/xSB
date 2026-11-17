@@ -67,11 +67,11 @@ export class Mailroom {
 
   // ---- sending --------------------------------------------------------------
 
-  /** A message from one agent's session to another agent's main session. */
+  /** A message from one agent's session to another agent: to its work session of the topic, or else its main session. */
   send(from: LiveSession, to: string, content: string, topic: string | undefined, steer: boolean): MailItem {
     const item: MailItem = {
       id: newId("m"),
-      to: { agentId: to, sessionId: this.hub.mainSession(to).id },
+      to: { agentId: to, sessionId: (this.hub.findWorkSession(to, topic) ?? this.hub.mainSession(to)).id },
       from: { kind: "agent", agentId: from.agentId, sessionId: from.id },
       kind: "message",
       topic,
@@ -95,7 +95,8 @@ export class Mailroom {
       id: newId("t"),
       ...input,
       from: { agentId: from.agentId, sessionId: from.id },
-      to: { agentId: to, sessionId: this.hub.mainSession(to).id },
+      // A peer's work goes to the agent's work session of its topic (Hub.workSession).
+      to: { agentId: to, sessionId: this.hub.workSession(to, input.topic).id },
       status: held ? "blocked" : "queued",
       createdAt: now(),
       updatedAt: now(),
@@ -283,15 +284,22 @@ export class Mailroom {
     for (const item of [...this.hub.state.mail.values()]) this.deliver(item);
   }
 
-  /** What the hub adds to a task for its assignee: the assets it works from, the skill for what it produces. */
-  private taskContext(item: MailItem): TaskContext | undefined {
+  /**
+   * What the hub adds to a task for its assignee: the assets it works from, the skill for what it produces. Of an
+   * input the session was given another version of, that version's text too, to tell what changed.
+   */
+  private taskContext(item: MailItem, session: LiveSession): TaskContext | undefined {
     const task = item.kind === "task" ? this.hub.state.tasks.get(item.taskId!) : undefined;
     const agent = this.hub.state.agents.get(item.to.agentId);
     if (!task || !agent) return undefined;
     const inputs = (task.inputs ?? [])
       .map((ref) => this.hub.assets.get(ref))
       .filter((a) => a !== undefined)
-      .map((asset) => ({ asset, text: this.hub.assets.text(asset) }));
+      .map((asset) => {
+        const had = session.given.assets.get(asset.id);
+        const earlier = had && had.version !== asset.version ? this.hub.assets.get(`${asset.id}@${had.version}`) : undefined;
+        return { asset, text: this.hub.assets.text(asset), ...(earlier ? { before: { version: earlier.version, text: this.hub.assets.text(earlier) } } : {}) };
+      });
     const skill = this.hub.role(agent)?.skills.find((s) => task.produces && s.produces === task.produces);
     return { inputs, skill: skill && { ...skill, body: skillBody(skill) } };
   }
@@ -306,18 +314,22 @@ export class Mailroom {
       return;
     }
     const session = this.hub.live.get(item.to.sessionId) ?? this.hub.mainSession(item.to.agentId);
-    const prompt = [text(renderMail(state, item, this.taskContext(item)))];
+    const { text: said, gives } = renderMail(state, item, this.taskContext(item, session), session.given);
+    const prompt = [text(said)];
     const origin: OriginMeta = {
       ...item.from,
       messageId: item.id,
       taskId: item.results ? (item.results.mode ? undefined : item.results.taskIds[0]) : item.taskId,
       role: item.kind === "results" ? "task_result" : item.kind,
     };
-    const queue = (): void => void session.enqueue({ origin, prompt, item });
+    const queue = (): void => void session.enqueue({ origin, prompt, item, gives });
     if (!item.steer || !session.current) return queue();
     session.steer(prompt, origin, "promptRequired").then(
       (answer) => {
-        if (answer.outcome === "injected") state.commit([ops.ack(item.id)]);
+        if (answer.outcome === "injected") {
+          session.take(gives);
+          state.commit([ops.ack(item.id)]);
+        }
         else queue();
       },
       (e) => {

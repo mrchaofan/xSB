@@ -21,6 +21,10 @@ import { Client } from "./acp-server.ts";
 import { Assets } from "./assets.ts";
 import { BackendPool } from "./backends.ts";
 import { DEFAULT_BACKEND, loadProjectConfig, projectLanguage } from "./config.ts";
+
+/** Past this much context a work session takes no new work, unless the project says otherwise (`limits.sessionTokens`). */
+const SESSION_TOKENS = 150_000;
+const sessionTokens = (paths: Paths): number => loadProjectConfig(paths).limits?.sessionTokens ?? SESSION_TOKENS;
 import { Mailroom } from "./mailroom.ts";
 import { commonServers, serveMcp } from "./mcp.ts";
 import { Paths } from "./paths.ts";
@@ -32,7 +36,7 @@ import type { Contract, Role } from "./roles.ts";
 import { LiveSession } from "./session.ts";
 import type { SessionRec } from "./state.ts";
 import { Spending } from "./spend.ts";
-import { State, ops } from "./state.ts";
+import { State, ops, topicKey } from "./state.ts";
 import { newId, now } from "./util.ts";
 
 export class Hub {
@@ -129,7 +133,10 @@ export class Hub {
   agentInfo(agent: AgentSpec): AgentInfo {
     const busy = [...this.live.values()].some((s) => s.agentId === agent.id && s.busy);
     const state = this.permissions.waitingOn(agent.id) ? "requires_action" : busy ? "running" : "idle";
-    return { ...agent, state, mainSessionId: this.state.mainSession(agent.id)?.id };
+    const workSessions = [...this.state.sessions.values()]
+      .filter((s) => s.agentId === agent.id && s.topic)
+      .map((s) => ({ sessionId: s.id, topic: s.topic!, retired: !!s.retired }));
+    return { ...agent, state, mainSessionId: this.state.mainSession(agent.id)?.id, workSessions };
   }
 
   /** The agent a client reaches when it names none. Read on every use, like the backend table. */
@@ -241,12 +248,13 @@ export class Hub {
     return session;
   }
 
-  createSession(agentId: string, clientMcp: McpServer[] = []): LiveSession {
+  createSession(agentId: string, clientMcp: McpServer[] = [], work?: { topic: string; continues?: string }): LiveSession {
     this.agent(agentId);
     const rec: SessionRec = {
       id: newId("ses"),
       agentId,
       main: !this.state.mainSession(agentId),
+      ...work,
       createdAt: now(),
       updatedAt: now(),
     };
@@ -255,6 +263,26 @@ export class Hub {
     session.clientMcp = clientMcp;
     this.agentChanged(agentId);
     return session;
+  }
+
+  /**
+   * The session an agent does a peer's work of a topic in: its work session of that topic, made when there is none.
+   * One that has grown past `limits.sessionTokens` takes no new work: a new one continues it, handed its conversation
+   * (session.ts), and the old one finishes what it has.
+   */
+  workSession(agentId: string, topic: string): LiveSession {
+    this.mainSession(agentId); // the main session is the first an agent has
+    const current = this.findWorkSession(agentId, topic);
+    if (current && (current.rec.used ?? 0) < sessionTokens(this.paths)) return current;
+    if (current) current.save({ retired: true });
+    return this.createSession(agentId, [], { topic: topicKey(topic), continues: current?.id });
+  }
+
+  /** The agent's current work session of a topic, if it has one. */
+  findWorkSession(agentId: string, topic: string | undefined): LiveSession | undefined {
+    if (!topic) return undefined;
+    const key = topicKey(topic);
+    return [...this.live.values()].find((s) => s.agentId === agentId && s.rec.topic === key && !s.rec.retired);
   }
 
   /** The session an agent receives its peers' mail in. */

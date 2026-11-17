@@ -8,6 +8,7 @@
  *   !await <json>         await_tasks on every task dispatched since the last !await
  *   !perm                 ask the client for permission and emit the outcome
  *   !servers              emit the names of the MCP servers the session was given
+ *   !usage <n>            report that the conversation uses n tokens of context
  *
  * A prompt without directives is echoed. Flags: --steering serves
  * `_session/steering` (without it the hub has to steer by interrupting) and
@@ -90,6 +91,9 @@ async function step(session: Session, line: string): Promise<void> {
       if ((name === "dispatch_task" || name === "start_job") && id) session.taskIds.push(id);
       return say(session, `result(${name}): ${out}\n`);
     }
+    case "usage":
+      conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "usage_update", used: Number(rest), size: 1_000_000 } });
+      return;
     case "servers":
       return say(session, `servers: ${session.servers.join(", ")}\n`);
     case "await": {
