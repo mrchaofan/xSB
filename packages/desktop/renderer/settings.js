@@ -80,6 +80,7 @@ export function showSettings(key = "general", refresh = true) {
       field(t("common.name"), h("div", { class: "readonly" }, state.workspace.name)),
       field(t("settings.folder"), h("div", { class: "readonly path" }, state.workspace.path)),
       h("button", { class: "btn", onclick: () => xsb.newWindow() }, t("settings.openWorkspace"))),
+      budgetSection(),
       section(t("settings.taskDisplay"), settingRow(t("settings.showCompleted"), t("settings.showCompletedHint"),
         toggle(t("settings.showCompleted"), prefs.showCompleted, (value) => save(() => {
           saveWorkspacePreferences(state.workspace.path, { showCompleted: value }); refreshRail();
@@ -114,6 +115,25 @@ export function showSettings(key = "general", refresh = true) {
       if (current === revision && state.settings === "backends") failure.textContent = error.message;
     });
   }
+}
+
+/** 生成预算：用户给这个工作区的生成花费定的硬上限。到了上限，出图和出视频的工具就不再生成。 */
+function budgetSection() {
+  const spend = state.spend ?? { spent: 0, unpriced: 0 };
+  const amount = h("input", { type: "number", min: "0", step: "1", value: spend.budget ?? "", placeholder: t("settings.budget.placeholder") });
+  const failure = h("p", { class: "error", role: "alert" });
+  const apply = async () => {
+    const value = Number(amount.value);
+    if (amount.value === "" || !Number.isFinite(value) || value < 0) return void (failure.textContent = t("settings.budget.invalid"));
+    failure.textContent = "";
+    try { await xsb.setBudget(value); } catch (e) { failure.textContent = e.message; }
+  };
+  return section(t("settings.budget"),
+    h("p", { class: "hint" }, t("settings.budget.hint")),
+    h("div", { class: "budget-row" }, amount, h("button", { class: "btn primary", onclick: apply }, t("settings.budget.save"))),
+    failure,
+    h("p", { class: "hint" }, t("settings.budget.spent", { spent: spend.spent.toFixed(2) }),
+      spend.unpriced ? ` ${t("settings.budget.unpriced", { n: spend.unpriced })}` : ""));
 }
 
 export function settingsBack() {

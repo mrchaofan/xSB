@@ -12,7 +12,7 @@
  * for each (../renderer/text.js). Main hands it facts, and errors already
  * worded in that language, since only main can tell what an error is about.
  */
-import type { AgentInfo, Boundary, OriginMeta, Task, Workplace } from "@xsb/protocol";
+import type { AgentInfo, Boundary, OriginMeta, Spend, Task, Workplace } from "@xsb/protocol";
 import type { Content } from "./content.ts";
 
 /**
@@ -103,6 +103,8 @@ export type Snapshot = {
   transcripts: Record<string, Entry[]>;
   /** Agent id -> what it is doing, for those with a turn running. */
   activities: Record<string, Activity>;
+  /** What generation has cost so far, and the user's budget for it. */
+  spend: Spend;
   /** The page tabs. `null` on an Electron that cannot show web pages (no `<webview2>`). */
   pages: PageView[] | null;
 };
@@ -113,6 +115,7 @@ export type Event =
   | { removedAgent: string }
   | { role: RoleView }
   | { removedRole: string }
+  | { spend: Spend }
   | { task: Task }
   | { artifact: Artifact }
   | { page: PageView }

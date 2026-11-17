@@ -108,6 +108,10 @@ body.no-workspace .hub { display: none; }
 .rail-footer { flex: none; border-top: 1px solid var(--line); padding: 10px 0 0; margin-top: 16px; }
 .utility-row { color: var(--ink-2); gap: 12px; height: 40px; }
 .utility-row small { margin-left: auto; font-size: 11px; }
+.utility-row.spend span { font-size: 12px; font-variant-numeric: tabular-nums; }
+.utility-row.spend[data-alert="true"] { color: #b4532a; }
+.budget-row { display: flex; gap: 8px; align-items: center; }
+.budget-row input { width: 160px; }
 .count { margin-right: auto; margin-left: 8px; font-size: 10px; padding: 0 5px; border-radius: 5px; background: var(--line); }
 .rail h2 { display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 2px 0 8px; }
 .rail h2:not(:first-child) { margin-top: 22px; }

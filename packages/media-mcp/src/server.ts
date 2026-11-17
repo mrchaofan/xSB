@@ -17,7 +17,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Connection, errorMessage } from "@xsb/protocol";
-import type { ImageProvider, VideoProvider } from "./provider.ts";
+import { Ledger } from "./ledger.ts";
+import type { Cost } from "./ledger.ts";
+import type { ImageProvider, Usage, VideoProvider } from "./provider.ts";
 import { seedance } from "./seedance.ts";
 import { seedream } from "./seedream.ts";
 
@@ -56,17 +58,29 @@ function lastFrameOf(video: string, to: string): Promise<boolean> {
   });
 }
 
-async function generateImage(provider: ImageProvider, args: any, signal: AbortSignal): Promise<string> {
-  need(args, "prompt", "output");
-  await provider.generate({ prompt: args.prompt, references: imagesOf(args), size: args.size, output: args.output }, signal);
-  return `Saved ${path.resolve(args.output)}`;
+/** Where an xsb project counts what generation costs (ledger.ts), and where the provider keeps its price list. */
+type Accounts = { ledger: Ledger; prices: string } | undefined;
+
+/** Write a generation down when there is a ledger; what to add to the tool's answer. */
+async function account(accounts: Accounts, provider: { cost(usage: Usage, cache: string | undefined): Promise<Cost> }, tool: string, output: string, usage: Usage | undefined): Promise<string> {
+  if (!accounts) return "";
+  const cost: Cost = usage ? await provider.cost(usage, accounts.prices) : { amount: null, usage: "unknown", basis: "the provider reported no usage" };
+  return `\n${accounts.ledger.record(tool, output, cost)}`;
 }
 
-async function generateVideo(provider: VideoProvider, args: any, signal: AbortSignal, env: NodeJS.ProcessEnv): Promise<string> {
+async function generateImage(provider: ImageProvider, args: any, signal: AbortSignal, accounts: Accounts): Promise<string> {
+  need(args, "prompt", "output");
+  accounts?.ledger.check("generate_image");
+  const usage = await provider.generate({ prompt: args.prompt, references: imagesOf(args), size: args.size, output: args.output }, signal);
+  return `Saved ${path.resolve(args.output)}${await account(accounts, provider, "generate_image", args.output, usage)}`;
+}
+
+async function generateVideo(provider: VideoProvider, args: any, signal: AbortSignal, env: NodeJS.ProcessEnv, accounts: Accounts): Promise<string> {
   need(args, "prompt", "output");
   const references = imagesOf(args);
   if (args.last_frame && !args.first_frame) throw new Error(`"last_frame" needs "first_frame"`);
   if (references?.length && args.first_frame) throw new Error(`"reference_images" cannot be combined with "first_frame": use one or the other`);
+  accounts?.ledger.check("generate_video");
   const id = await provider.submit({
     prompt: args.prompt,
     firstFrame: args.first_frame,
@@ -82,6 +96,8 @@ async function generateVideo(provider: VideoProvider, args: any, signal: AbortSi
   /** Give the generation up, and say whether that saved its cost. */
   const callOff = async (why: string): Promise<never> => {
     const stopped = await provider.cancel(id);
+    // Billed, and what it cost is not known: written down as such, so that the budget is not taken for more than it is.
+    if (!stopped) accounts?.ledger.record("generate_video", args.output, { amount: null, usage: "unknown", basis: `generation ${id} was given up after the provider had started it; it is billed, its usage was not read` });
     throw new Error(`generation ${id} ${why}. ${stopped ? "It was cancelled at the provider and is not billed." : "The provider had already started it: it will finish and be billed, but its result is not fetched."} Nothing was saved to ${args.output}.`);
   };
   const deadline = Date.now() + Number(env.VIDEO_TIMEOUT_S ?? 1800) * 1000;
@@ -93,7 +109,7 @@ async function generateVideo(provider: VideoProvider, args: any, signal: AbortSi
     if (job) misses = 0;
     if (job?.status === "failed") throw new Error(`generation ${id} failed: ${job.error}. Nothing was saved. If the reason is the prompt or the images, change them and submit again; otherwise report it to the user.`);
     if (job?.status === "succeeded") {
-      const { seed, lastFrame } = await provider.save(id, { video: args.output, lastFrame: args.last_frame_output }).catch((e) => {
+      const { seed, lastFrame, usage } = await provider.save(id, { video: args.output, lastFrame: args.last_frame_output }).catch((e) => {
         throw new Error(`generation ${id} finished and is billed, but its file could not be saved: ${errorMessage(e)}`);
       });
       const lines = [`Saved ${path.resolve(args.output)}`];
@@ -101,7 +117,7 @@ async function generateVideo(provider: VideoProvider, args: any, signal: AbortSi
       else if (args.last_frame_output && (await lastFrameOf(args.output, args.last_frame_output))) lines.push(`Last frame saved to ${path.resolve(args.last_frame_output)} (taken from the video: the provider returned none)`);
       else if (args.last_frame_output) lines.push(`Last frame NOT saved: the provider returned none, and it could not be taken from the video (that needs ffmpeg on PATH). ${args.last_frame_output} does not exist; do not use it as a first_frame.`);
       if (seed !== undefined) lines.push(`seed: ${seed}`);
-      return [...lines, `generation id: ${id}`].join("\n");
+      return [...lines, `generation id: ${id}`].join("\n") + (await account(accounts, provider, "generate_video", args.output, usage));
     }
     if (Date.now() > deadline) return callOff(`was not finished after ${env.VIDEO_TIMEOUT_S ?? 1800}s`);
   }
@@ -125,9 +141,31 @@ function choose<Provider extends { about: string }>(registry: Record<string, Pro
 const str = (description: string): object => ({ type: "string", description });
 const images = (description: string): object => ({ type: "array", items: { type: "string" }, description });
 
+/** At most `n` at a time; the others wait their turn. */
+function limiter(n: number): <T>(work: () => Promise<T>) => Promise<T> {
+  let running = 0;
+  const waiting: (() => void)[] = [];
+  return async (work) => {
+    if (running >= n) await new Promise<void>((resolve) => waiting.push(resolve));
+    running++;
+    try {
+      return await work();
+    } finally {
+      running--;
+      waiting.shift()?.();
+    }
+  };
+}
+
+/** Images asked for at once beyond this wait here: the provider would queue them anyway, slower and out of sight. */
+const IMAGES_AT_ONCE = 3;
+
 export function main(env: NodeJS.ProcessEnv = process.env): void {
   const image = choose(IMAGE_PROVIDERS, "IMAGE_PROVIDER", "seedream", env);
   const video = choose(VIDEO_PROVIDERS, "VIDEO_PROVIDER", "seedance", env);
+  // XSB_SPEND: the ledger of the xsb project this server works for; XSB_AGENT: the agent it works for.
+  const accounts: Accounts = env.XSB_SPEND ? { ledger: new Ledger(env.XSB_SPEND, env.XSB_AGENT), prices: path.join(path.dirname(env.XSB_SPEND), "run", "prices.json") } : undefined;
+  const oneOfFew = limiter(IMAGES_AT_ONCE);
   /** Calls that are running: the server does not exit before each has called its generation off. */
   const running = new Set<Promise<unknown>>();
 
@@ -179,8 +217,8 @@ export function main(env: NodeJS.ProcessEnv = process.env): void {
   conn.onRequest("tools/call", (p, { signal }) => {
     const args = p.arguments ?? {};
     const call = (async () => {
-      if (p.name === "generate_image") return generateImage(image.use(), args, signal);
-      if (p.name === "generate_video") return generateVideo(video.use(), args, signal, env);
+      if (p.name === "generate_image") return oneOfFew(() => generateImage(image.use(), args, signal, accounts));
+      if (p.name === "generate_video") return generateVideo(video.use(), args, signal, env, accounts);
       throw new Error(`no tool "${p.name}"`);
     })().then(
       (text) => ({ content: [{ type: "text", text }] }),

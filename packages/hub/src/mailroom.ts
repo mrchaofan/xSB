@@ -15,7 +15,9 @@
  * one store transaction.
  */
 import { Tasks, errorMessage, isTerminal, text, textOf } from "@xsb/protocol";
-import type { Addr, OriginMeta, StopReason, Task, TaskStatus } from "@xsb/protocol";
+import type { Addr, McpServer, OriginMeta, StopReason, Task, TaskStatus } from "@xsb/protocol";
+import { loadProjectConfig } from "./config.ts";
+import type { Paths } from "./paths.ts";
 import type { Op } from "@xsb/store";
 import type { Hub } from "./hub.ts";
 import { mcpRequest } from "./mcp-client.ts";
@@ -26,6 +28,13 @@ import type { LiveSession, Turn } from "./session.ts";
 import type { Gate, MailItem } from "./state.ts";
 import { ops } from "./state.ts";
 import { newId, now } from "./util.ts";
+
+/** A job as it waits for its place, with what is needed to run it then. */
+type Job = { task: Task; server: McpServer; cwd: string };
+
+/** How many calls of one tool run at a time, unless the project says otherwise (`limits.jobsAtOnce`). */
+const JOBS_AT_ONCE = 2;
+const jobsAtOnce = (paths: Paths): number => loadProjectConfig(paths).limits?.jobsAtOnce ?? JOBS_AT_ONCE;
 
 /** How long a cancelled job's tool has to call off what it started and say so, before its server is stopped. */
 const JOB_CANCEL_GRACE_MS = 15_000;
@@ -49,6 +58,8 @@ export class Mailroom {
   private hub: Hub;
   /** Task id -> how to stop the job that runs for it. */
   private jobs = new Map<string, AbortController>();
+  /** Jobs that wait for a place, per tool (`server/tool`), in the order they were started. */
+  private waiting = new Map<string, Job[]>();
 
   constructor(hub: Hub) {
     this.hub = hub;
@@ -109,9 +120,12 @@ export class Mailroom {
    */
   startJob(from: LiveSession, input: { title: string; topic: string; server: string; tool: string; arguments: unknown }): Task {
     const agent = this.hub.agent(from.agentId);
-    const server = this.hub.role(agent)?.mcpServers.find((s) => s.name === input.server);
+    const server = this.hub.toolServers(agent).find((t) => t.from === "role" && t.server.name === input.server)?.server;
     if (!server) throw new Error(`your role has no MCP server "${input.server}"`);
     const self = { agentId: from.agentId, sessionId: from.id };
+    const kind = `${input.server}/${input.tool}`;
+    const running = [...this.hub.state.tasks.values()].filter((t) => t.tool && `${t.tool.server}/${t.tool.name}` === kind && t.status === "running").length;
+    const waits = running >= jobsAtOnce(this.hub.paths);
     const task: Task = {
       id: newId("t"),
       title: input.title,
@@ -122,14 +136,28 @@ export class Mailroom {
       after: [],
       tool: { server: input.server, name: input.tool, arguments: input.arguments },
       partOf: this.openTask(from.current)?.id,
-      status: "running",
+      status: waits ? "queued" : "running",
       createdAt: now(),
       updatedAt: now(),
     };
     this.saveTask(task);
+    const job = { task, server, cwd: agent.workspace };
+    if (waits) this.waiting.set(kind, [...(this.waiting.get(kind) ?? []), job]);
+    else this.runJob(job);
+    return task;
+  }
+
+  /**
+   * Run a job's tool call. When it ends, the next job of the same tool that waits gets its place: at most
+   * `jobsAtOnce` calls of one tool run at a time, so that a halt called by the user finds the rest still waiting
+   * here, where cancelling one is certain to cost nothing.
+   */
+  private runJob({ task, server, cwd }: Job): void {
+    const kind = `${task.tool!.server}/${task.tool!.name}`;
+    if (task.status !== "running") this.saveTask((task = { ...task, status: "running" }));
     const abort = new AbortController();
     this.jobs.set(task.id, abort);
-    mcpRequest(server, "tools/call", { name: input.tool, arguments: input.arguments }, agent.workspace, abort.signal, JOB_CANCEL_GRACE_MS)
+    mcpRequest(server, "tools/call", { name: task.tool!.name, arguments: task.tool!.arguments }, cwd, abort.signal, JOB_CANCEL_GRACE_MS)
       .then(
         // A cancelled call is still answered: what the tool says became of it is the result. One that finished all the same did finish.
         (r): [TaskStatus, string] => {
@@ -141,9 +169,11 @@ export class Mailroom {
       )
       .then(([status, result]) => {
         this.jobs.delete(task.id);
-        if (!this.hub.stopping) this.finishTask(this.hub.state.tasks.get(task.id)!, status, result);
+        if (this.hub.stopping) return;
+        this.finishTask(this.hub.state.tasks.get(task.id)!, status, result);
+        const next = this.waiting.get(kind)?.shift();
+        if (next) this.runJob(next);
       });
-    return task;
   }
 
   /**
@@ -186,6 +216,13 @@ export class Mailroom {
    */
   cancel(task: Task): "stopping" | "cancelled" {
     if (task.tool) {
+      const kind = `${task.tool.server}/${task.tool.name}`;
+      const waiting = this.waiting.get(kind) ?? [];
+      if (waiting.some((job) => job.task.id === task.id)) {
+        this.waiting.set(kind, waiting.filter((job) => job.task.id !== task.id));
+        this.finishTask(task, "cancelled", "Cancelled by the dispatcher before it started: it waited for its turn in xsb, nothing was submitted, nothing is billed.");
+        return "cancelled";
+      }
       this.jobs.get(task.id)?.abort();
       return "stopping";
     }
@@ -237,7 +274,9 @@ export class Mailroom {
   /** Pick up what the last stop left unfinished: mail is delivered again, jobs are not run again. */
   resume(): void {
     for (const task of [...this.hub.state.tasks.values()]) {
-      if (task.tool && !isTerminal(task.status)) {
+      if (task.tool && task.status === "queued") {
+        this.finishTask(task, "failed", "xsb stopped while this job waited for its turn. It had not started, so nothing was billed; start it again if it is still needed.");
+      } else if (task.tool && !isTerminal(task.status)) {
         this.finishTask(task, "failed", "xsb stopped while this job ran, so its outcome is unknown. It was not run again; start it again if it is still needed.");
       }
     }

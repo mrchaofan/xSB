@@ -8,15 +8,16 @@
  * no profile, no endpoint address, no model. A command is run as it is, and when the
  * account cannot serve it, arkcli's own words are the error.
  *
- * Only generation is used. arkcli can also rewrite the configuration of the
- * agents on a machine; that is never run from here. `ALLOWED` is the whole
- * list of what is.
+ * Only generation is used, and the price list it is billed by (read only, to
+ * estimate what a generation cost). arkcli can also rewrite the configuration
+ * of the agents on a machine; that is never run from here. `ALLOWED` is the
+ * whole list of what is.
  *
  *   ARKCLI   the program, when it is not `arkcli` on PATH
  */
 import { spawn } from "node:child_process";
 
-const ALLOWED = ["+gen", "gen get", "gen delete", "api arkruntime.get_content_generation_task"];
+const ALLOWED = ["+gen", "gen get", "gen delete", "api arkruntime.get_content_generation_task", "pricing models"];
 
 /**
  * Said after every failure arkcli reports. Its messages advise whoever owns the account (sign in, choose a model,

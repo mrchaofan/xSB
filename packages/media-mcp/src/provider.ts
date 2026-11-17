@@ -11,6 +11,7 @@
  * To add a model: implement the interface in a file of its own and name it in
  * the registry in server.ts. Nothing else knows which model is in use.
  */
+import type { Cost } from "./ledger.ts";
 
 /** What to generate, in no provider's terms. An image is a file path or a URL. */
 export type VideoRequest = {
@@ -34,6 +35,9 @@ export type VideoRequest = {
   wantLastFrame?: boolean;
 };
 
+/** What one generation used, in the provider's units, as the provider reported it. */
+export type Usage = { unit: "tokens" | "images"; units: number; model?: string; resolution?: string };
+
 export type VideoStatus = { status: "pending" | "succeeded" } | { status: "failed"; error: string };
 
 export interface VideoProvider {
@@ -43,7 +47,9 @@ export interface VideoProvider {
   submit(request: VideoRequest): Promise<string>;
   poll(id: string): Promise<VideoStatus>;
   /** Write the finished video to `to.video` and, if asked and there is one, its last frame to `to.lastFrame`. */
-  save(id: string, to: { video: string; lastFrame?: string }): Promise<{ seed?: number; lastFrame: boolean }>;
+  save(id: string, to: { video: string; lastFrame?: string }): Promise<{ seed?: number; lastFrame: boolean; usage?: Usage }>;
+  /** What a generation cost, from the provider's price list (kept in `cache` between calls). */
+  cost(usage: Usage, cache: string | undefined): Promise<Cost>;
   /**
    * Nobody wants the result any more: stop it if the provider still can, so it is not paid for.
    * Answers whether it was stopped; false means it will finish, and be billed, regardless.
@@ -63,5 +69,7 @@ export type ImageRequest = {
 
 export interface ImageProvider {
   readonly about: string;
-  generate(request: ImageRequest, signal: AbortSignal): Promise<void>;
+  /** Answers what it used, when the provider says. */
+  generate(request: ImageRequest, signal: AbortSignal): Promise<Usage | undefined>;
+  cost(usage: Usage, cache: string | undefined): Promise<Cost>;
 }
