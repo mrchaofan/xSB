@@ -23,6 +23,13 @@ import { roleInput, roleView } from "./roles.ts";
 export const ARTIFACT_SCHEME = "xsb-artifact";
 
 type Emit = (event: Event) => void;
+
+/**
+ * What the user is told of even when they are not looking (main.ts makes it a notification of the system):
+ * the work they set going is over, or went wrong, or waits for them. `detail` is in the words it came in.
+ */
+export type Notice = { agentId: string; name: string; kind: "done" | "failed" | "confirm" | "permission"; detail: string };
+type Notify = (notice: Notice) => void;
 type Tool = Extract<Entry, { kind: "tool" }>;
 
 const KINDS: Record<string, Artifact["kind"]> = { ".md": "markdown", ".html": "html", ".htm": "html", ".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image", ".webp": "image", ".svg": "image", ".mp4": "video", ".webm": "video", ".mov": "video", ".m4v": "video" };
@@ -60,12 +67,20 @@ export class Workspace {
   /** Entry id -> how to answer the permission request it shows. */
   private asking = new Map<string, { agentId: string; entry: Extract<Entry, { kind: "permission" }>; request: PermissionRequest; answer: (r: PermissionResponse) => void }>();
   private seq = 0;
+  private notify: (notice: Omit<Notice, "name">) => void;
+  /**
+   * Whether some agent was at work when last looked, and what happened since the workspace last went quiet: an
+   * agent asked the user something, or the user stopped one. Either way its going quiet is no news of its own.
+   */
+  private busy = false;
+  private asked = false;
+  private stopped = false;
 
   /**
    * Open the project's workspace, making the folder a project first if it is none.
    * `language` is the one the user reads, and `say` words an error in it.
    */
-  static async open(paths: Paths, language: Language, say: (e: unknown) => string, emit: Emit): Promise<Workspace> {
+  static async open(paths: Paths, language: Language, say: (e: unknown) => string, emit: Emit, notify: Notify): Promise<Workspace> {
     if (!fs.existsSync(paths.dir)) initProject(paths);
     const socket = await hubSocket(paths);
     const conn = new Connection(socket, socket, "hub");
@@ -79,13 +94,16 @@ export class Workspace {
       },
       clientInfo: { name: "xsb-desktop", version: "0.1.0" },
     });
-    return new Workspace(paths, conn, say, emit);
+    return new Workspace(paths, conn, say, emit, notify);
   }
 
-  private constructor(paths: Paths, conn: Connection, say: (e: unknown) => string, emit: Emit) {
+  private constructor(paths: Paths, conn: Connection, say: (e: unknown) => string, emit: Emit, notify: Notify) {
     this.paths = paths;
     this.conn = conn;
     this.say = say;
+    this.notify = (notice) => {
+      if (this.live) notify({ ...notice, name: this.agents.get(notice.agentId)?.name ?? notice.agentId });
+    };
     this.emit = (event) => {
       if (this.live) emit(event);
     };
@@ -105,6 +123,10 @@ export class Workspace {
       this.emit({ removedRole: p.name });
     });
     conn.onNotification(Tasks.update, (p) => this.onTask(p.task));
+    conn.onNotification(Agents.asks, (p) => {
+      this.asked = true;
+      this.notify({ agentId: p.agentId, kind: "confirm", detail: p.question });
+    });
     conn.onRequest("session/request_permission", (p) => this.onPermission(p));
   }
 
@@ -133,6 +155,7 @@ export class Workspace {
 
   /** With the hub gone nothing runs: no agent is at work any more, and no question of theirs waits for an answer. */
   private onHubGone(emit: Emit): void {
+    this.stopped = true;
     for (const entryId of [...this.asking.keys()]) this.answer(entryId, "cancelled");
     for (const agent of [...this.agents.values()]) this.onAgent({ ...agent, state: "idle" });
     emit({ hub: "down" });
@@ -141,11 +164,26 @@ export class Workspace {
   /** Agents doing a turn or holding unfinished tasks, including jobs awaited between turns. */
   working(): string[] {
     if (this.conn.isClosed) return [];
+    return [...this.atWork()].map((id) => this.agents.get(id)?.name ?? id);
+  }
+
+  private atWork(): Set<string> {
     const busy = new Set([...this.agents.values()].filter((agent) => agent.state !== "idle").map((agent) => agent.id));
     for (const task of this.tasks.values()) {
       if (!isTerminal(task.status)) busy.add(task.tool ? task.from.agentId : task.to.agentId);
     }
-    return [...busy].map((id) => this.agents.get(id)?.name ?? id);
+    return busy;
+  }
+
+  /**
+   * Whether the workspace went quiet: nobody at work and no task open. That is when what the user set going is
+   * done, however many agents it went through; `agentId` was the last to stop.
+   */
+  private watch(agentId: string): void {
+    const busy = this.atWork().size > 0;
+    if (busy && !this.busy) this.asked = this.stopped = false;
+    if (!busy && this.busy && !this.asked && !this.stopped) this.notify({ agentId, kind: "done", detail: "" });
+    this.busy = busy;
   }
 
   /** Whether this directory is where one of the workspace's agents works, or is inside the project. */
@@ -175,6 +213,7 @@ export class Workspace {
     for (const agentId of this.growing.keys()) this.settle(agentId);
     // What the replayed history ended on is what an agent that is still at work is doing.
     for (const agent of this.agents.values()) if (agent.state === "idle") this.does(agent.id, null);
+    this.busy = this.atWork().size > 0;
     this.live = true;
     return {
       workspace: { name: path.basename(this.paths.project), path: this.paths.project },
@@ -208,11 +247,15 @@ export class Workspace {
       this.does(agent.id, "waiting"); // a turn began: nothing has come back yet
     }
     this.emit({ agent });
+    this.watch(agent.id);
   }
 
   private onTask(task: Task): void {
+    const agentId = task.tool ? task.from.agentId : task.to.agentId;
+    if (task.status === "failed" && this.tasks.get(task.id)?.status !== "failed") this.notify({ agentId, kind: "failed", detail: task.title });
     this.tasks.set(task.id, task);
     this.emit({ task });
+    this.watch(agentId);
   }
 
   private onAgentRemoved(id: string): void {
@@ -345,7 +388,9 @@ export class Workspace {
     } catch (e) {
       // It never became a turn: it stays as sent, no longer waiting.
       if (this.pending.delete(id)) this.put(agentId, entry);
-      this.put(agentId, { id: this.newId(), kind: "error", text: this.why(e) });
+      const text = this.why(e);
+      this.put(agentId, { id: this.newId(), kind: "error", text });
+      this.notify({ agentId, kind: "failed", detail: text });
     }
   }
 
@@ -365,6 +410,7 @@ export class Workspace {
 
   /** Stop the running turn. Its open permission requests are void. */
   async cancel(agentId: string): Promise<void> {
+    this.stopped = true;
     for (const [entryId, asked] of this.asking) if (asked.agentId === agentId) this.answer(entryId, "cancelled");
     const sessionId = await this.mains.get(agentId);
     if (sessionId) this.conn.notify("session/cancel", { sessionId });
@@ -381,6 +427,7 @@ export class Workspace {
       detail: request.toolCall.title ?? request.toolCall.name ?? request.toolCall.toolCallId,
     };
     this.put(agentId, entry);
+    this.notify({ agentId, kind: "permission", detail: entry.detail });
     return new Promise((answer) => this.asking.set(entry.id, { agentId, entry, request, answer }));
   }
 

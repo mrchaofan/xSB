@@ -5,6 +5,7 @@ import { Agents, Assets, Roles, Tasks, Teams } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
+import type { Notice } from "../src/workspace.ts";
 
 const role = (instructions = "old") => ({ name: "developer", instructions, description: "build", backend: "mock", mcpServers: {}, skills: [], agents: [] });
 const agent = (id: string) => ({ id, name: id, role: "developer", workspace: "/tmp", backend: "mock", description: "old", state: "idle" });
@@ -29,12 +30,13 @@ class Peer {
     this.isClosed = true;
   }
 }
-function workspace(peer: Peer) {
+function workspace(peer: Peer, notify: (notice: Notice) => void = () => {}) {
   return new Workspace(
     new Paths("/tmp/xsb-desktop-review"),
     peer,
     (e) => e.message,
     () => {},
+    notify,
   );
 }
 function snapshot(peer: Peer, agents = []) {
@@ -174,5 +176,40 @@ test("awaited jobs count as work even between idle agent turns", async () => {
   assert.deepEqual(ws.working(), ["a"]);
   peer.isClosed = true;
   assert.deepEqual(ws.working(), []);
+  ws.close();
+});
+
+test("the user is told when the work is done, failed, or waits for them", async () => {
+  const peer = new Peer();
+  snapshot(peer, [agent("a"), agent("b")]);
+  const notices: string[] = [];
+  const ws = workspace(peer, (n) => notices.push(`${n.kind} ${n.name} ${n.detail}`.trim()));
+  await ws.load();
+  const task = { id: "t1", title: "draw", from: { agentId: "a" }, to: { agentId: "b" }, status: "running" };
+
+  // The work goes through two agents; it is done when the last of them stops and no task is open.
+  peer.emit(Agents.update, { agent: { ...agent("a"), state: "running" } });
+  peer.emit(Tasks.update, { task });
+  peer.emit(Agents.update, { agent: agent("a") });
+  assert.deepEqual(notices, []);
+  peer.emit(Tasks.update, { task: { ...task, status: "failed" } });
+  peer.emit(Tasks.update, { task: { ...task, status: "failed", result: "again" } });
+  assert.deepEqual(notices, ["failed b draw", "done b"]);
+
+  // An agent that asks the user, or one the user stopped, going quiet is no news of its own.
+  notices.length = 0;
+  peer.emit(Agents.update, { agent: { ...agent("a"), state: "running" } });
+  peer.emit(Agents.asks, { agentId: "a", question: "Which cast?" });
+  peer.emit(Agents.update, { agent: agent("a") });
+  peer.emit(Agents.update, { agent: { ...agent("a"), state: "running" } });
+  await ws.cancel("a");
+  peer.emit(Agents.update, { agent: agent("a") });
+  assert.deepEqual(notices, ["confirm a Which cast?"]);
+
+  // A permission request is asked of the user.
+  notices.length = 0;
+  ws["sessionAgent"].set("s-a", "a");
+  void peer.requests.get("session/request_permission")({ sessionId: "s-a", toolCall: { toolCallId: "c", title: "rm -rf build" }, options: [] });
+  assert.deepEqual(notices, ["permission a rm -rf build"]);
   ws.close();
 });

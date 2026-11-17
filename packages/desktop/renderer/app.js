@@ -437,6 +437,7 @@ xsb.on((event) => {
   else if (event.removedPage) onPageRemoved(event.removedPage);
   else if (event.hub === "down") showHub(false);
   else if (event.revealPage) { document.body.classList.remove("no-artifact"); selectTab(event.revealPage); }
+  else if (event.showAgent) { if (agentOf(event.showAgent)) focusLane(event.showAgent); }
   else if ("activity" in event) {
     if (event.activity) state.activities[event.agentId] = event.activity; else delete state.activities[event.agentId];
     syncActivity(event.agentId);

@@ -66,6 +66,9 @@ export type SteeringOutcome =
  *                                                   turn on; a turn that is running fails
  *   notify     _dev.xsb/agents/update  { agent: AgentInfo }   (hub -> opted-in clients)
  *              _dev.xsb/agents/removed { id }
+ *              _dev.xsb/agents/asks    { agentId, question }   the agent waits for the user to decide or
+ *                                                   confirm something (its tool `ask_user`); the question
+ *                                                   itself is in its reply, this is for telling the user
  *
  * A client that opted in is an observer: it also receives permission requests
  * of sessions nobody is attached to, so an unattended agent is never stuck.
@@ -107,6 +110,7 @@ export const Agents = {
   restart: `_${NS}/agents/restart`,
   update: `_${NS}/agents/update`,
   removed: `_${NS}/agents/removed`,
+  asks: `_${NS}/agents/asks`,
 } as const;
 
 /**

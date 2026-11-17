@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { RpcError } from "@xsb/protocol";
 import type { Connection, McpServer } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
+import { mcpServers } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { TOOLS, callTool } from "./tools.ts";
 import { VERSION } from "./util.ts";
@@ -36,6 +37,17 @@ export function bridgeServer(socketPath: string, token: string): McpServer {
       { name: BRIDGE_TOKEN_ENV, value: token },
     ],
   };
+}
+
+/**
+ * MCP servers every agent has, role or not: what the client that started the hub gives them, in the shape of
+ * `.mcp.json` (the desktop app gives its browser). A role's server of the same name takes its place.
+ */
+export const COMMON_SERVERS_ENV = "XSB_MCP_SERVERS";
+
+export function commonServers(): McpServer[] {
+  const given = process.env[COMMON_SERVERS_ENV];
+  return given ? mcpServers(JSON.parse(given)) : [];
 }
 
 export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => LiveSession | undefined): void {

@@ -7,7 +7,8 @@
  *
  * The hub and the agents it starts find a program as a command on PATH, and
  * know nothing of this module: it puts a directory of launchers first on the
- * PATH the hub is started with.
+ * PATH the hub is started with. With it the hub is told that every agent has
+ * the app's browser, whatever its role (`COMMON_SERVERS_ENV`).
  *
  *   <dir>/bin/claude-agent-acp   the ACP wrapper shipped in the app, told where the claude program is
  *   <dir>/bin/codex-acp          the same for codex
@@ -31,7 +32,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findCommand } from "@xsb/hub";
+import { COMMON_SERVERS_ENV, findCommand } from "@xsb/hub";
 import { SOCKET_ENV } from "./browser.ts";
 
 /** The hub's built-in backends: each is named after the program of the user's machine it is, or is built around. */
@@ -43,7 +44,7 @@ const WRAPPERS: Record<string, { command: string; env: string }> = {
   codex: { command: "codex-acp", env: "CODEX_PATH" },
 };
 const BROWSER_TOOL = "xsb-browser-mcp";
-/** MCP servers shipped in the app. A role names one by its command. */
+/** MCP servers shipped in the app. A role names one by its command; the browser every agent has. */
 const TOOLS = ["xsb-media-mcp", BROWSER_TOOL];
 
 /** Where the app's own programs are bundled (rolldown.config.js). */
@@ -91,6 +92,8 @@ export class Clis {
       // No file yet, or one that cannot be read: the user locates the programs again.
     }
     process.env.PATH = `${this.bin}${path.delimiter}${this.userPath}`;
+    // The browser is the app's, not a role's: every agent has it.
+    process.env[COMMON_SERVERS_ENV] = JSON.stringify({ browser: { command: BROWSER_TOOL } });
     this.sync();
   }
 

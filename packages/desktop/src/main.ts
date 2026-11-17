@@ -26,8 +26,10 @@ import { BadAddress } from "./address.ts";
 import type { BackendView, Event } from "./bridge.ts";
 import { serveBrowser } from "./browser.ts";
 import { AGENTS, Clis, wrapped } from "./clis.ts";
+import { notice, setUpNotices } from "./notices.ts";
 import { PREVIEW_PARTITION, Pages } from "./pages.ts";
 import { ARTIFACT_SCHEME, Workspace } from "./workspace.ts";
+import type { Notice } from "./workspace.ts";
 
 /** The built-in pages are served as `app://xsb/…` from this directory, never as file:// URLs. */
 const APP_SCHEME = "app";
@@ -51,6 +53,8 @@ type Words = {
   notRunnable: (file: string) => string;
   noProgram: (agent: string, program: string) => string;
   badAddress: string;
+  /** A notification of the system: what became of an agent's work (`Notice`). */
+  notice: (n: Notice) => { title: string; body: string };
   /** Asking before a quit that cuts agents short: `names` are theirs. */
   quit: (names: string[]) => { message: string; detail: string; quit: string; stay: string };
 };
@@ -61,6 +65,13 @@ const TEXT: Record<Language, Words> = {
     notRunnable: (file) => `${file} is not a program that can be run`,
     noProgram: (agent, program) => `Agent "${agent}" runs on ${program}, and the ${program} program was not found on your PATH. Install it, or open this agent's settings and use "Locate…" next to its backend.`,
     badAddress: "Enter a valid address: http, https, file://, or an absolute file path.",
+    notice: ({ kind, name, detail }) =>
+      ({
+        done: { title: `${name} finished`, body: "All work is done. Nobody is working now." },
+        failed: { title: `${name}: something failed`, body: detail },
+        confirm: { title: `${name} needs your decision`, body: detail },
+        permission: { title: `${name} asks for permission`, body: detail },
+      })[kind],
     quit: (names) => ({
       message: names.length === 1 ? `${names[0]} is still working` : `${names.length} agents are still working`,
       detail: `${names.length > 1 ? `${names.join(", ")}. ` : ""}Quitting stops the work in progress. It will not continue when you open xsb again: unfinished tasks are cancelled, and you will have to ask for them again.`,
@@ -73,6 +84,13 @@ const TEXT: Record<Language, Words> = {
     notRunnable: (file) => `${file} 不是可执行文件`,
     noProgram: (agent, program) => `智能体“${agent}”要用 ${program}，但在 PATH 中没有找到 ${program} 程序。请安装它，或打开这个智能体的设置，在后端旁点“指定路径…”。`,
     badAddress: "请输入有效地址，支持 http、https、file:// 或绝对文件路径。",
+    notice: ({ kind, name, detail }) =>
+      ({
+        done: { title: `${name}完成了工作`, body: "工作已全部完成，现在没有智能体在工作。" },
+        failed: { title: `${name}：有工作失败了`, body: detail },
+        confirm: { title: `${name}需要你确认`, body: detail },
+        permission: { title: `${name}请求授权`, body: detail },
+      })[kind],
     quit: (names) => ({
       message: names.length === 1 ? `${names[0]}还在工作` : `还有 ${names.length} 个智能体在工作`,
       detail: `${names.length > 1 ? `${names.join("、")}。` : ""}退出会中断正在进行的工作。再次打开 xsb 时它不会自动继续：未完成的任务记为已取消，需要你重新交代。`,
@@ -196,7 +214,16 @@ function connect(paths: Paths): Promise<Workspace> {
     const send = (event: Event): void => {
       for (const [id, shown] of windows) if (shown === project) webContents.fromId(id)?.send("xsb:event", event);
     };
-    pending = Workspace.open(paths, language(), say, send)
+    // One notification, from the first window that shows the workspace: a click brings it to the agent.
+    const notify = (n: Notice): void => {
+      const [id] = [...windows].find(([, shown]) => shown === project) ?? [];
+      const contents = id === undefined ? undefined : webContents.fromId(id);
+      const win = contents && BrowserWindow.fromWebContents(contents);
+      if (!win) return;
+      const { title, body } = TEXT[language()].notice(n);
+      notice(win, title, body, () => win.webContents.send("xsb:event", { showAgent: n.agentId } satisfies Event));
+    };
+    pending = Workspace.open(paths, language(), say, send, notify)
       .then((created) => {
         current?.close();
         projects.set(project, created);
@@ -345,6 +372,7 @@ app.on("second-instance", (_event, _argv, _cwd, asked) => {
 
 void app.whenReady().then(() => {
   if (!first) return;
+  setUpNotices();
   clis = new Clis(path.join(app.getPath("userData"), "backends"));
   protocol.handle(APP_SCHEME, (request) => {
     const file = path.join(RENDERER, decodeURIComponent(new URL(request.url).pathname));

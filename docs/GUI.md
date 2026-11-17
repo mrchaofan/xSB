@@ -95,6 +95,22 @@ dist/renderer/            页面：index.html、styles.css、打成一个文件�
 - **有智能体在工作时，退出先问一句。** 对话框写明谁还在工作、退出的后果，默认按钮是"继续工作"。选"仍然退出"，没做完的工作就此放弃：再次打开时什么都不会自动重跑，没结束的任务记为已取消，派发它的智能体不会收到通知（那会是新的一轮），要用户重新交代（DESIGN.md 第 7 节）。窗口已关掉、Hub 还在运行的工作区也在询问范围内：关窗口时到 Hub 的连接留着（只是不再回答权限请求），退出时据此知道那里还有谁在工作。
 - 因此换新版本时退出应用就够了，不会再有旧版 Hub 留在后台被新应用连上。由命令行（`xsb`）启动、应用从没打开过的工作区的 Hub 不归应用管。
 
+### 系统通知
+
+用户不在看 xsb 时，四件事用系统通知告诉他（[notices.ts](../packages/desktop/src/notices.ts)；什么时候算哪一件，由 [workspace.ts](../packages/desktop/src/workspace.ts) 判断）：
+
+| 通知 | 什么时候 |
+| - | - |
+| 完成 | 工作区从"有人在工作"变成"没有智能体在工作、也没有未结束的任务"。一件事经过几个智能体，只在最后一个停下时通知一次，标题是最后停下的那个 |
+| 失败 | 一个任务（或后台作业）失败；用户发出的消息没能成为一轮或这一轮出错 |
+| 需要确认 | 智能体调用了中枢的 `ask_user`：工作要等用户拍板才能继续。问题本身照常写在它的回复里，这个工具只负责让用户知道 |
+| 需要授权 | 智能体的工具调用要用户批准（`session/request_permission`） |
+
+- **不重复**：智能体请用户确认过，或用户点了停止，之后工作区变空闲不再报"完成"；中枢断开也不报。
+- **只在用户没在看时**：工作区所在的窗口在前台并且有焦点，就不发，因为界面上已经能看到。窗口被关掉（隐藏）时照常发。
+- **点一下**：把那个窗口带到前台，打开对应智能体的对话。
+- **macOS 和 Windows 的差别**只在系统怎么认出通知是谁的。macOS 认应用的 bundle id，第一次发通知时系统会问用户是否允许，用户不允许就什么也不显示。Windows 认 AppUserModelID，而且开始菜单里必须有一个带同一个 ID 的快捷方式，否则通知不显示。应用以 zip 发布，没有安装程序替它建快捷方式，所以每次启动时自己在开始菜单写一个 `xsb.lnk`，指向这次运行的位置（zip 可能被解压到别处），ID 用 electron-builder 的 `appId`（`com.xsb.desktop`）。从源码直接运行（`npm start`）时不建快捷方式，在 Windows 上也就没有通知。通知对象在被点击或关闭之前都保留着引用，避免被回收后点击失效。
+
 ### 打开工作区
 
 - 欢迎页有两条路：点"打开文件夹…"（系统的选择文件夹对话框），或点最近打开的一项。
@@ -215,7 +231,8 @@ agent ──stdio MCP──▶ xsb-browser-mcp（管道）──unix socket─�
 ```
 
 - **桌面端自己是 MCP server**（[browser.ts](../packages/desktop/src/browser.ts)），在 `<userData>/backends/browser.sock` 上监听（权限 0600）。只有主进程能在右栏开标签、拿到背后的 WebContents，所以工具必须由它提供。
-- **`xsb-browser-mcp` 只是管道**（[browser-mcp.ts](../packages/desktop/src/browser-mcp.ts)），和 `xsb-mcp-bridge` 一个思路：告诉桌面端自己的工作目录，之后原样转发。它随应用自带，由应用放到 PATH 上；角色在 MCP 配置里写命令 `xsb-browser-mcp` 就有了浏览器，与 `xsb-media-mcp` 同样对待。
+- **`xsb-browser-mcp` 只是管道**（[browser-mcp.ts](../packages/desktop/src/browser-mcp.ts)），和 `xsb-mcp-bridge` 一个思路：告诉桌面端自己的工作目录，之后原样转发。它随应用自带，由应用放到 PATH 上。
+- **每个 Agent 都有，不看角色**：浏览器是应用的基础能力，不是某个角色的专用工具。桌面端启动 Hub 时用环境变量 `XSB_MCP_SERVERS`（`.mcp.json` 的格式）告诉它每个 Agent 都有的 MCP server，这里就是 `browser → xsb-browser-mcp`；Hub 给每个会话都挂上，没有角色的 Agent 也一样。角色里有同名的 server 时以角色的为准。角色专用的工具（如 `xsb-media-mcp`）仍然只在角色的 MCP 配置里，没有该角色就没有。
 - **操控走 Chromium DevTools Protocol**，经 `webContents.debugger.attach`：`Accessibility.getFullAXTree` 是 Agent 读到的页面（可操作的元素带编号），`Input.dispatchMouseEvent` / `dispatchKeyEvent` / `insertText` 是它的鼠标和键盘，`Page.captureScreenshot` 是截图。协议不出主进程，不开调试端口。
 - **去哪个窗口**：按管道报来的工作目录找，哪个窗口的工作区有 Agent 在这个目录工作（或目录在项目里），网页就开在哪个窗口的右栏。
 - **边界**：一个 MCP 连接是一个 Agent 会话，它只能看到和操作自己打开的标签，碰不到用户开的标签，更碰不到应用自己的窗口。它的标签上有一个状态点。用户在右栏看着，可以随时接手或关掉。
@@ -290,7 +307,7 @@ agent ──stdio MCP──▶ xsb-browser-mcp（管道）──unix socket─�
 - 工作区里原本就有的同名角色（包括旧版本复制进来的预设角色）在使用团队之后仍以工作区的为准，同样可以"恢复预设"。
 - 预设就是文件，随 Hub 一起发布，每种语言一份：[packages/hub/presets/](../packages/hub/presets)`<语言>/<团队>/team.json` 加上 `roles/<角色>/`，后者与项目里 `.xsb/roles/` 的格式完全相同。加一支团队要在每种语言下各加一个目录，结构必须相同。
 
-带专用工具的角色：测试工程师先用应用右栏的浏览器（`xsb-browser-mcp`，随应用自带，见 3.2），它做不到的再用 Playwright 的 MCP server（经 `npx`，需要机器上有 Node）；美术指导、分镜师和摄影师用 [@xsb/media-mcp](../packages/media-mcp)（随应用自带，命令 `xsb-media-mcp` 由应用放到 PATH 上；出图默认豆包 Seedream，出视频默认豆包 Seedance，都可更换，经 `arkcli` 调用，见 4.2）。
+带专用工具的角色（右栏的浏览器每个 Agent 都有，不算在内，见 3.2）：美术指导、分镜师和摄影师用 [@xsb/media-mcp](../packages/media-mcp)（随应用自带，命令 `xsb-media-mcp` 由应用放到 PATH 上；出图默认豆包 Seedream，出视频默认豆包 Seedance，都可更换，经 `arkcli` 调用，见 4.2）。
 
 角色还可以声明它要用到的本机程序（`team.json` 里的 `requires`，每项带一段安装说明）。剪辑师要 `ffmpeg` 和 `ffprobe`，摄影师要 `ffmpeg`（把过大的参考图转成 jpeg），美术指导、分镜师和摄影师要 `arkcli`：与各家 agent 的程序一样，在 PATH 上找，找不到时角色卡片上提示并提供"指定路径…"，应用不安装（第 8 节）。
 
@@ -447,7 +464,7 @@ Hub 仍然"只启动、不安装"，一行没改：应用在 `userData/backends/
 
 没有验证或没有做：
 
-- browser use 只用脚本当 MCP 客户端测过，没有让真实的 Agent（claude、codex）通过角色配置用过。预设的测试工程师配了它（与 Playwright 并存），这份配置只确认了能被读取，没有跑过。
+- browser use 只用脚本当 MCP 客户端测过，没有让真实的 Agent（claude、codex）用过。每个 Agent 都挂上它（`XSB_MCP_SERVERS`）由 Hub 的端到端测试覆盖，真实 Agent 里没有跑过。
 - 网页没有下载、文件选择、`alert` 之类对话框的处理；browser use 没有多标签、拖拽、悬停、上传这些工具。
 - 独立窗口的置顶、红绿灯位置只在 macOS 上看过。
 
