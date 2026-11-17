@@ -19,11 +19,11 @@ const en = {
         --backend <name>                a name from 'xsb backends' (default: the role's, or claude)
         --name <text> --desc <text>     how the others see it
         --instructions <text|@file>     what it is and how it works
-        --workspace <dir>               its working directory (default: the project's if the role says so, else .xsb/agents/<id>/workspace)
+        --workspace <dir>               its working directory (default: the project directory)
   xsb agent list | remove <id>
   xsb agent show <id>                   everything a new session of it is told (its system prompt)
   xsb agent restart <id>                restart its backend, so that changes apply now
-  xsb role add <name> [--desc <text>] [--backend <name>] [--workspace project|own] [--instructions <text|@file>]
+  xsb role add <name> [--desc <text>] [--backend <name>] [--instructions <text|@file>]
                                         create or change a role; its tools and skills are the
                                         files in .xsb/roles/<name>/
   xsb role list | show <name> | remove <name>
@@ -65,8 +65,8 @@ const en = {
   state: { idle: "idle", running: "running", requires_action: "requires_action" } satisfies Record<AgentState, string>,
   roleSaved: (name: string, dir: string) => `role ${name}: ${dir}`,
   roleTeam: (team: string, own: boolean) => `team: ${team}${own ? " (replaced by the project's own)" : ""}`,
-  roleFacts: (backend: string | undefined, workspace: string, agents: string[]) =>
-    `backend: ${backend ?? "(default)"}\nworkspace: ${workspace}\nagents: ${agents.join(", ") || "none"}`,
+  roleFacts: (backend: string | undefined, agents: string[]) =>
+    `backend: ${backend ?? "(default)"}\nagents: ${agents.join(", ") || "none"}`,
   roleServer: (server: string, command: string) => `mcp ${server}: ${command}`,
   roleSkill: (name: string, produces: string | undefined, inputs: string[], description: string) =>
     `skill ${name}${produces ? ` (produces ${produces}${inputs.length ? ` from ${inputs.join(", ")}` : ""})` : ""}: ${description}`,
@@ -121,11 +121,11 @@ const zh: typeof en = {
         --backend <名称>                'xsb backends' 列出的名称（默认：角色指定的，否则 claude）
         --name <文字> --desc <文字>     其他智能体看到的名字和描述
         --instructions <文字|@文件>     它是谁、怎么工作
-        --workspace <目录>              它的工作目录（默认：角色指定时用项目目录，否则 .xsb/agents/<标识>/workspace）
+        --workspace <目录>              它的工作目录（默认：项目目录）
   xsb agent list | remove <标识>
   xsb agent show <标识>                 它的新会话会被告知的全部内容（系统说明）
   xsb agent restart <标识>              重启它的后端，让改动立即生效
-  xsb role add <名称> [--desc <文字>] [--backend <名称>] [--workspace project|own] [--instructions <文字|@文件>]
+  xsb role add <名称> [--desc <文字>] [--backend <名称>] [--instructions <文字|@文件>]
                                         创建或修改角色；它的工具和技能是
                                         .xsb/roles/<名称>/ 下的文件
   xsb role list | show <名称> | remove <名称>
@@ -166,7 +166,7 @@ const zh: typeof en = {
   state: { idle: "空闲", running: "工作中", requires_action: "等待批准" },
   roleSaved: (name, dir) => `角色 ${name}：${dir}`,
   roleTeam: (team, own) => `团队：${team}${own ? "（已被项目自己的角色取代）" : ""}`,
-  roleFacts: (backend, workspace, agents) => `后端：${backend ?? "（默认）"}\n工作目录：${workspace === "project" ? "项目目录" : "各自的目录"}\n智能体：${agents.join("、") || "无"}`,
+  roleFacts: (backend, agents) => `后端：${backend ?? "（默认）"}\n智能体：${agents.join("、") || "无"}`,
   roleServer: (server, command) => `工具服务 ${server}：${command}`,
   roleSkill: (name, produces, inputs, description) =>
     `技能 ${name}${produces ? `（产出 ${produces}${inputs.length ? `，依据 ${inputs.join("、")}` : ""}）` : ""}：${description}`,

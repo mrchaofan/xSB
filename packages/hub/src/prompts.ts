@@ -72,7 +72,7 @@ export function systemPrompt(
   instructions: string,
   skills: Skill[],
   team: Contract[],
-  dirs: { shared: string; assets: string },
+  dirs: { shared: string; assets: string; scratch(id: string): string },
   state: State,
   language: Language,
   tools: { name: string; from: ToolOrigin; about?: string }[] = [],
@@ -132,7 +132,7 @@ Everything the team has to agree on (a requirement, a design, a character, a scr
 - The assets a task comes with are its facts. When one is wrong or not enough, say so in your result; do not quietly redefine it.${teamIndex}
 
 # Files
-Your working directory is ${agent.workspace}. Work in progress stays there.${sharing.length ? ` Also working in this directory: ${sharing.join(", ")}. They see what you change in it.` : ""} What others need goes into the asset library (${dirs.assets}); loose files that are no asset go in ${dirs.shared}. Refer to files by absolute path.${skillIndex}${toolSources(tools)}${WORKING_RULES}
+Your working directory is ${agent.workspace}.${sharing.length ? ` Also working in this directory: ${sharing.join(", ")}. They see what you change in it.` : ""} Keep your drafts and intermediate files (generated images and videos included) in your own folder ${dirs.scratch(agent.id)}, not loose in the working directory; where a skill names a relative path for such a file (like \`tmp/…\` or \`shots/…\`), put it under that folder. What others need goes into the asset library (${dirs.assets}); loose files that are no asset go in ${dirs.shared}. Refer to files by absolute path.${skillIndex}${toolSources(tools)}${WORKING_RULES}
 
 # Your memory at the start of this session
 ${memoryDigest(state, agent.id)}`;

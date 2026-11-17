@@ -19,7 +19,7 @@ export const pageHead = (title, subtitle, ...actions) => h("header", { class: "b
 export function editRole(role) {
   state.settings = "roles";
   const creating = !role;
-  const draft = structuredClone(role ?? { name: "", preset: null, description: "", backend: "", workspace: "own", instructions: "", mcpServers: [], skills: [] });
+  const draft = structuredClone(role ?? { name: "", preset: null, description: "", backend: "", instructions: "", mcpServers: [], skills: [] });
   const users = () => (creating ? [] : state.agents.filter((a) => a.role === role.name));
   /** 预设团队的角色：按预设使用（"as-is"），还是工作区自己改过的版本（"own"）。不是预设的角色为 null。 */
   const shipped = () => (creating || !role.preset ? null : role.preset.own ? "own" : "as-is");
@@ -150,7 +150,6 @@ export function editRole(role) {
         field(t("avatar.title"), avatarPicker(draft), t("avatar.role.hint")),
         field(t("agent.description"), input(draft, "description")),
         field(t("role.backend"), select(draft, "backend", [["", t("role.backend.none")], ...state.backends.map((b) => [b.name, b.installed ? b.name : t("role.backend.missing", { name: b.name })])])),
-        field(t("agent.workspace"), select(draft, "workspace", [["own", t("role.workspace.own")], ["project", t("role.workspace.project")]])),
         count > 0 && check("sync", t("role.sync", { names: names() }))),
 
       section(t("role.instructions.title"), t("role.instructions.hint"),

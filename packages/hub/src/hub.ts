@@ -160,13 +160,13 @@ export class Hub {
       name: input.name ?? prior?.name ?? input.id,
       description: input.description ?? prior?.description ?? role?.description ?? "",
       backend: input.backend ?? prior?.backend ?? role?.backend ?? DEFAULT_BACKEND,
-      workspace: input.workspace ?? prior?.workspace ?? (role?.workspace === "project" ? this.paths.project : this.paths.defaultWorkspace(input.id)),
+      workspace: input.workspace ?? prior?.workspace ?? this.paths.project,
       ...(roleName ? { role: roleName } : {}),
       createdAt: prior?.createdAt ?? now(),
     };
     this.backends.spec(agent); // refuse a backend this machine does not have
     fs.mkdirSync(agent.workspace, { recursive: true });
-    fs.mkdirSync(this.paths.agentDir(agent.id), { recursive: true });
+    fs.mkdirSync(this.paths.scratch(agent.id), { recursive: true });
     if (instructions !== undefined || !fs.existsSync(this.paths.instructions(agent.id))) {
       fs.writeFileSync(this.paths.instructions(agent.id), instructions ?? "");
     }

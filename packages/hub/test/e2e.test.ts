@@ -413,7 +413,6 @@ fs.writeFileSync(
   JSON.stringify({
     description: "paints shots",
     backend: "bare",
-    workspace: "project",
     mcpServers: { gen: { command: node, args: [GENERATOR], env: { GEN_KEY: "k1" } } },
   }),
 );
@@ -523,7 +522,7 @@ const p = await newSession("p1");
   assert.match(said.get(a)!.split("result(get_asset)").at(-1)!, /red coat/);
   await prompt(a, call("get_asset", { id: "character/lin" }));
   assert.match(said.get(a)!.split("result(get_asset)").at(-1)!, /version="2"[\s\S]*blue coat/);
-  fs.writeFileSync(path.join(paths.defaultWorkspace("a"), "frame.png"), "PNG");
+  fs.writeFileSync(path.join(project, "frame.png"), "PNG");
   await prompt(a, call("put_asset", { type: "image", name: "frame-1", description: "first frame", path: "frame.png" }));
   const { assets } = await conn.request(Assets.list, {});
   assert.deepEqual(assets.map((x: any) => `${x.id}@${x.version}`), ["character/lin@2", "shot_list/scene-1@1", "image/frame-1@1"]);
@@ -599,7 +598,6 @@ const p = await newSession("p1");
   const { roles } = await conn.request(Roles.list);
   assert.deepEqual(roles.map((r: any) => [r.name, r.agents, r.skills.map((s: any) => s.name)]), [["painter", ["p1"], ["grading", "shots"]]]);
   assert.deepEqual(roles[0].skills.map((s: any) => [s.produces, s.inputs]), [[undefined, []], ["shot_list", ["character", "script"]]]);
-  assert.equal(roles[0].workspace, "project");
   assert.equal(roles[0].mcpServers.gen.env.GEN_KEY, "k1");
 
   const mcpServers = { gen: { command: node, args: [GENERATOR] }, broken: { command: "xsb-no-such-command" } };
@@ -615,7 +613,6 @@ const p = await newSession("p1");
   assert.equal((await conn.request(Roles.get, { name: "writer" })).role.instructions, "WRITER-RULES");
   await assert.rejects(conn.request(Roles.put, { role: { name: "writer", backend: "nope" } }), /no backend named "nope"/);
   await assert.rejects(conn.request(Roles.put, { role: { name: "../x" } }), /role name must be/);
-  await assert.rejects(conn.request(Roles.put, { role: { name: "writer", workspace: "elsewhere" } }), /workspace must be "project" or "own"/);
 
   const { servers } = await conn.request(Roles.check, { name: "writer" });
   assert.deepEqual(servers[0], { server: "gen", tools: [{ name: "render", description: "Render a shot." }] });
@@ -745,6 +742,8 @@ const p = await newSession("p1");
   assert.ok(!fs.existsSync(paths.roleDir("reviewer")), "nothing was copied into the project");
   const { agent: r1 } = await conn.request(Agents.put, { agent: { id: "r1", role: "reviewer", backend: "mock" } });
   assert.equal(r1.workspace, project);
+  assert.ok(fs.existsSync(paths.scratch("r1")));
+  assert.ok((await conn.request(Agents.get, { id: "r1" })).systemPrompt.includes(`in your own folder ${paths.scratch("r1")}`));
   const shippedText = (await conn.request(Roles.get, { name: "reviewer" })).role.instructions;
   assert.match((await conn.request(Agents.get, { id: "r1" })).systemPrompt, /- review: you, from prd, architecture, change/);
 
@@ -789,7 +788,7 @@ const p = await newSession("p1");
       team.roles.map((entry) => {
         const role = roleOf(language, team.id, entry.role);
         const programs = (entry.requires ?? []).map((program) => program.command);
-        return [entry.role, programs, role.servers, role.workspace, role.skills.map((skill) => [skill.name, skill.produces, skill.inputs])];
+        return [entry.role, programs, role.servers, role.skills.map((skill) => [skill.name, skill.produces, skill.inputs])];
       }),
     ]);
   for (const language of LANGUAGES) assert.deepEqual(shape(language), shape("en"), `the ${language} teams differ from the English ones in more than words`);

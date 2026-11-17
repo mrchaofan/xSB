@@ -11,7 +11,6 @@ export function roleView(role: Omit<RoleDetail, "agents">): RoleView {
     preset: role.preset ?? null,
     description: role.description ?? "",
     backend: role.backend ?? "",
-    workspace: role.workspace ?? "own",
     instructions: role.instructions,
     mcpServers: Object.entries(role.mcpServers).map(([name, spec]) => ({
       name,
@@ -30,7 +29,6 @@ export function roleInput(view: RoleView): RoleInput {
     description: view.description,
     // The hub keeps a field that is left out; a default backend, once set, cannot be unset from here.
     backend: view.backend || undefined,
-    workspace: view.workspace,
     instructions: view.instructions,
     mcpServers: Object.fromEntries(
       view.mcpServers.map((s) => [s.name, { command: s.command, args: s.args, env: Object.fromEntries(s.env.map((e) => [e.name, e.value])) }]),

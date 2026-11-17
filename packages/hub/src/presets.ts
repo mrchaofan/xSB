@@ -183,7 +183,6 @@ export function overlay(base: Role, top: Role): Role {
     avatarFile: top.avatar !== undefined ? top.avatarFile : base.avatarFile,
     description: top.description ?? base.description,
     backend: top.backend ?? base.backend,
-    workspace: top.workspace ?? base.workspace,
     instructions: [base.instructions.trim(), top.instructions.trim()].filter(Boolean).join("\n\n"),
     servers,
     mcpServers: [...base.mcpServers.filter((s) => !(s.name in top.servers)), ...top.mcpServers],

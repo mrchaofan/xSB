@@ -21,11 +21,11 @@ xsb agent add <id> [选项]              新增或修改一个 Agent
       --backend <名称>                 `xsb backends` 里的名称（默认取角色的，否则 claude）
       --name <文字> --desc <文字>       别的 Agent 看到的名字和描述
       --instructions <文字|@文件>       它是谁、怎么工作
-      --workspace <目录>               工作目录（默认 .xsb/agents/<id>/workspace）
+      --workspace <目录>               工作目录（默认项目目录）
 xsb agent list | remove <id>
 xsb agent show <id>                   它的新会话会被告知的全部文字（系统说明）
 xsb agent restart <id>                重启它的后端，使修改立即生效（正在运行的一轮会失败）
-xsb role add <名称> [--desc <文字>] [--backend <名称>] [--workspace project|own] [--instructions <文字|@文件>]
+xsb role add <名称> [--desc <文字>] [--backend <名称>] [--instructions <文字|@文件>]
                                       新增或修改角色；工具和 skills 是 .xsb/roles/<名称>/ 下的文件
 xsb role list | show <名称> | remove <名称>
 xsb role check <名称>                  启动角色的 MCP server 并列出工具

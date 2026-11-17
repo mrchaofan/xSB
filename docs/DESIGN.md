@@ -355,14 +355,14 @@ job 不是新机制，它就是"执行者是工具而不是 Agent 的任务"（`
 
 ```
 .xsb/roles/<角色>/
-  role.json                 { "description", "backend", "workspace", "mcpServers": { 名称: { command, args, env } } }
+  role.json                 { "description", "backend", "mcpServers": { 名称: { command, args, env } } }
   instructions.md           这个角色是谁、怎么工作
   skills/<名称>/SKILL.md     做某一类工作的步骤；旁边可以放它引用的文件
 ```
 
 | 角色给什么 | 怎么到达模型 | 何时读取 |
 | - | - | - |
-| `description`、`backend`、`workspace` | 新建 Agent 时的默认值，之后是 Agent 自己的字段（两个同角色的 Agent 可以用不同后端）。`workspace` 为 `project` 时新 Agent 在项目目录里工作，否则在自己的目录里；同一目录里还有谁在工作，写在各自的系统说明里 | 仅在 `agent add` 时 |
+| `description`、`backend` | 新建 Agent 时的默认值，之后是 Agent 自己的字段（两个同角色的 Agent 可以用不同后端） | 仅在 `agent add` 时 |
 | `instructions.md` | 系统说明里，排在 Agent 自己的说明之前 | 每次会话绑定 |
 | `mcpServers` | ACP `session/new` 的标准字段，与协作工具并列。对所有后端一致，包括封装的三方 agent | 每次会话绑定 |
 | skills | 见下 | 每次使用 |
@@ -437,7 +437,7 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
   agents/<id>/instructions.md       这个 Agent 是谁、怎么工作（可手改）
   agents/<id>/memory.jsonl          它的笔记
   agents/<id>/sessions/<sid>.jsonl  会话记录（用于 session/load 回放）
-  agents/<id>/workspace/            默认工作目录
+  agents/<id>/scratch/              它的草稿和中间文件
   shared/                           Agent 之间交接的零散文件
   assets.jsonl  assets/             资产库：索引与文件
   roles/<角色>/                      项目自己的角色：role.json、instructions.md、skills/（用户编写）。所用预设团队的角色不在这里
@@ -475,13 +475,13 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
 - Hub 对后端不提供 `fs/*` 和 `terminal/*`，Agent 用自己的文件和命令工具。
 - 项目的工作语言定下后不随客户端变化；换语言要手改 `.xsb/config.json`，并重启 Agent 才对已有会话生效。用户直接写的角色和说明不翻译，写的是什么语言就是什么语言。
 - CLI 的语言取自终端的环境变量，可能与系统语言不同（不少终端固定为 `en_US.UTF-8`）。
-- 对外 `session/new` 的 `cwd` 不改变 Agent 的工作目录，Agent 始终在自己的 workspace 里工作。
+- Agent 默认都在项目目录（`.xsb/` 的父目录）里工作，能直接用用户放在项目里的材料，也互相看得见对方的改动；同一目录里还有谁，写在各自的系统说明里。草稿和中间文件放在自己的 `agents/<id>/scratch/`，记忆、会话记录和资产由 Hub 经工具写进 `.xsb/`，与工作目录无关。对外 `session/new` 的 `cwd` 不改变 Agent 的工作目录。
 - Hub 面向本机单用户：能连上 socket 的客户端可以操作任何会话。
 - 在不支持原生 steering 的后端上插话，会中断它正在执行的工具调用。
 - 工具隔离只到 xsb 这一层：角色决定给哪些 MCP server，但后端自带的 shell / 文件工具和用户级配置（如 `~/.claude` 里登记的 MCP）对同后端的所有 Agent 都生效。要真正隔离，生成能力必须只能经角色的 MCP server 到达。
 - Agent 之间只传文本。图像、视频以资产路径传递，能不能"看"取决于后端模型和它自己的读文件工具。
 - 资产库没有删除和垃圾回收，每个版本都保留；视频会占空间。
-- 角色的 `description`、`backend`、`workspace` 在新建 Agent 时复制，之后改 `role.json` 不影响已有 Agent；其余内容随改随生效。
+- 角色的 `description`、`backend` 在新建 Agent 时复制，之后改 `role.json` 不影响已有 Agent；其余内容随改随生效。
 - `mailbox.jsonl`、`tasks.jsonl` 不压缩：话题账本靠重放全部邮件重建，所以日志只增不减。笔记日志会在加载时压缩。
 - 删除 Agent 不删除它的目录和会话记录；同名重建会接上原来的主会话。
 - `role.json` 里 MCP server 的 `env`（含密钥）是明文，`roles/get` 也原样返回；掩码显示是客户端的事。

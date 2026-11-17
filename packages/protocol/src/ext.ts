@@ -168,9 +168,6 @@ export type McpServerSpec = { command: string; args?: string[]; env?: Record<str
  */
 export type SkillInfo = { name: string; description: string; produces?: string; inputs: string[] };
 
-/** Where a new agent of a role works: in the project directory, with the others who do, or in a directory of its own. */
-export type Workplace = "project" | "own";
-
 export type RoleDetail = {
   /** Bundled avatar ID, or "role" for the role's own picture (`avatarFile`); empty or absent uses the default. */
   avatar?: string;
@@ -185,7 +182,6 @@ export type RoleDetail = {
   preset?: { team: string; teamTitle: string; own: boolean; title: string };
   description?: string;
   backend?: string;
-  workspace?: Workplace;
   instructions: string;
   mcpServers: Record<string, McpServerSpec>;
   /** `dir`: where the skill's files are, on the hub's machine. */
@@ -200,7 +196,6 @@ export type RoleInput = {
   name: string;
   description?: string;
   backend?: string;
-  workspace?: Workplace;
   instructions?: string;
   mcpServers?: Record<string, McpServerSpec>;
   skills?: { name: string; content: string }[];
