@@ -72,6 +72,7 @@ export const TEXT = {
     "task.status.completed": "已完成",
     "task.status.failed": "失败",
     "task.status.cancelled": "已取消",
+    "task.status.interrupted": "已中断",
 
     // 标题栏
     "titlebar.rail.toggle": "显示或隐藏智能体栏",
@@ -418,6 +419,7 @@ export const TEXT = {
     "task.status.completed": "Done",
     "task.status.failed": "Failed",
     "task.status.cancelled": "Canceled",
+    "task.status.interrupted": "Interrupted",
 
     // Title bar
     "titlebar.rail.toggle": "Show or hide the sidebar",

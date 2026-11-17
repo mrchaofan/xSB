@@ -9,7 +9,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { Agents, Assets, Backends, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, errorMessage, failure } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, errorMessage, failure, textOf } from "@xsb/protocol";
 import type { Connection, McpServerCheck, OriginMeta, RoleDetail, TeamInfo } from "@xsb/protocol";
 import { backends, describeBackends, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
@@ -123,6 +123,7 @@ export class Client {
     conn.onRequest("session/prompt", (p) => {
       const session = this.own(p.sessionId);
       if (!Array.isArray(p.prompt)) throw RpcError.invalidParams("prompt must be an array of content blocks");
+      hub.mail.userWrote(session.agentId, textOf(p.prompt));
       return session.enqueue({ origin: userOrigin(p), prompt: p.prompt, from: this });
     });
 
@@ -150,6 +151,7 @@ export class Client {
       }
       const idle = p._meta?.[Steering.metaKey]?.idleBehavior;
       if (idle !== undefined && idle !== "promptRequired") throw RpcError.invalidParams("unsupported steering idleBehavior");
+      hub.mail.userWrote(session.agentId, textOf(p.prompt));
       return session.steer(p.prompt, userOrigin(p), idle === "promptRequired" ? "promptRequired" : "start", this);
     });
 

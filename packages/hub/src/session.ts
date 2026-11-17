@@ -7,7 +7,7 @@
  * the hub's unit: whoever waits for it (a `session/prompt` caller, a task) sees
  * one turn with one end, whatever the backend needed to get there.
  */
-import { Boundaries, OriginExt, RpcError, failure, errorMessage, isTerminal, text } from "@xsb/protocol";
+import { Boundaries, OriginExt, TurnFailure, RpcError, failure, errorMessage, isTerminal, text } from "@xsb/protocol";
 import type {
   Boundary,
   ContentBlock,
@@ -24,7 +24,7 @@ import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
 import { bridgeServer } from "./mcp.ts";
 import { Paths } from "./paths.ts";
-import { asPreface, handoff } from "./prompts.ts";
+import { asPreface, handoff, resumeNote } from "./prompts.ts";
 import type { Renewal } from "./prompts.ts";
 import { turnsSinceCleared } from "./transcript.ts";
 import type { MailItem, SessionRec } from "./state.ts";
@@ -53,6 +53,10 @@ export type Turn = {
   /** The backend has been prompted. */
   started: boolean;
   cancelled: boolean;
+  /** Who stopped it: the user (their client) or the dispatcher of the task it works on (`cancel_task`). */
+  cancelledBy?: "user" | "dispatcher";
+  /** A task this turn takes up again that a turn before it was stopped in by the user (`LiveSession.resumes`). */
+  resumes?: string;
   /** Agent text since the last tool call: what the turn ends up saying. */
   lastText: string;
 };
@@ -67,6 +71,11 @@ export class LiveSession {
   setup: { modes?: unknown; configOptions?: unknown } = {};
   /** MCP servers the creating client asked for, passed on next to the hub's own. */
   clientMcp: McpServer[] = [];
+  /**
+   * A task whose turn the user stopped. Stopping a turn is not cancelling the work: the task stays open, and the
+   * next turn of this session that is not another task's takes it up again and ends it.
+   */
+  resumes?: string;
 
   private hub: Hub;
   private queue: Queued[] = [];
@@ -168,6 +177,11 @@ export class LiveSession {
       .sort((x, y) => y.createdAt.localeCompare(x.createdAt))
       .slice(0, HANDOFF_ASSETS);
     return handoff(why, turnsSinceCleared(state.store, this.agentId, this.id), { tasks, waiting, assets });
+  }
+
+  /** Text to put in front of the next prompt of this session, whichever turn that is. */
+  preface(text: string): void {
+    this.prefaces.push(text);
   }
 
   /** Record, and show, where what the model sees of this session starts anew. */
@@ -278,6 +292,15 @@ export class LiveSession {
 
   private async run(req: Queued): Promise<void> {
     const turn: Turn = { req, prompt: [...req.prompt], started: false, cancelled: false, lastText: "" };
+    // Another task's turn leaves the stopped one for later; any other turn takes it up.
+    if (this.resumes && !req.item?.taskId) {
+      const resumed = this.hub.state.tasks.get(this.resumes);
+      if (resumed && !isTerminal(resumed.status)) {
+        turn.resumes = resumed.id;
+        this.prefaces.push(resumeNote(resumed));
+      }
+      this.resumes = undefined;
+    }
     this.current = turn;
     this.hub.mail.turnStarted(turn);
     this.hub.agentChanged(this.agentId);
@@ -303,6 +326,9 @@ export class LiveSession {
     // While the hub stops, nothing is acknowledged: the turn runs again on the next start.
     if (!this.hub.stopping) {
       if (failure) this.hub.log(`${this.agentId}/${this.id}: turn failed: ${errorMessage(failure)}`);
+      // Whoever asked for a turn of their own is answered with the error; a turn that mail started has nobody
+      // waiting on it, so the failure goes into the transcript, where the user sees it.
+      if (failure && req.item) this.emit({ sessionUpdate: "session_info_update", _meta: { [TurnFailure.key]: { message: errorMessage(failure), data: (failure as RpcError).data } } } as SessionUpdate);
       this.hub.mail.turnEnded(this, turn, stopReason, failure);
       this.hub.agentChanged(this.agentId);
     }
@@ -354,11 +380,12 @@ export class LiveSession {
     return { outcome: "injected" };
   }
 
-  /** Stop the running turn. Queued turns stay queued. */
-  cancel(): void {
+  /** Stop the running turn. Queued turns stay queued. `by`: the user, or the dispatcher of the task the turn works on. */
+  cancel(by: "user" | "dispatcher" = "user"): void {
     const turn = this.current;
     if (!turn) return;
     turn.cancelled = true;
+    turn.cancelledBy = by;
     this.hub.permissions.cancel(this);
     if (turn.started) this.backend?.cancel(this.rec.backendSessionId!);
   }

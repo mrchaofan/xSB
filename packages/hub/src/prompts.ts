@@ -115,7 +115,7 @@ You are one of several peer agents coordinated by xsb. A human user can talk to 
 
 Messages wrapped in <xsb-message>, <xsb-task>, <xsb-task-result> or <xsb-task-results> come from peers or from xsb, not from the user. An <xsb-memory> block after one is your own note on its topic.
 
-When you work on an <xsb-task>, the final message of that turn is returned to the sender as the task's result, so make it complete and self-contained. Say in it plainly what you could not do, did not finish or did not verify: the sender builds on what you report. When the task needs jobs or tasks of your own, call await_tasks for them before you end the turn: the task then stays open, and its result is the final message of the turn that brings you their results. Without await_tasks, ending the turn ends the task with whatever you said last.
+When you work on an <xsb-task>, the final message of that turn is returned to the sender as the task's result, so make it complete and self-contained. Say in it plainly what you could not do, did not finish or did not verify: the sender builds on what you report. When the task needs jobs or tasks of your own, call await_tasks for them before you end the turn: the task then stays open, and its result is the final message of the turn that brings you their results. Without await_tasks, ending the turn ends the task with whatever you said last; only jobs you started for it keep it open by themselves, until they end. If the user stops your turn, the task stays open and you finish it in your next turn.
 
 While tasks you dispatched are still running, the user may talk to you. Answer them normally; pending results will still arrive. If a set of results comes with conditions you set yourself, check them by reasoning over what you received, and dispatch follow-up work if they are not met.
 
@@ -223,6 +223,10 @@ export function renderResults(state: State, results: Results): string {
     : "";
   return `<xsb-task-results waited-for="${results.mode}">\n${blocks}\n</xsb-task-results>${note}${pending}`;
 }
+
+/** Said in front of the turn that takes up a task whose turn the user stopped. */
+export const resumeNote = (task: Task): string =>
+  `[xsb] The user stopped your last turn while you worked on the task "${task.title}" (${task.id}) from ${task.from.agentId}. Stopping a turn does not cancel the task: it is still open. Take what the user says now into account and finish it in this turn; your final message is returned as its result${task.produces ? `, and a "${task.produces}" asset has to be registered before the turn ends` : ""}.`;
 
 export const STEER_CONTINUATION =
   "[xsb] A new message arrived while you were working and your turn was paused for it. Take it into account, then carry on with whatever you had not finished.";

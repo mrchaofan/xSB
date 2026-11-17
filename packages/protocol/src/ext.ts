@@ -274,8 +274,12 @@ export const AGENT_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 /** What a role, a skill, an MCP server and an asset type may be called. */
 export const NAME = /^[\w-]+$/;
 
-export type TaskStatus = "blocked" | "queued" | "running" | "completed" | "failed" | "cancelled";
-export const isTerminal = (s: TaskStatus): boolean => s === "completed" || s === "failed" || s === "cancelled";
+/**
+ * `interrupted`: xsb was quit while the task was unfinished and the user chose not to have it continued. It has
+ * ended without a result; whoever dispatched it decides whether it is still needed.
+ */
+export type TaskStatus = "blocked" | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export const isTerminal = (s: TaskStatus): boolean => s === "completed" || s === "failed" || s === "cancelled" || s === "interrupted";
 
 export type Task = {
   id: string;
@@ -295,6 +299,8 @@ export type Task = {
    * the dispatcher's own MCP servers, run by the hub in the background.
    */
   tool?: { server: string; name: string; arguments: unknown };
+  /** Of a job: the task its dispatcher was working on when it started it. That task does not end before the job. */
+  partOf?: string;
   status: TaskStatus;
   result?: string;
   createdAt: string;
@@ -329,6 +335,14 @@ export type Boundary = {
   /** Whether the model was given a handoff of what precedes this boundary. */
   handoff: boolean;
 };
+
+/**
+ * A turn that mail started (a task, a message, results) and that failed. Nobody waits on such a turn, so its failure
+ * is recorded in the transcript and shown to whoever watches the session:
+ *   session/update { sessionUpdate: "session_info_update", _meta: { "dev.xsb/turn_failed": { message, data? } } }
+ * `data` is the error's, with a `reason` a client can word for its reader (errors.ts).
+ */
+export const TurnFailure = { key: `${NS}/turn_failed` } as const;
 
 export const Boundaries = {
   key: `${NS}/boundary`,
