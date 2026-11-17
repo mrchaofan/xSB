@@ -405,7 +405,8 @@ export class Mailroom {
         this.hub.state.commit(acks);
         return this.tell(task.from, task.topic, `The user stopped ${session.agentId}'s turn on your task "${task.title}" (${task.id}). The task stays open, and ${session.agentId} finishes it in its next turn, with what the user says. Nothing for you to do, unless you no longer need it: then cancel it.`);
       }
-      const status = failure ? "failed" : stopReason === "cancelled" ? "cancelled" : "completed";
+      // The dispatcher's cancel is not the user's Esc: the turn may go on with what was steered into it, the task does not.
+      const status = failure ? "failed" : stopReason === "cancelled" || turn.cancelledBy === "dispatcher" ? "cancelled" : "completed";
       const gates = [...this.hub.state.gates.values()];
       // Jobs the task started that nobody awaits keep it open as a join of their own would: a result is not
       // complete while what it is made of is still being generated.

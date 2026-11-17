@@ -54,9 +54,10 @@ export type Turn = {
   prompt: ContentBlock[];
   /** The backend has been prompted. */
   started: boolean;
-  /** Stopped before the backend was prompted: it never will be. */
-  cancelled: boolean;
-  /** Who stopped it: the user (their client) or the dispatcher of the task it works on (`cancel_task`). */
+  /**
+   * Who stopped it: the user (their client) or the dispatcher of the task it works on (`cancel_task`). Stopped before
+   * it started, it never will; stopped after, it may go on with what was steered into it (Backend.cancel).
+   */
   cancelledBy?: "user" | "dispatcher";
   /** A task this turn takes up again that a turn before it was stopped in by the user (`LiveSession.resumes`). */
   resumes?: string;
@@ -343,7 +344,7 @@ export class LiveSession {
   }
 
   private async run(req: Queued): Promise<void> {
-    const turn: Turn = { req, prompt: [...req.prompt], started: false, cancelled: false, lastText: "", shown: new Map() };
+    const turn: Turn = { req, prompt: [...req.prompt], started: false, lastText: "", shown: new Map() };
     // Another task's turn leaves the stopped one for later; any other turn takes it up.
     if (this.resumes && !req.item?.taskId) {
       const resumed = this.hub.state.tasks.get(this.resumes);
@@ -363,7 +364,7 @@ export class LiveSession {
     let backend: Backend | undefined;
     try {
       backend = await this.ensureBackend();
-      if (!turn.cancelled) {
+      if (!turn.cancelledBy) {
         turn.started = true;
         this.take(req.gives);
         const spend = this.hub.spending.line();
@@ -409,12 +410,16 @@ export class LiveSession {
     const waiting = origin.messageId ? this.queue.findIndex((queued) => queued.origin.messageId === origin.messageId) : -1;
     if (waiting < 0) return this.steerNow(prompt, origin, whenIdle, from);
     const [queued] = this.queue.splice(waiting, 1);
+    const behind = this.queue[waiting];
     try {
       const outcome = await this.steerNow(prompt, origin, whenIdle, from);
       queued.done.resolve({ stopReason: "cancelled" });
       return outcome;
     } catch (e) {
-      this.queue.unshift(queued); // it did not get there: it keeps its turn
+      // It did not get there: it waits where it waited, before what waited behind it (if that has run, so has all before it).
+      const at = behind ? this.queue.indexOf(behind) : this.queue.length;
+      this.queue.splice(Math.max(at, 0), 0, queued);
+      this.pump();
       throw e;
     }
   }
@@ -424,7 +429,7 @@ export class LiveSession {
     // Named before it goes anywhere: if the turn is stopped before the backend is given it, that is what is discarded.
     const steered = { ...origin, messageId: origin.messageId ?? newId("m"), steered: true };
     let how: "injected" | "interrupted" | "idle" = "idle";
-    if (turn && !turn.started && !turn.cancelled) {
+    if (turn && !turn.started && !turn.cancelledBy) {
       turn.prompt.push(...prompt);
       how = "injected";
     } else if (turn && this.backend) {
@@ -452,12 +457,12 @@ export class LiveSession {
     if (by === "user") this.dropQueued();
     const turn = this.current;
     if (!turn) return;
-    turn.cancelledBy = by;
     this.hub.permissions.cancel(this);
+    const again = !!turn.cancelledBy;
+    // The dispatcher's cancel stands: a stop of the user's after it does not leave the task open (mailroom.ts).
+    if (turn.cancelledBy !== "dispatcher") turn.cancelledBy = by;
     if (turn.started) return this.backend?.cancel(this.rec.backendSessionId!);
-    if (turn.cancelled) return;
-    turn.cancelled = true;
-    for (const [id, input] of turn.shown) this.discard(id, input.origin, input.content);
+    if (!again) for (const [id, input] of turn.shown) this.discard(id, input.origin, input.content);
   }
 
   /** Drop the user's messages that wait for a turn: their `session/prompt` ends as cancelled. */
