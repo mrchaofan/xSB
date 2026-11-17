@@ -37,6 +37,8 @@ export type Gate = {
   taskIds: string[];
   mode: "all" | "any";
   note?: string;
+  /** The task the owner was working on when it asked for the join. That task stays open until the results are in. */
+  taskId?: string;
   createdAt: string;
 };
 
@@ -48,7 +50,7 @@ export type MailItem = {
   topic?: string;
   /** Of a message. */
   content?: string;
-  /** Of a task. */
+  /** The task the recipient's turn works on: of a task, the task itself; of joined results, the task they were awaited for. */
   taskId?: string;
   /** Of results: whose they are. With `mode`, they answer a join; without, it is one task's own result. */
   results?: Results;
@@ -153,12 +155,12 @@ export class State {
           this.recordTopic(rec.item);
         } else this.mail.delete(rec.id);
         return;
-    }
-    if (file === F.assets) {
-      const versions = this.assets.get(rec.asset.id);
-      if (versions) versions.push(rec.asset);
-      else this.assets.set(rec.asset.id, [rec.asset]);
-      return;
+      case F.assets: {
+        const versions = this.assets.get(rec.asset.id);
+        if (versions) versions.push(rec.asset);
+        else this.assets.set(rec.asset.id, [rec.asset]);
+        return;
+      }
     }
     const memory = /^agents\/([^/]+)\/memory\.jsonl$/.exec(file);
     if (memory) {

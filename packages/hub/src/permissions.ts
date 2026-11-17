@@ -3,8 +3,13 @@
  *
  * Whether a backend asks at all is the backend's own setting. When it does,
  * the hub decides nothing and passes the question to a human: the clients
- * attached to the session, or failing that any observer. With nobody
- * connected the request waits for the next client.
+ * attached to the session, or failing that any observer. A client that cannot
+ * answer (it has no handler for the request: a script, a log) says so by
+ * failing it, and is passed over.
+ *
+ * When nobody connected can answer, the request waits for the next client,
+ * with one exception: a turn that a client asked for and still waits on (a
+ * script's `xsb send`) is not left hanging, and its request is declined.
  */
 import type { PermissionRequest, PermissionResponse } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
@@ -18,6 +23,8 @@ type Pending = {
   params: PermissionRequest;
   answer: Deferred<PermissionResponse>;
   asked: Set<Client>;
+  /** Clients that were asked and could not answer, or left. */
+  unable: Set<Client>;
 };
 
 export class Permissions {
@@ -40,6 +47,7 @@ export class Permissions {
       params: { ...request, sessionId: session.id },
       answer: deferred(),
       asked: new Set(),
+      unable: new Set(),
     };
     this.pending.push(pending);
     this.route();
@@ -47,19 +55,25 @@ export class Permissions {
     return pending.answer.promise;
   }
 
-  /** Ask whoever can answer and has not been asked. Called when clients come or attach. */
+  /** Ask whoever can answer and has not been asked. Called when clients come, attach, or turn out unable to answer. */
   route(): void {
-    for (const pending of this.pending) {
-      const attached = [...pending.session.clients];
-      const targets = attached.length ? attached : [...this.hub.clients].filter((c) => c.observer);
+    for (const pending of [...this.pending]) {
+      const able = (clients: Iterable<Client>): Client[] => [...clients].filter((c) => !pending.unable.has(c));
+      const attached = able(pending.session.clients);
+      const targets = attached.length ? attached : able(this.hub.clients).filter((c) => c.observer);
       for (const client of targets) {
         if (pending.asked.has(client)) continue;
         pending.asked.add(client);
         client.conn.request<PermissionResponse>("session/request_permission", pending.params).then(
           (answer) => this.settle(pending, answer),
-          () => {}, // that client left; another one may still answer
+          () => {
+            pending.unable.add(client);
+            this.route(); // another one may still answer
+          },
         );
       }
+      const waiting = pending.session.current?.req.from;
+      if (!targets.length && waiting && !waiting.conn.isClosed) this.settle(pending, { outcome: { outcome: "cancelled" } });
     }
   }
 

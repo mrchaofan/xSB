@@ -13,14 +13,14 @@ Register one master table as `storyboard/<title-or-scene>` (markdown), and each 
 
 Use `generate_image` from `media`, once per shot:
 
-- `reference_images`: the look references of the characters in the shot (from the character sheet in `character`), plus the scene reference image for the scene (from `style_guide`). In the prompt, refer to them in order as 图1, 图2 (the labels the model expects for reference images; keep them as written), and say clearly what to borrow from each.
+- `reference_images`: the look references of the characters in the shot (from the character sheet in `character`), plus the scene reference image for the scene (from `style_guide`). In the prompt, refer to them in order as 图一, 图二 (the labels the model expects for reference images; keep them as written), and say clearly what to borrow from each.
 - Prompt order: the character's appearance description (copied **verbatim** from `character`) → the character's position and pose in this frame → setting → shot size and camera position → lighting → style suffix (copied **verbatim** from `style_guide`).
 - Use the aspect ratio from the brief, the same for the whole film. The video will follow this image's aspect ratio.
 - Describe the frame at **the moment the action starts**, not how it looks once the action is done. The first frame of "walks from the left to the window" has the character at the left of the frame.
 
 Example:
 
-> The person in 图1, keeping the face, hair, and costume exactly the same: A thirty-year-old woman with shoulder-length black hair and a lean face, wearing a long dark gray trench coat over a white shirt, carrying a faded dark green canvas bag. She stands at the left edge of the frame, dragging a suitcase, her body turned toward the ticket booth at the right of the frame. Scene reference 图2: A ferry landing late at night, fog over the river, a single dim yellow light on in the ticket booth. Medium shot, eye level. The only light source is the ticket booth. Realistic cinematic look, low-key lighting, warm tungsten light with teal shadows, shallow depth of field, film grain, restrained color, no text in frame. 16:9 horizontal composition.
+> The person in 图一, keeping the face, hair, and costume exactly the same: A thirty-year-old woman with shoulder-length black hair and a lean face, wearing a long dark gray trench coat over a white shirt, carrying a faded dark green canvas bag. She stands at the left edge of the frame, dragging a suitcase, her body turned toward the ticket booth at the right of the frame. Scene reference 图二: A ferry landing late at night, fog over the river, a single dim yellow light on in the ticket booth. Medium shot, eye level. The only light source is the ticket booth. Realistic cinematic look, low-key lighting, warm tungsten light with teal shadows, shallow depth of field, film grain, restrained color, no text in frame. 16:9 horizontal composition.
 
 ## What to draw for each generation method
 

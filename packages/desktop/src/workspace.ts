@@ -1,10 +1,10 @@
 /**
- * One window's workspace: an ACP connection to the project's hub, turned into
+ * One project's workspace: an ACP connection to the project's hub, turned into
  * what the renderer shows (bridge.ts).
  *
  * The hub speaks in sessions and `session/update`s; the renderer shows one
- * transcript of entries per agent. This file is that translation and nothing
- * else: it keeps no state the hub does not have, apart from the user's
+ * transcript of entries per agent. This file maintains that view and coordinates workspace operations. It
+ * keeps no state the hub does not have, apart from the user's
  * messages the hub has not yet made part of a turn, and the permission
  * requests the user has not yet answered.
  */
@@ -13,9 +13,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
-import { Agents, Assets, Backends, Connection, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams } from "@xsb/protocol";
+import { Agents, Assets, Backends, Connection, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
 import type { AgentInfo, Asset, BackendInfo, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
-import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, RoleView, Snapshot } from "./bridge.ts";
+import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
 import { roleInput, roleView } from "./roles.ts";
@@ -38,7 +38,14 @@ export class Workspace {
   private emit: Emit;
   /** False while `load` gathers the snapshot: what arrives then is part of it, not an event. */
   private live = false;
+  /** This side closed the connection (`close`): its end is then no news. */
+  private left = false;
+  /** No window shows this workspace (`setShown`). */
+  private hidden = false;
   private agents = new Map<string, AgentInfo>();
+  private tasks = new Map<string, Task>();
+  /** The roles as last heard of, by name: what a window is shown when it loads. */
+  private roles = new Map<string, RoleView>();
   private transcripts = new Map<string, Entry[]>();
   /** Agent id -> its main session, attached to. Where its transcript comes from and its input goes. */
   private mains = new Map<string, Promise<string>>();
@@ -82,42 +89,83 @@ export class Workspace {
     this.emit = (event) => {
       if (this.live) emit(event);
     };
+    // The hub stopped, or died: the window says so, whatever it is in the middle of. Not when it was this side that left.
+    void conn.closed.then(() => this.left || this.onHubGone(emit));
     conn.onNotification("session/update", (p) => this.onUpdate(p.sessionId, p.update));
     conn.onNotification(Agents.update, (p) => this.onAgent(p.agent));
     conn.onNotification(Agents.removed, (p) => this.onAgentRemoved(p.id));
     conn.onNotification(Assets.update, (p) => this.asset(p.asset));
-    conn.onNotification(Roles.update, (p) => void this.role(p.role.name).then((role) => this.emit({ role })));
-    conn.onNotification(Roles.removed, (p) => this.emit({ removedRole: p.name }));
-    conn.onNotification(Tasks.update, (p) => this.emit({ task: p.task }));
+    conn.onNotification(Roles.update, (p) => {
+      const role = roleView(p.role);
+      this.roles.set(role.name, role);
+      this.emit({ role });
+    });
+    conn.onNotification(Roles.removed, (p) => {
+      this.roles.delete(p.name);
+      this.emit({ removedRole: p.name });
+    });
+    conn.onNotification(Tasks.update, (p) => this.onTask(p.task));
     conn.onRequest("session/request_permission", (p) => this.onPermission(p));
   }
 
+  get connected(): boolean {
+    return !this.conn.isClosed;
+  }
+
   close(): void {
+    this.left = true;
     this.conn.close();
   }
 
-  /** The names of the agents that are in the middle of a turn. */
+  /**
+   * Whether a window shows this workspace. When none does, the hub runs on and the connection stays, to know when
+   * the app quits whether agents are at work here; but nobody is here to be asked anything.
+   */
+  setShown(shown: boolean): void {
+    this.hidden = !shown;
+    if (!shown) for (const entryId of [...this.asking.keys()]) this.answer(entryId, "cancelled");
+  }
+
+  /** An error in the user's words. One that is only the connection ending says what ended: the hub. */
+  private why(e: unknown): string {
+    return this.say(this.conn.isClosed ? failure("hub_gone") : e);
+  }
+
+  /** With the hub gone nothing runs: no agent is at work any more, and no question of theirs waits for an answer. */
+  private onHubGone(emit: Emit): void {
+    for (const entryId of [...this.asking.keys()]) this.answer(entryId, "cancelled");
+    for (const agent of [...this.agents.values()]) this.onAgent({ ...agent, state: "idle" });
+    emit({ hub: "down" });
+  }
+
+  /** Agents doing a turn or holding unfinished tasks, including jobs awaited between turns. */
   working(): string[] {
-    return [...this.agents.values()].filter((agent) => agent.state !== "idle").map((agent) => agent.name);
+    if (this.conn.isClosed) return [];
+    const busy = new Set([...this.agents.values()].filter((agent) => agent.state !== "idle").map((agent) => agent.id));
+    for (const task of this.tasks.values()) {
+      if (!isTerminal(task.status)) busy.add(task.tool ? task.from.agentId : task.to.agentId);
+    }
+    return [...busy].map((id) => this.agents.get(id)?.name ?? id);
   }
 
   /** Whether this directory is where one of the workspace's agents works, or is inside the project. */
   worksIn(dir: string): boolean {
     // The same directory can be named in two ways (on macOS, /tmp is /private/tmp).
-    const real = (name: string): string => fs.realpathSync.native(fs.existsSync(name) ? name : path.resolve(name));
+    const real = (name: string): string => (fs.existsSync(name) ? fs.realpathSync.native(name) : path.resolve(name));
     const inside = (parent: string): boolean => !path.relative(real(parent), real(dir)).startsWith("..");
     return [...this.agents.values()].some((agent) => real(agent.workspace) === real(dir)) || inside(this.paths.project);
   }
 
   /** Everything of the workspace that the window shows at first. What changes afterwards arrives as events. */
-  async load(): Promise<Omit<Snapshot, "pages">> {
+  async load(): Promise<Omit<Snapshot, "pages" | "backends">> {
     this.live = false;
-    const [backends, roles, { teams }, { agents }, { tasks }, { assets }] = await Promise.all([
-      this.backends(),
-      this.roles(),
+    // Roles and tasks are kept as they are answered. The hub answers in order on one connection, so what changes
+    // while the rest still loads arrives after the answer, as an event, and is the newer word.
+    const [, { teams }, { agents }, , { assets }] = await Promise.all([
+      this.conn.request<{ roles: RoleDetail[] }>(Roles.list).then(({ roles }) => (this.roles = new Map(roles.map((r) => [r.name, roleView(r)])))),
       this.conn.request<{ teams: TeamInfo[] }>(Teams.list),
       this.conn.request<{ agents: AgentInfo[] }>(Agents.list),
-      this.conn.request<{ tasks: Task[] }>(Tasks.list, {}),
+      this.conn.request<{ tasks: Task[] }>(Tasks.list, {}).then(({ tasks }) => tasks.forEach((task) => this.tasks.set(task.id, task))),
       this.conn.request<{ assets: Asset[] }>(Assets.list, {}),
     ]);
     agents.forEach((agent) => this.onAgent(agent));
@@ -130,10 +178,9 @@ export class Workspace {
     this.live = true;
     return {
       workspace: { name: path.basename(this.paths.project), path: this.paths.project },
-      backends,
-      roles,
+      roles: [...this.roles.values()],
       agents: [...this.agents.values()],
-      tasks,
+      tasks: [...this.tasks.values()],
       artifacts: [...this.artifacts.values()],
       assetNames: Object.assign({}, ...teams.map((team) => team.assets)),
       transcripts: Object.fromEntries(this.transcripts),
@@ -144,7 +191,7 @@ export class Workspace {
   /** The backends of this machine, as the hub that starts them sees them now. */
   async backends(): Promise<BackendView[]> {
     const { backends } = await this.conn.request<{ backends: BackendInfo[] }>(Backends.list);
-    return backends.map((b) => ({ name: b.name, command: [b.command, ...b.args].join(" "), installed: b.installed, hint: b.installHint }));
+    return backends.map((b) => ({ name: b.name, command: [b.command, ...b.args].join(" "), installed: b.installed }));
   }
 
   // ---- agents and their transcripts -------------------------------------------
@@ -152,7 +199,8 @@ export class Workspace {
   private onAgent(agent: AgentInfo): void {
     this.agents.set(agent.id, agent);
     if (!this.transcripts.has(agent.id)) this.transcripts.set(agent.id, []);
-    if (agent.mainSessionId && !this.mains.has(agent.id)) void this.session(agent);
+    // A history that cannot be read is said so, where it would have been shown.
+    if (agent.mainSessionId && !this.mains.has(agent.id)) this.session(agent).catch((e) => this.put(agent.id, { id: this.newId(), kind: "error", text: this.why(e) }));
     if (agent.state === "idle") {
       this.settle(agent.id);
       this.does(agent.id, null);
@@ -160,6 +208,11 @@ export class Workspace {
       this.does(agent.id, "waiting"); // a turn began: nothing has come back yet
     }
     this.emit({ agent });
+  }
+
+  private onTask(task: Task): void {
+    this.tasks.set(task.id, task);
+    this.emit({ task });
   }
 
   private onAgentRemoved(id: string): void {
@@ -189,8 +242,10 @@ export class Workspace {
     return session;
   }
 
+  /** Show an entry of an agent's transcript, in place of the one with its id if there is one. Nothing, once the agent is gone. */
   private put(agentId: string, entry: Entry): void {
-    const entries = this.transcripts.get(agentId)!;
+    const entries = this.transcripts.get(agentId);
+    if (!entries) return;
     const index = entries.findIndex((e) => e.id === entry.id);
     if (index < 0) entries.push(entry);
     else entries[index] = entry;
@@ -198,8 +253,9 @@ export class Workspace {
   }
 
   private drop(agentId: string, entryId: string): void {
-    const entries = this.transcripts.get(agentId)!;
-    entries.splice(entries.findIndex((e) => e.id === entryId), 1);
+    const index = this.transcripts.get(agentId)?.findIndex((e) => e.id === entryId) ?? -1;
+    if (index < 0) return;
+    this.transcripts.get(agentId)!.splice(index, 1);
     this.emit({ agentId, removedEntry: entryId });
   }
 
@@ -289,7 +345,7 @@ export class Workspace {
     } catch (e) {
       // It never became a turn: it stays as sent, no longer waiting.
       if (this.pending.delete(id)) this.put(agentId, entry);
-      this.put(agentId, { id: this.newId(), kind: "error", text: this.say(e) });
+      this.put(agentId, { id: this.newId(), kind: "error", text: this.why(e) });
     }
   }
 
@@ -301,7 +357,10 @@ export class Workspace {
     const content = this.pending.get(entryId);
     const sessionId = await this.mains.get(agentId);
     if (!content || !sessionId) return; // it became a turn in the meantime
-    await this.conn.request(Steering.method, { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: entryId } } });
+    // It could not go in (the agent waits for an approval, say): it keeps its turn, and the reason is shown.
+    await this.conn
+      .request(Steering.method, { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: entryId } } })
+      .catch((e) => this.put(agentId, { id: this.newId(), kind: "error", text: this.why(e) }));
   }
 
   /** Stop the running turn. Its open permission requests are void. */
@@ -313,8 +372,8 @@ export class Workspace {
 
   private onPermission(request: PermissionRequest): Promise<PermissionResponse> {
     const agentId = this.sessionAgent.get(request.sessionId);
-    // A session this window does not show: leave the question to a client that does.
-    if (!agentId) throw RpcError.notFound(`session ${request.sessionId}`);
+    // A session this window does not show, or no window at all: leave the question to a client that can show it.
+    if (!agentId || this.hidden) throw RpcError.notFound(`session ${request.sessionId}`);
     this.settle(agentId);
     const entry = {
       id: this.newId(),
@@ -351,9 +410,52 @@ export class Workspace {
     await this.conn.request(Agents.remove, { id });
   }
 
-  /** Stop the agent's backend process, so that what was edited applies from its next turn on. */
-  async restartAgent(id: string): Promise<void> {
-    await this.conn.request(Agents.restart, { id });
+  /**
+   * Do the same for several agents, one after the other. What is done stays done, and doing it again does the rest:
+   * so when one fails, the answer says which were done and why it stopped.
+   */
+  private async each<Item extends { id: string }>(agents: Item[], work: (agent: Item) => Promise<unknown>, completed: string[] = []): Promise<Progress> {
+    const done = completed.filter((id) => agents.some((agent) => agent.id === id));
+    for (const agent of agents) {
+      if (done.includes(agent.id)) continue;
+      try {
+        await work(agent);
+        done.push(agent.id);
+      } catch (e) {
+        return { done, failed: agent.id, error: this.why(e) };
+      }
+    }
+    return { done };
+  }
+
+  private agentsOf(role: string): AgentInfo[] {
+    return [...this.agents.values()].filter((agent) => agent.role === role);
+  }
+
+  /** Stop the backend processes of a role's agents, so that what was edited applies from their next turns on. */
+  applyRole(role: string, completed: string[] = []): Promise<Progress> {
+    return this.each(this.agentsOf(role), (agent) => this.conn.request(Agents.restart, { id: agent.id }), completed);
+  }
+
+  /** Give a role's agents the description and the backend the role now has. */
+  async syncRole(role: string): Promise<Progress> {
+    const { description, backend } = this.roles.get(role) ?? { description: "", backend: "" };
+    return this.each(this.agentsOf(role).filter((agent) => agent.description !== description || (backend && agent.backend !== backend)), async (agent) => {
+      const result = await this.conn.request<{ agent: AgentInfo }>(Agents.put, { agent: { id: agent.id, description, backend: backend || agent.backend } });
+      this.agents.set(result.agent.id, result.agent);
+    });
+  }
+
+  /** Use a team, and give each of its roles that has none an agent, named after the role and run by `backend`. */
+  async buildTeam(id: string, backend: string): Promise<Progress> {
+    await this.useTeam(id);
+    const { teams } = await this.conn.request<{ teams: TeamInfo[] }>(Teams.list);
+    const missing = (teams.find((team) => team.id === id)?.roles ?? []).map(({ name, role }) => ({ id: role.name, name, description: role.description, backend, role: role.name }));
+    const progress = await this.each(missing.filter((agent) => !this.agents.has(agent.id)), async (agent) => {
+      const result = await this.conn.request<{ agent: AgentInfo }>(Agents.put, { agent });
+      this.agents.set(result.agent.id, result.agent);
+    });
+    return progress;
   }
 
   async inspectAgent(id: string): Promise<AgentDetail> {
@@ -361,21 +463,15 @@ export class Workspace {
     return { instructions, systemPrompt };
   }
 
-  /** Every role of the workspace: its own, and those of the preset teams it uses. */
-  async roles(): Promise<RoleView[]> {
-    const { roles } = await this.conn.request<{ roles: { name: string }[] }>(Roles.list);
-    return Promise.all(roles.map((r) => this.role(r.name)));
-  }
-
-  private async role(name: string): Promise<RoleView> {
-    return roleView((await this.conn.request<{ role: RoleDetail }>(Roles.get, { name })).role);
-  }
-
   async putRole(view: RoleView): Promise<RoleView> {
-    await this.conn.request(Roles.put, { role: roleInput(view) });
-    return this.role(view.name);
+    const { role } = await this.conn.request<{ role: RoleDetail }>(Roles.put, { role: roleInput(view) });
+    return roleView(role);
   }
 
+  /**
+   * Remove the workspace's own role. Like using or dropping a team, it can change several roles: what became of
+   * them arrives as events, ahead of the answer.
+   */
   async removeRole(name: string): Promise<void> {
     await this.conn.request(Roles.remove, { name });
   }
@@ -398,6 +494,11 @@ export class Workspace {
 
   async dropTeam(id: string): Promise<void> {
     await this.conn.request(Teams.drop, { id });
+  }
+
+  /** Where the files of one of a role's skills are: the role may be the workspace's own, or a preset team's. */
+  async skillDir(role: string, skill: string): Promise<string | undefined> {
+    return (await this.conn.request<{ role: RoleDetail }>(Roles.get, { name: role })).role.skills.find((s) => s.name === skill)?.dir;
   }
 
   /** Start one of the role's saved MCP servers and name its tools. */

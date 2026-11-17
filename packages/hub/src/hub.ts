@@ -14,7 +14,7 @@
  */
 import fs from "node:fs";
 import net from "node:net";
-import { Agents, Connection, RpcError, failure } from "@xsb/protocol";
+import { AGENT_ID, Agents, Connection, RpcError, failure } from "@xsb/protocol";
 import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Client } from "./acp-server.ts";
@@ -131,7 +131,7 @@ export class Hub {
   }
 
   putAgent(input: Partial<AgentSpec> & { id: string }, instructions?: string): AgentInfo {
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(input.id ?? "")) throw failure("agent_id_invalid");
+    if (!AGENT_ID.test(input.id ?? "")) throw failure("agent_id_invalid");
     const prior = this.state.agents.get(input.id);
     const roleName = input.role ?? prior?.role;
     const role = roleName ? loadRole(this.paths, roleName) : undefined; // refuse a role that does not exist
@@ -186,7 +186,7 @@ export class Hub {
       const members = agents.filter((a) => a.role === name).map((a) => a.id);
       return loadRole(this.paths, name)
         .skills.filter((s) => s.produces)
-        .map((s) => ({ produces: s.produces!, inputs: s.inputs, role: name, agents: members }));
+        .map((s) => ({ produces: s.produces!, inputs: s.inputs, agents: members }));
     });
   }
 

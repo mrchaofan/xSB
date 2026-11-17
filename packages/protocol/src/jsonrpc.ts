@@ -82,13 +82,25 @@ export class Connection {
     return this;
   }
 
-  request<T = any>(method: string, params?: unknown): Promise<T> {
+  /**
+   * Ask the peer. With `cancel`, aborting its signal tells the peer that the answer is no longer wanted, by the
+   * notification the protocol spoken has for that (`cancel.notify`). The request stays open: what the peer
+   * answers to a cancelled request is still its answer.
+   */
+  request<T = any>(method: string, params?: unknown, cancel?: { signal: AbortSignal; notify: string }): Promise<T> {
     if (this.isClosed) return Promise.reject(new RpcError(CONNECTION_CLOSED, `${this.name}: connection closed`));
     const id = this.nextId++;
-    return new Promise<T>((resolve, reject) => {
+    const answer = new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       this.send({ jsonrpc: "2.0", id, method, params });
     });
+    if (!cancel) return answer;
+    const tell = (): void => this.notify(cancel.notify, { requestId: id });
+    if (cancel.signal.aborted) tell();
+    else cancel.signal.addEventListener("abort", tell, { once: true });
+    const forget = (): void => cancel.signal.removeEventListener("abort", tell);
+    answer.then(forget, forget);
+    return answer;
   }
 
   notify(method: string, params?: unknown): void {

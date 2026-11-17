@@ -3,9 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Paths, backends, findCommand, findProject, globalConfigPath, hubSocket, initProject, readHubInfo, stopHub } from "@xsb/hub";
-import { Agents, Assets, Roles, Steering, Tasks, Teams, exitCode, explain, isTerminal, text } from "@xsb/protocol";
-import type { AgentInfo, Asset, McpServerCheck, RoleDetail, RoleInfo, Connection, PermissionRequest, PermissionResponse, SteeringOutcome, Task, TeamInfo } from "@xsb/protocol";
+import { Paths, describeBackends, findProject, globalConfigPath, hubSocket, initProject, readHubInfo, stopHub } from "@xsb/hub";
+import { Agents, Assets, Backends, Roles, Steering, Tasks, Teams, exitCode, explain, isTerminal, text } from "@xsb/protocol";
+import type { AgentInfo, Asset, BackendInfo, McpServerCheck, RoleDetail, Connection, PermissionRequest, PermissionResponse, SteeringOutcome, Task, TeamInfo } from "@xsb/protocol";
 import { connectHub } from "./client.ts";
 import { Printer } from "./printer.ts";
 import { language, t } from "./text.ts";
@@ -23,7 +23,8 @@ function parse(argv: string[]): Args {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith("--")) args._.push(arg);
-    else if (SWITCHES.has(arg.slice(2)) || i + 1 >= argv.length) args[arg.slice(2)] = true;
+    else if (SWITCHES.has(arg.slice(2))) args[arg.slice(2)] = true;
+    else if (i + 1 >= argv.length) throw new Error(t.noValue(arg));
     else args[arg.slice(2)] = argv[++i];
   }
   return args;
@@ -65,7 +66,7 @@ async function run(args: Args): Promise<void> {
     case "team":
       return team(args, rest);
     case "backends":
-      return listBackends();
+      return listBackends(args);
     case "chat":
       return chat(args, rest[0]);
     case "send":
@@ -94,10 +95,21 @@ function init(args: Args): void {
   console.log(t.initialized(paths.dir));
 }
 
-function listBackends(): void {
-  for (const [name, spec] of Object.entries(backends())) {
-    const found = t.installed(findCommand(spec.command) !== null);
-    console.log(`${name.padEnd(10)} ${found} ${spec.command} ${(spec.args ?? []).join(" ")}`);
+/**
+ * The backends of this machine. Whether one is installed is the word of the project's running hub, for the hub is
+ * what starts it, on a PATH that may not be this terminal's (the desktop app's, say). With no hub running, the next
+ * one would be started from here and find what this terminal finds.
+ */
+async function listBackends(args: Args): Promise<void> {
+  const dir = flag(args, "project") ?? findProject();
+  let list = describeBackends();
+  if (dir && readHubInfo(new Paths(dir))) {
+    const conn = await connectHub(new Paths(dir), false);
+    list = (await conn.request<{ backends: BackendInfo[] }>(Backends.list)).backends;
+    conn.close();
+  }
+  for (const b of list) {
+    console.log(`${b.name.padEnd(10)} ${t.installed(b.installed)} ${[b.command, ...b.args].join(" ")}${!b.installed && b.installHint ? `    ${b.installHint}` : ""}`);
   }
   console.log(t.backendsDefined(globalConfigPath()));
 }
@@ -143,7 +155,7 @@ async function role(args: Args, [action, name]: string[]): Promise<void> {
   try {
     if (action === "add") {
       const input = { name, description: flag(args, "desc"), backend: flag(args, "backend"), workspace: flag(args, "workspace"), instructions: textFlag(args, "instructions") };
-      const { role: saved } = await conn.request<{ role: RoleInfo }>(Roles.put, { role: input });
+      const { role: saved } = await conn.request<{ role: RoleDetail }>(Roles.put, { role: input });
       console.log(t.roleSaved(saved.name, paths.roleDir(saved.name)));
     } else if (action === "remove") {
       await conn.request(Roles.remove, { name });
@@ -159,7 +171,7 @@ async function role(args: Args, [action, name]: string[]): Promise<void> {
       for (const s of servers) console.log(s.tools ? t.serverOk(s.server, s.tools.map((tool) => tool.name)) : t.serverFailed(s.server, s.error ?? ""));
       if (servers.some((s) => s.error)) process.exitCode = 1;
     } else {
-      const { roles } = await conn.request<{ roles: RoleInfo[] }>(Roles.list);
+      const { roles } = await conn.request<{ roles: RoleDetail[] }>(Roles.list);
       if (roles.length === 0) console.log(t.noRoles);
       for (const r of roles) {
         const has = `${r.preset ? `${r.preset.team}${r.preset.own ? "*" : ""}, ` : ""}${t.roleHas(Object.keys(r.mcpServers).length, r.skills.length, r.agents)}`;
@@ -211,17 +223,16 @@ async function openSession(conn: Connection, agentId: string, fresh: boolean, hi
   return created.sessionId;
 }
 
-/** Answer permission requests at the terminal, one at a time. */
-function servePermissions(conn: Connection, printer: Printer, ask: ((question: string) => Promise<string>) | null): void {
+/**
+ * Answer permission requests at the terminal, one at a time. A command with no terminal does not call this: the
+ * hub then finds that it cannot answer, and asks whoever can (permissions.ts in @xsb/hub).
+ */
+function servePermissions(conn: Connection, printer: Printer, ask: (question: string) => Promise<string>): void {
   let turn: Promise<unknown> = Promise.resolve();
   conn.onRequest("session/request_permission", (request: PermissionRequest): Promise<PermissionResponse> => {
     const answer = turn.then(async (): Promise<PermissionResponse> => {
       const who = printer.labels.get(request.sessionId) ?? request.sessionId;
       const what = request.toolCall.title ?? request.toolCall.name ?? t.useTool;
-      if (!ask) {
-        printer.line(t.askedNoTerminal(who, what));
-        return { outcome: { outcome: "cancelled" } };
-      }
       printer.line(t.asks(who, what));
       request.options.forEach((o, i) => printer.line(`  ${i + 1}) ${o.name}`));
       const choice = request.options[Number(await ask(t.choose)) - 1];
@@ -272,6 +283,7 @@ async function chat(args: Args, agentId: string | undefined): Promise<void> {
     }
     rl.prompt();
   });
+  void conn.closed.then(() => rl.close()); // the hub went away: there is nobody left to talk to
   await new Promise((resolve) => rl.on("close", resolve));
   conn.close();
 }
@@ -283,27 +295,24 @@ async function send(args: Args, agentId: string | undefined, message: string): P
   const printer = new Printer();
   conn.onNotification("session/update", (p) => printer.update(p.sessionId, p.update));
   let rl: readline.Interface | undefined;
-  const ask = process.stdin.isTTY
-    ? (q: string): Promise<string> => {
-        rl ??= readline.createInterface({ input: process.stdin, output: process.stdout });
-        return new Promise((resolve) => rl!.question(q, resolve));
-      }
-    : null;
-  servePermissions(conn, printer, ask);
+  if (process.stdin.isTTY) {
+    servePermissions(conn, printer, (q) => {
+      rl ??= readline.createInterface({ input: process.stdin, output: process.stdout });
+      return new Promise((resolve) => rl!.question(q, resolve));
+    });
+  }
   const sessionId = await openSession(conn, agentId, args.new === true, false);
   printer.labels.set(sessionId, agentId);
   try {
     if (args.interject === true) {
-      const result = await conn.request<SteeringOutcome>(Steering.method, { sessionId, prompt: [text(message)] });
-      printer.line(t.steered[result.outcome]);
-      if (result.outcome === "injected") return;
-      // The agent was idle, so the message became a turn of its own: follow it.
-      await sleep(200);
-      while ((await agentState(conn, agentId)) !== "idle") await sleep(300);
-    } else {
-      const result = await conn.request("session/prompt", { sessionId, prompt: [text(message)] });
-      if (result.stopReason !== "end_turn") printer.line(t.stopped(result.stopReason));
+      // With no turn to go into, the hub is asked to leave the message with us: it is then sent as a turn of its own, below, and followed to its end.
+      const params = { sessionId, prompt: [text(message)], _meta: { [Steering.metaKey]: { idleBehavior: "promptRequired" } } };
+      const { outcome } = await conn.request<SteeringOutcome>(Steering.method, params);
+      printer.line(t.steered[outcome === "injected" ? "injected" : "startedNewTurn"]);
+      if (outcome === "injected") return;
     }
+    const result = await conn.request("session/prompt", { sessionId, prompt: [text(message)] });
+    if (result.stopReason !== "end_turn") printer.line(t.stopped(result.stopReason));
   } finally {
     printer.endLine();
     rl?.close();
@@ -314,11 +323,6 @@ async function send(args: Args, agentId: string | undefined, message: string): P
 /** Who does a task: an agent, or for a job the tool that runs. */
 const doer = (task: Task): string => (task.tool ? `${task.tool.server}/${task.tool.name}` : task.to.agentId);
 
-async function agentState(conn: Connection, agentId: string): Promise<string | undefined> {
-  const { agents } = await conn.request<{ agents: AgentInfo[] }>(Agents.list);
-  return agents.find((a) => a.id === agentId)?.state;
-}
-
 async function watch(args: Args): Promise<void> {
   const paths = project(args);
   const conn = await connectHub(paths, true);
@@ -328,16 +332,20 @@ async function watch(args: Args): Promise<void> {
     const sessionId = agentInfo.mainSessionId;
     if (!sessionId || printer.labels.has(sessionId)) return;
     printer.labels.set(sessionId, agentInfo.id);
-    await conn.request("session/resume", { sessionId, cwd: agentInfo.workspace, mcpServers: [] });
+    // An agent that cannot be followed is said so, and tried again when it next changes; the others are watched all the same.
+    await conn.request("session/resume", { sessionId, cwd: agentInfo.workspace, mcpServers: [] }).catch((e) => {
+      printer.labels.delete(sessionId);
+      printer.line(t.failed(why(e)));
+    });
   };
   conn.onNotification("session/update", (p) => printer.update(p.sessionId, p.update));
-  conn.onNotification(Agents.update, (p) => void follow(p.agent).catch(() => {}));
+  conn.onNotification(Agents.update, (p) => void follow(p.agent));
   conn.onNotification(Agents.removed, (p) => printer.line(t.agentRemoved(p.id)));
   conn.onNotification(Tasks.update, ({ task }: { task: Task }) =>
     printer.line(t.taskLine(task.id, task.from.agentId, doer(task), task.title, task.status)),
   );
   const rl = process.stdin.isTTY ? readline.createInterface({ input: process.stdin, output: process.stdout }) : undefined;
-  servePermissions(conn, printer, rl ? (q) => new Promise((resolve) => rl.question(q, resolve)) : null);
+  if (rl) servePermissions(conn, printer, (q) => new Promise((resolve) => rl.question(q, resolve)));
   const { agents } = await conn.request<{ agents: AgentInfo[] }>(Agents.list);
   for (const a of agents) await follow(a);
   printer.line(t.watching(agents.length));

@@ -65,6 +65,3 @@ export interface ImageProvider {
   readonly about: string;
   generate(request: ImageRequest, signal: AbortSignal): Promise<void>;
 }
-
-/** A provider is made from the environment the server was started with: that is where a role's settings are. */
-export type Factory<Provider> = (env: NodeJS.ProcessEnv) => Provider;

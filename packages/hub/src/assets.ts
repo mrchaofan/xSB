@@ -61,7 +61,7 @@ export class Assets {
       description: input.description,
       path: file,
       by: by.agentId,
-      taskId: item?.kind === "task" ? item.taskId : undefined,
+      taskId: item?.taskId,
       createdAt: now(),
     };
     this.hub.state.commit([ops.putAsset(asset)]);

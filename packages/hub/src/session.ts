@@ -23,7 +23,7 @@ import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
 import { bridgeServer } from "./mcp.ts";
 import { Paths } from "./paths.ts";
-import { CONTEXT_LOST } from "./prompts.ts";
+import { CONTEXT_LOST, asPreface } from "./prompts.ts";
 import type { MailItem, SessionRec } from "./state.ts";
 import { ops } from "./state.ts";
 import type { Deferred } from "./util.ts";
@@ -136,7 +136,7 @@ export class LiveSession {
     const created = await backend.conn.request("session/new", params);
     this.setup = created;
     // Without the system prompt capability the instructions ride on the first prompt.
-    if (!backend.caps.systemPrompt) this.prefaces.push(instructions);
+    if (!backend.caps.systemPrompt) this.prefaces.push(asPreface(instructions));
     this.save({ backendSessionId: created.sessionId });
     backend.open(created.sessionId, this);
     this.backend = backend;

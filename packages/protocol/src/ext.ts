@@ -112,9 +112,9 @@ export const Agents = {
  * agents instructions, MCP servers and skills.
  *
  *   advertise  agentCapabilities._meta["dev.xsb/roles"] = { version: 1 }
- *   request    _dev.xsb/roles/list   {}       -> { roles: RoleInfo[] }
+ *   request    _dev.xsb/roles/list   {}       -> { roles: RoleDetail[] }
  *              _dev.xsb/roles/get    { name } -> { role: RoleDetail }
- *              _dev.xsb/roles/put    { role: RoleInput } -> { role: RoleInfo }
+ *              _dev.xsb/roles/put    { role: RoleInput } -> { role: RoleDetail }
  *                                    Fields left out stay as they are. `mcpServers` and `skills`,
  *                                    when given, are the whole set: what is not in it is removed.
  *                                    A change is to the project's own role; a team's role is copied to become one.
@@ -123,7 +123,7 @@ export const Agents = {
  *                                    that is only a team's goes with the team (`teams/drop`)
  *              _dev.xsb/roles/check  { name, server? } -> { servers: McpServerCheck[] }
  *                                    start the role's MCP servers and ask each for its tools
- *   notify     _dev.xsb/roles/update  { role: RoleInfo }   (hub -> observers, after `put`)
+ *   notify     _dev.xsb/roles/update  { role: RoleDetail } (hub -> observers, after `put`)
  *              _dev.xsb/roles/removed { name }
  *
  * A role is also a directory the user may edit by hand; such an edit is read
@@ -158,7 +158,7 @@ export type SkillInfo = { name: string; description: string; produces?: string; 
 /** Where a new agent of a role works: in the project directory, with the others who do, or in a directory of its own. */
 export type Workplace = "project" | "own";
 
-export type RoleInfo = {
+export type RoleDetail = {
   name: string;
   /**
    * Set when a team the project uses has a role of this name: which team, and
@@ -169,15 +169,12 @@ export type RoleInfo = {
   description?: string;
   backend?: string;
   workspace?: Workplace;
+  instructions: string;
   mcpServers: Record<string, McpServerSpec>;
-  skills: SkillInfo[];
+  /** `dir`: where the skill's files are, on the hub's machine. */
+  skills: (SkillInfo & { content: string; dir: string })[];
   /** Ids of the agents that are instances of the role. */
   agents: string[];
-};
-
-export type RoleDetail = Omit<RoleInfo, "skills"> & {
-  instructions: string;
-  skills: (SkillInfo & { content: string })[];
 };
 
 export type RoleInput = {
@@ -195,7 +192,7 @@ export type McpServerCheck = { server: string; tools?: { name: string; descripti
 /**
  * Teams: the sets of roles xsb ships, and which of them the project uses.
  * Using a team copies nothing: its roles are among the project's from then on
- * (`RoleInfo.preset`), as they ship with the hub that runs.
+ * (`RoleDetail.preset`), as they ship with the hub that runs.
  *
  *   advertise  agentCapabilities._meta["dev.xsb/teams"] = { version: 1 }
  *   request    _dev.xsb/teams/list {}     -> { teams: TeamInfo[] }
@@ -261,6 +258,11 @@ export type BackendInfo = {
  */
 /** One session of one agent: where mail comes from and goes to. */
 export type Addr = { agentId: string; sessionId: string };
+
+/** What an agent's id may be. It names a directory and is a word of a command line, so it starts with a letter or a digit. */
+export const AGENT_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+/** What a role, a skill, an MCP server and an asset type may be called. */
+export const NAME = /^[\w-]+$/;
 
 export type TaskStatus = "blocked" | "queued" | "running" | "completed" | "failed" | "cancelled";
 export const isTerminal = (s: TaskStatus): boolean => s === "completed" || s === "failed" || s === "cancelled";

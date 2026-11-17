@@ -11,7 +11,7 @@ Hub 守护进程：一个项目唯一的常驻进程，系统的全部行为都�
 | `xsb-hub <项目目录>` | 在前台运行该项目的 Hub，直到收到 SIGTERM / SIGINT。通常不用手动执行：客户端按需在后台启动它 |
 | `xsb-mcp-bridge` | 后端用来访问协作工具的 stdio MCP server。只由 Hub 写进后端会话的 `mcpServers`，不能手动执行 |
 
-Hub 启动后监听两个 Unix socket（`.xsb/run/acp.sock`、`.xsb/run/mcp.sock`；项目路径太深时落在临时目录），进程信息在 `.xsb/run/hub.json`，日志在 `.xsb/run/hub.log`。
+Hub 启动后监听两个 Unix socket（`.xsb/run/acp.sock`、`.xsb/run/mcp.sock`；项目路径太深时落在临时目录），运行期间持有 `.xsb/run/hub.lock` 上的文件锁（一个项目只有一个 Hub），进程信息在 `.xsb/run/hub.json`，日志在 `.xsb/run/hub.log`。
 
 ## 与 Hub 交互
 
@@ -61,7 +61,7 @@ await hub.shutdown();
 | [mcp.ts](src/mcp.ts) / [mcp-bridge.ts](src/mcp-bridge.ts) | 工具的 MCP server / 桥接进程。身份来自每个会话的 token |
 | [prompts.ts](src/prompts.ts) | Hub 对模型说的所有文字：系统说明、邮件在 prompt 里的包装 |
 | [state.ts](src/state.ts) | 内存状态 = 对事件日志的折叠；`apply` 是唯一修改状态的代码 |
-| [daemon.ts](src/daemon.ts) | 后台进程：独占项目（`hub.json` 独占创建）、启动、停止 |
+| [daemon.ts](src/daemon.ts) | 后台进程：独占项目（持有 `hub.lock` 的文件锁，见 lock.ts）、启动、停止 |
 | [config.ts](src/config.ts) / [paths.ts](src/paths.ts) | 两个配置文件 / `.xsb/` 的布局 |
 
 ## 配置
@@ -125,3 +125,7 @@ npm test -w @xsb/hub
 - [test/third-party-agent.ts](test/third-party-agent.ts)：不说 ACP 的 agent，经 [@xsb/adapter](../adapter) 封装。
 
 [test/mock-generator.ts](test/mock-generator.ts) 是一个 stdio MCP server，充当慢的生成服务。
+
+Node 22.18 的 SQLite 文件锁会打印实验性功能警告。SQLite 只在实际获取或检查已有锁时加载，普通命令不会因导入 Hub 而打印它；保留 Node >=22.18 的兼容性，锁操作的提示不影响功能。
+
+真实模型的跨轮检查是显式选择运行的：先构建桌面端，再执行 `XSB_LIVE_BACKEND=codex node packages/hub/test/live-smoke.ts`（也可用 `claude`）。它在临时项目里使用软件团队的开发者角色和一个只延迟、不会生成媒体的本地测试工具，核对 `start_job`、`await_tasks` 和结果到达后的收尾；会调用所选真实模型，不属于自动测试。

@@ -29,7 +29,7 @@ For a costume change, add another passage and note which scenes it applies to.
 
 ## 4. Look references (required)
 
-A look test puts the chosen face into the character's look in the film. Generate the images as described in the skill `reference-image`; for every image, pass the chosen candidate as a reference image and state "keep the face of 图1 exactly the same" (图1, 图2 are the labels the image model expects for reference images; keep them as written). Register each image as `reference/<character>-<view>`:
+A look test puts the chosen face into the character's look in the film. Generate the images as described in the skill `reference-image`; for every image, pass the chosen candidate as a reference image and state "keep the face of 图一 exactly the same" (图一, 图二 are the labels the image model expects for reference images; keep them as written). Register each image as `reference/<character>-<view>`:
 
 | Image | Purpose |
 | - | - |

@@ -28,7 +28,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { failure, RpcError } from "@xsb/protocol";
+import { NAME, failure, RpcError } from "@xsb/protocol";
 import type { McpServer, McpServerSpec, RoleDetail, RoleInput, Workplace } from "@xsb/protocol";
 import { loadProjectConfig, projectLanguage } from "./config.ts";
 import type { Paths } from "./paths.ts";
@@ -37,7 +37,7 @@ import { teamRoles, teams } from "./teams.ts";
 export type Skill = { name: string; description: string; produces?: string; inputs: string[]; dir: string };
 
 /** One thing the team can make: an asset type, the types it is made from, and who makes it. */
-export type Contract = { produces: string; inputs: string[]; role: string; agents: string[] };
+export type Contract = { produces: string; inputs: string[]; agents: string[] };
 
 export type Role = {
   name: string;
@@ -57,20 +57,19 @@ export type Role = {
 /** `role.json`. `mcpServers` is in the shape of `.mcp.json`: name -> how to start it. */
 type RoleFile = { description?: string; backend?: string; workspace?: Workplace; mcpServers?: Record<string, McpServerSpec> };
 
-const NAME = /^[\w-]+$/;
-
 const read = (file: string): string => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "");
 
 const has = (dir: string, name: string): boolean => fs.existsSync(path.join(dir, name, "role.json"));
 
 /** Where the project's roles are looked for, in order: its own, then the teams it uses. */
-function sources(paths: Paths): { dir: string; team?: string }[] {
+function sources(paths: Paths, used = loadProjectConfig(paths).teams ?? []): { dir: string; team?: string }[] {
   const language = projectLanguage(paths);
-  return [{ dir: paths.roles }, ...(loadProjectConfig(paths).teams ?? []).map((team) => ({ dir: teamRoles(team, language), team }))];
+  return [{ dir: paths.roles }, ...used.map((team) => ({ dir: teamRoles(team, language), team }))];
 }
 
-export function roleNames(paths: Paths): string[] {
-  const names = sources(paths).flatMap(({ dir }) => (fs.existsSync(dir) ? fs.readdirSync(dir).filter((name) => has(dir, name)) : []));
+/** The names of the project's roles; with `used`, what they would be if it used those teams. */
+export function roleNames(paths: Paths, used?: string[]): string[] {
+  const names = sources(paths, used).flatMap(({ dir }) => (fs.existsSync(dir) ? fs.readdirSync(dir).filter((name) => has(dir, name)) : []));
   return [...new Set(names)];
 }
 
@@ -142,6 +141,7 @@ export function saveRole(paths: Paths, input: RoleInput): void {
   if (input.instructions !== undefined) fs.writeFileSync(path.join(dir, "instructions.md"), input.instructions);
   if (!input.skills) return;
   const skillsDir = path.join(dir, "skills");
+  fs.mkdirSync(skillsDir, { recursive: true });
   for (const skill of input.skills) {
     fs.mkdirSync(path.join(skillsDir, skill.name), { recursive: true });
     fs.writeFileSync(path.join(skillsDir, skill.name, "SKILL.md"), skill.content);
@@ -160,7 +160,7 @@ export function describeRole(role: Role): Omit<RoleDetail, "agents"> {
     workspace: role.workspace,
     instructions: role.instructions,
     mcpServers: role.servers,
-    skills: role.skills.map(({ dir, ...skill }) => ({ ...skill, content: skillBody({ dir }) })),
+    skills: role.skills.map((skill) => ({ ...skill, content: skillBody(skill) })),
   };
 }
 

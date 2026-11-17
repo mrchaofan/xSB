@@ -7,7 +7,7 @@ inputs: brief, script, style_guide
 
 One per main character, registered as `casting/<character>`, in markdown. It contains candidates only, nothing final: the character sheet is made only after the user has chosen (skill `character`).
 
-Cast main characters only. Supporting characters and characters who appear in only one or two shots go straight to a character sheet. For a character whose look the user specified in the brief or supplied a photo for, do not produce candidates; register the user's image as the sole candidate and note where it came from.
+Cast main characters only. Supporting characters and characters who appear in only one or two shots go straight to a character sheet. For a character whose look the user specified in the brief or supplied a photo for, do not produce candidates; register the user's image as the sole candidate and note where it came from. When what the user supplied is a photo of a real person, warn the director in your result: the video model does not accept an uploaded real face, so the user first has to register and authorise that person's portrait in their Ark account, or a generated look has to be used instead.
 
 ## 1. First write down what this character requires
 Copy the fixed conditions from the script: age range, gender, role, and any traits the story needs ("should look more tired than their actual age"). Candidates vary only within these conditions.

@@ -1,11 +1,13 @@
 // 角色的编辑，和团队的产出总览。两者都是占用主区域的页面（showPage）。
 import { confirmRestart, previewPrompt } from "./agent.js";
-import { assetName, closePage, onAgent, onRole, reloadRoles, roleOf, roleTitle, showPage, state } from "./app.js";
+import { assetName, closePage, nameOf, onRole, roleOf, roleTitle, showPage, state } from "./app.js";
 import { ICON, fill, h } from "./dom.js";
 import { confirmDialog, field, input, select } from "./form.js";
 import { t } from "./i18n.js";
 
-const NAME_RULE = /^[\w-]+$/;
+/** 对几个智能体依次做的事停在了半路：做成了哪些，为什么停。全做成了就是 null。 */
+export const halted = ({ done, failed, error }) => (error ? t("progress.stopped", { count: done.length, failed: failed ? nameOf(failed) : "", names: done.map(nameOf).join(t("list.separator")), error }) : null);
+
 export const pageHead = (title, subtitle, ...actions) => h("header", { class: "bar" },
   h("div", { class: "artifact-title" }, h("strong", {}, title), h("small", {}, subtitle)),
   ...actions,
@@ -21,6 +23,7 @@ export function editRole(role) {
   const names = () => users().map((a) => a.name).join(t("list.separator"));
   const opened = new WeakSet();         // 展开着的 skill
   const option = { sync: false, reveal: false };
+  let applied = [];                    // 本次保存已重启的实例，失败后只补剩余的
   let notice = null;                    // 保存之后的结果：{ text, apply? }
   const body = h("div", { class: "page-body" });
 
@@ -34,7 +37,7 @@ export function editRole(role) {
     const result = h("small", { role: "status" }, saved ? t("server.test.saved") : t("server.test.unsaved"));
     const test = async () => {
       result.textContent = t("server.test.starting");
-      const r = await xsb.testMcp(role.name, server.name);
+      const r = await xsb.testMcp(role.name, server.name).catch((e) => ({ error: e.message }));
       result.textContent = r.tools ? t("server.test.ok", { count: r.tools.length, tools: r.tools.join(t("list.separator")) }) : t("server.test.failed", { error: r.error });
     };
     return h("div", { class: "card" },
@@ -54,7 +57,7 @@ export function editRole(role) {
   }
 
   function skillCard(skill) {
-    const saved = !creating && shipped() !== "as-is" && role.skills.some((s) => s.name === skill.name);
+    const saved = !creating && role.skills.some((s) => s.name === skill.name);
     const auto = skill.produces != null;
     const use = h("select", { onchange: (e) => { skill.produces = e.target.value === "auto" ? "" : null; render(); } },
       h("option", { value: "auto", selected: auto }, t("skill.use.auto")),
@@ -81,37 +84,34 @@ export function editRole(role) {
     h("button", { class: "link", onclick: () => { const skill = { name: "", produces: auto ? "" : null, inputs: "", description: "", body: "" }; opened.add(skill); draft.skills.push(skill); render(); } }, t("skill.add")));
 
   const save = async () => {
-    const problem =
-      !NAME_RULE.test(draft.name) ? t("role.error.name") :
-      creating && roleOf(draft.name) ? t("role.error.taken", { role: draft.name }) :
-      [...draft.mcpServers, ...draft.skills].some((x) => !NAME_RULE.test(x.name)) ? t("role.error.names") :
-      draft.skills.some((s) => s.produces != null && !NAME_RULE.test(s.produces)) ? t("role.error.produces") : "";
-    if (problem) { notice = { text: problem }; return render(); }
-
     const synced = option.sync ? users() : [];
     if (!await confirmRestart(synced.filter((a) => draft.backend && a.backend !== draft.backend), t("restart.action.sync"))) return;
     onRole(await xsb.putRole(draft));
-    for (const a of synced) onAgent(await xsb.putAgent({ ...a, description: draft.description, backend: draft.backend || a.backend }));
+    applied = [];
     if (creating) return editRole(roleOf(draft.name));
 
     role = roleOf(draft.name);
-    notice = users().length
-      ? { text: t("role.saved.pending", { names: names() }), apply: true }
+    const stopped = synced.length ? halted(await xsb.syncRole(role.name)) : null;      // 智能体的变化随事件到达
+    notice = stopped ? { text: stopped }
+      : users().length ? { text: t("role.saved.pending", { names: names() }), apply: true }
       : { text: t("role.saved") };
     render();
   };
 
+  /** 做一件事；做不成就把原因写在页面顶部。 */
+  const shown = (work) => () => work().catch((e) => { notice = { text: e.message }; render(); });
+
   const apply = async () => {
-    if (!await confirmRestart(users(), t("restart.action.apply"))) return;
-    for (const a of users()) await xsb.restartAgent(a.id);
-    notice = { text: t("role.applied", { names: names() }) };
+    if (!await confirmRestart(users().filter((a) => !applied.includes(a.id)), t("restart.action.apply"))) return;
+    const result = await xsb.applyRole(role.name, applied);
+    applied = result.done;
+    notice = { text: halted(result) ?? t("role.applied", { names: names() }), apply: !!result.error };
     render();
   };
 
   const restore = async () => {
     if (!await confirmDialog(t("role.restore.title", { name: roleTitle(role) }), [h("p", {}, t("role.restore.body", { role: role.name, team: role.preset.teamTitle }))], t("role.restore"))) return;
-    await xsb.removeRole(role.name);
-    await reloadRoles();
+    await xsb.removeRole(role.name);           // 恢复成的预设版本随事件先到
     editRole(roleOf(role.name));
   };
 
@@ -133,14 +133,14 @@ export function editRole(role) {
           t("role.page.users", { count, names: names() }),
         ].filter(Boolean).join(t("sentence.gap")),
         !creating && h("button", { class: "btn", disabled: !count, title: count ? null : t("role.preview.disabled"), onclick: () => previewPrompt(users()) }, t("prompt.preview")),
-        shipped() === "own" && h("button", { class: "btn", onclick: restore }, t("role.restore")),
-        !creating && !shipped() && h("button", { class: "btn", disabled: count > 0, title: count ? t("role.delete.disabled") : null, onclick: remove }, t("role.delete")),
-        h("button", { class: "btn primary", onclick: () => save().catch((e) => { notice = { text: e.message }; render(); }) }, creating ? t("role.create") : t("common.save"))),
+        shipped() === "own" && h("button", { class: "btn", onclick: shown(restore) }, t("role.restore")),
+        !creating && !shipped() && h("button", { class: "btn", disabled: count > 0, title: count ? t("role.delete.disabled") : null, onclick: shown(remove) }, t("role.delete")),
+        h("button", { class: "btn primary", onclick: shown(save) }, creating ? t("role.create") : t("common.save"))),
       body);
 
     fill(body,
       notice && h("div", { class: "notice", role: "status" }, h("span", {}, notice.text),
-        notice.apply && h("button", { class: "btn", onclick: apply }, t("role.apply"))),
+        notice.apply && h("button", { class: "btn", onclick: shown(apply) }, t("role.apply"))),
 
       section(t("role.defaults.title"), creating ? null : t("role.defaults.hint"),
         creating && field(t("common.name"), input(draft, "name", { placeholder: "gaffer" }), t("common.id.hint")),

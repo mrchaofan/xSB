@@ -20,10 +20,12 @@
  * A launcher exists exactly while its program does, so "is it installed"
  * keeps one meaning: the command is on PATH.
  *
- * The user's PATH is the one their shell has. An app started from the Finder
- * or the Dock is not given it (only /usr/bin:/bin:/usr/sbin:/sbin), so it is
- * asked of the user's login shell; nothing else of that shell's environment
- * is taken.
+ * The user's environment is the one their shell has. An app started from the
+ * Finder or the Dock is not given it (a PATH of /usr/bin:/bin:/usr/sbin:/sbin,
+ * and none of the variables the shell's startup files set, such as the API
+ * key an agent's own configuration names), so it is asked of the user's login
+ * shell. The PATH is the shell's; of the rest, what this process already has
+ * stays as it is.
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -32,16 +34,17 @@ import { fileURLToPath } from "node:url";
 import { findCommand } from "@xsb/hub";
 import { SOCKET_ENV } from "./browser.ts";
 
-/** The hub's built-in backends, and the program of the user's machine each one is, or is built around. */
-export const AGENTS: Record<string, string> = { claude: "claude", codex: "codex", gemini: "gemini", grok: "grok" };
+/** The hub's built-in backends: each is named after the program of the user's machine it is, or is built around. */
+export const AGENTS = new Set(["claude", "codex", "gemini", "grok"]);
 
 /** Programs that do not speak ACP themselves: the wrapper shipped in the app, and how it is told where the program is. */
 const WRAPPERS: Record<string, { command: string; env: string }> = {
   claude: { command: "claude-agent-acp", env: "CLAUDE_CODE_EXECUTABLE" },
   codex: { command: "codex-acp", env: "CODEX_PATH" },
 };
+const BROWSER_TOOL = "xsb-browser-mcp";
 /** MCP servers shipped in the app. A role names one by its command. */
-const TOOLS = ["xsb-media-mcp", "xsb-browser-mcp"];
+const TOOLS = ["xsb-media-mcp", BROWSER_TOOL];
 
 /** Where the app's own programs are bundled (rolldown.config.js). */
 const SHIPPED = fileURLToPath(new URL("../bin/", import.meta.url));
@@ -49,16 +52,16 @@ const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 /** A shell line that runs a JavaScript program shipped in the app: Electron's own binary is the Node. */
 const node = (program: string): string => `ELECTRON_RUN_AS_NODE=1 exec ${quote(process.execPath)} ${quote(path.join(SHIPPED, program))} "$@"`;
 
-/** The PATH of the user's shell, or this process's own where the shell does not say. */
-function shellPath(): string {
-  const own = process.env.PATH ?? "";
-  if (process.platform === "win32") return own;
+/** The environment of the user's shell; nothing where the shell does not say. */
+function shellEnv(): Record<string, string> {
+  if (process.platform === "win32") return {};
   try {
     // Between marks, because a shell's startup files may print things of their own.
-    const out = execFileSync(process.env.SHELL || "/bin/zsh", ["-ilc", 'printf "<xsb-path>%s</xsb-path>" "$PATH"'], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] });
-    return /<xsb-path>(.+)<\/xsb-path>/s.exec(out)?.[1] || own;
+    const out = execFileSync(process.env.SHELL || "/bin/zsh", ["-ilc", 'printf "<xsb-env>"; env -0; printf "</xsb-env>"'], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] });
+    const vars = /<xsb-env>(.*)<\/xsb-env>/s.exec(out)?.[1].split("\0") ?? [];
+    return Object.fromEntries(vars.filter((line) => line.includes("=")).map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   } catch {
-    return own;
+    return {};
   }
 }
 
@@ -72,14 +75,21 @@ export class Clis {
   private file: string;
   private paths: Record<string, string> = {};
   /** The PATH as the user has it, without the launchers. */
-  private userPath = shellPath();
+  private userPath: string;
 
   constructor(dir: string) {
+    const env = shellEnv();
+    for (const [name, value] of Object.entries(env)) process.env[name] ??= value;
+    this.userPath = env.PATH ?? process.env.PATH ?? "";
     this.browserSocket = path.join(dir, "browser.sock");
     this.bin = path.join(dir, "bin");
     this.file = path.join(dir, "paths.json");
     fs.mkdirSync(this.bin, { recursive: true });
-    if (fs.existsSync(this.file)) this.paths = JSON.parse(fs.readFileSync(this.file, "utf8"));
+    try {
+      this.paths = JSON.parse(fs.readFileSync(this.file, "utf8"));
+    } catch {
+      // No file yet, or one that cannot be read: the user locates the programs again.
+    }
     process.env.PATH = `${this.bin}${path.delimiter}${this.userPath}`;
     this.sync();
   }
@@ -108,7 +118,8 @@ export class Clis {
 
   /** Make the launchers say what is true now. */
   private sync(): void {
-    const launchers = new Map<string, string>(TOOLS.map((tool) => [tool, `${SOCKET_ENV}=${quote(this.browserSocket)} ${node(tool)}`]));
+    // The browser's tool is told where the app listens for it.
+    const launchers = new Map<string, string>(TOOLS.map((tool) => [tool, `${tool === BROWSER_TOOL ? `${SOCKET_ENV}=${quote(this.browserSocket)} ` : ""}${node(tool)}`]));
     for (const command of new Set([...Object.keys(WRAPPERS), ...Object.keys(this.paths)])) {
       const found = this.locate(command);
       if (!found) continue;

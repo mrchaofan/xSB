@@ -4,9 +4,6 @@
   "description": "The xsb command: an ACP client of the hub for the terminal",
   "type": "module",
   "private": true,
-  "exports": {
-    ".": "./src/cli.ts"
-  },
   "bin": {
     "xsb": "bin/xsb"
   },

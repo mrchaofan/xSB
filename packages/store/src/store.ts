@@ -51,8 +51,10 @@ function readLines(file: string): Record_[] {
 }
 
 export class Store {
-  readonly root: string;
+  private root: string;
   private repaired = new Set<string>();
+  /** A transaction began and did not reach its commit: an append failed. Until `recover` finishes it, only the WAL knows of it. */
+  private unfinished = false;
 
   constructor(root: string) {
     this.root = root;
@@ -89,13 +91,18 @@ export class Store {
     if (ops.length === 0) return;
     if (ops.length === 1) return this.append(ops[0].file, ops[0].rec);
     const tx = `tx_${randomBytes(6).toString("hex")}`;
-    this.append(WAL, { t: "begin", tx, ops: ops.map((o) => ({ f: o.file, r: o.rec })) });
-    this.failpoint?.("after-begin");
-    ops.forEach((op, i) => {
-      this.append(op.file, { ...op.rec, _tx: `${tx}:${i}` });
-      this.failpoint?.(`after-op-${i}`);
-    });
-    this.append(WAL, { t: "commit", tx });
+    try {
+      this.append(WAL, { t: "begin", tx, ops: ops.map((o) => ({ f: o.file, r: o.rec })) });
+      this.failpoint?.("after-begin");
+      ops.forEach((op, i) => {
+        this.append(op.file, { ...op.rec, _tx: `${tx}:${i}` });
+        this.failpoint?.(`after-op-${i}`);
+      });
+      this.append(WAL, { t: "commit", tx });
+    } catch (e) {
+      this.unfinished = true;
+      throw e;
+    }
     this.checkpoint();
   }
 
@@ -124,6 +131,7 @@ export class Store {
       });
       this.append(WAL, { t: "commit", tx });
     }
+    this.unfinished = false;
     this.checkpoint(true);
     return begun.size;
   }
@@ -131,7 +139,7 @@ export class Store {
   /** The WAL only matters for open transactions; with none open it can be emptied. */
   private checkpoint(force = false): void {
     const abs = this.abs(WAL);
-    if (!fs.existsSync(abs)) return;
+    if (!fs.existsSync(abs) || (this.unfinished && !force)) return;
     if (force || fs.statSync(abs).size > WAL_CHECKPOINT_BYTES) fs.truncateSync(abs, 0);
   }
 

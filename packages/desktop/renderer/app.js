@@ -52,9 +52,9 @@ function upsert(list, item, key = "id") {
 
 // ---------- 没有工作区 ----------
 
-/** candidate：用户刚选的、还不是工作区的文件夹，等待确认是否创建。 */
-function renderWelcome(candidate) {
-  const open = async (path) => { await xsb.open(path); start(); };
+/** candidate：用户刚选的、还不是工作区的文件夹，等待确认是否创建。error：刚才没打开成的原因。 */
+function renderWelcome(candidate, error) {
+  const open = (path) => xsb.open(path).then(start, (e) => renderWelcome(candidate, e.message));
   const pick = async () => {
     const folder = await xsb.pickFolder();
     if (folder?.initialized) open(folder.path); else if (folder) renderWelcome(folder);
@@ -62,6 +62,7 @@ function renderWelcome(candidate) {
   fill($("#welcome"), 
     h("h1", {}, t("welcome.title")),
     h("p", {}, t("welcome.intro")),
+    error && h("div", { class: "notice", role: "status" }, h("span", {}, error)),
     candidate
       ? h("div", { class: "notice" },
           h("span", {}, t("welcome.candidate", { path: candidate.path })),
@@ -361,6 +362,17 @@ async function renderArtifact() {
 // ---------- 窗口级交互 ----------
 
 $("#ws").onclick = () => xsb.newWindow();
+/** 与中枢的连接是否还在，画成工作区名字旁的圆点。 */
+function showHub(up, why) {
+  const dot = $("#hub");
+  dot.dataset.up = up;
+  dot.title = why ?? t(up ? "titlebar.hub.up" : "titlebar.hub.down");
+  dot.setAttribute("aria-label", dot.title);
+}
+// 断了的时候点圆点：重新打开这个工作区（中枢没在运行就启动它），再按最新的状态重画。
+$("#hub").onclick = () => {
+  if ($("#hub").dataset.up === "false") xsb.open(state.workspace.path).then(start, (e) => showHub(false, e.message));
+};
 $("#new-agent").onclick = () => editAgent();
 $("#new-role").onclick = () => editRole();
 $("#toggle-rail").onclick = () => document.body.classList.toggle("no-rail");
@@ -405,11 +417,6 @@ export function onRole(role) {
   upsert(state.roles, role, "name");
   renderRail();
 }
-/** 角色整体变了（使用或停用了一支预设团队、恢复了预设）：重新读一遍。 */
-export async function reloadRoles() {
-  state.roles = await xsb.roles();
-  renderRail();
-}
 
 xsb.on((event) => {
   if (event.agent) onAgent(event.agent);
@@ -426,6 +433,7 @@ xsb.on((event) => {
   }
   else if (event.page) onPage(event.page);
   else if (event.removedPage) onPageRemoved(event.removedPage);
+  else if (event.hub === "down") showHub(false);
   else if (event.revealPage) { document.body.classList.remove("no-artifact"); selectTab(event.revealPage); }
   else if ("activity" in event) {
     if (event.activity) state.activities[event.agentId] = event.activity; else delete state.activities[event.agentId];
@@ -447,6 +455,7 @@ export async function start() {
   $("#ws-path").textContent = state.workspace?.path ?? "";
   if (!state.workspace) return renderWelcome();
 
+  showHub(true);
   $("#lanes").replaceChildren();
   if (state.agents[0]) openLane(state.agents[0].id);
   state.artifactId = state.artifacts[0]?.id ?? null;

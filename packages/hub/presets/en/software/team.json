@@ -33,6 +33,7 @@
     "change": "Code change",
     "review": "Code review",
     "test_plan": "Test plan",
-    "test_report": "Test report"
+    "test_report": "Test report",
+    "adr": "Architecture decision record"
   }
 }

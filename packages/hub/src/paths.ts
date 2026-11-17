@@ -16,7 +16,7 @@
  *     assets.jsonl  assets/            the asset library: its index and its files
  *     roles/<role>/                    role.json, instructions.md, skills/<name>/SKILL.md (user-edited); the roles of
  *                                      the preset teams the project uses are not here (teams.ts)
- *     run/                             pid, sockets, log of the running hub
+ *     run/                             lock, pid, sockets, log of the running hub
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -64,8 +64,13 @@ export class Paths {
   get run(): string {
     return path.join(this.dir, "run");
   }
+  /** Who the running hub is. Its word counts only while `hubLock` is held. */
   get hubInfo(): string {
     return path.join(this.run, "hub.json");
+  }
+  /** Held by the project's hub for as long as its process lives (lock.ts). */
+  get hubLock(): string {
+    return path.join(this.run, "hub.lock");
   }
   /** Left by whoever stopped the hub to say: do not pick up what was unfinished (see `stopHub`). */
   get abandonMark(): string {

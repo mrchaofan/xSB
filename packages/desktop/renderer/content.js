@@ -46,7 +46,7 @@ export function fromClipboard(data) {
   return Promise.all(files.map(async (file) => {
     if (file.type.startsWith("image/")) return { type: "image", mimeType: file.type, data: await base64(file) };
     const path = xsb.pathOf(file);
-    return { type: "resource_link", uri: path ? `file://${encodeURI(path)}` : file.name, name: file.name, size: file.size, ...(file.type ? { mimeType: file.type } : {}) };
+    return { type: "resource_link", uri: path ? `file://${path.split("/").map(encodeURIComponent).join("/")}` : file.name, name: file.name, size: file.size, ...(file.type ? { mimeType: file.type } : {}) };
   }));
 }
 

@@ -5,13 +5,6 @@
     "browser": {
       "command": "xsb-browser-mcp",
       "args": []
-    },
-    "playwright": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@playwright/mcp@latest"
-      ]
     }
   }
 }

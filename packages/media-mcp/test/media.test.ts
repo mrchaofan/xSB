@@ -44,12 +44,13 @@ const call = (conn: Connection, args: unknown, name = "generate_video"): Promise
     "gen get cgt-1 --save-to=",
     "gen get cgt-1 --save-to=",
     "gen get cgt-1 --save-to=TMP",
+    'api arkruntime.get_content_generation_task --params={"id":"cgt-1"}',
   ]);
   assert.deepEqual(fs.readdirSync(os.tmpdir()).filter((name) => /^xsb-ark-\w{6}$/.test(name) && fs.readdirSync(path.join(os.tmpdir(), name)).some((file) => file.endsWith(".mp4"))), []); // arkcli's own directory is not left behind
 
   // 2. What was not asked for is not passed, and a model never is: that is set in arkcli; a reference that is a URL is passed as it is.
   await call(conn, { prompt: "the river at night", output: "b.mp4", reference_images: ["https://example.com/style.png"] });
-  assert.equal(ran()[4], "+gen the river at night --modality=video --watermark=false --input=reference_image:https://example.com/style.png --save-to=");
+  assert.equal(ran()[5], "+gen the river at night --modality=video --watermark=false --input=reference_image:https://example.com/style.png --save-to=");
 
   // 3. An image: one call.
   const drawn = await call(conn, { prompt: "Lin, front view", output: "refs/lin_front.png", reference_images: ["lin.png"], size: "2K" }, "generate_image");
@@ -59,17 +60,38 @@ const call = (conn: Connection, args: unknown, name = "generate_video"): Promise
 
   // 4. Failures are the tool's answer, in words an agent can act on.
   const refused = await call(conn, { prompt: "refused", output: "c.mp4" });
-  assert.deepEqual([refused.isError, refused.content[0].text], [true, "generation cgt-3 failed: the prompt was refused"]);
+  assert.deepEqual([refused.isError, refused.content[0].text], [true, "generation cgt-3 failed: the prompt was refused. Nothing was saved. If the reason is the prompt or the images, change them and submit again; otherwise report it to the user."]);
   assert.match((await call(conn, { prompt: "x" })).content[0].text, /"output" is required/);
+  // What the tool's description rules out is refused before anything is submitted.
+  const submitted = ran().length;
+  assert.match((await call(conn, { prompt: "x", output: "d.mp4", reference_images: "lin.png" })).content[0].text, /"reference_images" must be an array/);
+  assert.match((await call(conn, { prompt: "x", output: "d.mp4", last_frame: "lin.png" })).content[0].text, /"last_frame" needs "first_frame"/);
+  assert.match((await call(conn, { prompt: "x", output: "d.mp4", first_frame: "lin.png", reference_images: ["lin.png"] })).content[0].text, /cannot be combined with "first_frame"/);
+  assert.equal(ran().length, submitted);
   stop();
+  const noisy = await server({ FAKE_ARK_PREAMBLE: "1" });
+  assert.equal((await call(noisy.conn, { prompt: "x", output: "noisy.png" }, "generate_image")).isError, undefined);
+  noisy.stop();
   const noCli = await server({ ARKCLI: "xsb-no-such-arkcli" });
-  assert.match((await call(noCli.conn, { prompt: "x", output: "e.png" }, "generate_image")).content[0].text, /"xsb-no-such-arkcli" is not installed or not on PATH.*arkcli auth login/);
+  assert.match((await call(noCli.conn, { prompt: "x", output: "e.png" }, "generate_image")).content[0].text, /"xsb-no-such-arkcli" is not installed or not on PATH.*do not install it or sign in yourself.*arkcli auth login/);
   noCli.stop();
-  const signedOut = await server({ FAKE_ARK_SIGNED_OUT: "1" });
-  assert.match((await call(signedOut.conn, { prompt: "x", output: "e.png" }, "generate_image")).content[0].text, /arkcli \+gen x: not configured \(run `arkcli auth login` and retry\)/);
+  const signedOut = await server({ FAKE_ARK_SIGNED_OUT: "1", FAKE_ARK_PREAMBLE: "1" });
+  assert.match((await call(signedOut.conn, { prompt: "x", output: "e.png" }, "generate_image")).content[0].text, /^arkcli \+gen: not configured \(run `arkcli auth login` and retry\)\nWhatever arkcli advises above is for the user to do.*do not run arkcli yourself\.$/);
   signedOut.stop();
+  // A model that hands over no last frame: it is taken from the video, by ffmpeg where there is one.
+  const ffmpeg = path.join(dir, "fake-ffmpeg");
+  fs.writeFileSync(ffmpeg, `#!/bin/sh\nfor last; do :; done\nprintf FRAME-BY-FFMPEG > "$last"\n`, { mode: 0o755 });
+  const noFrame = await server({ FAKE_ARK_NO_LAST_FRAME: "1", FFMPEG: ffmpeg });
+  assert.match((await call(noFrame.conn, { prompt: "a", output: "k.mp4", last_frame_output: "frames/k_last.jpg" })).content[0].text, /Last frame saved to \S+k_last\.jpg \(taken from the video: the provider returned none\)/);
+  assert.equal(fs.readFileSync(path.join(dir, "frames/k_last.jpg"), "utf8"), "FRAME-BY-FFMPEG");
+  noFrame.stop();
+  const neither = await server({ FAKE_ARK_NO_LAST_FRAME: "1", FFMPEG: "xsb-no-such-ffmpeg" });
+  assert.match((await call(neither.conn, { prompt: "a", output: "l.mp4", last_frame_output: "l_last.jpg" })).content[0].text, /Last frame NOT saved.*l_last\.jpg does not exist/);
+  assert.ok(!fs.existsSync(path.join(dir, "l_last.jpg")));
+  neither.stop();
   const unknown = await server({ VIDEO_PROVIDER: "sora" });
-  assert.match((await call(unknown.conn, { prompt: "x", output: "e.mp4" })).content[0].text, /unknown VIDEO_PROVIDER "sora"\. Known: seedance/);
+  assert.match((await call(unknown.conn, { prompt: "x", output: "e.mp4" })).content[0].text, /^unknown VIDEO_PROVIDER "sora"\. Known: seedance$/);
+  assert.match((await unknown.conn.request("tools/list")).tools[1].description, /NOT AVAILABLE: unknown VIDEO_PROVIDER "sora"\. Known: seedance\. Every call fails/);
   assert.equal((await call(unknown.conn, { prompt: "x", output: "f.png" }, "generate_image")).isError, undefined); // one model being wrong does not take the other down
   unknown.stop();
 }
@@ -83,18 +105,27 @@ const call = (conn: Connection, args: unknown, name = "generate_video"): Promise
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
   };
-  // The server is stopped while it waits, as the hub stops a cancelled job.
+  // The server is stopped while it waits.
   const killed = await server();
   void call(killed.conn, { prompt: "slow", output: "g.mp4" }).catch(() => {});
-  await until("the slow task is being polled", () => ran().at(-1)!.startsWith("gen get cgt-4"));
+  await until("the slow task is being polled", () => ran().at(-1)!.startsWith("gen get cgt-6"));
   killed.stop();
-  await until("the stopped server cancelled its task", () => deleted().includes("gen delete cgt-4 --yes=true"));
+  await until("the stopped server cancelled its task", () => deleted().includes("gen delete cgt-6 --yes=true"));
+
+  // A cancelled call (this is how the hub cancels a job) is answered, and the answer says whether that saved its cost.
+  const cancelled = await server();
+  const abort = new AbortController();
+  const answer = cancelled.conn.request("tools/call", { name: "generate_video", arguments: { prompt: "slow", output: "j.mp4" } }, { signal: abort.signal, notify: "notifications/cancelled" });
+  await until("the cancelled task is being polled", () => ran().at(-1)!.startsWith("gen get cgt-7"));
+  abort.abort();
+  assert.match((await answer).content[0].text, /generation cgt-7 was cancelled\. It was cancelled at the provider and is not billed\. Nothing was saved to j\.mp4\./);
+  cancelled.stop();
 
   // A generation that takes too long is called off too; the answer says whether that saved its cost.
   const { conn, stop } = await server({ VIDEO_TIMEOUT_S: "0.2" });
   assert.match((await call(conn, { prompt: "slow", output: "h.mp4" })).content[0].text, /was not finished after 0\.2s\. It was cancelled at the provider and is not billed\./);
   assert.match((await call(conn, { prompt: "already running", output: "i.mp4" })).content[0].text, /The provider had already started it: it will finish and be billed/);
-  assert.equal(deleted().length, 3);
+  assert.equal(deleted().length, 4);
   stop();
 }
 

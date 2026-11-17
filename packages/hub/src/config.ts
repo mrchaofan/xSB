@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { failure } from "@xsb/protocol";
-import type { Language } from "@xsb/protocol";
+import type { BackendInfo, Language } from "@xsb/protocol";
 import { DIR } from "./paths.ts";
 import type { Paths } from "./paths.ts";
 
@@ -101,6 +101,17 @@ function initGlobalConfig(): boolean {
 /** The backends of this machine. Read on every use, so an edit needs no hub restart. */
 export function backends(): Record<string, BackendSpec> {
   return { ...BUILTIN_BACKENDS, ...readJson<GlobalConfig>(globalConfigPath(), { version: 1 }).backends };
+}
+
+/** The backends as a client is told of them: each with whether its command is found on this process's PATH. */
+export function describeBackends(): BackendInfo[] {
+  return Object.entries(backends()).map(([name, spec]) => ({
+    name,
+    command: spec.command,
+    args: spec.args ?? [],
+    installed: findCommand(spec.command) !== null,
+    installHint: INSTALL_HINT[spec.command],
+  }));
 }
 
 /** Absolute path of a command on `searchPath` (the process's PATH unless given), or null when it is not installed. */

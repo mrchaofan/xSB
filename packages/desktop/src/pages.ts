@@ -17,6 +17,7 @@
  */
 import { BrowserWindow, session, shell, webContents } from "electron";
 import type { WebContents, WebPreferences } from "electron";
+import { address } from "./address.ts";
 import type { PageView } from "./bridge.ts";
 
 /** What the private Electron adds to the official one's types. */
@@ -44,8 +45,10 @@ export class Pages {
   constructor(host: WebContents, shell: Shell) {
     this.host = host;
     this.shell = shell;
-    // A website gets no camera, location or notifications by asking.
-    session.fromPartition(WEB_PARTITION).setPermissionRequestHandler((_contents, _permission, answer) => answer(false));
+    // Neither a website nor a page an agent wrote gets camera, location or notifications by asking.
+    for (const partition of [WEB_PARTITION, PREVIEW_PARTITION]) {
+      session.fromPartition(partition).setPermissionRequestHandler((_contents, _permission, answer) => answer(false));
+    }
   }
 
   /** The page tabs, in the order they were opened. */
@@ -58,6 +61,7 @@ export class Pages {
    * artifact) and is no tab; one an agent opened says so on its tab.
    */
   open(url: string, { embedded = false, agent = false } = {}): PageView {
+    if (url !== "about:blank" && !(embedded && url.startsWith("xsb-artifact:"))) url = address(url);
     if (!create) throw new Error("this Electron has no <webview2>");
     const contents = create.call(webContents, {
       type: "webview2",
@@ -79,9 +83,11 @@ export class Pages {
       page.error = description;
       changed();
     });
-    // What a page opens in a new window becomes a tab next to it.
+    // What a page opens in a new window becomes a tab next to it. An agent's page loads it itself: the agent acts on that one tab.
     contents.setWindowOpenHandler(({ url: target }) => {
-      if (/^https?:/.test(target)) this.open(target, { agent: page.agent });
+      if (!/^https?:/.test(target)) return { action: "deny" };
+      if (page.agent) void contents.loadURL(target).catch(() => {});
+      else this.open(target);
       return { action: "deny" };
     });
     void contents.loadURL(url).catch(() => {});     // a failed load is reported by did-fail-load
@@ -94,7 +100,7 @@ export class Pages {
     const page = this.pages.get(id);
     if (!page) throw new Error("this page was closed");
     const { contents, window } = page;
-    if (op === "navigate") void contents.loadURL(String(arg)).catch(() => {});
+    if (op === "navigate") void this.navigate(id, String(arg)).catch(() => {});
     else if (op === "back") contents.navigationHistory.goBack();
     else if (op === "forward") contents.navigationHistory.goForward();
     else if (op === "reload") contents.reload();
@@ -106,6 +112,13 @@ export class Pages {
     else if (op === "pin") window?.setAlwaysOnTop(arg === true);
     else throw new Error(`unknown page operation ${op}`);
     if (op === "pin") this.changed(page);
+  }
+
+  /** The address bar and browser tools use the same validation and navigation. */
+  navigate(id: string, given: string): Promise<void> {
+    const contents = this.contents(id);
+    if (!contents) throw new Error("this page was closed");
+    return contents.loadURL(address(given));
   }
 
   /** The page's WebContents, for what drives it (browser.ts). */

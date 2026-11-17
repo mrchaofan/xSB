@@ -33,40 +33,52 @@ const COMMAND_TIMEOUT_MS = 15_000;
 
 const str = (description: string): object => ({ type: "string", description });
 const ref = { type: "integer", description: "The element's number in the latest snapshot: the n of [n]." };
+/** Keys by name, as `Input.dispatchKeyEvent` wants them: the virtual key code. A key of one character is itself. */
+const KEYS: Record<string, number> = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, Space: 32, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, PageUp: 33, PageDown: 34, End: 35, Home: 36 };
+const KEY_NAMES = `${Object.keys(KEYS).join(", ")}, or one character`;
+/** The longest snapshot an agent is given, in characters. */
+const SNAPSHOT_LIMIT = 20_000;
+
 const TOOLS = [
   {
     name: "browser_navigate",
-    description: "Open a URL in the browser in the app's side panel, where the user watches. The first call opens a tab; later calls load in the same tab. Answers a snapshot of the page.",
-    inputSchema: { type: "object", required: ["url"], properties: { url: str("The address to load.") } },
+    description:
+      "Open a web page in the browser of the app's side panel, where the user watches and can take over. The first call opens your tab; later calls load in the same tab. Sign-ins made in this browser are kept between sessions. Returns a snapshot of the page (see browser_snapshot).",
+    inputSchema: { type: "object", required: ["url"], properties: { url: str("The address to load: a web page (http or https; without a scheme https:// is assumed, http:// for localhost). A local file (file:// or an absolute path) is also accepted.") } },
   },
   {
     name: "browser_snapshot",
-    description: "The page as it is now: title, address, and its content in reading order. What can be acted on has a number [n]; numbers are valid until the next snapshot.",
-    inputSchema: { type: "object", properties: {} },
+    description:
+      `Read the page as it is now. Returns its title and address, then its content in reading order: a line starting with # is a heading, a plain line is text, and a line like [3] button "Save" is an element you can act on: its number, role and name, followed by = "value" for what a field holds, (on) when it is checked or selected, and (focused) when it has the focus. The numbers belong to one snapshot: every tool that returns a snapshot numbers the elements anew, so act on the latest one. A snapshot holds ${SNAPSHOT_LIMIT} characters of content; where a page is longer it says so, and \`from\` reads on from there; continuation parts reuse the same captured content and element numbers. Start at from: 0 for a fresh snapshot.`,
+    inputSchema: { type: "object", properties: { from: { type: "integer", description: "Read the page's content from this character on: the position the previous part said it was cut off at. Default 0." } } },
   },
   {
     name: "browser_click",
-    description: "Click an element. Answers a snapshot of the page afterwards.",
+    description: "Click an element. Returns a snapshot of the page afterwards.",
     inputSchema: { type: "object", required: ["ref"], properties: { ref } },
   },
   {
     name: "browser_type",
-    description: "Replace the content of a text field with a text. Answers a snapshot of the page afterwards.",
-    inputSchema: { type: "object", required: ["ref", "text"], properties: { ref, text: str("What to enter."), submit: { type: "boolean", description: "Press Enter afterwards." } } },
+    description: "Replace what a text field holds with the given text. Returns a snapshot of the page afterwards.",
+    inputSchema: {
+      type: "object",
+      required: ["ref", "text"],
+      properties: { ref, text: str("The text to enter. An empty text clears the field."), submit: { type: "boolean", description: "Press Enter afterwards, which submits a form. Default: false." } },
+    },
   },
   {
     name: "browser_press_key",
-    description: "Press a key in the page, on whatever has focus: Enter, Escape, Tab, ArrowDown, PageDown, a, … Answers a snapshot of the page afterwards.",
-    inputSchema: { type: "object", required: ["key"], properties: { key: str("The key's name.") } },
+    description: "Press one key in the page, on whatever has the focus. Returns a snapshot of the page afterwards.",
+    inputSchema: { type: "object", required: ["key"], properties: { key: str(`${KEY_NAMES}. Key combinations are not supported.`) } },
   },
   {
     name: "browser_back",
-    description: "Go back to the previous page. Answers a snapshot.",
+    description: "Go back to the previous page of your tab. Returns a snapshot of it.",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "browser_screenshot",
-    description: "A picture of what the page shows now. Use it for what a snapshot cannot say: layout, images, a chart.",
+    description: "A picture of the part of the page that is visible now. Use it for what a snapshot cannot say: layout, images, a chart. It brings your tab to the front of the side panel.",
     inputSchema: { type: "object", properties: {} },
   },
 ];
@@ -75,14 +87,13 @@ const TOOLS = [
 
 /** Roles of the accessibility tree that are something to act on. */
 const ACTIONABLE = new Set(["button", "link", "textbox", "searchbox", "combobox", "listbox", "option", "checkbox", "radio", "switch", "slider", "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "treeitem"]);
-/** Keys by name, as `Input.dispatchKeyEvent` wants them: the virtual key code. A key of one character is itself. */
-const KEYS: Record<string, number> = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, " ": 32, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, PageUp: 33, PageDown: 34, End: 35, Home: 36 };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A page as an agent drives it. `refs` are the elements of the latest snapshot: [n] is `refs[n - 1]`, a DOM node. */
-class Driven {
+export class Driven {
   private refs: number[] = [];
+  private captured?: { text: string; title: string; url: string; loading: boolean };
   private contents: WebContents;
 
   constructor(contents: WebContents) {
@@ -107,13 +118,22 @@ class Driven {
     for (const until = Date.now() + LOAD_TIMEOUT_MS; this.contents.isLoading() && Date.now() < until; ) await sleep(100);
   }
 
-  async navigate(url: string): Promise<void> {
-    const { errorText } = await this.send("Page.navigate", { url });
-    if (errorText) throw new Error(`${url} could not be loaded: ${errorText}`);
+  /**
+   * The page in reading order, from its accessibility tree: what a person using it by ear would be told.
+   * A long page is given in parts: `from` is where in its content to go on.
+   */
+  async snapshot(from = 0): Promise<string> {
+    if (!Number.isSafeInteger(from) || from < 0) throw new Error("from must be a non-negative integer");
+    if (from === 0 || !this.captured) await this.capture();
+    const { text, title, url, loading: pending } = this.captured!;
+    const loading = pending ? "(the page was still loading: start a new snapshot for updated content)\n" : "";
+    const end = from + SNAPSHOT_LIMIT;
+    const more = text.length > end ? `\n… (cut off at character ${end} of ${text.length}: read on with browser_snapshot { "from": ${end} })` : "";
+    const content = `${text.slice(from, end)}${more}` || (from ? "(the page has no content from there on)" : "(the page is empty)");
+    return `${title}\n${url}\n${loading}\n${content}`;
   }
 
-  /** The page in reading order, from its accessibility tree: what a person using it by ear would be told. */
-  async snapshot(): Promise<string> {
+  private async capture(): Promise<void> {
     const { nodes } = await this.send("Accessibility.getFullAXTree");
     const byId = new Map<string, any>(nodes.map((node: any) => [node.nodeId, node]));
     const lines: string[] = [];
@@ -133,8 +153,7 @@ class Driven {
       for (const id of node.childIds ?? []) if (byId.has(id)) walk(byId.get(id));
     };
     if (nodes.length) walk(nodes[0]);
-    const text = lines.join("\n");
-    return `${this.contents.getTitle()}\n${this.contents.getURL()}\n\n${text.length > 20_000 ? `${text.slice(0, 20_000)}\n… (cut here: the page is longer)` : text || "(the page is empty)"}`;
+    this.captured = { text: lines.join("\n"), title: this.contents.getTitle(), url: this.contents.getURL(), loading: this.contents.isLoading() };
   }
 
   private node(index: number): { backendNodeId: number } {
@@ -165,9 +184,10 @@ class Driven {
     await this.send("Input.insertText", { text });
   }
 
-  async key(key: string): Promise<void> {
-    const code = KEYS[key] ?? ([...key].length === 1 ? key.toUpperCase().charCodeAt(0) : undefined);
-    if (code === undefined) throw new Error(`unknown key "${key}". Known: ${Object.keys(KEYS).join(", ").replace(" ,", "Space,")}, or one character`);
+  async key(name: string): Promise<void> {
+    const code = KEYS[name] ?? ([...name].length === 1 ? name.toUpperCase().charCodeAt(0) : undefined);
+    if (code === undefined) throw new Error(`unknown key "${name}". Known: ${KEY_NAMES}`);
+    const key = name === "Space" ? " " : name;
     // A key that writes something says what: Enter a line break, which is what submits a form.
     const text = key === "Enter" ? "\r" : [...key].length === 1 ? key : undefined;
     const event = { key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code };
@@ -212,8 +232,6 @@ export function serveBrowser(socketPath: string, pagesFor: (cwd: string) => Page
           return { content: [{ type: "image", data: await driven.screenshot(), mimeType: "image/png" }] };
         }
         if (p.name === "browser_navigate") {
-          const url = /^[a-z][a-z0-9+.-]*:/i.test(args.url) ? args.url : `https://${args.url}`;
-          if (!/^https?:/.test(url)) throw new Error("only http and https addresses can be opened");
           if (!tab || tab.contents.isDestroyed()) {
             const pages = pagesFor(cwd);
             if (!pages) throw new Error("the xsb app has no window open for this workspace, so there is no browser to use");
@@ -221,7 +239,7 @@ export function serveBrowser(socketPath: string, pagesFor: (cwd: string) => Page
             const contents = pages.contents(id)!;
             tab = { pages, id, contents, driven: new Driven(contents) };
           }
-          await page().navigate(url);
+          await tab.pages.navigate(tab.id, String(args.url ?? ""));
         } else if (p.name === "browser_click") await page().click(args.ref);
         else if (p.name === "browser_type") {
           await page().type(args.ref, String(args.text));
@@ -230,7 +248,7 @@ export function serveBrowser(socketPath: string, pagesFor: (cwd: string) => Page
         else if (p.name === "browser_back") tab?.contents.navigationHistory.goBack();
         else if (p.name !== "browser_snapshot") throw new Error(`no tool "${p.name}"`);
         await page().settled();
-        return { content: [{ type: "text", text: await page().snapshot() }] };
+        return { content: [{ type: "text", text: await page().snapshot(p.name === "browser_snapshot" ? args.from ?? 0 : 0) }] };
       } catch (e) {
         return { content: [{ type: "text", text: errorMessage(e) }], isError: true };
       }

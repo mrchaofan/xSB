@@ -69,6 +69,10 @@
     "storyboard": "分镜画面",
     "animatic": "动态分镜",
     "shot": "镜头",
-    "cut": "成片"
+    "cut": "成片",
+    "candidate": "候选形象",
+    "reference": "参考图",
+    "frame": "分镜帧",
+    "edl": "剪辑表"
   }
 }

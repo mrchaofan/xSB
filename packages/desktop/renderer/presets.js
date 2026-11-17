@@ -1,11 +1,11 @@
 // 预设团队：应用自带的几支团队（软件开发、电影制作）。工作区"使用"一支团队，就有了它的全部角色。
 // 使用不是复制：角色按应用自带的版本生效，应用更新了它们也跟着更新。在工作区里改过的角色才是工作区自己的，
 // 可以随时恢复成预设。
-import { agentOf, assetName, onAgent, reloadRoles, roleOf, showPage, state } from "./app.js";
+import { assetName, roleOf, showPage, state } from "./app.js";
 import { markdownHtml } from "./content.js";
 import { fill, h } from "./dom.js";
 import { t } from "./i18n.js";
-import { editRole, pageHead } from "./team.js";
+import { editRole, halted, pageHead } from "./team.js";
 
 const body = h("div", { class: "page-body" });
 const opened = new Set();         // 展开着的角色：页面重画后保持展开
@@ -24,7 +24,6 @@ export async function showPresets() {
 /** 做一件事，把结果写在页面顶部，然后按最新的状态重画。 */
 const run = (work) => async () => {
   try { notice = await work(); } catch (e) { notice = [e.message]; }
-  await reloadRoles();
   await showPresets();
 };
 
@@ -33,14 +32,8 @@ function packSection(pack) {
   const buildTeam = run(async () => {
     const backend = state.backends.find((b) => b.installed)?.name;
     if (!backend) return [t("presets.build.nobackend")];
-    await xsb.useTeam(pack.id);
-    let created = 0;
-    for (const { name, role } of pack.roles) {
-      if (agentOf(role.name)) continue;
-      onAgent(await xsb.putAgent({ id: role.name, name, description: role.description, backend, role: role.name, workspace: "", instructions: "" }));
-      created++;
-    }
-    return [created ? t("presets.build.done", { count: created, backend }) : t("presets.build.complete")];
+    const built = await xsb.buildTeam(pack.id, backend);       // 角色和新建的智能体随事件到达
+    return [halted(built) ?? (built.done.length ? t("presets.build.done", { count: built.done.length, backend }) : t("presets.build.complete"))];
   });
   const use = run(async () => { await xsb.useTeam(pack.id); return [t("presets.use.done", { title: pack.title, count: pack.roles.length })]; });
   const drop = run(async () => { await xsb.dropTeam(pack.id); return [t("presets.drop.done", { title: pack.title })]; });

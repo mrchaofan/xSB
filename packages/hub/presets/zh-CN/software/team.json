@@ -33,6 +33,7 @@
     "change": "代码变更",
     "review": "评审意见",
     "test_plan": "测试计划",
-    "test_report": "测试报告"
+    "test_report": "测试报告",
+    "adr": "架构决策记录"
   }
 }

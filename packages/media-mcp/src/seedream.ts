@@ -8,13 +8,13 @@
 import path from "node:path";
 import { arkcli } from "./arkcli.ts";
 import { QUIET, flags, input, saved } from "./ark.ts";
-import type { Factory, ImageProvider } from "./provider.ts";
+import type { ImageProvider } from "./provider.ts";
 
 /** The file is what its name says: without this the model answers a JPEG whatever the output is called. */
 const format = (output: string): string | undefined => ({ ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg" })[path.extname(output).toLowerCase()];
 
-export const seedream: Factory<ImageProvider> = () => ({
-  about: `Model: Doubao Seedream (the image model set in the user's arkcli), through arkcli. Size is a tier such as "2K" or exact pixels such as "2560x1440"; say the aspect ratio in the prompt when you give a tier or none. Up to 10 reference images; in the prompt call them 图1, 图2, … in their order. Keep the prompt under 300 Chinese characters.`,
+export const seedream: ImageProvider = {
+  about: `Model: Doubao Seedream (the image model set in the user's arkcli), through arkcli. Size is a tier or exact pixels such as "2560x1440": every version offers the tier "2K", which others it offers (1K, 1.5K, 3K, 4K) depends on the version; say the aspect ratio in the prompt when you give a tier or none. Up to 10 reference images (14 on Seedream 5.0 lite, 4.5 and 4.0), each under 30 MB; in the prompt call them 图一, 图二, … in their order and say what to take from each. Use concise, coherent natural language to describe the subject, action and environment, then the style, lighting and composition.`,
 
   async generate(request, signal): Promise<void> {
     const references = (request.references ?? []).flatMap((image) => input("reference_image", image));
@@ -23,4 +23,4 @@ export const seedream: Factory<ImageProvider> = () => ({
       arkcli(["+gen", request.prompt, "--modality", "image", ...flags({ size: request.size, "output-format": format(request.output), watermark: false, "save-to": dir }), ...references, "--inline-local", ...QUIET], { signal }),
     );
   },
-});
+};
