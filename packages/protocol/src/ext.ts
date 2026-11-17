@@ -167,8 +167,10 @@ export type SkillInfo = { name: string; description: string; produces?: string; 
 export type Workplace = "project" | "own";
 
 export type RoleDetail = {
-  /** Bundled avatar ID; empty or absent uses the default. */
+  /** Bundled avatar ID, or "role" for the role's own picture (`avatarFile`); empty or absent uses the default. */
   avatar?: string;
+  /** With `avatar` "role": the absolute path of the role's own picture, a PNG in its directory. */
+  avatarFile?: string;
   name: string;
   /**
    * Set when a team the project uses has a role of this name: which team, and
@@ -210,6 +212,10 @@ export type McpServerCheck = { server: string; tools?: { name: string; descripti
  *   request    _dev.xsb/teams/list {}     -> { teams: TeamInfo[] }
  *              _dev.xsb/teams/use  { id } -> {}
  *              _dev.xsb/teams/drop { id } -> {}    refused while an agent has a role only that team gives
+ *              _dev.xsb/teams/derive { id, base } -> { team: TeamInfo }
+ *                                  start a team of the user's (~/.xsb/presets) that extends `base`
+ *   The list says, besides the teams, what is wrong among the preset directories that belongs to no team
+ *   (`problems`). Teams come from xsb (`builtin`) and from the user's ~/.xsb/presets (`user`), organised alike.
  *
  * A team ships once per language (`Language`); the project's language decides which is read.
  *
@@ -220,10 +226,26 @@ export const Teams = {
   list: `_${NS}/teams/list`,
   use: `_${NS}/teams/use`,
   drop: `_${NS}/teams/drop`,
+  derive: `_${NS}/teams/derive`,
 } as const;
+
+/** Something wrong with a preset team or one of its files (`error`: left out; `warning`: used all the same). */
+export type PresetProblem = { team?: string; path: string; code: string; detail: string; severity: "error" | "warning" };
 
 export type TeamInfo = {
   id: string;
+  /** Shipped with xsb, or the user's own (~/.xsb/presets). */
+  source: "builtin" | "user";
+  /** The team it builds on. */
+  extends?: string;
+  /** Where it is, in the language read. */
+  dir: string;
+  /** The language its words are in: the project's, unless the team has none in it. */
+  language: Language;
+  /** What is wrong with it, as far as can be checked without running it. */
+  problems: PresetProblem[];
+  /** The programs its roles' MCP servers start. */
+  programs: string[];
   title: string;
   description: string;
   /** What its asset types are called: type -> name, in the project's language. */

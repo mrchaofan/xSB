@@ -60,7 +60,7 @@ Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src
 | `backend.ts` / `backends.ts` | 一个后端进程：链路末端，握手、能力、补齐缺的能力，对上提供统一的 `prompt` / `steer` / `cancel` / 每个 Agent 至多一个进程的进程池 |
 | `mailroom.ts` | Agent 间的一切：消息、任务、后台任务（job）、结果的投递、确认与事务 |
 | `roles.ts` | 角色：按名字查找（项目自己的优先，再找所用的预设团队），读取说明、MCP 配置和 skills |
-| `teams.ts` | 预设团队：随 Hub 发布的几套角色（`presets/<团队>/`） |
+| `presets.ts` | 预设团队：应用自带的（`presets/<语言>/<团队>/`）和用户自己的（`~/.xsb/presets/`），组织相同；继承（`extends`）与叠加、冲突与问题、检查。写法见 [PRESETS.md](PRESETS.md) |
 | `assets.ts` | 资产库：登记、版本、查找 |
 | `mcp-client.ts` | 调用一次 stdio MCP server 的一个工具（后台任务用） |
 | `permissions.ts` | 把后端的权限请求转给人 |

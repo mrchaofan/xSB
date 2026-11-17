@@ -1,0 +1,20 @@
+{
+  "id": "S6",
+  "title": "When it is unclear what a remark is about, it asks first",
+  "role": "director",
+  "messages": [
+    "still this one"
+  ],
+  "peers": [
+    "screenwriter",
+    "art-director"
+  ],
+  "expect": [
+    {
+      "noCalls": "dispatch_task"
+    },
+    {
+      "says": "which|do you mean|referring"
+    }
+  ]
+}

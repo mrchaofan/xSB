@@ -1,11 +1,12 @@
-// 预设团队：应用自带的几支团队（软件开发、电影制作）。工作区"使用"一支团队，就有了它的全部角色。
-// 使用不是复制：角色按应用自带的版本生效，应用更新了它们也跟着更新。在工作区里改过的角色才是工作区自己的，
-// 可以随时恢复成预设。
+// 预设团队：应用自带的几支团队（软件开发、电影制作），以及用户自己放在 ~/.xsb/presets 里的团队，两处的组织一样。
+// 工作区"使用"一支团队，就有了它的全部角色。使用不是复制：角色按团队里的版本生效，团队更新了它们也跟着更新。
+// 在工作区里改过的角色才是工作区自己的，可以随时恢复成预设。一支团队可以基于另一支（extends），只放不同的部分。
 import { assetName, roleOf, showPage, state } from "./app.js";
 import { markdownHtml } from "./content.js";
 import { avatarImage } from "./avatars.js";
 import { fill, h } from "./dom.js";
-import { t } from "./i18n.js";
+import { field, input, openDialog } from "./form.js";
+import { language, t } from "./i18n.js";
 import { editRole, halted, pageHead } from "./team.js";
 
 const body = h("div", { class: "page-body" });
@@ -15,12 +16,16 @@ let notice = [];                  // 上一次操作的结果，一行一条
 export async function showPresets() {
   const category = state.settings;
   const page = state.page;
-  const packs = await xsb.presets();
+  const { teams: packs, problems } = await xsb.presets();
   if (state.settings !== category || state.page !== page) return;
   const top = body.scrollTop;
   showPage("presets", pageHead(t("presets.title"), t("presets.hint")), body);
   fill(body,
     notice.length > 0 && h("div", { class: "notice", role: "status" }, h("span", {}, ...notice.map((line) => h("div", {}, line)))),
+    h("div", { class: "card-foot" },
+      h("small", {}, t("presets.mine.hint")),
+      h("button", { class: "btn", onclick: () => xsb.openFolder() }, t("presets.mine.open"))),
+    problems.length > 0 && problemList(problems),
     ...packs.map(packSection));
   body.scrollTop = top;
 }
@@ -30,6 +35,30 @@ const run = (work) => async () => {
   try { notice = await work(); } catch (e) { notice = [e.message]; }
   await showPresets();
 };
+
+/** 预设里有问题的地方：错误的那支团队或角色不会被使用，提醒只是提醒。 */
+function problemList(problems) {
+  return h("div", { class: "notice problems" }, h("span", {},
+    ...problems.map((p) => h("div", { "data-severity": p.severity },
+      t(p.severity === "error" ? "presets.problem.error" : "presets.problem.warning"), " ", p.detail, " ", h("code", {}, p.path)))));
+}
+
+/** 从这支团队派生一支自己的：放在 ~/.xsb/presets 里，只写不同的部分。 */
+function derive(pack) {
+  const draft = { id: "" };
+  openDialog(t("presets.derive.title", { title: pack.title }), [
+    h("p", { class: "hint" }, t("presets.derive.hint")),
+    field(t("presets.derive.id"), input(draft, "id", { placeholder: `${pack.id}-mine` })),
+  ], [
+    { label: t("common.cancel") },
+    { label: t("presets.derive.confirm"), primary: true, run: async () => {
+      const dir = await xsb.deriveTeam(draft.id.trim(), pack.id);
+      notice = [t("presets.derive.done", { id: draft.id.trim() })];
+      await xsb.openFolder(dir);
+      await showPresets();
+    } },
+  ]);
+}
 
 function packSection(pack) {
   /** 使用这支团队，并给还没有 Agent 的角色各建一个（id 用角色名）。可以重复执行：只补缺的。 */
@@ -42,14 +71,22 @@ function packSection(pack) {
   const use = run(async () => { await xsb.useTeam(pack.id); return [t("presets.use.done", { title: pack.title, count: pack.roles.length })]; });
   const drop = run(async () => { await xsb.dropTeam(pack.id); return [t("presets.drop.done", { title: pack.title })]; });
 
+  const errors = pack.problems.filter((p) => p.severity === "error");
   return h("section", {},
-    h("h2", {}, pack.title), h("p", { class: "hint" }, pack.description),
+    h("h2", {}, pack.title, " ", h("small", { class: "tag" }, t(pack.source === "user" ? "presets.source.user" : "presets.source.builtin"))),
+    h("p", { class: "hint" }, pack.description),
+    pack.extends && h("p", { class: "hint" }, t("presets.extends", { base: pack.extends })),
+    pack.language !== language && pack.source === "user" && h("p", { class: "hint" }, t("presets.language", { language: pack.language })),
+    pack.programs.length > 0 && h("p", { class: "hint" }, t("presets.programs", { programs: pack.programs.join(t("list.separator")) })),
+    pack.problems.length > 0 && problemList(pack.problems),
     h("div", { class: "card-foot" },
       h("small", {}, pack.used ? t("presets.used") : t("presets.unused")),
       pack.used
         ? h("button", { class: "btn", title: t("presets.drop.title"), onclick: drop }, t("presets.drop"))
         : h("button", { class: "btn", title: t("presets.use.title"), onclick: use }, t("presets.use")),
-      h("button", { class: "btn primary", title: t("presets.build.title"), onclick: buildTeam }, t("presets.build"))),
+      h("button", { class: "btn primary", title: t("presets.build.title"), onclick: buildTeam, disabled: errors.length > 0 }, t("presets.build")),
+      h("button", { class: "btn", title: t("presets.derive.hint"), onclick: () => derive(pack) }, t("presets.derive")),
+      pack.source === "user" && h("button", { class: "btn", onclick: () => xsb.openFolder(pack.dir) }, t("presets.open"))),
     ...pack.roles.map((entry) => roleCard(pack, entry)));
 }
 

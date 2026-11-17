@@ -12,15 +12,15 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { Hub } from "./hub.ts";
 import { isLocked, lockFile } from "./lock.ts";
-import { Paths } from "./paths.ts";
+import { Paths, shipped } from "./paths.ts";
 import { errorMessage, failure } from "@xsb/protocol";
 import { now } from "./util.ts";
 
-const BIN = fileURLToPath(new URL("../bin/xsb-hub", import.meta.url));
+const BIN = path.join(shipped("bin"), "xsb-hub");
 
 export type HubInfo = { pid: number; startedAt: string };
 

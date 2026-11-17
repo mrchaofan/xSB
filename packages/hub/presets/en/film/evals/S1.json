@@ -1,0 +1,16 @@
+{
+  "id": "S1",
+  "title": "\"The built-in browser\" goes to the side-panel browser the first time",
+  "role": "director",
+  "messages": [
+    "Open example.com in the IAB."
+  ],
+  "expect": [
+    {
+      "firstTool": {
+        "among": "browser|open_in_app|navigate",
+        "is": "^browser_navigate$"
+      }
+    }
+  ]
+}

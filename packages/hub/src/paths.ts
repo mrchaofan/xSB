@@ -16,15 +16,25 @@
  *     assets.jsonl  assets/            the asset library: its index and its files
  *     spend.jsonl                      what generation cost, and the user's budget for it (spend.ts)
  *     roles/<role>/                    role.json, instructions.md, skills/<name>/SKILL.md (user-edited); the roles of
- *                                      the preset teams the project uses are not here (teams.ts)
+ *                                      the preset teams the project uses are not here (presets.ts)
  *     run/                             lock, pid, sockets, log of the running hub
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const DIR = ".xsb";
+
+/**
+ * What xsb ships besides its code, by name ("presets", "bin"). One rule, whatever form xsb runs in: it is the
+ * directory of that name next to the directory the code is in. In the sources the code is packages/hub/src and
+ * they are packages/hub/presets and packages/hub/bin; in the app (packages/desktop/rolldown.config.js) the code is
+ * one file in dist/bin or dist/app, and they are dist/presets and dist/bin. They are plain files in both (the app
+ * is packed without asar), so nothing asks which form it runs in.
+ */
+export const shipped = (name: string): string => fileURLToPath(new URL(`../${name}/`, import.meta.url));
 
 export function findProject(start = process.cwd()): string | null {
   let dir = path.resolve(start);

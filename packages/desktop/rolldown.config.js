@@ -46,12 +46,22 @@ const pages = {
   },
 };
 
-/** The preset teams are files the hub reads at run time (teams.ts in @xsb/hub). */
+/**
+ * The preset teams are files the hub reads at run time (presets.ts in @xsb/hub), found by one rule: the directory
+ * `presets` next to the one the code is in (`shipped` in paths.ts). Checked here, so that a change of this layout
+ * does not leave the app without its teams unnoticed.
+ */
 const presets = {
   name: "presets",
   writeBundle() {
     fs.rmSync("dist/presets", { recursive: true, force: true });
     fs.cpSync("../hub/presets", "dist/presets", { recursive: true });
+    for (const code of ["dist/app", "dist/bin"]) {
+      const teams = `${code}/../presets/en`;
+      if (!fs.existsSync(teams) || !fs.readdirSync(teams).some((team) => fs.existsSync(`${teams}/${team}/team.json`))) {
+        throw new Error(`no preset teams next to ${code}: the hub looks for them in ../presets`);
+      }
+    }
   },
 };
 

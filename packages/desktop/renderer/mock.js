@@ -438,7 +438,9 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
       return { tools: serverName === "render" ? ["render_preview", "list_fixtures"] : ["generate", "get_status"] };
     },
     // ---------- 预设团队 ----------
-    presets: async () => [{ ...structuredClone(TEAM), used: data.teams.includes(TEAM.id) }],
+    presets: async () => ({ teams: [{ ...structuredClone(TEAM), source: "builtin", dir: "/app/presets/zh-CN/film", language: "zh-CN", problems: [], programs: [], used: data.teams.includes(TEAM.id) }], problems: [] }),
+    deriveTeam: async (id) => `~/.xsb/presets/zh-CN/${id}`,
+    openFolder: async () => {},
     /** 使用一支团队：它的角色成为工作区的角色，但不复制；工作区已有的同名角色仍以工作区的为准。 */
     async useTeam(teamId) {
       if (data.teams.includes(teamId)) return;

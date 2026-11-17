@@ -1,0 +1,22 @@
+{
+  "id": "S5",
+  "title": "连着来的意见先归并，只派一次",
+  "role": "director",
+  "messages": [
+    "女研究员被咬后的表情再夸张一点。",
+    "算了，还是以痛苦为主。",
+    "不对，要克制，别演过了。"
+  ],
+  "peers": [
+    "screenwriter",
+    "art-director"
+  ],
+  "expect": [
+    {
+      "atMost": {
+        "tool": "dispatch_task",
+        "times": 1
+      }
+    }
+  ]
+}

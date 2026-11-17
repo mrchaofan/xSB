@@ -59,6 +59,8 @@ export type BackendView = { name: string; command: string; installed: boolean; m
 /** A role as it is edited: servers and variables as lists, a skill's front matter as fields. */
 export type RoleView = {
   avatar?: string;
+  /** With `avatar` "role": the role's own picture, as a URL the window can load. */
+  avatarUrl?: string;
   name: string;
   /** The preset team the workspace uses that has this role, what it calls it, and whether the workspace has its own version in its place. */
   preset: { team: string; teamTitle: string; own: boolean; title: string } | null;
@@ -79,6 +81,17 @@ export type RoleView = {
  */
 export type Pack = {
   id: string;
+  /** Shipped with xsb, or the user's own (~/.xsb/presets). */
+  source: "builtin" | "user";
+  extends?: string;
+  /** Where it is: the folder the user can open. */
+  dir: string;
+  /** The language its words are in, when it is not the workspace's. */
+  language: string;
+  /** What is wrong with it (errors and warnings). */
+  problems: { path: string; code: string; detail: string; severity: "error" | "warning" }[];
+  /** The programs its roles' MCP servers start. */
+  programs: string[];
   title: string;
   description: string;
   assets: Record<string, string>;

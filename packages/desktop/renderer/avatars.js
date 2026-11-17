@@ -4,7 +4,9 @@ import { language, t } from "./i18n.js";
 
 /** Name appears next to the image, so artwork is decorative to screen readers. */
 export function avatarImage(agent, role) {
-  return h("img", { class: "avatar", src: avatarSource(resolveAvatar(agent, role)), alt: "", draggable: "false",
+  // 角色自带的图片（用户的预设团队里的 avatar.png）：智能体自己没选头像时用它。
+  const own = !agent?.avatar && role?.avatar === "role" && role.avatarUrl;
+  return h("img", { class: "avatar", src: own || avatarSource(resolveAvatar(agent, role)), alt: "", draggable: "false",
     onerror: (event) => { const img = event.currentTarget; img.onerror = null; img.src = avatarSource(DEFAULT_AVATAR); } });
 }
 
