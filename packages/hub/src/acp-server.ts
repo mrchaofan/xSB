@@ -9,7 +9,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { Agents, Assets, Backends, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, errorMessage, failure } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, errorMessage, failure } from "@xsb/protocol";
 import type { Connection, McpServerCheck, OriginMeta, RoleDetail, TeamInfo } from "@xsb/protocol";
 import { backends, describeBackends, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
@@ -127,6 +127,11 @@ export class Client {
     });
 
     conn.onNotification("session/cancel", (p) => hub.live.get(p?.sessionId)?.cancel());
+
+    conn.onRequest(Boundaries.clear, (p) => {
+      hub.session(p.sessionId).clear();
+      return {};
+    });
 
     for (const method of ["session/set_mode", "session/set_config_option"]) {
       conn.onRequest(method, async (p) => {

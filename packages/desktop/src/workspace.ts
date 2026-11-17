@@ -13,8 +13,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
-import { Agents, Assets, Backends, Connection, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
-import type { AgentInfo, Asset, BackendInfo, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Connection, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
+import type { AgentInfo, Asset, BackendInfo, Boundary, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
 import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
@@ -331,6 +331,11 @@ export class Workspace {
     const agentId = this.sessionAgent.get(sessionId);
     if (!agentId) return;
     if (update.sessionUpdate === "agent_thought_chunk") return this.does(agentId, "thinking");
+    const boundary = update.sessionUpdate === "session_info_update" ? (update._meta?.[Boundaries.key] as Boundary | undefined) : undefined;
+    if (boundary) {
+      this.settle(agentId);
+      return this.put(agentId, { id: this.newId(), kind: "boundary", boundary });
+    }
     if (update.sessionUpdate === "agent_message_chunk") {
       this.does(agentId, "writing");
       const entry = this.growing.get(agentId) ?? { id: this.newId(), kind: "output", content: [], streaming: true };
@@ -406,6 +411,12 @@ export class Workspace {
     await this.conn
       .request(Steering.method, { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: entryId } } })
       .catch((e) => this.put(agentId, { id: this.newId(), kind: "error", text: this.why(e) }));
+  }
+
+  /** Clear the agent's context: its model starts anew and sees nothing of what was said. The transcript keeps it. */
+  async clear(agentId: string): Promise<void> {
+    const sessionId = await this.mains.get(agentId);
+    if (sessionId) await this.conn.request(Boundaries.clear, { sessionId }).catch((e) => this.put(agentId, { id: this.newId(), kind: "error", text: this.why(e) }));
   }
 
   /** Stop the running turn. Its open permission requests are void. */

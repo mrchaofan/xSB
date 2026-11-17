@@ -7,8 +7,9 @@
  * the hub's unit: whoever waits for it (a `session/prompt` caller, a task) sees
  * one turn with one end, whatever the backend needed to get there.
  */
-import { OriginExt, RpcError, failure, errorMessage, text } from "@xsb/protocol";
+import { Boundaries, OriginExt, RpcError, failure, errorMessage, isTerminal, text } from "@xsb/protocol";
 import type {
+  Boundary,
   ContentBlock,
   McpServer,
   OriginMeta,
@@ -23,7 +24,9 @@ import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
 import { bridgeServer } from "./mcp.ts";
 import { Paths } from "./paths.ts";
-import { CONTEXT_LOST, asPreface } from "./prompts.ts";
+import { asPreface, handoff } from "./prompts.ts";
+import type { Renewal } from "./prompts.ts";
+import { turnsSinceCleared } from "./transcript.ts";
 import type { MailItem, SessionRec } from "./state.ts";
 import { ops } from "./state.ts";
 import type { Deferred } from "./util.ts";
@@ -37,6 +40,9 @@ export type TurnRequest = {
   /** The client that sent it. It is not sent its own message back unless it asked to be (`Client.echo`). */
   from?: Client;
 };
+
+/** How many of the agent's latest assets a handoff lists. */
+const HANDOFF_ASSETS = 30;
 
 type Queued = TurnRequest & { done: Deferred<{ stopReason: StopReason }> };
 
@@ -114,7 +120,9 @@ export class LiveSession {
     };
 
     const prior = this.rec.backendSessionId;
-    if (prior) {
+    // A backend session of another backend is not that backend's to restore: the conversation is handed over instead.
+    let renewal: Renewal | undefined = prior && this.rec.backend && this.rec.backend !== agent.backend ? "backend_changed" : undefined;
+    if (prior && !renewal) {
       try {
         if (backend.caps.resume) {
           this.setup = await backend.conn.request("session/resume", { sessionId: prior, ...params });
@@ -126,10 +134,11 @@ export class LiveSession {
         }
         backend.open(prior, this);
         this.backend = backend;
+        if (!this.rec.backend) this.save({ backend: agent.backend });
         return;
       } catch (e) {
         this.hub.log(`${this.id}: backend session ${prior} not restored (${errorMessage(e)}), starting a new one`);
-        this.prefaces.push(CONTEXT_LOST);
+        renewal = "not_restored";
       }
     }
 
@@ -137,9 +146,45 @@ export class LiveSession {
     this.setup = created;
     // Without the system prompt capability the instructions ride on the first prompt.
     if (!backend.caps.systemPrompt) this.prefaces.push(asPreface(instructions));
-    this.save({ backendSessionId: created.sessionId });
+    this.save({ backendSessionId: created.sessionId, backend: agent.backend });
     backend.open(created.sessionId, this);
     this.backend = backend;
+    if (renewal) {
+      // The handoff is made before the boundary is written: what it tells is what precedes the boundary.
+      this.prefaces.push(this.handoff(renewal));
+      this.boundary({ kind: renewal, backend: agent.backend, handoff: true });
+      this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : "backend session renewed"}, with a handoff of the conversation`);
+    }
+  }
+
+  /** What a new backend session is told of this session's conversation, and of what is open (prompts.ts, `handoff`). */
+  private handoff(why: Renewal): string {
+    const { state } = this.hub;
+    const tasks = [...state.tasks.values()].filter((t) => !isTerminal(t.status) && (t.from.sessionId === this.id || t.to.sessionId === this.id));
+    const waiting = [...state.gates.values()].filter((g) => g.owner.sessionId === this.id).map((g) => ({ taskIds: g.taskIds, mode: g.mode, note: g.note }));
+    const assets = [...state.assets.values()]
+      .map((versions) => versions.at(-1)!)
+      .filter((a) => a.by === this.agentId)
+      .sort((x, y) => y.createdAt.localeCompare(x.createdAt))
+      .slice(0, HANDOFF_ASSETS);
+    return handoff(why, turnsSinceCleared(state.store, this.agentId, this.id), { tasks, waiting, assets });
+  }
+
+  /** Record, and show, where what the model sees of this session starts anew. */
+  private boundary(boundary: Boundary): void {
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [Boundaries.key]: boundary } } as SessionUpdate);
+  }
+
+  /**
+   * The user clears the context: the next turn starts a backend session that is given nothing of the conversation
+   * so far. The transcript keeps it all, behind a boundary that says the model does not see it.
+   */
+  clear(): void {
+    if (this.busy) throw failure("session_busy", { agent: this.agentId });
+    this.prefaces = [];
+    this.backend = undefined;
+    this.save({ backendSessionId: undefined });
+    this.boundary({ kind: "cleared", handoff: false });
   }
 
   /** ACP's `auth_required` says nothing about which of several agents needs what. */

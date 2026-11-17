@@ -11,7 +11,7 @@
  *
  * A prompt without directives is echoed. Flags: --steering serves
  * `_session/steering` (without it the hub has to steer by interrupting) and
- * reads images, --no-system-prompt, --auth-required, --protocol <n>.
+ * reads images, --no-system-prompt, --no-resume (cannot restore a session), --auth-required, --protocol <n>.
  */
 import { spawn } from "node:child_process";
 import { Connection, RpcError } from "@xsb/protocol";
@@ -120,7 +120,7 @@ conn.onRequest("initialize", () => ({
   protocolVersion: flags.includes("--protocol") ? Number(flags[flags.indexOf("--protocol") + 1]) : 1,
   agentInfo: { name: "mock", version: "0" },
   authMethods: [{ id: "login", name: "Log in with the mock CLI" }],
-  agentCapabilities: { promptCapabilities: { image: steering }, sessionCapabilities: { resume: {}, ...(flags.includes("--no-system-prompt") ? {} : { systemPrompt: {} }) } },
+  agentCapabilities: { promptCapabilities: { image: steering }, sessionCapabilities: { ...(flags.includes("--no-resume") ? {} : { resume: {} }), ...(flags.includes("--no-system-prompt") ? {} : { systemPrompt: {} }) } },
   ...(steering ? { _meta: { steering: { supported: true } } } : {}),
 }));
 conn.onRequest("session/new", async (p) => ({ sessionId: (await open(`mock_${process.pid}_${++counter}`, p.mcpServers)).id }));

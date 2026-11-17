@@ -17,6 +17,8 @@ export type SessionRec = {
   backendSessionId?: string;
   /** The session peers' messages go to. One per agent. */
   main: boolean;
+  /** The backend the backend session belongs to: one of another backend cannot be restored in this one. */
+  backend?: string;
   title?: string;
   createdAt: string;
   updatedAt: string;

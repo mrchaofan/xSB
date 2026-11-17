@@ -5,13 +5,17 @@ import { fill, h } from "./dom.js";
 import { confirmDialog, field, input, openDialog, select } from "./form.js";
 import { t } from "./i18n.js";
 
-/** 重启后端进程会让正在进行的那一轮失败，所以先看状态再问。agents 都空闲时直接通过。 */
-export async function confirmRestart(agents, action) {
+/**
+ * 重启后端进程会让正在进行的那一轮失败，所以先看状态再问。agents 都空闲时直接通过。
+ * `note`：这次重启还有别的后果要用户知道（换后端时对话不会带过去），有它就总是问。
+ */
+export async function confirmRestart(agents, action, note) {
   const busy = agents.filter((a) => a.state !== "idle");
-  if (!busy.length) return true;
+  if (!busy.length && !note) return true;
   return confirmDialog(t("restart.title", { action }), [
-    h("p", {}, t("restart.body", { action })),
-    h("ul", {}, ...busy.map((a) => h("li", {}, t("restart.item", { name: a.name, state: STATE_TEXT[a.state] })))),
+    note && h("p", {}, note),
+    busy.length && h("p", {}, t("restart.body", { action })),
+    busy.length && h("ul", {}, ...busy.map((a) => h("li", {}, t("restart.item", { name: a.name, state: STATE_TEXT[a.state] })))),
   ], t("restart.confirm"));
 }
 
@@ -96,7 +100,8 @@ export async function editAgent(agent) {
       || "";
     if (error.textContent) return false;
     const restarts = !creating && ["role", "backend", "workspace"].some((key) => draft[key] !== (agent[key] ?? ""));
-    if (restarts && !await confirmRestart([agent], t("restart.action.edit"))) return false;
+    const handedOver = !creating && agent.mainSessionId && draft.backend !== agent.backend ? t("restart.backend", { backend: draft.backend }) : undefined;
+    if (restarts && !await confirmRestart([agent], t("restart.action.edit"), handedOver)) return false;
     onAgent(await xsb.putAgent(draft));
     if (creating) focusLane(draft.id);
   };

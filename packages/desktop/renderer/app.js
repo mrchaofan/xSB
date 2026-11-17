@@ -151,8 +151,10 @@ function openLane(agentId) {
   const send = (interject) => {
     const content = editor.read();
     if (!content.length) return;
-    xsb.send(agentId, content, interject);
     editor.clear();
+    // /clear 是 xsb 自己的命令，不交给后端：由中枢换一个新的后端会话，对哪种后端都一样。
+    if (content.length === 1 && content[0].type === "text" && content[0].text.trim() === "/clear") return xsb.clear(agentId);
+    xsb.send(agentId, content, interject);
   };
   // 一个按钮管两件事：输入框里有内容就是发送；没有内容而智能体在工作，就是停止。
   const press = () => (lane.dataset.action === "stop" ? xsb.cancel(agentId) : send(false));
@@ -253,6 +255,11 @@ function entryNode(agentId, entry) {
 
   if (entry.kind === "output") return h("div", { ...base, "data-streaming": entry.streaming }, contentView(entry.content));
   if (entry.kind === "error") return h("div", base, entry.text);
+  // 上下文的边界：对话记录都还在，分隔线告诉用户模型从哪里起看不到上面的内容。
+  if (entry.kind === "boundary") {
+    return h("div", { ...base, role: "separator", "data-boundary": entry.boundary.kind },
+      h("span", {}, t(`entry.boundary.${entry.boundary.kind}`, { backend: entry.boundary.backend ?? "" })));
+  }
 
   if (entry.kind === "input") {
     const o = entry.origin;
