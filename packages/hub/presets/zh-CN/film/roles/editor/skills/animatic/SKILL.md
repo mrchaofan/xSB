@@ -26,7 +26,7 @@ ffmpeg -loop 1 -t 5 -i frames/3-1.png -f lavfi -t 5 -i anullsrc=r=48000:cl=stere
 ffmpeg -f concat -safe 0 -i list.txt -c copy animatic/film.mp4
 ```
 
-4. 自己从头看一遍，再用 `put_asset` 登记。
+4. 自己检查一遍（总时长、每个镜号都在、没有黑帧），再用 `put_asset` 登记。
 
 分辨率用 720p 就够。镜头表里的时长含剪辑余量；这里按成片里预计用的时长排（一般每镜减 1–2 秒），并在结果里说明用的是哪个。
 

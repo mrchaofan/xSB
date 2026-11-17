@@ -7,12 +7,12 @@ inputs: shot_list, storyboard, style_guide, character
 
 ## Workflow
 
-1. Read the inputs: `shot_list`, `storyboard`, `style_guide`, and the `character` of everyone in the scene. Copy down the style suffix and each character's appearance description; use `get_asset` to get the file paths of the storyboard frames and reference images you need.
-2. Order by dependency: shots with no "continue from last frame" dependency can be submitted together.
+1. Read the inputs: `shot_list`, `storyboard`, `style_guide`, and the `character` of everyone in the scene. Copy down the style suffix, the location suffix of this scene, each character's appearance description, and the user's hard requirements from the style guide (check against them before generating); use `get_asset` to get the file paths of the storyboard frames and reference images you need.
+2. Order by dependency: shots with no "continue from last frame" dependency can be submitted together, but submit one or two first and the rest once those come out right. The reason: a generation that has started cannot be called back, and the more you submit at once, the more is wasted when the director calls a halt.
 3. Write a prompt for each shot (see below) and submit it with `start_job`: `server: "media"`, `tool: "generate_video"`, at draft resolution.
 4. `await_tasks`, then end your turn: the task stays open, and you carry on when the results come back. Check the files then, and adjust and reshoot any that fail (submit again, `await_tasks` again).
 5. Use `put_asset` to register each draft as `shot/<shot>` (with `path` pointing to the video file), with the prompt and parameters in the description, marked as a draft. Hand them to the director for review in your result; this task ends here.
-6. Once the director approves, a new task asks for the finals: generate them with **exactly the same prompt and inputs** at the final resolution, and register each as a new version of the same `shot/<shot>`, marked as final.
+6. Once the user has signed off, the director sends a new task for the finals: generate them with **exactly the same prompt and inputs** at the final resolution, and register each as a new version of the same `shot/<shot>`, marked as final.
 
 ## Prompts
 
@@ -24,7 +24,7 @@ Write one coherent paragraph; do not pile up keywords. The order is fixed:
 4. **Camera**: shot size, angle, movement ("medium shot, eye level, camera slowly pushes in").
 5. **Lighting**: where the light comes from and its quality.
 6. **Sound** (shots with sound): who says what, in quotation marks; what the ambient sound is.
-7. **Style suffix** (copied verbatim).
+7. **Location suffix and style suffix** (both copied verbatim, the location suffix first).
 
 Example (图片1, 图片2 are the labels the video model expects for reference images; keep them as written):
 
@@ -74,7 +74,11 @@ Limits:
 
 The character matches the look references; the composition matches the storyboard frame; the action completes, with spare footage at the head and tail; no obvious artifacts in limbs or faces; no garbled text; the color grade cuts smoothly with adjacent shots; for shots with sound, the dialogue is correct.
 
-When reshooting, **change only one thing at a time**, or you will not know which change made the difference. If the same shot still fails after three attempts, stop, describe the symptoms in the result, and suggest how to change the shot design.
+When reshooting, **change only one thing at a time**, or you will not know which change made the difference. Before submitting a reshoot, compare the old and new prompt and parameters and make sure the one change is really there: when a script or file name was not updated along with it, the reshoot comes out the same and costs all the same. If the same shot still fails after three attempts, stop, describe the symptoms in the result, and suggest how to change the shot design.
+
+## Technical check
+
+The technical check the director sends once the brief is signed off: one low-resolution draft with a face and one spoken line. In the result, say whether the first frame with the face was accepted and which image it was; whether lip sync and voice are usable; whether anything needs the user's own approval or activation; and what this one draft really cost (the usage and the estimated amount).
 
 ## Test shoot
 
@@ -82,4 +86,4 @@ When the director dispatches only two or three shots and says it is a test shoot
 
 ## What to include in the result
 
-For each shot: shot number, asset id, duration, whether it is a draft or a final, and how many times it was generated in total; for reshot shots, the reason and what was changed; for unfinished shots, where they are stuck; any canceled tasks and whether they were billed.
+For each shot: shot number, asset id, duration, whether it is a draft or a final, and how many times it was generated in total; for reshot shots, the reason and what was changed; for unfinished shots, where they are stuck; any canceled tasks and whether they were billed. Close with the total usage and estimated cost of the task, as the generation tool reported them; what it did not report is "unknown": do not guess, and do not write "free".

@@ -26,7 +26,7 @@ ffmpeg -loop 1 -t 5 -i frames/3-1.png -f lavfi -t 5 -i anullsrc=r=48000:cl=stere
 ffmpeg -f concat -safe 0 -i list.txt -c copy animatic/film.mp4
 ```
 
-4. Watch it yourself from start to finish, then register it with `put_asset`.
+4. Check it yourself (the total duration, every shot number present, no black frames), then register it with `put_asset`.
 
 720p is enough. Durations in the shot list include editing margin; here, lay the frames out for the duration you expect to use in the finished film (usually 1–2 seconds less per shot), and state in the result which one you used.
 

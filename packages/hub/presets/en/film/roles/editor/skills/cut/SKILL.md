@@ -7,7 +7,7 @@ inputs: shot_list, shot
 
 ## Steps
 
-1. Read `shot_list`, list all `shot` assets with `find_assets`, and verify that every shot number has an approved final. Use `get_asset` to get the file paths.
+1. Read `shot_list`, list all `shot` assets with `find_assets`, and verify that every shot number has an approved version (a final, or a draft the director said to use as it is). A shot without one is stood in for by a placeholder with "PLACEHOLDER" burned in, and listed in the result. Use `get_asset` to get the file paths.
 2. Check the footage: `ffprobe -v error -show_streams <file>`, and note each file's resolution, frame rate, codec, and whether it has an audio track.
 3. Set each shot's in and out points: trim the wind-up at the head and the excess at the tail, and cut action shots on the action.
 4. Normalize the parameters and trim (see below), then concatenate and export to `cut/<title>.mp4`.

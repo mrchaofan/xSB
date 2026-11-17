@@ -21,7 +21,7 @@ import type {
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
-import { bridgeServer, commonServers } from "./mcp.ts";
+import { bridgeServer } from "./mcp.ts";
 import { Paths } from "./paths.ts";
 import { CONTEXT_LOST, asPreface } from "./prompts.ts";
 import type { MailItem, SessionRec } from "./state.ts";
@@ -101,14 +101,12 @@ export class LiveSession {
   private async bind(backend: Backend): Promise<void> {
     const agent = this.hub.agent(this.agentId);
     const role = this.hub.role(agent);
-    const instructions = this.hub.systemPromptFor(agent);
+    const instructions = this.hub.systemPromptFor(agent, this.clientMcp);
     const { paths } = this.hub;
-    const own = role?.mcpServers ?? [];
-    const common = commonServers().filter((server) => !own.some((s) => s.name === server.name));
     const params = {
       cwd: agent.workspace,
-      // The hub's own tools, those every agent has, the role's, and whatever the client that created the session asked for.
-      mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), ...common, ...own, ...this.clientMcp],
+      // The hub's own tools, then the others the agent has (Hub.toolServers): the system prompt says where each comes from.
+      mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), ...this.hub.toolServers(agent, this.clientMcp).map((t) => t.server)],
       ...(backend.caps.systemPrompt ? { systemPrompt: { mode: "append", content: [text(instructions)] } } : {}),
       ...(backend.caps.additionalDirectories
         ? { additionalDirectories: [paths.shared, paths.assets, ...(role ? [role.dir] : [])] }

@@ -25,6 +25,43 @@ export function memoryDigest(state: State, agentId: string, limit = 30): string 
   return lines.length ? lines.join("\n") : "(empty)";
 }
 
+/** Where an MCP server of a session comes from, besides the hub's own (Hub.toolServers). */
+export type ToolOrigin = "app" | "role" | "client";
+
+const ORIGIN: Record<ToolOrigin, string> = {
+  app: "given to every agent by the app the user runs xsb in",
+  role: "your role's",
+  client: "added by the client that opened this session",
+};
+
+/**
+ * Where each tool comes from. Which tool to pick for a request is decided by the tools' own descriptions, which say
+ * what each is; this only tells the servers apart from one another and from the agent program's own tools.
+ */
+function toolSources(tools: { name: string; from: ToolOrigin }[]): string {
+  const lines = [`- xsb: the hub of this team (collaboration, tasks, assets, memory).`, ...tools.map((t) => `- ${t.name}: ${ORIGIN[t.from]}.`)];
+  return `
+
+# Where your tools come from
+Besides the tools of the agent program you run in, you have the tools of these MCP servers:
+${lines.join("\n")}
+What each tool is for, and when to use it, is in its own description; when a request could be served by tools of different sources, take the one whose description names what is asked. Every other tool you have comes with the agent program itself (its own file, shell, browser or computer-use tools, for example) and acts on the user's machine, not on anything of xsb's. When asked where a tool comes from, answer from this list and the tool's description; there is nothing else to look up.`;
+}
+
+/**
+ * Rules for every agent of every team. Each says why: a model that knows the reason applies a rule to cases it
+ * does not name.
+ */
+const WORKING_RULES = `
+
+# How you work
+- Say how you checked. In a result, write what you checked and by what means ("ffprobe shows an audio track in every clip", "6 frames sampled per shot"), not that you "watched" or "listened to" something. What needs a person's eyes or ears, list for the user to check. The reason: whoever gets your result builds on it as fact.
+- When a program you need is missing, or something needs an account, a password or a payment, stop and say what is missing to the user or to whoever gave you the work, and let them decide. What is installed on this machine and how its accounts are used is the user's; credential files are not yours to read, and programs from unverified sources are not yours to fetch or run.
+- When you need a peer to deliver something, dispatch a task; a message is for telling or adding to what someone knows. The reason: only a task brings its result back to you.
+- Keep a note (remember) to decisions: what was decided, who owns it, what is open. Rewrite it when something is decided, not to log progress: a note comes with every later message on its topic, and progress is in the tasks and assets already.
+- Look at images small first: a copy at most 1024 pixels on its long side, or a contact sheet of frames (make one with sips or ffmpeg); open the original only for a detail, cropped. The reason: an image stays in your context for the rest of the session, and a full-size one is several thousand tokens.
+- When you write to the user, call assets by their names and leave out task ids, version shorthands and other internal labels: the user reads them as noise.`;
+
 /** What a model is to call each language. */
 const LANGUAGE_NAME: Record<Language, string> = { en: "English", "zh-CN": "Simplified Chinese (简体中文)" };
 
@@ -36,6 +73,7 @@ export function systemPrompt(
   dirs: { shared: string; assets: string },
   state: State,
   language: Language,
+  tools: { name: string; from: ToolOrigin }[] = [],
 ): string {
   const from = (inputs: string[]): string => (inputs.length ? `, from ${inputs.join(", ")}` : "");
   const teamIndex = team.length
@@ -92,7 +130,7 @@ Everything the team has to agree on (a requirement, a design, a character, a scr
 - The assets a task comes with are its facts. When one is wrong or not enough, say so in your result; do not quietly redefine it.${teamIndex}
 
 # Files
-Your working directory is ${agent.workspace}. Work in progress stays there.${sharing.length ? ` Also working in this directory: ${sharing.join(", ")}. They see what you change in it.` : ""} What others need goes into the asset library (${dirs.assets}); loose files that are no asset go in ${dirs.shared}. Refer to files by absolute path.${skillIndex}
+Your working directory is ${agent.workspace}. Work in progress stays there.${sharing.length ? ` Also working in this directory: ${sharing.join(", ")}. They see what you change in it.` : ""} What others need goes into the asset library (${dirs.assets}); loose files that are no asset go in ${dirs.shared}. Refer to files by absolute path.${skillIndex}${toolSources(tools)}${WORKING_RULES}
 
 # Your memory at the start of this session
 ${memoryDigest(state, agent.id)}`;
