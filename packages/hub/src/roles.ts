@@ -44,6 +44,7 @@ export type Role = {
   dir: string;
   /** The team the project uses that has a role of this name, what it calls it, and whether the project has its own in its place. */
   preset?: { team: string; teamTitle: string; own: boolean; title: string };
+  avatar?: string;
   description?: string;
   backend?: string;
   workspace?: Workplace;
@@ -55,7 +56,7 @@ export type Role = {
 };
 
 /** `role.json`. `mcpServers` is in the shape of `.mcp.json`: name -> how to start it. */
-type RoleFile = { description?: string; backend?: string; workspace?: Workplace; mcpServers?: Record<string, McpServerSpec> };
+type RoleFile = { avatar?: string; description?: string; backend?: string; workspace?: Workplace; mcpServers?: Record<string, McpServerSpec> };
 
 const read = (file: string): string => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "");
 
@@ -103,6 +104,7 @@ export function readRole(dir: string, name: string): Role {
   return {
     name,
     dir,
+    avatar: json.avatar,
     description: json.description,
     backend: json.backend,
     workspace: json.workspace,
@@ -124,6 +126,7 @@ export function readRole(dir: string, name: string): Role {
  */
 export function saveRole(paths: Paths, input: RoleInput): void {
   if (!NAME.test(input.name ?? "")) throw failure("role_name_invalid");
+  if (input.avatar !== undefined && (typeof input.avatar !== "string" || (input.avatar !== "" && !/^[a-z][a-z0-9-]{0,63}$/.test(input.avatar)))) throw RpcError.invalidParams("avatar must be a bundled avatar ID or empty");
   for (const [server, spec] of Object.entries(input.mcpServers ?? {})) {
     if (!NAME.test(server) || typeof spec?.command !== "string" || !spec.command) throw failure("server_invalid", { server });
   }
@@ -136,8 +139,8 @@ export function saveRole(paths: Paths, input: RoleInput): void {
   if (shipped?.team) fs.cpSync(path.join(shipped.dir, input.name), dir, { recursive: true });
   fs.mkdirSync(dir, { recursive: true });
   const prior: RoleFile = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-  const { description = prior.description, backend = prior.backend, workspace = prior.workspace, mcpServers = prior.mcpServers } = input;
-  fs.writeFileSync(file, JSON.stringify({ description, backend, workspace, mcpServers } satisfies RoleFile, null, 2) + "\n");
+  const { avatar = prior.avatar, description = prior.description, backend = prior.backend, workspace = prior.workspace, mcpServers = prior.mcpServers } = input;
+  fs.writeFileSync(file, JSON.stringify({ avatar, description, backend, workspace, mcpServers } satisfies RoleFile, null, 2) + "\n");
   if (input.instructions !== undefined) fs.writeFileSync(path.join(dir, "instructions.md"), input.instructions);
   if (!input.skills) return;
   const skillsDir = path.join(dir, "skills");
@@ -155,6 +158,7 @@ export function describeRole(role: Role): Omit<RoleDetail, "agents"> {
   return {
     name: role.name,
     preset: role.preset,
+    avatar: role.avatar,
     description: role.description,
     backend: role.backend,
     workspace: role.workspace,

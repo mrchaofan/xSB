@@ -71,6 +71,8 @@ export type SteeringOutcome =
  * of sessions nobody is attached to, so an unattended agent is never stuck.
  */
 export type AgentSpec = {
+  /** Bundled avatar ID. Empty or absent inherits the role avatar, then the default. */
+  avatar?: string;
   id: string;
   name: string;
   description: string;
@@ -159,6 +161,8 @@ export type SkillInfo = { name: string; description: string; produces?: string; 
 export type Workplace = "project" | "own";
 
 export type RoleDetail = {
+  /** Bundled avatar ID; empty or absent uses the default. */
+  avatar?: string;
   name: string;
   /**
    * Set when a team the project uses has a role of this name: which team, and
@@ -178,6 +182,8 @@ export type RoleDetail = {
 };
 
 export type RoleInput = {
+  /** Bundled avatar ID; empty or absent uses the default. */
+  avatar?: string;
   name: string;
   description?: string;
   backend?: string;

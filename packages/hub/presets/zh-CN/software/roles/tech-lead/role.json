@@ -1,5 +1,6 @@
 {
   "description": "统筹交付：把需求拆成任务派给合适的人，按质量门把关，向用户汇报",
   "workspace": "project",
-  "mcpServers": {}
+  "mcpServers": {},
+  "avatar": "person-tech-lead"
 }

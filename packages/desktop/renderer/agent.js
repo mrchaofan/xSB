@@ -1,5 +1,6 @@
 // Agent 的创建、编辑、删除，以及它与角色页共用的两个对话框：重启确认、系统说明预览。
 import { OVER, STATE_TEXT, TASK_TEXT, agentOf, focusLane, nameOf, onAgent, roleOf, roleTitle, state } from "./app.js";
+import { avatarPicker } from "./avatars.js";
 import { fill, h } from "./dom.js";
 import { confirmDialog, field, input, openDialog, select } from "./form.js";
 import { t } from "./i18n.js";
@@ -34,8 +35,8 @@ const RESTARTS = t("agent.restarts");
 export async function editAgent(agent) {
   const creating = !agent;
   const draft = creating
-    ? { id: "", name: "", description: "", role: "", backend: state.backends.find((b) => b.installed)?.name ?? "", workspace: "", instructions: "" }
-    : { id: agent.id, name: agent.name, description: agent.description, role: agent.role ?? "", backend: agent.backend, workspace: agent.workspace, instructions: (await xsb.inspectAgent(agent.id)).instructions };
+    ? { avatar: "", id: "", name: "", description: "", role: "", backend: state.backends.find((b) => b.installed)?.name ?? "", workspace: "", instructions: "" }
+    : { avatar: agent.avatar ?? "", id: agent.id, name: agent.name, description: agent.description, role: agent.role ?? "", backend: agent.backend, workspace: agent.workspace, instructions: (await xsb.inspectAgent(agent.id)).instructions };
   const edited = new Set();             // 用户亲手改过的字段，选角色时不覆盖
   const fields = h("div", { class: "fields" });
   const idHint = h("small", {}, ID_HINT);
@@ -78,6 +79,7 @@ export async function editAgent(agent) {
     field(t("agent.role"), select(draft, "role", [["", t("agent.role.none")], ...state.roles.map((r) => [r.name, roleTitle(r)])], pickRole),
       creating ? t("agent.role.hint") : RESTARTS),
     creating && field(t("agent.id"), input(draft, "id", { placeholder: "gaffer1", oninput: () => { idHint.textContent = (draft.id && idError()) || ID_HINT; } }), idHint),
+    field(t("avatar.title"), avatarPicker(draft, () => roleOf(draft.role)), t("avatar.agent.hint")),
     field(t("agent.name"), input(draft, "name", { placeholder: t("agent.name.placeholder") })),
     field(t("agent.description"), input(draft, "description", { rows: 2, oninput: () => edited.add("description") }),
       creating ? t("agent.description.hint") : t("agent.description.hint") + t("sentence.gap") + t("agent.description.effect")),

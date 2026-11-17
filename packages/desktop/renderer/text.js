@@ -258,6 +258,12 @@ export const TEXT = {
     "overview.idle": "不产出资产的角色：",
 
     // 预设团队
+    "avatar.title": "头像",
+    "avatar.auto": "默认",
+    "avatar.people": "人物",
+    "avatar.animals": "动物",
+    "avatar.agent.hint": "默认使用角色头像；没有角色头像时使用猫头鹰。",
+    "avatar.role.hint": "作为这个角色的默认头像；智能体可单独选择。",
     "presets.title": "预设团队",
     "presets.hint": "每一支是一套现成的角色。使用后角色随应用更新；在工作区里改过的角色以工作区的为准。",
     "presets.used": "这个工作区正在使用这支团队。",
@@ -545,6 +551,12 @@ export const TEXT = {
     "overview.idle": "Roles that produce no assets: ",
 
     // Preset teams
+    "avatar.title": "Avatar",
+    "avatar.auto": "Default",
+    "avatar.people": "People",
+    "avatar.animals": "Animals",
+    "avatar.agent.hint": "Uses the role avatar by default, or the owl when none is set.",
+    "avatar.role.hint": "The default avatar for this role. Agents can choose their own.",
     "presets.title": "Preset teams",
     "presets.hint": "Each team is a ready-made set of roles. Once in use, its roles update with the app. Roles changed in the workspace keep the workspace's version.",
     "presets.used": "This workspace uses this team.",

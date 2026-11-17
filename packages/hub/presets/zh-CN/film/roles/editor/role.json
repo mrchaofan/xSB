@@ -1,4 +1,5 @@
 {
   "description": "开拍前把分镜画面排成动态分镜；开拍后按镜头表把通过的镜头剪成成片，处理节奏、衔接与声音并导出",
-  "mcpServers": {}
+  "mcpServers": {},
+  "avatar": "person-editor"
 }

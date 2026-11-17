@@ -1,6 +1,7 @@
 // 角色的编辑，和团队的产出总览。两者都是占用主区域的页面（showPage）。
 import { confirmRestart, previewPrompt } from "./agent.js";
 import { assetName, closePage, nameOf, onRole, roleOf, roleTitle, showPage, state } from "./app.js";
+import { avatarPicker } from "./avatars.js";
 import { ICON, fill, h } from "./dom.js";
 import { confirmDialog, field, input, select } from "./form.js";
 import { t } from "./i18n.js";
@@ -144,6 +145,7 @@ export function editRole(role) {
 
       section(t("role.defaults.title"), creating ? null : t("role.defaults.hint"),
         creating && field(t("common.name"), input(draft, "name", { placeholder: "gaffer" }), t("common.id.hint")),
+        field(t("avatar.title"), avatarPicker(draft), t("avatar.role.hint")),
         field(t("agent.description"), input(draft, "description")),
         field(t("role.backend"), select(draft, "backend", [["", t("role.backend.none")], ...state.backends.map((b) => [b.name, b.installed ? b.name : t("role.backend.missing", { name: b.name })])])),
         field(t("agent.workspace"), select(draft, "workspace", [["own", t("role.workspace.own")], ["project", t("role.workspace.project")]])),

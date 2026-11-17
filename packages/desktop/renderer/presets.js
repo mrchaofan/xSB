@@ -3,6 +3,7 @@
 // 可以随时恢复成预设。
 import { assetName, roleOf, showPage, state } from "./app.js";
 import { markdownHtml } from "./content.js";
+import { avatarImage } from "./avatars.js";
 import { fill, h } from "./dom.js";
 import { t } from "./i18n.js";
 import { editRole, halted, pageHead } from "./team.js";
@@ -81,7 +82,7 @@ function roleCard(pack, { name, role, missing }) {
       description: s.description }))),
     h("div", { class: "md", html: markdownHtml(s.body) }));
   return h("details", { class: "card", open: opened.has(key), ontoggle: (e) => (e.target.open ? opened.add(key) : opened.delete(key)) },
-    h("summary", {}, h("strong", {}, name), h("small", {}, role.description)),
+    h("summary", { class: "preset-role-summary" }, avatarImage(role), h("strong", {}, name), h("small", {}, role.description)),
     ...missing.map(requirement),
     status && h("div", { class: "card-foot" }, ...[status].flat()),
     role.workspace === "project" && h("p", { class: "hint" }, t("presets.role.project")),

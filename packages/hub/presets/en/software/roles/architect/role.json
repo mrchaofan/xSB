@@ -1,5 +1,6 @@
 {
   "description": "Reads the existing code, proposes the simplest workable technical design and interface contracts, and records key decisions",
   "workspace": "project",
-  "mcpServers": {}
+  "mcpServers": {},
+  "avatar": "person-architect"
 }
