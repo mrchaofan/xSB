@@ -11,7 +11,7 @@
  *     agents/<id>/instructions.md      what this agent is (free text, user-edited)
  *     agents/<id>/memory.jsonl         the agent's own notes, by topic
  *     agents/<id>/sessions/<sid>.jsonl transcript of one session
- *     agents/<id>/workspace/           default working directory of the agent
+ *     agents/<id>/scratch/             the agent's own drafts and intermediate files
  *     shared/                          files agents hand to each other
  *     assets.jsonl  assets/            the asset library: its index and its files
  *     spend.jsonl                      what generation cost, and the user's budget for it (spend.ts)
@@ -109,8 +109,9 @@ export class Paths {
   instructions(id: string): string {
     return path.join(this.agentDir(id), "instructions.md");
   }
-  defaultWorkspace(id: string): string {
-    return path.join(this.agentDir(id), "workspace");
+  /** Where an agent keeps its drafts and intermediate files; it works in the project directory, with the others. */
+  scratch(id: string): string {
+    return path.join(this.agentDir(id), "scratch");
   }
 
   // Store-relative names (the store is rooted at `.xsb/`).

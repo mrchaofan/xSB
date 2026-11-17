@@ -155,7 +155,7 @@ async function role(args: Args, [action, name]: string[]): Promise<void> {
   const conn = await connectHub(paths, false);
   try {
     if (action === "add") {
-      const input = { name, description: flag(args, "desc"), backend: flag(args, "backend"), workspace: flag(args, "workspace"), instructions: textFlag(args, "instructions") };
+      const input = { name, description: flag(args, "desc"), backend: flag(args, "backend"), instructions: textFlag(args, "instructions") };
       const { role: saved } = await conn.request<{ role: RoleDetail }>(Roles.put, { role: input });
       console.log(t.roleSaved(saved.name, paths.roleDir(saved.name)));
     } else if (action === "remove") {
@@ -163,7 +163,7 @@ async function role(args: Args, [action, name]: string[]): Promise<void> {
       console.log(t.removed(name));
     } else if (action === "show") {
       const { role: r } = await conn.request<{ role: RoleDetail }>(Roles.get, { name });
-      console.log(`${r.name}: ${r.description ?? ""}\n${r.preset ? `${t.roleTeam(r.preset.team, r.preset.own)}\n` : ""}${t.roleFacts(r.backend, r.workspace ?? "own", r.agents)}`);
+      console.log(`${r.name}: ${r.description ?? ""}\n${r.preset ? `${t.roleTeam(r.preset.team, r.preset.own)}\n` : ""}${t.roleFacts(r.backend, r.agents)}`);
       for (const [server, spec] of Object.entries(r.mcpServers)) console.log(t.roleServer(server, [spec.command, ...(spec.args ?? [])].join(" ")));
       for (const s of r.skills) console.log(t.roleSkill(s.name, s.produces, s.inputs, s.description));
       if (r.instructions.trim()) console.log(`\n${r.instructions.trim()}`);

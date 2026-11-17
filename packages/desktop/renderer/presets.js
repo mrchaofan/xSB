@@ -125,7 +125,6 @@ function roleCard(pack, { name, role, missing }) {
     h("summary", { class: "preset-role-summary" }, avatarImage(role), h("strong", {}, name), h("small", {}, role.description)),
     ...missing.map(requirement),
     status && h("div", { class: "card-foot" }, ...[status].flat()),
-    role.workspace === "project" && h("p", { class: "hint" }, t("presets.role.project")),
     h("div", { class: "md", html: markdownHtml(role.instructions) }),
     h("h3", {}, t("role.servers.title")),
     ...(role.mcpServers.length ? role.mcpServers.map(server) : [h("p", { class: "hint" }, t("presets.servers.empty"))]),

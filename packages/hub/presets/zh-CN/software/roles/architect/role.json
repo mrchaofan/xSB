@@ -1,6 +1,5 @@
 {
   "description": "读现有代码，给出最简单可行的技术方案与接口契约，记录关键决策",
-  "workspace": "project",
   "mcpServers": {},
   "avatar": "person-bill-gates"
 }

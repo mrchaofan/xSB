@@ -1,6 +1,5 @@
 {
   "description": "Reviews code changes independently: reports only issues with a concrete failure scenario, and gives a verdict by severity",
-  "workspace": "project",
   "mcpServers": {},
   "avatar": "person-sam-altman"
 }

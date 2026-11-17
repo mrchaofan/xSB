@@ -12,7 +12,7 @@
  * for each (../renderer/text.js). Main hands it facts, and errors already
  * worded in that language, since only main can tell what an error is about.
  */
-import type { AgentInfo, Boundary, OriginMeta, Spend, Task, Workplace } from "@xsb/protocol";
+import type { AgentInfo, Boundary, OriginMeta, Spend, Task } from "@xsb/protocol";
 import type { Content } from "./content.ts";
 
 /**
@@ -66,8 +66,6 @@ export type RoleView = {
   preset: { team: string; teamTitle: string; own: boolean; title: string } | null;
   description: string;
   backend: string;
-  /** Where a new agent of the role works: the project directory, or one of its own. */
-  workspace: Workplace;
   instructions: string;
   mcpServers: { name: string; command: string; args: string[]; env: { name: string; value: string }[] }[];
   /** `inputs`: the asset types a skill that produces one makes it from, as the user types them (comma-separated). */
