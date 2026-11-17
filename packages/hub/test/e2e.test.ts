@@ -9,7 +9,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Agents, Assets, Backends, Boundaries, Connection, SpendExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Connection, Discarded, SpendExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
 import type { Language, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { bridgeServer } from "../src/mcp.ts";
@@ -1201,6 +1201,51 @@ const p = await newSession("p1");
   await idle("b");
   await idle("a");
   console.log("ok 31 parallel work");
+}
+
+// 32. One stop is enough, and the transcript says what the model saw: the user's messages that wait for a turn and
+// interjections the backend was not given yet are discarded, and recorded so; an interjection a backend with
+// steering of its own took counts as seen.
+{
+  const socket = net.connect(paths.socket("acp"));
+  await new Promise((resolve) => socket.once("connect", resolve));
+  const watching = new Connection(socket, socket, "watching");
+  const seen: string[] = [];
+  watching.onNotification("session/update", ({ update }) => {
+    if (update.sessionUpdate === "user_message_chunk") seen.push(`in ${update.messageId}`);
+    const discarded = update._meta?.[Discarded.key];
+    if (discarded) seen.push(`discarded ${discarded.messageId}: ${discarded.content[0].text}`);
+    if (update.sessionUpdate === "agent_message_chunk") seen.push(`out ${update.content.text.trim()}`);
+  });
+  await watching.request("initialize", { protocolVersion: 1, clientCapabilities: { _meta: { [OriginExt.capability]: {} } } });
+  const open = async (agentId: string) => (await watching.request("session/new", { cwd: project, mcpServers: [], _meta: { [Agents.sessionKey]: agentId } })).sessionId;
+  const mine = (sessionId: string, messageId: string, text: string) => ({ sessionId, prompt: [{ type: "text", text }], _meta: { [OriginExt.key]: { messageId } } });
+
+  // Without steering of its own: the interjection waits in the hub until the interrupted prompt returns, which takes a while.
+  const s = await open("a");
+  const running = watching.request("session/prompt", mine(s, "stop-1", "!busy 600\n!say LATE"));
+  const waiting = watching.request("session/prompt", mine(s, "stop-2", "!say QUEUED"));
+  await until("the turn running", () => hub.session(s).current?.started);
+  assert.equal((await watching.request(Steering.method, mine(s, "stop-3", "!say MID"))).outcome, "injected");
+  watching.notify("session/cancel", { sessionId: s });
+  assert.deepEqual([await running, await waiting], [{ stopReason: "cancelled" }, { stopReason: "cancelled" }]);
+  await idle("a");
+  assert.equal(hub.session(s).busy, false, "nothing runs after the stop");
+  assert.deepEqual(seen, ["in stop-1", "in stop-3", "discarded stop-2: !say QUEUED", "discarded stop-3: !say MID"]);
+  const record = hub.state.store.read(Paths.transcript("a", s)).map((r: any) => r.update._meta?.[Discarded.key]?.messageId).filter(Boolean);
+  assert.deepEqual(record, ["stop-2", "stop-3"], "the transcript keeps what was discarded");
+
+  // With steering of its own: what it took is seen, nothing is discarded.
+  seen.length = 0;
+  const c = await open("c");
+  const turn = watching.request("session/prompt", mine(c, "stop-4", "!sleep 3000"));
+  await until("c running", () => hub.session(c).current?.started);
+  assert.equal((await watching.request(Steering.method, mine(c, "stop-5", "!sleep 3000"))).outcome, "injected");
+  watching.notify("session/cancel", { sessionId: c });
+  assert.equal((await turn).stopReason, "cancelled");
+  assert.deepEqual(seen, ["in stop-4", "in stop-5"]);
+  watching.close();
+  console.log("ok 32 one stop, and what the model did not see is discarded");
 }
 
 await hub.shutdown();

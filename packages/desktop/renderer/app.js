@@ -273,8 +273,9 @@ function entryNode(agentId, entry) {
 
   if (entry.kind === "input") {
     const o = entry.origin;
-    const tag = entry.queued ? t("entry.tag.queued") : o.steered ? t("entry.tag.interjected") : null;
-    return h("div", { ...base, "data-origin": o.kind, "data-queued": entry.queued },
+    // 停止时模型还没看到的输入被丢弃了：照样留在记录里，但标明模型没有看到。
+    const tag = entry.discarded ? t("entry.tag.discarded") : entry.queued ? t("entry.tag.queued") : o.steered ? t("entry.tag.interjected") : null;
+    return h("div", { ...base, "data-origin": o.kind, "data-queued": entry.queued, "data-discarded": entry.discarded, title: entry.discarded ? t("entry.tag.discarded.title") : undefined },
       o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId), roleOf(agentOf(o.agentId)?.role)),
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
       o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),

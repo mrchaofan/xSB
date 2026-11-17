@@ -1,5 +1,5 @@
 /** Turns `session/update` notifications into terminal output. */
-import { OriginExt } from "@xsb/protocol";
+import { Discarded, OriginExt, textOf } from "@xsb/protocol";
 import type { OriginMeta, SessionUpdate } from "@xsb/protocol";
 import { t } from "./text.ts";
 
@@ -49,10 +49,17 @@ export class Printer {
         return;
       case "user_message_chunk": {
         const origin = update._meta?.[OriginExt.key] as OriginMeta | undefined;
-        const from = origin?.kind === "agent" ? origin.agentId : origin?.kind === "system" ? "xsb" : t.user;
-        const how = origin?.steered ? t.interjected : "";
-        return this.line(`${label}${dim(`← ${from}${how}: ${body}`)}`);
+        return this.line(`${label}${dim(`← ${from(origin)}${origin?.steered ? t.interjected : ""}: ${body}`)}`);
+      }
+      case "session_info_update": {
+        const discarded = update._meta?.[Discarded.key] as Discarded | undefined;
+        if (discarded) this.line(`${label}${dim(`← ${from(discarded.origin)}${t.discarded}: ${textOf(discarded.content)}`)}`);
+        return;
       }
     }
   }
+}
+
+function from(origin: OriginMeta | undefined): string {
+  return origin?.kind === "agent" ? origin.agentId : origin?.kind === "system" ? "xsb" : t.user;
 }

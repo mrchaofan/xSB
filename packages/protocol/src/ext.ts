@@ -12,6 +12,7 @@
  * `initialize`, an unknown request answers -32601 and an unknown notification
  * is ignored.
  */
+import type { ContentBlock } from "./acp.ts";
 
 /** Namespace of the extensions this project defines itself. */
 export const NS = "dev.xsb";
@@ -374,6 +375,21 @@ export type Boundary = {
  * `data` is the error's, with a `reason` a client can word for its reader (errors.ts).
  */
 export const TurnFailure = { key: `${NS}/turn_failed` } as const;
+
+/**
+ * Input the model never saw: the turn it was for was stopped before it got there. So that what a reader of the
+ * transcript sees is what the model saw, the input is recorded, and shown, as discarded:
+ *   session/update { sessionUpdate: "session_info_update", _meta: { "dev.xsb/discarded": Discarded } }
+ * A message that was already shown (`user_message_chunk` with the same `messageId`) is that message, now discarded;
+ * one that was not (it waited for its turn) is shown for the first time, as discarded.
+ *
+ * What the user stops goes with the turn: messages of theirs that wait for a turn, input of a turn that had not
+ * reached its backend yet, and interjections the backend had not been given yet (a backend without steering of its
+ * own is given them only after its interrupted prompt returns). An interjection that a backend with steering
+ * accepted ("injected") counts as seen: ACP v1 has no way to tell more.
+ */
+export const Discarded = { key: `${NS}/discarded` } as const;
+export type Discarded = { messageId: string; origin: OriginMeta; content: ContentBlock[] };
 
 export const Boundaries = {
   key: `${NS}/boundary`,

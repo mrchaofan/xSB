@@ -110,6 +110,7 @@ const en = {
   toolFailed: (title: string) => `${title} failed`,
   user: "user",
   interjected: " (interjected)",
+  discarded: " (discarded: stopped before the model saw it)",
 };
 
 const zh: typeof en = {
@@ -210,6 +211,7 @@ const zh: typeof en = {
   toolFailed: (title) => `${title} 失败`,
   user: "用户",
   interjected: "（插话）",
+  discarded: "（已丢弃：停止时模型还没看到）",
 };
 
 export const t: typeof en = { en, "zh-CN": zh }[language];
