@@ -178,7 +178,7 @@ Hub 不知道读报错的人用什么语言，所以它不负责措辞。凡是�
 
 **默认不是插话。** 对一个正在工作的会话再发 `session/prompt`，是排队成为下一轮。只有显式调用 `_session/steering`（CLI 的 `/i`、`--interject`，或工具参数 `interject: true`）才会进入运行中的那一轮。
 
-**停止一次就停下，记录和模型看到的一致。** 用户停止（`session/cancel`）时，Hub 一并放弃模型还没看到的输入：这个会话里用户自己还在排队的消息（它们的 `session/prompt` 以 `cancelled` 返回）、还没交给后端的那一轮的输入，以及兜底插话里还压在 Hub、没随续接 prompt 发出去的插话。别人发来、还在排队的邮件不是用户的，照常留着。被放弃的输入不删，而是在会话记录里追加一条 `session_info_update`，`_meta["dev.xsb/discarded"] = { messageId, origin, content }`（[ext.ts](../packages/protocol/src/ext.ts) 的 `Discarded`）：已经显示过的那条（同一个 `messageId`）改标为已丢弃，排队中从未显示过的，以已丢弃的样子第一次显示。原生支持插话的后端答了 `injected` 的插话算模型已看到：ACP v1 没有办法知道得更多。要确认它是否真的进了模型，得在各后端的 ACP 实现里加回执；claude-agent-acp、codex-acp 是从 npm 装的，gemini、grok 的 ACP 在它们自己的 CLI 里，都不在本仓库维护，所以没有做。
+**停止就是 Esc，记录和模型看到的一致。** 用户停止（`session/cancel`）与 Claude Code、Codex 里按 Esc 一样：后端停在当前这一步，Hub 里还压着的输入全部放弃——这个会话里用户自己还在排队的消息（它们的 `session/prompt` 以 `cancelled` 返回），以及还没交给后端的那一轮（连同插进它的插话）。别人发来、还在排队的邮件不是用户的，照常留着，就像 Claude Code 里 Esc 之后后台任务的通知照常到达。插话不放弃：兜底插话里还没随续接发出去的，立刻随续接发出，这一轮带着它继续（Claude Code 的 Esc 立即发送排队消息、Codex 的 Esc "interrupt and send immediately" 都是如此）；想停到空闲，再停一次。被放弃的输入不删，而是在会话记录里追加一条 `session_info_update`，`_meta["dev.xsb/discarded"] = { messageId, origin, content }`（[ext.ts](../packages/protocol/src/ext.ts) 的 `Discarded`）：已经显示过的那条（同一个 `messageId`）改标为已丢弃，排队中从未显示过的，以已丢弃的样子第一次显示。原生支持插话的后端答了 `injected` 的插话已在后端手里，停止后怎么处理是后端的事：claude-agent-acp 0.107、codex-acp 2.6 都把模型还没看到的插话静默丢掉（它们的 TUI 是在客户端补发的），而 ACP v1 没有回执，Hub 不知道是哪些，只能算作模型已看到。要确认它是否真的进了模型，得在各后端的 ACP 实现里加回执；claude-agent-acp、codex-acp 是从 npm 装的，gemini、grok 的 ACP 在它们自己的 CLI 里，都不在本仓库维护，所以没有做。
 
 ### 3.2 多 Agent：`dev.xsb/agents`
 
