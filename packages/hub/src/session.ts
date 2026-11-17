@@ -83,6 +83,8 @@ export class LiveSession {
   private binding?: Promise<void>;
   /** Text to put in front of the next prompt. */
   private prefaces: string[] = [];
+  /** What this session was last told of the project's spending: it is told again when that changes. */
+  private toldSpend?: string;
 
   constructor(hub: Hub, rec: SessionRec) {
     this.hub = hub;
@@ -313,6 +315,9 @@ export class LiveSession {
       backend = await this.ensureBackend();
       if (!turn.cancelled) {
         turn.started = true;
+        const spend = this.hub.spending.line();
+        if (spend && spend !== this.toldSpend) this.prefaces.push(spend);
+        this.toldSpend = spend;
         const preface = this.prefaces.splice(0).map((p) => text(p));
         stopReason = await backend.prompt(this.rec.backendSessionId!, [...preface, ...turn.prompt], req.origin);
       }

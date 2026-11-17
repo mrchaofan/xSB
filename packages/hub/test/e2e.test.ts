@@ -9,7 +9,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Agents, Assets, Backends, Boundaries, Connection, TurnFailure, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Connection, SpendExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
 import type { Language, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { bridgeServer } from "../src/mcp.ts";
@@ -936,6 +936,46 @@ const p = await newSession("p1");
   assert.deepEqual(boundaries(s).map((b) => b.kind), ["backend_changed", "cleared", "backend_changed", "not_restored"]);
   await conn.request(Agents.put, { agent: { id: "h1", backend: "mock" } });
   console.log("ok 26 context boundaries and handoffs");
+}
+
+// 27. Spending: the user's budget goes into the project's ledger, which the generation tools are told of; agents hear
+// where the spending stands when it changed; jobs of one tool run a few at a time, and one that waits is cancelled for free.
+{
+  const updates: any[] = [];
+  conn.onNotification(SpendExt.update, ({ spend }) => updates.push(spend));
+  assert.deepEqual((await conn.request(SpendExt.get)).spend, { spent: 0, unpriced: 0, dearest: {} });
+  await assert.rejects(conn.request(SpendExt.budget, { amount: -1 }), /amount must be a number/);
+  assert.equal((await conn.request(SpendExt.budget, { amount: 30 })).spend.budget, 30);
+  await until("the change announced", () => updates.some((u) => u.budget === 30), 5000);
+
+  // A role's servers know where the ledger is and whom they work for; the hub's own and the app's need not.
+  const served = hub.toolServers(hub.agent("r9")).find((t) => t.server.name === "gen")!.server;
+  assert.deepEqual(served.env!.filter((e) => e.name.startsWith("XSB_")), [{ name: "XSB_SPEND", value: paths.spend }, { name: "XSB_AGENT", value: "r9" }]);
+
+  // Told once, and again when it changed.
+  const s9 = await newSession("r9");
+  await prompt(s9, "hello");
+  assert.match(said.get(s9)!, /Spent on generation in this project so far: about 0\.00 yuan of the budget of 30\.00 yuan/);
+  said.set(s9, "");
+  await prompt(s9, "again");
+  assert.doesNotMatch(said.get(s9)!, /Spent on generation/);
+  fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: "t", tool: "generate_video", output: "a.mp4", usage: "48437 tokens", amount: 2.23, basis: "test" }) + "\n");
+  await prompt(s9, "and now");
+  assert.match(said.get(s9)!, /about 2\.23 yuan of the budget of 30\.00 yuan/);
+
+  // Three jobs of one tool: two run, one waits; the one that waits is cancelled without the tool being asked.
+  const job = (title: string) => call("start_job", { server: "gen", tool: "render", arguments: { prompt: title, ms: 500 }, title });
+  await prompt(s9, [job("q1"), job("q2"), job("q3")].join("\n"));
+  const byTitle = async (title: string) => (await tasks()).find((t) => t.title === title)!;
+  assert.deepEqual([(await byTitle("q1")).status, (await byTitle("q2")).status, (await byTitle("q3")).status], ["running", "running", "queued"]);
+  await prompt(s9, call("cancel_task", { task_id: (await byTitle("q3")).id }));
+  assert.match((await byTitle("q3")).result!, /before it started: it waited for its turn in xsb, nothing was submitted, nothing is billed/);
+  // One that waits starts when a place is free.
+  await prompt(s9, job("q4"));
+  assert.equal((await byTitle("q4")).status, "queued");
+  await until("q4 done", async () => (await byTitle("q4")).status === "completed");
+  await idle("r9");
+  console.log("ok 27 spending and jobs at a time");
 }
 
 await hub.shutdown();

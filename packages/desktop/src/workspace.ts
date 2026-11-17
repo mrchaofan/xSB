@@ -13,8 +13,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
-import { Agents, Assets, Backends, Boundaries, Connection, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
-import type { AgentInfo, Asset, BackendInfo, Boundary, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Connection, SpendExt, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
+import type { AgentInfo, Asset, BackendInfo, Boundary, Spend, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
 import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
@@ -123,6 +123,7 @@ export class Workspace {
       this.emit({ removedRole: p.name });
     });
     conn.onNotification(Tasks.update, (p) => this.onTask(p.task));
+    conn.onNotification(SpendExt.update, (p) => this.emit({ spend: p.spend }));
     conn.onNotification(Agents.asks, (p) => {
       this.asked = true;
       this.notify({ agentId: p.agentId, kind: "confirm", detail: p.question });
@@ -199,12 +200,13 @@ export class Workspace {
     this.live = false;
     // Roles and tasks are kept as they are answered. The hub answers in order on one connection, so what changes
     // while the rest still loads arrives after the answer, as an event, and is the newer word.
-    const [, { teams }, { agents }, , { assets }] = await Promise.all([
+    const [, { teams }, { agents }, , { assets }, { spend }] = await Promise.all([
       this.conn.request<{ roles: RoleDetail[] }>(Roles.list).then(({ roles }) => (this.roles = new Map(roles.map((r) => [r.name, roleView(r)])))),
       this.conn.request<{ teams: TeamInfo[] }>(Teams.list),
       this.conn.request<{ agents: AgentInfo[] }>(Agents.list),
       this.conn.request<{ tasks: Task[] }>(Tasks.list, {}).then(({ tasks }) => tasks.forEach((task) => this.tasks.set(task.id, task))),
       this.conn.request<{ assets: Asset[] }>(Assets.list, {}),
+      this.conn.request<{ spend: Spend }>(SpendExt.get),
     ]);
     agents.forEach((agent) => this.onAgent(agent));
     assets.forEach((asset) => this.asset(asset));
@@ -224,6 +226,7 @@ export class Workspace {
       assetNames: Object.assign({}, ...teams.map((team) => team.assets)),
       transcripts: Object.fromEntries(this.transcripts),
       activities: Object.fromEntries(this.activities),
+      spend,
     };
   }
 
@@ -420,6 +423,11 @@ export class Workspace {
     await this.conn
       .request(Steering.method, { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: entryId } } })
       .catch((e) => this.put(agentId, { id: this.newId(), kind: "error", text: this.why(e) }));
+  }
+
+  /** The user's cap on what generation may cost in this workspace, in yuan. */
+  async setBudget(amount: number): Promise<void> {
+    await this.conn.request(SpendExt.budget, { amount });
   }
 
   /** Clear the agent's context: its model starts anew and sees nothing of what was said. The transcript keeps it. */

@@ -9,7 +9,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { Agents, Assets, Backends, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, errorMessage, failure, textOf } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, SpendExt, Steering, Tasks, Teams, errorMessage, failure, textOf } from "@xsb/protocol";
 import type { Connection, McpServerCheck, OriginMeta, RoleDetail, TeamInfo } from "@xsb/protocol";
 import { backends, describeBackends, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
@@ -62,6 +62,7 @@ export class Client {
             [Backends.capability]: { version: 1 },
             [Tasks.capability]: { version: 1 },
             [Assets.capability]: { version: 1 },
+            [SpendExt.capability]: { version: 1 },
             [OriginExt.capability]: { version: 1 },
           },
         },
@@ -128,6 +129,16 @@ export class Client {
     });
 
     conn.onNotification("session/cancel", (p) => hub.live.get(p?.sessionId)?.cancel());
+
+    // ---- spending ---------------------------------------------------------
+
+    conn.onRequest(SpendExt.get, () => ({ spend: hub.spending.read() }));
+    // Only a client reaches this, on the user's word: agents have no tool for it.
+    conn.onRequest(SpendExt.budget, (p) => {
+      const amount = Number(p?.amount);
+      if (!Number.isFinite(amount) || amount < 0) throw RpcError.invalidParams("amount must be a number of yuan, 0 or more");
+      return { spend: hub.spending.setBudget(amount) };
+    });
 
     conn.onRequest(Boundaries.clear, (p) => {
       hub.session(p.sessionId).clear();
