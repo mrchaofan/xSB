@@ -32,6 +32,12 @@ const program = (name, entry) => ({
 /** The pages' files that are not code: copied as they are. mock.js is only loaded outside Electron. */
 const pages = {
   name: "pages",
+  writeBundle() {
+    const current = new Set(fs.readdirSync("renderer/avatars"));
+    for (const name of fs.readdirSync("dist/renderer/avatars")) {
+      if (name.endsWith(".png") && !current.has(name)) fs.unlinkSync(`dist/renderer/avatars/${name}`);
+    }
+  },
   generateBundle() {
     const avatars = fs.readdirSync("renderer/avatars").filter((name) => name.endsWith(".png")).map((name) => `avatars/${name}`);
     for (const fileName of ["index.html", "page.html", "styles.css", "mock.js", ...avatars]) {

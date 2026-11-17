@@ -14,7 +14,7 @@ export function avatarPicker(draft, role = () => undefined) {
   const paint = () => {
     const choice = (id, label) => h("button", {
       type: "button", class: "avatar-choice", title: label, "aria-label": label,
-      "aria-pressed": String((draft.avatar ?? "") === id),
+      "aria-pressed": String((draft.avatar ? resolveAvatar(draft) : "") === id),
       onclick: () => { draft.avatar = id; paint(); },
     }, avatarImage({ avatar: id }, id ? undefined : role()), id === "" && h("small", {}, label));
     fill(picker,
