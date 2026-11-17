@@ -11,9 +11,9 @@ Register one master table as `storyboard/<title-or-scene>` (markdown), and each 
 
 ## Generating the images
 
-Use `generate_image` from `media`, once per shot:
+Use the image tool chosen for this film, once per shot:
 
-- `reference_images`: the look references of the characters in the shot (from the character sheet in `character`), plus the scene reference image for the scene (from `style_guide`). In the prompt, refer to them in order as 图一, 图二 (the labels the model expects for reference images; keep them as written), and say clearly what to borrow from each.
+- Reference images: the look references of the characters in the shot (from the character sheet in `character`), plus the scene reference image for the scene (from `style_guide`). In the prompt, refer to them in order (how they are named follows the image tool's description; the example below calls them 图一, 图二), and say clearly what to borrow from each.
 - Prompt order: the character's appearance description (copied **verbatim** from `character`) → the character's position and pose in this frame → setting → shot size and camera position → lighting → style suffix (copied **verbatim** from `style_guide`).
 - Use the aspect ratio from the brief, the same for the whole film. The video will follow this image's aspect ratio.
 - Describe the frame at **the moment the action starts**, not how it looks once the action is done. The first frame of "walks from the left to the window" has the character at the left of the frame.

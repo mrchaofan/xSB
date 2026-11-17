@@ -817,7 +817,7 @@ const p = await newSession("p1");
   // The agents are told, and the teams are the Chinese ones.
   assert.match((await conn.request(Agents.get, { id: "a" })).systemPrompt, /The user reads Simplified Chinese/);
   const film = (await chinese.request(Teams.list)).teams.find((t: any) => t.id === "film");
-  assert.deepEqual([film.title, film.roles[0].name, film.assets.casting], ["电影制作", "导演", "选角"]);
+  assert.deepEqual([film.title, film.roles[0].name, film.assets.casting], ["电影创作", "导演", "选角"]);
   await chinese.request(Teams.use, { id: "film" });
   assert.equal((await chinese.request(Roles.get, { name: "director" })).role.preset.title, "导演");
   await chinese.request(Agents.put, { agent: { id: "ad", role: "art-director", backend: "mock" } });
@@ -1134,6 +1134,45 @@ const p = await newSession("p1");
   for (const id of ["solo", "strict"]) await conn.request(Teams.drop, { id });
   fs.rmSync(root, { recursive: true, force: true });
   console.log("ok 29 preset teams of the user's");
+}
+
+// 30. Two film teams: "film" is bound to no generation models; "film-ark" is film with Volcengine Ark, and holds
+// only what differs. A project of an earlier xsb that used "film" (which was Ark's then) uses "film-ark" now.
+{
+  for (const language of LANGUAGES) {
+    const cat = catalog(language);
+    const generic = teamRole(cat, "film", "cinematographer")!;
+    const ark = teamRole(cat, "film-ark", "cinematographer")!;
+    assert.deepEqual(generic.servers, {}, `${language}: the generic team names no generation server`);
+    assert.equal(ark.servers.media.env!.VIDEO_PROVIDER, "seedance");
+    assert.deepEqual(ark.skills.map((s) => s.name).sort(), ["seedance", "shot"]);
+    assert.ok(ark.instructions.startsWith(generic.instructions) && ark.instructions.length > generic.instructions.length, "film-ark's instructions follow film's");
+    assert.equal(teamRole(cat, "film-ark", "storyboard-artist")!.servers.media.env!.IMAGE_PROVIDER, "seedream");
+    assert.deepEqual(teamRole(cat, "film-ark", "screenwriter")!.instructions, teamRole(cat, "film", "screenwriter")!.instructions, "a role it does not change is film's");
+    const arkTeam = cat.teams.get("film-ark")!;
+    assert.ok(arkTeam.roles.find((r) => r.role === "cinematographer")!.requires!.some((p) => p.command === "arkcli"));
+    assert.ok(!cat.teams.get("film")!.roles.some((r) => r.requires?.some((p) => p.command === "arkcli")));
+    // Nothing of Ark is left in the generic team's words.
+    const words = cat.teams.get("film")!.roles.map((r) => { const role = teamRole(cat, "film", r.role)!; return [role.instructions, ...role.skills.map((s) => fs.readFileSync(path.join(s.dir, "SKILL.md"), "utf8"))].join("\n"); }).join("\n");
+    // (The brief may point to the Ark team by its name; it knows nothing of Ark.)
+    assert.doesNotMatch(words.replaceAll("火山方舟视频创作", "").replaceAll("Volcengine Ark video", ""), /Seedance|Seedream|arkcli|方舟|\bArk\b|`media`|generate_video|generate_image/);
+  }
+  // An earlier config: "film" becomes "film-ark" on the next start, once.
+  const config = JSON.parse(fs.readFileSync(paths.config, "utf8"));
+  fs.writeFileSync(paths.config, JSON.stringify({ ...config, version: 1, teams: ["film", "software"] }));
+  await hub.shutdown();
+  hub = new Hub(project);
+  await hub.start();
+  conn = await connect();
+  assert.deepEqual([JSON.parse(fs.readFileSync(paths.config, "utf8")).version, JSON.parse(fs.readFileSync(paths.config, "utf8")).teams], [2, ["film-ark", "software"]]);
+  fs.writeFileSync(paths.config, JSON.stringify({ ...JSON.parse(fs.readFileSync(paths.config, "utf8")), teams: ["film"] }));
+  await hub.shutdown();
+  hub = new Hub(project);
+  await hub.start();
+  conn = await connect();
+  assert.deepEqual(JSON.parse(fs.readFileSync(paths.config, "utf8")).teams, ["film"], "a version-2 config is left as it is");
+  fs.writeFileSync(paths.config, JSON.stringify({ ...config }));
+  console.log("ok 30 two film teams, and the move of earlier projects");
 }
 
 await hub.shutdown();

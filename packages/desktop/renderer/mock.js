@@ -114,7 +114,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
   const skill = (name, produces, description, body, inputs = "") => ({ name, produces, inputs, description, body });
 
   /** 应用自带的一支预设团队（原型里只放了一个角色作示意）。 */
-  const TEAM = { id: "film", title: "电影制作", description: "一支 AI 短片剧组（原型里只放了一个角色作示意）。", assets: { script: "剧本", brief: "创作简报" }, roles: [{
+  const TEAM = { id: "film", title: "电影创作", description: "一支 AI 短片剧组（原型里只放了一个角色作示意）。", assets: { script: "剧本", brief: "创作简报" }, roles: [{
     name: "编剧",
     role: { avatar: "person-screenwriter", name: "screenwriter", preset: null, description: "把想法写成标准格式的剧本", backend: "", workspace: "own", instructions: "你是编剧。只写看得见、听得见的内容。",
       mcpServers: [{ name: "media", command: "xsb-media-mcp", args: [], env: [] }],

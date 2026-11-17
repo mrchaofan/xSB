@@ -20,7 +20,7 @@ import { Store } from "@xsb/store";
 import { Client } from "./acp-server.ts";
 import { Assets } from "./assets.ts";
 import { BackendPool } from "./backends.ts";
-import { DEFAULT_BACKEND, loadProjectConfig, projectLanguage } from "./config.ts";
+import { DEFAULT_BACKEND, loadProjectConfig, migrateProjectConfig, projectLanguage } from "./config.ts";
 
 /** Past this much context a work session takes no new work, unless the project says otherwise (`limits.sessionTokens`). */
 const SESSION_TOKENS = 150_000;
@@ -87,6 +87,8 @@ export class Hub {
     await this.listen(this.paths.socket("mcp"), (socket) => {
       serveMcp(this, new Connection(socket, socket, "mcp"), (token) => this.bridgeTokens.get(token));
     });
+    const migrated = migrateProjectConfig(this.paths);
+    if (migrated) this.log(migrated);
     // Whoever stopped the last hub may have said that its unfinished work is not to be taken up again.
     if (fs.existsSync(this.paths.abandonMark)) {
       const { mail, tasks } = this.mail.abandon();

@@ -3,7 +3,7 @@ description: Generate character, scene, and style reference images with the imag
 ---
 # Generating reference images
 
-Use `generate_image` from `media`. The model and its limits are given in the tool description, which takes precedence.
+Use the image tool chosen for this film. The model and its limits are given in the tool description, which takes precedence.
 
 ## Prompts
 
@@ -19,7 +19,7 @@ How to write a character reference image (put the appearance description from th
 
 ## Staying consistent with reference images
 
-Pass existing images in `reference_images`, refer to them in the prompt in order as **图一, 图二** (the labels the model expects for reference images; keep them as written), and say clearly what to borrow from each:
+Pass existing images as reference images and refer to them in the prompt in order (how they are named follows the image tool's description; the example below calls them 图一, 图二), saying what to borrow from each:
 
 > The person in 图一, keeping the face, hair, and costume exactly the same. Full body, standing side-on, facing the right of the frame. Plain light gray background, even soft light.
 

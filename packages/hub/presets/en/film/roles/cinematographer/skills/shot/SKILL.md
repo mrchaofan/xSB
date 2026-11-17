@@ -9,7 +9,7 @@ inputs: shot_list, storyboard, style_guide, character
 
 1. Read the inputs: `shot_list`, `storyboard`, `style_guide`, and the `character` of everyone in the scene. Copy down the style suffix, the location suffix of this scene, each character's appearance description, and the user's hard requirements from the style guide (check against them before generating); use `get_asset` to get the file paths of the storyboard frames and reference images you need.
 2. Order by dependency: shots with no "continue from last frame" dependency can be submitted together, but submit one or two first and the rest once those come out right. The reason: a generation that has started cannot be called back, and the more you submit at once, the more is wasted when the director calls a halt.
-3. Write a prompt for each shot (see below) and submit it with `start_job`: `server: "media"`, `tool: "generate_video"`, at draft resolution.
+3. Write a prompt for each shot (see below) and submit it with `start_job` to the video tool chosen for this film (`server` and `tool` are its server and tool names), at draft resolution.
 4. `await_tasks`, then end your turn: the task stays open, and you carry on when the results come back. Check the files then, and adjust and reshoot any that fail (submit again, `await_tasks` again).
 5. Use `put_asset` to register each draft as `shot/<shot>` (with `path` pointing to the video file), with the prompt and parameters in the description, marked as a draft. Hand them to the director for review in your result; this task ends here.
 6. Once the user has signed off, the director sends a new task for the finals: generate them with **exactly the same prompt and inputs** at the final resolution, and register each as a new version of the same `shot/<shot>`, marked as final.
@@ -26,9 +26,9 @@ Write one coherent paragraph; do not pile up keywords. The order is fixed:
 6. **Sound** (shots with sound): who says what, in quotation marks; what the ambient sound is.
 7. **Location suffix and style suffix** (both copied verbatim, the location suffix first).
 
-Example (图片1, 图片2 are the labels the video model expects for reference images; keep them as written):
+Example (reference images are numbered in the order they are passed; how the prompt names them follows the video tool's description):
 
-> A thirty-year-old woman with shoulder-length black hair and a lean face, wearing a long dark gray trench coat over a white shirt, carrying a faded dark green canvas bag (see 图片1). Dragging a suitcase, she jogs from the left of the frame to the ticket booth window, stops, and raises a hand to knock twice on the glass. A ferry landing late at night, fog over the river, a single dim yellow light on in the ticket booth (scene reference: 图片2). Medium shot, eye level, static camera. The only light source is the ticket booth, casting warm light on the side of her face. She says: "Is there still a boat tonight?" The ambient sound is water in the distance. Realistic cinematic look, low-key lighting, warm tungsten light with teal shadows, shallow depth of field, film grain, slow and steady camera movement, restrained color, no text in frame.
+> A thirty-year-old woman with shoulder-length black hair and a lean face, wearing a long dark gray trench coat over a white shirt, carrying a faded dark green canvas bag (see reference image 1). Dragging a suitcase, she jogs from the left of the frame to the ticket booth window, stops, and raises a hand to knock twice on the glass. A ferry landing late at night, fog over the river, a single dim yellow light on in the ticket booth (scene reference: 图片2). Medium shot, eye level, static camera. The only light source is the ticket booth, casting warm light on the side of her face. She says: "Is there still a boat tonight?" The ambient sound is water in the distance. Realistic cinematic look, low-key lighting, warm tungsten light with teal shadows, shallow depth of field, film grain, slow and steady camera movement, restrained color, no text in frame.
 
 Key points:
 
@@ -41,9 +41,11 @@ Key points:
 
 ## Writing about reference images
 
-The images in `reference_images` are, in order, 图片1, 图片2, and so on. In the prompt, **say for each image what to borrow from it**: the person, the costume, the setting, or the composition. If you pass an image without explanation, the model does not know how to use it.
+Reference images are numbered in the order they are passed; how the prompt names them follows the video tool's description. In the prompt, **say for each image what to borrow from it**: the person, the costume, the setting, or the composition. If you pass an image without explanation, the model does not know how to use it.
 
 ## Parameters for the five generation methods
+
+The parameter names are the video tool's; below are the usual ones.
 
 | Shot list says | Parameters |
 | - | - |
@@ -53,12 +55,7 @@ The images in `reference_images` are, in order, 图片1, 图片2, and so on. In 
 | Continue from last frame | Submit the previous shot with `last_frame_output: "shots/<previous-shot>_last.jpg"` (the last frame is a JPEG); use that file as this shot's `first_frame`. The previous shot's result says whether its last frame was saved; when it was not, do not use the file |
 | First and last frames | `first_frame` and `last_frame`: `frame/<shot>` and `frame/<shot>-end`, as registered by the storyboard artist |
 
-Limits:
-
-- `reference_images` and `first_frame` cannot be used together. When using `first_frame`, do not pass `ratio`; the aspect ratio follows the first-frame image.
-- How many reference images a call may carry depends on the model version; the number is in the tool description of `generate_video`. Use only what the shot needs: one front view per character plus one scene image, usually two or three in all.
-- Images are sent inside the request, and all the images of one call together must stay under a size limit (also in the tool description). When a look reference is a very large PNG, make a JPEG copy first with `ffmpeg -i original.png -q:v 2 copy.jpg` and pass that; the copy is for generating only and is not registered as an asset.
-- The video model does not accept images that show a real person's face; it trusts only the original images generated by models under this account. Pass reference images with faces as the files they were generated to where you can; when a converted copy is refused as "contains a real person's face", pass the original and use fewer images. A photo of a real person supplied by the user does not pass: say so to the director in your result, so that the user registers and authorises the portrait in their Ark account, or a generated look is used instead.
+Limits: which parameters cannot be combined, how many reference images a call may carry, how large images may be, and whether images with faces are accepted all depend on the model; they are in the video tool's description and the chosen model's skill, which take precedence. Use only the reference images the shot needs: one front view per character plus one scene image, usually two or three in all.
 
 ## Other parameters
 
@@ -67,7 +64,7 @@ Limits:
 | `output` | `shots/<shot>.mp4`, for example `shots/s03_02.mp4`; add `_draft` for drafts |
 | `duration` | The duration in the shot list (which already includes editing margin), not exceeding the limit in the tool description |
 | `ratio` | The same for the whole film, following the aspect ratio in the brief |
-| `resolution` | `480p` for drafts; for finals, follow the delivery specs in the brief |
+| `resolution` | The model's lowest resolution for drafts (e.g. `480p`); for finals, follow the delivery specs in the brief |
 | `audio` | true for shots with dialogue or that need production sound; false for picture-only shots (the editor handles the sound) |
 
 ## Self-check (every shot, before delivery)

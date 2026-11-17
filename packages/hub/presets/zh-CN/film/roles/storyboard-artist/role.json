@@ -1,12 +1,4 @@
 {
   "description": "把剧本拆成逐个可生成的镜头，并为每个镜头画出分镜画面：景别、机位、运动、时长、构图与衔接",
-  "mcpServers": {
-    "media": {
-      "command": "xsb-media-mcp",
-      "env": {
-        "IMAGE_PROVIDER": "seedream"
-      }
-    }
-  },
   "avatar": "person-dario-amodei"
 }

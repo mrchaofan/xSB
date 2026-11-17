@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "media": {
+      "command": "xsb-media-mcp",
+      "env": {
+        "IMAGE_PROVIDER": "seedream"
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "title": "Filmmaking",
-  "description": "An AI short-film crew. The Director sets the direction, acts as gatekeeper, and asks for your sign-off at five points: the brief, the script, the style, the lead cast, and the finished film. The Screenwriter, Art Director, and Storyboard Artist turn the story step by step into shots that can be generated; for the leads, the Art Director produces candidate looks for you to choose from. The Cinematographer generates the film shot by shot. The Editor first assembles an animatic, then cuts the finished film. Images come from Doubao Seedream and video from Doubao Seedance (through Volcengine Ark's official arkcli; the models can be swapped); all other work is done by each agent's own language model. Consistency across the film rests on the asset library: there is exactly one finalized version each of the characters, the style, and the shot list.",
+  "description": "An AI short-film crew, bound to no one's generation models. The Director sets the direction, acts as gatekeeper, and asks for your sign-off at the brief, the script, the style, the lead cast, the finals and the finished film. The Screenwriter, Art Director, and Storyboard Artist turn the story step by step into shots that can be generated; for the leads, the Art Director produces candidate looks for you to choose from. The Cinematographer generates the film shot by shot. The Editor first assembles an animatic, then cuts the finished film. Images and video come from the models you choose: give the generating roles a tool server or a skill for them, and say so in the brief; for Volcengine Ark, use the \"Volcengine Ark video\" team as it is. Consistency across the film rests on the asset library: there is exactly one finalized version each of the characters, the style, and the shot list.",
   "roles": [
     {
       "role": "director",
@@ -12,37 +12,15 @@
     },
     {
       "role": "art-director",
-      "name": "Art Director",
-      "requires": [
-        {
-          "command": "arkcli",
-          "install": "Image and video generation uses Volcengine Ark's official command-line tool. Install it and sign in yourself:\nARKCLI_SKIP_SKILLS=1 ARKCLI_SKIP_POSTINSTALL=1 npm i -g @volcengine/ark-cli\narkcli auth login\nThe image and video models are also chosen in arkcli: arkcli profile set-default <model name or endpoint ID> --modality image (use video for video).\nThe first two variables keep its install script from touching the configuration of other agents on your machine."
-        }
-      ]
+      "name": "Art Director"
     },
     {
       "role": "storyboard-artist",
-      "name": "Storyboard Artist",
-      "requires": [
-        {
-          "command": "arkcli",
-          "install": "Image and video generation uses Volcengine Ark's official command-line tool. Install it and sign in yourself:\nARKCLI_SKIP_SKILLS=1 ARKCLI_SKIP_POSTINSTALL=1 npm i -g @volcengine/ark-cli\narkcli auth login\nThe image and video models are also chosen in arkcli: arkcli profile set-default <model name or endpoint ID> --modality image (use video for video).\nThe first two variables keep its install script from touching the configuration of other agents on your machine."
-        }
-      ]
+      "name": "Storyboard Artist"
     },
     {
       "role": "cinematographer",
-      "name": "Cinematographer",
-      "requires": [
-        {
-          "command": "arkcli",
-          "install": "Image and video generation uses Volcengine Ark's official command-line tool. Install it and sign in yourself:\nARKCLI_SKIP_SKILLS=1 ARKCLI_SKIP_POSTINSTALL=1 npm i -g @volcengine/ark-cli\narkcli auth login\nThe image and video models are also chosen in arkcli: arkcli profile set-default <model name or endpoint ID> --modality image (use video for video).\nThe first two variables keep its install script from touching the configuration of other agents on your machine."
-        },
-        {
-          "command": "ffmpeg",
-          "install": "Converting oversized reference images to JPEG uses ffmpeg. Install it yourself (for example, brew install ffmpeg), or point to where it is."
-        }
-      ]
+      "name": "Cinematographer"
     },
     {
       "role": "editor",
