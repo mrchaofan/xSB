@@ -17,7 +17,7 @@ const why = (e: unknown): string => explain(e, language);
 type Args = { _: string[]; [flag: string]: string | boolean | string[] };
 
 /** Flags that take no value: what follows them is the next argument, not theirs. */
-const SWITCHES = new Set(["new", "history", "interject", "help"]);
+const SWITCHES = new Set(["new", "history", "interject", "help", "keep"]);
 
 function parse(argv: string[]): Args {
   const args: Args = { _: [] };
@@ -222,12 +222,13 @@ async function evalTeam(args: Args, id: string): Promise<void> {
   const only = flag(args, "only")?.split(",");
   const scenarios = scenariosOf(lang, id).filter((s) => !only || only.includes(s.id));
   if (!scenarios.length) return console.log(t.noScenarios(id));
-  const options = { team: id, backend: flag(args, "backend") ?? "claude", runs: Number(flag(args, "runs") ?? 3), language: lang, timeoutMs: Number(flag(args, "timeout") ?? 300) * 1000 };
+  const options = { team: id, backend: flag(args, "backend") ?? "claude", runs: Number(flag(args, "runs") ?? 3), language: lang, timeoutMs: Number(flag(args, "timeout") ?? 300) * 1000, keep: args.keep === true };
   console.log(t.evalStart(scenarios.length, options.runs, options.backend));
   const outcomes = await evaluate(scenarios, options, ({ scenario, runs }) => {
     const passed = runs.filter((r) => r.passed).length;
     console.log(`${scenario.id.padEnd(5)} ${passed}/${runs.length}  ${scenario.title}`);
     for (const failure of [...new Set(runs.flatMap((r) => r.failures))]) console.log(`      ${failure}`);
+    for (const run of runs) if (run.dir) console.log(`      ${run.dir}`);
   });
   const passed = outcomes.reduce((n, o) => n + o.runs.filter((r) => r.passed).length, 0);
   const total = outcomes.reduce((n, o) => n + o.runs.length, 0);

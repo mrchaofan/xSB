@@ -40,8 +40,8 @@ const ORIGIN: Record<ToolOrigin, string> = {
  * Where each tool comes from. Which tool to pick for a request is decided by the tools' own descriptions, which say
  * what each is; this only tells the servers apart from one another and from the agent program's own tools.
  */
-function toolSources(tools: { name: string; from: ToolOrigin }[]): string {
-  const lines = [`- xsb: the hub of this team (collaboration, tasks, assets, memory).`, ...tools.map((t) => `- ${t.name}: ${ORIGIN[t.from]}.`)];
+function toolSources(tools: { name: string; from: ToolOrigin; about?: string }[]): string {
+  const lines = [`- xsb: the hub of this team (collaboration, tasks, assets, memory).`, ...tools.map((t) => `- ${t.name}: ${ORIGIN[t.from]}.${t.about ? ` ${t.about.trim()}` : ""}`)];
   return `
 
 # Where your tools come from
@@ -75,7 +75,7 @@ export function systemPrompt(
   dirs: { shared: string; assets: string },
   state: State,
   language: Language,
-  tools: { name: string; from: ToolOrigin }[] = [],
+  tools: { name: string; from: ToolOrigin; about?: string }[] = [],
 ): string {
   const from = (inputs: string[]): string => (inputs.length ? `, from ${inputs.join(", ")}` : "");
   const teamIndex = team.length

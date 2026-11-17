@@ -8,8 +8,8 @@
   "expect": [
     {
       "firstTool": {
-        "among": "browser|open_in_app|navigate",
-        "is": "^browser_navigate$"
+        "among": "browser|open_in_app|navigate|cua_repl",
+        "is": "browser_navigate$"
       }
     }
   ]

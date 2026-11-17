@@ -38,10 +38,12 @@ export class Spending {
 
   /** What an agent is told of it, in front of a turn; nothing while there is neither budget nor spending. */
   line(): string | undefined {
-    const { budget, spent, unpriced } = this.read();
+    const { budget, spent, unpriced, dearest } = this.read();
     if (budget === undefined && spent === 0 && unpriced === 0) return undefined;
     const of = budget === undefined ? "; no budget is set" : ` of the budget of ${budget.toFixed(2)} yuan`;
-    return `[xsb] Spent on generation in this project so far: about ${spent.toFixed(2)} yuan${unpriced ? `, and ${unpriced} generation(s) not priced` : ""}${of} (estimates).`;
+    // What one call of each tool has cost at most: enough to estimate what more of it would cost without asking.
+    const each = Object.entries(dearest).map(([tool, amount]) => `${tool} up to about ${amount.toFixed(2)} yuan a call`);
+    return `[xsb] Spent on generation in this project so far: about ${spent.toFixed(2)} yuan${unpriced ? `, and ${unpriced} generation(s) not priced` : ""}${of} (estimates).${each.length ? ` So far ${each.join(", ")}.` : ""}`;
   }
 
   /** Call `changed` when the ledger changes, whoever wrote it. */

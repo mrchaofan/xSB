@@ -153,7 +153,12 @@ export const Roles = {
 } as const;
 
 /** How to start a stdio MCP server, as in `.mcp.json`. */
-export type McpServerSpec = { command: string; args?: string[]; env?: Record<string, string> };
+/**
+ * How to start an MCP server, in the shape of `.mcp.json`. `about`: one sentence, from whoever provides the server,
+ * on what it is and when it is the one to use; agents are told it next to the server's name (where their tools
+ * come from), which is what they choose between tools of several sources by.
+ */
+export type McpServerSpec = { command: string; args?: string[]; env?: Record<string, string>; about?: string };
 
 /**
  * `description`, `produces` and `inputs` are what the skill's SKILL.md declares

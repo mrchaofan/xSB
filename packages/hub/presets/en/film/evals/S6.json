@@ -16,5 +16,6 @@
     {
       "says": "which|do you mean|referring"
     }
-  ]
+  ],
+  "fixture": "film-basic"
 }

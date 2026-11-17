@@ -215,13 +215,14 @@ export class Hub {
    * started the hub gives them, such as the desktop app's browser), the role's (one of the same name takes the place
    * of a common one), and those the client that created the session asked for. Each with where it comes from.
    */
-  toolServers(agent: AgentSpec, clientMcp: McpServer[] = []): { server: McpServer; from: ToolOrigin }[] {
-    const own = this.role(agent)?.mcpServers ?? [];
-    const common = commonServers().filter((server) => !own.some((s) => s.name === server.name));
+  toolServers(agent: AgentSpec, clientMcp: McpServer[] = []): { server: McpServer; from: ToolOrigin; about?: string }[] {
+    const role = this.role(agent);
+    const own = role?.mcpServers ?? [];
+    const common = commonServers().filter(({ server }) => !own.some((s) => s.name === server.name));
     return [
-      ...common.map((server) => ({ server, from: "app" as const })),
+      ...common.map(({ server, about }) => ({ server, from: "app" as const, about })),
       // A role's servers are told where the project counts what generation costs, and whom they work for.
-      ...own.map((server) => ({ server: this.spending.withLedger(server, agent.id), from: "role" as const })),
+      ...own.map((server) => ({ server: this.spending.withLedger(server, agent.id), from: "role" as const, about: role?.servers[server.name]?.about })),
       ...clientMcp.map((server) => ({ server, from: "client" as const })),
     ];
   }
@@ -230,7 +231,7 @@ export class Hub {
   systemPromptFor(agent: AgentSpec, clientMcp: McpServer[] = []): string {
     const role = this.role(agent);
     const instructions = [role?.instructions, this.instructions(agent.id)].filter((t) => t?.trim()).join("\n\n");
-    const tools = this.toolServers(agent, clientMcp).map(({ server, from }) => ({ name: server.name, from }));
+    const tools = this.toolServers(agent, clientMcp).map(({ server, from, about }) => ({ name: server.name, from, about }));
     return systemPrompt(agent, instructions, role?.skills ?? [], this.team(), this.paths, this.state, projectLanguage(this.paths), tools);
   }
 

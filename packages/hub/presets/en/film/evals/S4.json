@@ -5,7 +5,7 @@
   "budget": 150,
   "spent": 40,
   "messages": [
-    "The cinematographer just reported: drafts 1-1, 1-2 and 2-1 passed its checks, 480p, and their links expire at 9 tomorrow morning. Take it from here."
+    "You already reviewed the drafts 1-1, 1-2 and 2-1 with dailies-review, and all three passed; no need to review them again. They are 480p, and their links expire at 9 tomorrow morning. Take it from here."
   ],
   "peers": [
     "cinematographer"
@@ -21,7 +21,8 @@
       "says": "total|about \\d"
     },
     {
-      "noCalls": "dispatch_task|start_job"
+      "noCalls": "start_job|generate_"
     }
-  ]
+  ],
+  "fixture": "film-basic"
 }

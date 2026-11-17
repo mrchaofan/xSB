@@ -13,6 +13,9 @@
  *     "messages": ["..."],                      what the user says, in order (sent at once: later ones wait their turn)
  *     "peers": ["cinematographer"],             other roles of the team present as agents (not run)
  *     "budget": 100, "spent": 12.5,             the project's budget and what is spent already (optional)
+ *     "fixture": "film-basic",                  assets the project starts with: evals/fixtures/<name>.json, a list of
+ *                                               { type, name, description, content } (or "file": "png" | "mp4" for a
+ *                                               placeholder file); written into the library before the hub starts
  *     "expect": [                               every check must hold
  *       { "firstTool": { "among": "<regex of tool names>", "is": "<regex>" } },
  *       { "calls": "<regex>" }, { "noCalls": "<regex>" }, { "atMost": { "tool": "<regex>", "times": 1 } },
@@ -20,8 +23,8 @@
  *     ]
  *   }
  *
- * Tool names are compared without what the agent program puts in front of them (`mcp__xsb__dispatch_task` and
- * `mcp.xsb.dispatch_task` are both `dispatch_task`); regular expressions are case-insensitive.
+ * Tool names are compared without what the agent program puts in front of them, but with their server unless it is
+ * xsb's (`bare`); regular expressions are case-insensitive.
  *
  * It runs real models, which costs what the backend's account is charged; the generation tools cost nothing.
  */
@@ -36,6 +39,10 @@ import type { Connection, Language } from "@xsb/protocol";
 import { connectHub } from "./client.ts";
 
 const STUB = fileURLToPath(new URL("./eval-stub.ts", import.meta.url));
+/** What the desktop app says of its browser to agents (packages/desktop/src/clis.ts); the stand-in is said the same of. */
+const BROWSER_ABOUT =
+  'It is the browser in the side panel of the xsb app, which the user watches and can take over. When the user says "the browser", "the built-in browser", "the side-panel browser" or "IAB" (浏览器, 内置浏览器, 右栏浏览器), they mean this one: use its tools (browser_navigate first), not a browser or computer-use tool of your agent program, which cannot reach the side panel.';
+
 /** A backend name whose command is not installed: the agents a role works with are there, but do not run. */
 const ABSENT = "xsb-eval-absent";
 
@@ -47,12 +54,41 @@ type Check =
   | { says: string }
   | { saysNot: string };
 
-export type Scenario = { id: string; title: string; role: string; messages: string[]; peers?: string[]; budget?: number; spent?: number; expect: Check[]; file?: string };
+export type Scenario = { id: string; title: string; role: string; messages: string[]; peers?: string[]; budget?: number; spent?: number; fixture?: string; expect: Check[]; file?: string; fixtures?: string[] };
+
+type FixtureAsset = { type: string; name: string; description: string; content?: string; file?: "png" | "mp4" };
+
+/** Placeholder files: enough for an asset to be one, nothing for a tool to show. */
+const PLACEHOLDER: Record<string, Buffer> = {
+  png: Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000", "hex"),
+  mp4: Buffer.from("000000186674797069736f6d0000020069736f6d69736f32", "hex"),
+};
+
+/** Write a fixture's assets into a project's library, as the hub would have registered them, before it starts. */
+function seed(paths: Paths, assets: FixtureAsset[]): void {
+  const at = new Date().toISOString();
+  for (const a of assets) {
+    const dir = path.join(paths.assets, a.type, a.name);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, a.file ? `v1.${a.file}` : "v1.md");
+    fs.writeFileSync(file, a.file ? PLACEHOLDER[a.file] : (a.content ?? ""));
+    const asset = { id: `${a.type}/${a.name}`, type: a.type, name: a.name, version: 1, description: a.description, path: file, by: "user", createdAt: at };
+    fs.appendFileSync(path.join(paths.dir, "assets.jsonl"), JSON.stringify({ op: "put", asset }) + "\n");
+  }
+}
 
 /** What a run left behind: the tools the role called, in order, and everything it said. */
 type Seen = { tools: string[]; said: string };
 
-const bare = (name: string): string => name.split(/__|\./).at(-1) ?? name;
+/**
+ * A tool's name without what the agent program puts in front of it, but with the server it is of, unless that is
+ * xsb's own: `mcp__xsb__dispatch_task` and `mcp.xsb.dispatch_task` are `dispatch_task`, `mcp.cua_repl.js` is
+ * `cua_repl.js`, `mcp__browser__browser_navigate` is `browser.browser_navigate`.
+ */
+const bare = (name: string): string => {
+  const mcp = /^mcp(?:__|\.)(.+?)(?:__|\.)(.+)$/.exec(name);
+  return !mcp ? name : mcp[1] === "xsb" ? mcp[2] : `${mcp[1]}.${mcp[2]}`;
+};
 const re = (pattern: string): RegExp => new RegExp(pattern, "i");
 
 /** Whether one check holds of what was seen, and if not, what was seen instead. */
@@ -79,12 +115,13 @@ export function scenariosOf(language: Language, id: string): Scenario[] {
   const cat = catalog(language);
   if (!cat.teams.has(id)) throw new Error(`no team "${id}"`);
   const found = new Map<string, Scenario>();
-  for (const team of lineage(cat, id).reverse()) {
-    const dir = path.join(team.dir, "evals");
+  const dirs = lineage(cat, id).reverse().map((team) => path.join(team.dir, "evals"));
+  for (const dir of dirs) {
     if (!fs.existsSync(dir)) continue;
     for (const name of fs.readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
       const scenario = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as Scenario;
-      found.set(scenario.id, { ...scenario, file: path.join(dir, name) });
+      // A fixture is looked for in the scenario's own team first, then in the teams it builds on.
+      found.set(scenario.id, { ...scenario, file: path.join(dir, name), fixtures: [dir, ...dirs.filter((d) => d !== dir).reverse()].map((d) => path.join(d, "fixtures")) });
     }
   }
   return [...found.values()];
@@ -113,13 +150,23 @@ async function until(probe: () => Promise<boolean>, ms: number): Promise<boolean
 }
 
 /** One run of one scenario, in a project of its own. */
-async function runOnce(scenario: Scenario, team: string, backend: string, language: Language, timeoutMs: number): Promise<Seen> {
+async function runOnce(scenario: Scenario, team: string, backend: string, language: Language, timeoutMs: number, keep: boolean): Promise<Seen & { dir?: string }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-eval-"));
   const paths = new Paths(dir);
   initProject(paths);
   fs.writeFileSync(paths.config, JSON.stringify({ version: 2, language, teams: [team] }));
+  if (scenario.fixture) {
+    const file = (scenario.fixtures ?? []).map((d) => path.join(d, `${scenario.fixture}.json`)).find((f) => fs.existsSync(f));
+    if (!file) throw new Error(`no fixture "${scenario.fixture}" for scenario ${scenario.id}`);
+    seed(paths, JSON.parse(fs.readFileSync(file, "utf8")));
+  }
   if (scenario.budget !== undefined) fs.appendFileSync(paths.spend, JSON.stringify({ op: "budget", at: new Date().toISOString(), amount: scenario.budget }) + "\n");
-  if (scenario.spent) fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: new Date().toISOString(), tool: "generate_video", output: "earlier.mp4", usage: "earlier work", amount: scenario.spent, basis: "the scenario's" }) + "\n");
+  // What was spent before, as drafts of a few yuan each (one record of the whole would read as one costly call).
+  for (let left = scenario.spent ?? 0, n = 1; left > 0; n++) {
+    const amount = Math.min(left, 4.5);
+    fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: new Date().toISOString(), tool: "generate_video", output: `earlier-${n}.mp4`, usage: "a 480p draft", amount, basis: "the scenario's" }) + "\n");
+    left -= amount;
+  }
   let conn: Connection | undefined;
   try {
     conn = await connectHub(paths, true);
@@ -139,6 +186,7 @@ async function runOnce(scenario: Scenario, team: string, backend: string, langua
     const sessions = path.join(paths.agentDir(scenario.role), "sessions");
     const updates = fs.readdirSync(sessions).flatMap((file) => fs.readFileSync(path.join(sessions, file), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line).update));
     return {
+      ...(keep ? { dir } : {}),
       tools: updates.filter((u) => u?.sessionUpdate === "tool_call").map((u) => bare(String(u._meta?.claudeCode?.toolName ?? u.name ?? u.title ?? ""))),
       said: updates.filter((u) => u?.sessionUpdate === "agent_message_chunk").map((u) => u.content?.text ?? "").join(""),
     };
@@ -146,16 +194,17 @@ async function runOnce(scenario: Scenario, team: string, backend: string, langua
     conn?.close();
     stopHub(paths, true);
     await sleep(500);
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (!keep) fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
-export type Outcome = { scenario: Scenario; runs: { passed: boolean; failures: string[] }[] };
+/** `dir`: the run's project, kept for a look when asked (`--keep`). */
+export type Outcome = { scenario: Scenario; runs: { passed: boolean; failures: string[]; dir?: string }[] };
 
 /** Run every scenario `runs` times; report as each one finishes. */
 export async function evaluate(
   scenarios: Scenario[],
-  options: { team: string; backend: string; runs: number; language: Language; timeoutMs: number },
+  options: { team: string; backend: string; runs: number; language: Language; timeoutMs: number; keep?: boolean },
   report: (outcome: Outcome) => void,
 ): Promise<Outcome[]> {
   const previous = { home: process.env.XSB_HOME, servers: process.env.XSB_MCP_SERVERS };
@@ -163,7 +212,8 @@ export async function evaluate(
   // and computer-use tools every agent is given (as the app gives its browser).
   process.env.XSB_HOME = home();
   process.env.XSB_MCP_SERVERS = JSON.stringify({
-    browser: { command: process.execPath, args: [STUB, "browser"] },
+    // With what the app says of its browser (desktop clis.ts), for the agents choose between browsers by it.
+    browser: { command: process.execPath, args: [STUB, "browser"], about: BROWSER_ABOUT },
     desktop: { command: process.execPath, args: [STUB, "desktop"] },
   });
   const outcomes: Outcome[] = [];
@@ -172,9 +222,9 @@ export async function evaluate(
       const runs: Outcome["runs"] = [];
       for (let i = 0; i < options.runs; i++) {
         try {
-          const seen = await runOnce(scenario, options.team, options.backend, options.language, options.timeoutMs);
+          const seen = await runOnce(scenario, options.team, options.backend, options.language, options.timeoutMs, !!options.keep);
           const failures = scenario.expect.map((check) => judge(check, seen)).filter((f): f is string => !!f);
-          runs.push({ passed: failures.length === 0, failures });
+          runs.push({ passed: failures.length === 0, failures, ...(seen.dir ? { dir: seen.dir } : {}) });
         } catch (e) {
           runs.push({ passed: false, failures: [`the run failed: ${(e as Error).message}`] });
         }

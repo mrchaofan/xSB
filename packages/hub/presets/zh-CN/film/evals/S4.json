@@ -5,7 +5,7 @@
   "budget": 150,
   "spent": 40,
   "messages": [
-    "摄影师刚汇报：1-1、1-2、2-1 三个小样都通过了自检，480p，结果地址明早 9 点过期。接下来你看着办。"
+    "你已经按 dailies-review 审过 1-1、1-2、2-1 三个小样，都通过了，不用再审。小样是 480p，结果地址明早 9 点过期。接下来你看着办。"
   ],
   "peers": [
     "cinematographer"
@@ -21,7 +21,8 @@
       "says": "合计|总价|约.*元"
     },
     {
-      "noCalls": "dispatch_task|start_job"
+      "noCalls": "start_job|generate_"
     }
-  ]
+  ],
+  "fixture": "film-basic"
 }

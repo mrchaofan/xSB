@@ -12,5 +12,6 @@
     {
       "says": "听不到|无法听|不能听|请你|核验|ffprobe|检测"
     }
-  ]
+  ],
+  "fixture": "film-basic"
 }
