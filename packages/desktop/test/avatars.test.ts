@@ -8,21 +8,26 @@ import { Hub, Paths } from "@xsb/hub";
 import { readRole, saveRole } from "../../hub/src/roles.ts";
 import { teams, teamRoles } from "../../hub/src/teams.ts";
 import { roleInput, roleView } from "../src/roles.ts";
-import { AVATARS, DEFAULT_AVATAR, avatarSource, resolveAvatar } from "../renderer/avatar-catalog.js";
+import { AVATARS, DEFAULT_AVATAR, LEGACY_AVATARS, avatarSource, resolveAvatar } from "../renderer/avatar-catalog.js";
 
 const assets = fileURLToPath(new URL("../renderer/avatars/", import.meta.url));
 
 test("avatar fallback is local and covers old workspaces, roles and overrides", () => {
   assert.equal(resolveAvatar(), DEFAULT_AVATAR);
-  assert.equal(resolveAvatar({}, { avatar: "person-director" }), "person-director");
+  assert.equal(resolveAvatar({ avatar: "person-qa" }), "person-satya-nadella");
+  assert.equal(avatarSource("person-art-director"), "./avatars/person-huang-le.png");
+  assert.equal(avatarSource("toString"), `./avatars/${DEFAULT_AVATAR}.png`);
+  assert.equal(resolveAvatar({}, { avatar: "person-director" }), "person-larry-page");
   assert.equal(resolveAvatar({ avatar: "animal-cat" }, { avatar: "person-director" }), "animal-cat");
-  assert.equal(resolveAvatar({ avatar: "" }, { avatar: "person-director" }), "person-director");
+  assert.equal(resolveAvatar({ avatar: "" }, { avatar: "person-director" }), "person-larry-page");
   assert.equal(resolveAvatar({ avatar: "removed" }, { avatar: "removed" }), DEFAULT_AVATAR);
   assert.equal(avatarSource("https://example.com/a.png"), `./avatars/${DEFAULT_AVATAR}.png`);
 });
 
 test("every choice and both languages' preset roles have bundled PNG artwork", () => {
-  assert.equal(AVATARS.length, 24);
+  assert.equal(AVATARS.length, 28);
+  assert.equal(AVATARS.filter((a) => a.group === "people").length, 16);
+  assert.equal(fs.readdirSync(assets).filter((name) => name.endsWith(".png")).length, AVATARS.length);
   assert.equal(new Set(AVATARS.map((a) => a.id)).size, AVATARS.length);
   for (const { id } of AVATARS) {
     const png = fs.readFileSync(path.join(assets, `${id}.png`));
@@ -33,7 +38,7 @@ test("every choice and both languages' preset roles have bundled PNG artwork", (
   for (const language of ["en", "zh-CN"] as const) {
     for (const team of teams(language)) for (const entry of team.roles) {
       const role = readRole(path.join(teamRoles(team.id, language), entry.role), entry.role);
-      assert.equal(role.avatar, `person-${entry.role}`);
+      assert.equal(role.avatar, LEGACY_AVATARS[`person-${entry.role}`]);
       assert.ok(AVATARS.some((a) => a.id === role.avatar));
     }
   }
@@ -55,7 +60,7 @@ test("agent and role avatars survive persistence, partial edits and clearing", (
     assert.equal(new Hub(dir).agent("a").avatar, "animal-fox");
     hub.putAgent({ id: "a", avatar: "" });
     assert.equal(new Hub(dir).agent("a").avatar, "");
-    assert.equal(resolveAvatar(hub.agent("a"), role), "person-art-director");
+    assert.equal(resolveAvatar(hub.agent("a"), role), "person-huang-le");
     saveRole(paths, { name: "artist", avatar: "" });
     role = readRole(paths.roleDir("artist"), "artist");
     assert.equal(resolveAvatar(hub.agent("a"), role), DEFAULT_AVATAR);
