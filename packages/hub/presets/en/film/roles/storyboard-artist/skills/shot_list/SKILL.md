@@ -33,7 +33,7 @@ Once the shot list is approved, you draw a storyboard frame for every shot (skil
 | Reference images | The character enters from off-screen, or the action starts with large movement, so a first frame cannot be pinned down | `reference images: reference/aning-front, reference/scene-ferry` |
 | Text-to-video | Empty shots, environments, no main characters | `text-to-video` |
 
-Constraints: **reference images cannot be combined with a first frame (first frame, continue from last frame, first and last frames).** With a first frame, the aspect ratio follows the first-frame image. A "continue from last frame" shot depends on the previous shot and cannot be generated in parallel; do not build a whole scene out of them.
+Constraints: many video models **do not take reference images together with a first frame (first frame, continue from last frame, first and last frames)**, and with a first frame the aspect ratio follows the first-frame image; the chosen model's description says how it is. A "continue from last frame" shot depends on the previous shot and cannot be generated in parallel; do not build a whole scene out of them.
 
 ## Design rules
 

@@ -1,6 +1,6 @@
 {
-  "title": "电影制作",
-  "description": "一支 AI 短片剧组。导演定方向、把关，并在简报、剧本、风格、主演、成片五处请你确认；编剧、美术指导、分镜师把故事逐步变成可以生成的镜头，其中主演由美术指导出候选形象供你挑选；摄影师逐镜生成；剪辑师先排动态分镜，再合成成片。出图用豆包 Seedream、出视频用豆包 Seedance（经火山方舟官方的 arkcli，可更换模型），其余工作由各智能体自己的语言模型完成。全片的一致性靠资产库：人物、风格、镜头表各只有一份定稿。",
+  "title": "电影创作",
+  "description": "一支 AI 短片剧组，不绑定任何一家的生成模型。导演定方向、把关，并在简报、剧本、风格、主演、正式版、成片几处请你确认；编剧、美术指导、分镜师把故事逐步变成可以生成的镜头，其中主演由美术指导出候选形象供你挑选；摄影师逐镜生成；剪辑师先排动态分镜，再合成成片。出图和出视频用你选定的模型：给生成类角色配上工具服务或技能，并在简报里写明；用火山方舟的，直接用“火山方舟视频创作”团队。全片的一致性靠资产库：人物、风格、镜头表各只有一份定稿。",
   "roles": [
     {
       "role": "director",
@@ -12,37 +12,15 @@
     },
     {
       "role": "art-director",
-      "name": "美术指导",
-      "requires": [
-        {
-          "command": "arkcli",
-          "install": "生成图片和视频用火山方舟的官方命令行工具。请自行安装并登录：\nARKCLI_SKIP_SKILLS=1 ARKCLI_SKIP_POSTINSTALL=1 npm i -g @volcengine/ark-cli\narkcli auth login\n用哪个模型出图、出视频也在 arkcli 里设：arkcli profile set-default <模型名或接入点 ID> --modality image（视频为 video）。\n前两个变量让它的安装脚本不去改动你机器上其他 Agent 的配置。"
-        }
-      ]
+      "name": "美术指导"
     },
     {
       "role": "storyboard-artist",
-      "name": "分镜师",
-      "requires": [
-        {
-          "command": "arkcli",
-          "install": "生成图片和视频用火山方舟的官方命令行工具。请自行安装并登录：\nARKCLI_SKIP_SKILLS=1 ARKCLI_SKIP_POSTINSTALL=1 npm i -g @volcengine/ark-cli\narkcli auth login\n用哪个模型出图、出视频也在 arkcli 里设：arkcli profile set-default <模型名或接入点 ID> --modality image（视频为 video）。\n前两个变量让它的安装脚本不去改动你机器上其他 Agent 的配置。"
-        }
-      ]
+      "name": "分镜师"
     },
     {
       "role": "cinematographer",
-      "name": "摄影师",
-      "requires": [
-        {
-          "command": "arkcli",
-          "install": "生成图片和视频用火山方舟的官方命令行工具。请自行安装并登录：\nARKCLI_SKIP_SKILLS=1 ARKCLI_SKIP_POSTINSTALL=1 npm i -g @volcengine/ark-cli\narkcli auth login\n用哪个模型出图、出视频也在 arkcli 里设：arkcli profile set-default <模型名或接入点 ID> --modality image（视频为 video）。\n前两个变量让它的安装脚本不去改动你机器上其他 Agent 的配置。"
-        },
-        {
-          "command": "ffmpeg",
-          "install": "把过大的参考图转成 jpeg 要用 ffmpeg。请自行安装（如 brew install ffmpeg），或指定它的位置。"
-        }
-      ]
+      "name": "摄影师"
     },
     {
       "role": "editor",

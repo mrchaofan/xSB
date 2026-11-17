@@ -1,12 +1,4 @@
 {
   "description": "Breaks the script into individually generatable shots and draws a storyboard frame for each: shot size, camera position, movement, duration, composition, and continuity",
-  "mcpServers": {
-    "media": {
-      "command": "xsb-media-mcp",
-      "env": {
-        "IMAGE_PROVIDER": "seedream"
-      }
-    }
-  },
   "avatar": "person-dario-amodei"
 }

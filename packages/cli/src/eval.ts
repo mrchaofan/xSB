@@ -117,7 +117,7 @@ async function runOnce(scenario: Scenario, team: string, backend: string, langua
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-eval-"));
   const paths = new Paths(dir);
   initProject(paths);
-  fs.writeFileSync(paths.config, JSON.stringify({ version: 1, language, teams: [team] }));
+  fs.writeFileSync(paths.config, JSON.stringify({ version: 2, language, teams: [team] }));
   if (scenario.budget !== undefined) fs.appendFileSync(paths.spend, JSON.stringify({ op: "budget", at: new Date().toISOString(), amount: scenario.budget }) + "\n");
   if (scenario.spent) fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: new Date().toISOString(), tool: "generate_video", output: "earlier.mp4", usage: "earlier work", amount: scenario.spent, basis: "the scenario's" }) + "\n");
   let conn: Connection | undefined;

@@ -58,7 +58,14 @@ export type GlobalConfig = { version: 1; backends?: Record<string, BackendSpec> 
  * `limits.sessionTokens`: past how many tokens of context a work session takes no new work, which goes to a new
  * session handed its conversation (default 150000).
  */
-export type ProjectConfig = { version: 1; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number } };
+export type ProjectConfig = { version: 1 | 2; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number } };
+
+/**
+ * The version of the project config this xsb writes. 2: the preset team "film" is the one that is bound to no
+ * generation models, and "film-ark" the one that makes images and video with Volcengine Ark. Before, "film" was
+ * that one, so a config of version 1 that uses "film" is moved to "film-ark" (`migrateProjectConfig`).
+ */
+export const CONFIG_VERSION = 2;
 
 /** Agents whose spec names no backend get this one. */
 export const DEFAULT_BACKEND = "claude";
@@ -76,7 +83,21 @@ function readJson<T>(file: string, fallback: T): T {
 }
 
 export function loadProjectConfig(paths: Paths): ProjectConfig {
-  return readJson<ProjectConfig>(paths.config, { version: 1 });
+  return readJson<ProjectConfig>(paths.config, { version: CONFIG_VERSION });
+}
+
+/**
+ * Bring a project's config written by an earlier xsb up to this one's. Only the project's own file changes. Says
+ * what it did, for the log; nothing when there was nothing to do.
+ */
+export function migrateProjectConfig(paths: Paths): string | undefined {
+  if (!fs.existsSync(paths.config)) return undefined;
+  const config = loadProjectConfig(paths);
+  if (config.version >= CONFIG_VERSION) return undefined;
+  // Version 1 had one film team, and it made images and video with Ark: that team is "film-ark" now.
+  const teams = config.teams?.map((team) => (team === "film" ? "film-ark" : team));
+  saveProjectConfig(paths, { ...config, version: CONFIG_VERSION, ...(teams ? { teams } : {}) });
+  return `project config moved to version ${CONFIG_VERSION}${config.teams?.includes("film") ? `: the team "film" is "film-ark" now (the one that generates with Volcengine Ark)` : ""}`;
 }
 
 /** The project's working language. English until a client has declared one. */
@@ -90,7 +111,7 @@ export function saveProjectConfig(paths: Paths, config: ProjectConfig): void {
 export function initProject(paths: Paths): boolean {
   fs.mkdirSync(paths.shared, { recursive: true });
   fs.mkdirSync(paths.run, { recursive: true });
-  if (!fs.existsSync(paths.config)) saveProjectConfig(paths, { version: 1 });
+  if (!fs.existsSync(paths.config)) saveProjectConfig(paths, { version: CONFIG_VERSION });
   fs.writeFileSync(path.join(paths.dir, ".gitignore"), "run/\n");
   return initGlobalConfig();
 }

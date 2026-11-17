@@ -1,13 +1,4 @@
 {
   "description": "制定全片的视觉规范，为主要人物出候选形象供选角，做人物设定与定妆图，让每个镜头看起来属于同一部片子",
-  "mcpServers": {
-    "media": {
-      "command": "xsb-media-mcp",
-      "env": {
-        "IMAGE_PROVIDER": "seedream",
-        "VIDEO_PROVIDER": "seedance"
-      }
-    }
-  },
   "avatar": "person-huang-le"
 }
