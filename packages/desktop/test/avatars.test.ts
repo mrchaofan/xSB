@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { Hub, Paths } from "@xsb/hub";
 import { readRole, saveRole } from "../../hub/src/roles.ts";
-import { teams, teamRoles } from "../../hub/src/teams.ts";
+import { catalog, teamRole } from "../../hub/src/presets.ts";
 import { roleInput, roleView } from "../src/roles.ts";
 import { AVATARS, DEFAULT_AVATAR, LEGACY_AVATARS, avatarSource, resolveAvatar } from "../renderer/avatar-catalog.js";
 
@@ -36,8 +36,9 @@ test("every choice and both languages' preset roles have bundled PNG artwork", (
     assert.equal(png.readUInt32BE(20), 192);
   }
   for (const language of ["en", "zh-CN"] as const) {
-    for (const team of teams(language)) for (const entry of team.roles) {
-      const role = readRole(path.join(teamRoles(team.id, language), entry.role), entry.role);
+    const cat = catalog(language);
+    for (const team of [...cat.teams.values()].filter((t) => t.source === "builtin")) for (const entry of team.roles) {
+      const role = teamRole(cat, team.id, entry.role)!;
       assert.equal(role.avatar, LEGACY_AVATARS[`person-${entry.role}`]);
       assert.ok(AVATARS.some((a) => a.id === role.avatar));
     }

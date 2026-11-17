@@ -7,17 +7,18 @@
  * token the hub put into that session's bridge environment, so a tool call
  * needs no "who am I" argument and an agent cannot speak for another.
  */
-import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { RpcError } from "@xsb/protocol";
 import type { Connection, McpServer } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
+import { shipped } from "./paths.ts";
 import { mcpServers } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { TOOLS, callTool } from "./tools.ts";
 import { VERSION } from "./util.ts";
 
 const MCP_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const BRIDGE = fileURLToPath(new URL("../bin/xsb-mcp-bridge", import.meta.url));
+const BRIDGE = path.join(shipped("bin"), "xsb-mcp-bridge");
 
 export const BRIDGE_ATTACH = "_xsb/attach";
 export const BRIDGE_SOCKET_ENV = "XSB_MCP_SOCKET";

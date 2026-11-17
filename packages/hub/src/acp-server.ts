@@ -10,15 +10,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Agents, Assets, Backends, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, SpendExt, Steering, Tasks, Teams, errorMessage, failure, textOf } from "@xsb/protocol";
-import type { Connection, McpServerCheck, OriginMeta, RoleDetail, TeamInfo } from "@xsb/protocol";
+import type { Connection, McpServerCheck, OriginMeta, RoleDetail, PresetProblem, TeamInfo } from "@xsb/protocol";
 import { backends, describeBackends, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
 import { mcpRequest } from "./mcp-client.ts";
 import { Paths } from "./paths.ts";
-import { describeRole, loadRole, readRole, roleNames, saveRole } from "./roles.ts";
+import { describeRole, loadRole, roleNames, saveRole } from "./roles.ts";
 import type { Role } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
-import { teamRoles, teams } from "./teams.ts";
+import { catalog, check, clashes, derive, teamRole, teamRoleNames } from "./presets.ts";
+import type { Catalog, TeamEntry } from "./presets.ts";
 import { VERSION } from "./util.ts";
 
 /** One connected ACP client, as the hub sees it. */
@@ -237,37 +238,62 @@ export class Client {
     });
     // ---- teams ------------------------------------------------------------
 
-    const team = (id: string) => {
-      const all = teams(projectLanguage(hub.paths));
-      const found = all.find((t) => t.id === id);
-      if (!found) throw failure("team_unknown", { team: id, known: all.map((t) => t.id) });
+    const team = (id: string): TeamEntry => {
+      const cat = catalog(projectLanguage(hub.paths));
+      const found = cat.teams.get(id);
+      if (!found) throw failure("team_unknown", { team: id, known: [...cat.teams.keys()] });
       return found;
     };
-    /** Change which teams the project uses, unless that leaves an agent without its role. */
+    /** Change which teams the project uses, unless that leaves an agent without its role or two teams clash. */
     const setTeams = (used: string[], changed: string): void => {
+      const clash = clashes(catalog(projectLanguage(hub.paths)), used).find((c) => c.teams.includes(changed));
+      if (clash) throw failure("team_clash", { team: changed, other: clash.teams.find((t) => t !== changed), role: clash.role });
       const left = roleNames(hub.paths, used);
       const stranded = [...hub.state.agents.values()].filter((a) => a.role && !left.includes(a.role)).map((a) => a.id);
       if (stranded.length) throw failure("team_in_use", { team: changed, agents: stranded });
       saveProjectConfig(hub.paths, { ...loadProjectConfig(hub.paths), teams: used });
-      announceRoles(team(changed).roles.map((entry) => entry.role));
+      announceRoles(teamRoleNames(catalog(projectLanguage(hub.paths)), changed));
     };
-    conn.onRequest(Teams.list, (): { teams: TeamInfo[] } => {
-      const used = loadProjectConfig(hub.paths).teams ?? [];
-      const language = projectLanguage(hub.paths);
+    /** A team as a client is told of it: its roles as they apply, what is wrong with it, what it starts. */
+    const teamInfo = (cat: Catalog, entry: TeamEntry, used: string[]): TeamInfo => {
+      const roles = entry.roles.flatMap((r) => {
+        try {
+          const role = teamRole(cat, entry.id, r.role);
+          return role ? [{ name: r.name, role: describeRole(role), requires: r.requires ?? [] }] : [];
+        } catch {
+          return []; // said among its problems
+        }
+      });
+      const own = cat.problems.filter((p) => p.team === entry.id && p.source === entry.source);
       return {
-        teams: teams(language).map(({ id, title, description, roles, assets }) => ({
-          id,
-          title,
-          description,
-          assets: assets ?? {},
-          used: used.includes(id),
-          roles: roles.map((entry) => ({
-            name: entry.name,
-            role: describeRole(readRole(path.join(teamRoles(id, language), entry.role), entry.role)),
-            requires: entry.requires ?? [],
-          })),
-        })),
+        id: entry.id,
+        source: entry.source,
+        ...(entry.extends ? { extends: entry.extends } : {}),
+        dir: entry.dir,
+        language: entry.language,
+        problems: [...own, ...check(cat, entry.id)].map(({ source, ...p }) => p),
+        programs: [...new Set(roles.flatMap((r) => Object.values(r.role.mcpServers).map((s) => s.command)))],
+        title: entry.title,
+        description: entry.description,
+        assets: entry.assets,
+        used: used.includes(entry.id),
+        roles,
       };
+    };
+    conn.onRequest(Teams.list, (): { teams: TeamInfo[]; problems: PresetProblem[] } => {
+      const used = loadProjectConfig(hub.paths).teams ?? [];
+      const cat = catalog(projectLanguage(hub.paths));
+      return {
+        teams: [...cat.teams.values()].map((entry) => teamInfo(cat, entry, used)),
+        // What belongs to no team in the list: a team left out, or one of the user's that is not the one listed.
+        problems: cat.problems.filter((p) => !p.team || cat.teams.get(p.team)?.source !== p.source).map(({ source, ...p }) => p),
+      };
+    });
+    conn.onRequest(Teams.derive, (p) => {
+      const language = projectLanguage(hub.paths);
+      const made = derive(catalog(language), String(p?.id ?? ""), String(p?.base ?? ""), language);
+      const cat = catalog(language);
+      return { team: teamInfo(cat, cat.teams.get(made.id) ?? made, loadProjectConfig(hub.paths).teams ?? []) };
     });
     conn.onRequest(Teams.use, (p) => {
       const used = loadProjectConfig(hub.paths).teams ?? [];

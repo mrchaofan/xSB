@@ -28,9 +28,13 @@ const en = {
                                         files in .xsb/roles/<name>/
   xsb role list | show <name> | remove <name>
   xsb role check <name>                 start the role's MCP servers and list their tools
-  xsb team list                         the preset teams xsb ships, and which the project uses
+  xsb team list                         the preset teams (xsb's own and yours in ~/.xsb/presets), and which the project uses
   xsb team use <id> | drop <id>         use a team's roles in this project as they ship, or stop;
                                         nothing is copied, and 'xsb role add' makes a role the project's own
+  xsb team check [<id>]                 what is wrong with the preset teams, as far as can be checked without running them
+  xsb team new <id> --extends <base>    start a team of yours in ~/.xsb/presets that builds on <base>
+  xsb team eval <id> [--backend <name>] [--runs <n>] [--only S1,S2] [--language en|zh-CN] [--timeout <s>]
+                                        run the team's scenarios (evals/) on a real backend: costs model use
   xsb backends                          the backends of this machine, and whether each is installed
 
   xsb chat <agent> [--new] [--history]  talk to an agent
@@ -73,6 +77,15 @@ const en = {
   teamUsed: (id: string) => `using team ${id}; its roles are in 'xsb role list'`,
   teamDropped: (id: string) => `dropped team ${id}`,
   used: (yes: boolean): string => (yes ? "used" : "    "),
+  teamSource: (source: string): string => (source === "user" ? "yours" : "xsb"),
+  teamExtends: (base: string): string => `extends ${base}`,
+  problem: (severity: string): string => (severity === "error" ? "error" : "note"),
+  noProblems: "no problems found",
+  teamMade: (dir: string): string => `made ${dir}; put in it only the roles and skills that differ`,
+  evalUsage: "usage: xsb team eval <team> [--backend <name>] [--runs <n>] [--only S1,S2]",
+  noScenarios: (id: string): string => `the team ${id} has no scenarios (evals/*.json)`,
+  evalStart: (n: number, runs: number, backend: string): string => `${n} scenarios, ${runs} runs each, on ${backend}. This uses the backend's model, which is billed; generation is stood in for and costs nothing.`,
+  evalTotal: (passed: number, total: number): string => `passed ${passed} of ${total} runs`,
   asks: (who: string, what: string) => `[${who}] asks permission: ${what}`,
   useTool: "use a tool",
   choose: "choose> ",
@@ -117,9 +130,13 @@ const zh: typeof en = {
                                         .xsb/roles/<名称>/ 下的文件
   xsb role list | show <名称> | remove <名称>
   xsb role check <名称>                 启动角色的工具服务并列出各自的工具
-  xsb team list                         xsb 自带的预设团队，以及项目用了哪些
+  xsb team list                         预设团队（xsb 自带的，和你放在 ~/.xsb/presets 里的），以及项目用了哪些
   xsb team use <标识> | drop <标识>     在项目里原样使用一支团队的角色，或停止使用；
                                         不复制任何文件，'xsb role add' 会把角色变成项目自己的
+  xsb team check [<标识>]               不运行就能查出的预设团队的问题
+  xsb team new <标识> --extends <基础>  在 ~/.xsb/presets 里新建一支基于 <基础> 的团队
+  xsb team eval <标识> [--backend <名称>] [--runs <次数>] [--only S1,S2] [--language en|zh-CN] [--timeout <秒>]
+                                        用真实后端跑团队的场景评估（evals/），会产生模型费用
   xsb backends                          这台机器上的后端，以及各自是否已安装
 
   xsb chat <智能体> [--new] [--history] 与一个智能体对话
@@ -160,6 +177,15 @@ const zh: typeof en = {
   teamUsed: (id) => `已使用团队 ${id}；它的角色见 'xsb role list'`,
   teamDropped: (id) => `已停用团队 ${id}`,
   used: (yes) => (yes ? "在用" : "　　"),
+  teamSource: (source) => (source === "user" ? "我的" : "自带"),
+  teamExtends: (base) => `基于 ${base}`,
+  problem: (severity) => (severity === "error" ? "错误" : "提醒"),
+  noProblems: "没有发现问题",
+  teamMade: (dir) => `已新建 ${dir}；只把不同的角色和技能放进去`,
+  evalUsage: "用法：xsb team eval <团队> [--backend <名称>] [--runs <次数>] [--only S1,S2]",
+  noScenarios: (id) => `团队 ${id} 没有场景（evals/*.json）`,
+  evalStart: (n, runs, backend) => `${n} 个场景，每个跑 ${runs} 次，后端 ${backend}。会用到后端的模型并计费；生成工具是替身，不花钱。`,
+  evalTotal: (passed, total) => `共 ${total} 次，通过 ${passed} 次`,
   asks: (who, what) => `[${who}] 请求许可：${what}`,
   useTool: "使用一个工具",
   choose: "请选择> ",

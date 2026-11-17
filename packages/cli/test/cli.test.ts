@@ -115,6 +115,27 @@ try {
   assert.match(ok("send", "a", "after the kill"), /echo: after the kill/);
   assert.notEqual(Number(/pid (\d+)/.exec(ok("hub", "status"))![1]), process.pid);
   console.log("ok 7 a killed hub, and a stale file");
+  // 8. Preset teams and their scenarios: a team of the user's, its problems, and a run of the scenarios.
+  const mine = path.join(home, "presets", "en", "mine");
+  fs.mkdirSync(path.join(mine, "evals"), { recursive: true });
+  fs.writeFileSync(path.join(mine, "team.json"), JSON.stringify({ title: "Mine", extends: "film", roles: [{ role: "director", name: "Director" }, { role: "ghost", name: "Ghost" }] }));
+  fs.writeFileSync(path.join(mine, "evals", "S9.json"), JSON.stringify({ id: "S9", title: "replaced", role: "director", messages: ["!say DISPATCHED NOTHING"], peers: ["cinematographer"], expect: [{ calls: "dispatch_task" }] }));
+  assert.match(ok("team", "list"), /mine\s+Mine \(yours, extends film\)/);
+  const checked = xsb("team", "check", "mine");
+  assert.equal(checked.code, 1, "an error makes the check fail");
+  assert.match(checked.out, /error: team.json lists the role "ghost"/);
+  // The film team's scenarios and this team's own, which takes the place of one of the same id; run on the mock
+  // backend, which only echoes: the plumbing is tested, not a model.
+  const evaluated = spawnSync(process.execPath, [XSB, "team", "eval", "mine", "--backend", "mock", "--runs", "1", "--only", "S9,S6", "--language", "en", "--timeout", "20"], {
+    cwd: os.tmpdir(), env: { ...process.env, XSB_HOME: home, LC_ALL: "en_US.UTF-8" }, encoding: "utf8", timeout: 120_000,
+  });
+  assert.equal(evaluated.status, 0, evaluated.stderr);
+  assert.match(evaluated.stdout, /2 scenarios, 1 runs each, on mock/);
+  assert.match(evaluated.stdout, /S6\s+0\/1[^\n]*\n\s+did not say/);
+  assert.match(evaluated.stdout, /S9\s+0\/1\s+replaced\n\s+no call of \/dispatch_task\//);
+  assert.match(evaluated.stdout, /passed 0 of 2 runs/);
+  assert.ok(!fs.readdirSync(os.tmpdir()).some((n) => n.startsWith("xsb-eval-home-")), "the runs leave nothing behind");
+  console.log("ok 8 preset teams and their scenarios");
 } finally {
   xsb("hub", "stop");
 }

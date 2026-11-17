@@ -15,7 +15,7 @@ import { Hub } from "../src/hub.ts";
 import { bridgeServer } from "../src/mcp.ts";
 import { Paths } from "../src/paths.ts";
 import { readRole } from "../src/roles.ts";
-import { teamRoles, teams } from "../src/teams.ts";
+import { catalog, teamRole } from "../src/presets.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const MOCK = fileURLToPath(new URL("./mock-agent.ts", import.meta.url));
@@ -779,12 +779,14 @@ const p = await newSession("p1");
   );
 
   // Every language has the same teams, roles, skills, contracts and tools; only the words differ.
+  const builtin = (language: Language) => [...catalog(language).teams.values()].filter((team) => team.source === "builtin");
+  const roleOf = (language: Language, team: string, role: string) => teamRole(catalog(language), team, role)!;
   const shape = (language: Language) =>
-    teams(language).map((team) => [
+    builtin(language).map((team) => [
       team.id,
       Object.keys(team.assets ?? {}),
       team.roles.map((entry) => {
-        const role = readRole(path.join(teamRoles(team.id, language), entry.role), entry.role);
+        const role = roleOf(language, team.id, entry.role);
         const programs = (entry.requires ?? []).map((program) => program.command);
         return [entry.role, programs, role.servers, role.workspace, role.skills.map((skill) => [skill.name, skill.produces, skill.inputs])];
       }),
@@ -792,8 +794,8 @@ const p = await newSession("p1");
   for (const language of LANGUAGES) assert.deepEqual(shape(language), shape("en"), `the ${language} teams differ from the English ones in more than words`);
   // What a team makes is named: every type one of its skills produces (and the types registered on the way, which no task asks for).
   for (const language of LANGUAGES) {
-    for (const team of teams(language)) {
-      const made = team.roles.flatMap((entry) => readRole(path.join(teamRoles(team.id, language), entry.role), entry.role).skills.flatMap((skill) => skill.produces ?? []));
+    for (const team of builtin(language)) {
+      const made = team.roles.flatMap((entry) => roleOf(language, team.id, entry.role).skills.flatMap((skill) => skill.produces ?? []));
       const unnamed = made.filter((type) => !team.assets?.[type]);
       assert.deepEqual(unnamed, [], `${language}/${team.id}: asset types without a name`);
     }
@@ -1056,6 +1058,82 @@ const p = await newSession("p1");
   await idle("b");
   await idle("a");
   console.log("ok 28 work sessions and what a session is given");
+}
+
+// 29. Preset teams of the user's: ~/.xsb/presets, organised as xsb's own. A team may extend another and hold only
+// what differs; what is wrong is said, and the rest stays usable; edits apply without a restart.
+{
+  const root = path.join(process.env.XSB_HOME!, "presets");
+  const write = (file: string, text: string) => {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), text);
+  };
+  const json = (value: unknown) => JSON.stringify(value);
+  // A team in English only: the project works in Chinese by now, and uses it all the same.
+  write("en/solo/team.json", json({ title: "Solo", description: "one poet", roles: [{ role: "poet", name: "Poet" }], assets: { poem: "Poem" } }));
+  write("en/solo/roles/poet/role.json", json({ description: "writes poems", avatar: "role" }));
+  write("en/solo/roles/poet/avatar.png", "PNG");
+  write("en/solo/roles/poet/instructions.md", "POET-RULES");
+  write("en/solo/roles/poet/skills/poem/SKILL.md", "---\ndescription: write a poem\nproduces: poem\ninputs: theme\n---\nPOEM-PROCEDURE");
+  // One that takes a builtin id, two that go round in a circle, one whose base is missing.
+  write("en/software/team.json", json({ title: "Mine", roles: [] }));
+  write("en/loop-a/team.json", json({ title: "A", extends: "loop-b", roles: [] }));
+  write("en/loop-b/team.json", json({ title: "B", extends: "loop-a", roles: [] }));
+  write("en/orphan/team.json", json({ title: "Orphan", extends: "nowhere", roles: [] }));
+  // One that builds on software and changes only the reviewer.
+  write("en/strict/team.json", json({ title: "Strict", extends: "software", roles: [{ role: "reviewer", name: "Strict Reviewer" }] }));
+  write("en/strict/roles/reviewer/role.json", json({ description: "reviews strictly" }));
+  write("en/strict/roles/reviewer/instructions.md", "STRICT-EXTRA");
+  write("en/strict/roles/reviewer/skills/extra/SKILL.md", "---\ndescription: the extra checks\n---\nEXTRA-CHECKS");
+
+  const list = async () => await conn.request(Teams.list);
+  const { teams: all, problems } = await list();
+  const byId = (id: string) => all.find((t: any) => t.id === id);
+  assert.deepEqual([byId("solo").source, byId("solo").language, byId("software").source], ["user", "en", "builtin"]);
+  assert.ok(problems.some((p: any) => p.code === "team_shadows_builtin" && p.team === "software"));
+  assert.ok(!byId("loop-a") && !byId("orphan"), "teams that cannot be resolved are left out");
+  assert.deepEqual([...new Set(problems.filter((p: any) => /^loop|orphan/.test(p.team)).map((p: any) => p.code))].sort(), ["team_extends_cycle", "team_extends_missing"]);
+  assert.ok(byId("solo").problems.some((p: any) => p.code === "input_unmade" && /"theme"/.test(p.detail)));
+  assert.equal(byId("solo").roles[0].role.avatarFile, path.join(root, "en/solo/roles/poet/avatar.png"));
+  assert.equal(byId("strict").extends, "software");
+
+  // Used, its roles are the project's; the one it lays over its base's is both.
+  await conn.request(Teams.use, { id: "solo" });
+  await conn.request(Agents.put, { agent: { id: "poet1", role: "poet", backend: "mock" } });
+  assert.match((await conn.request(Agents.get, { id: "poet1" })).systemPrompt, /POET-RULES/);
+  await conn.request(Teams.use, { id: "strict" });
+  const strict = (await conn.request(Roles.get, { name: "reviewer" })).role;
+  assert.equal(strict.description, "reviews strictly");
+  assert.match(strict.instructions, /\n\nSTRICT-EXTRA$/);
+  assert.deepEqual(strict.skills.map((s: any) => s.name).sort(), ["extra", "review", "security-checklist"]);
+  assert.equal(strict.preset.title, "Strict Reviewer");
+
+  // Two teams that both have a reviewer, neither built on the other, are not used together.
+  write("en/other/team.json", json({ title: "Other", roles: [{ role: "reviewer", name: "R" }] }));
+  write("en/other/roles/reviewer/role.json", json({}));
+  const refused = await conn.request(Teams.use, { id: "other" }).then(() => undefined, (e) => e);
+  assert.deepEqual([refused.data.reason, refused.data.role], ["team_clash", "reviewer"]);
+
+  // An edit holds at once.
+  write("en/solo/roles/poet/instructions.md", "POET-RULES-2");
+  assert.match((await conn.request(Agents.get, { id: "poet1" })).systemPrompt, /POET-RULES-2/);
+
+  // Made the project's own, a laid-over role is written out as it applies.
+  await conn.request(Roles.put, { role: { name: "reviewer", description: "ours" } });
+  assert.match(fs.readFileSync(path.join(paths.roleDir("reviewer"), "instructions.md"), "utf8"), /STRICT-EXTRA$/);
+  assert.ok(fs.existsSync(path.join(paths.roleDir("reviewer"), "skills", "extra", "SKILL.md")));
+  await conn.request(Roles.remove, { name: "reviewer" });
+
+  // A team of the user's that builds on another is started from the app.
+  const { team: mine } = await conn.request(Teams.derive, { id: "film-mine", base: "film" });
+  assert.deepEqual([mine.source, mine.extends, mine.language], ["user", "film", "zh-CN"]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "zh-CN/film-mine/team.json"), "utf8")).extends, "film");
+  await assert.rejects(conn.request(Teams.derive, { id: "film", base: "software" }), /there is a team "film" already/);
+
+  await conn.request(Agents.remove, { id: "poet1" });
+  for (const id of ["solo", "strict"]) await conn.request(Teams.drop, { id });
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log("ok 29 preset teams of the user's");
 }
 
 await hub.shutdown();

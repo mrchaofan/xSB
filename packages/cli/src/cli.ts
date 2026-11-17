@@ -5,8 +5,9 @@ import readline from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Paths, describeBackends, findProject, globalConfigPath, hubSocket, initProject, readHubInfo, stopHub } from "@xsb/hub";
 import { Agents, Assets, Backends, Roles, Steering, Tasks, Teams, exitCode, explain, isTerminal, text } from "@xsb/protocol";
-import type { AgentInfo, Asset, BackendInfo, McpServerCheck, RoleDetail, Connection, PermissionRequest, PermissionResponse, SteeringOutcome, Task, TeamInfo } from "@xsb/protocol";
+import type { AgentInfo, Asset, BackendInfo, McpServerCheck, RoleDetail, Connection, PermissionRequest, PermissionResponse, SteeringOutcome, Task, TeamInfo, PresetProblem, Language } from "@xsb/protocol";
 import { connectHub } from "./client.ts";
+import { evaluate, scenariosOf } from "./eval.ts";
 import { Printer } from "./printer.ts";
 import { language, t } from "./text.ts";
 
@@ -184,18 +185,53 @@ async function role(args: Args, [action, name]: string[]): Promise<void> {
 }
 
 async function team(args: Args, [action, id]: string[]): Promise<void> {
+  // Scenarios run in projects of their own: no project, and no hub of one, is needed here.
+  if (action === "eval") return evalTeam(args, id);
   const conn = await connectHub(project(args), false);
   try {
     if (action === "use" || action === "drop") {
       await conn.request(Teams[action], { id });
       console.log(action === "use" ? t.teamUsed(id) : t.teamDropped(id));
+    } else if (action === "new") {
+      const { team } = await conn.request<{ team: TeamInfo }>(Teams.derive, { id, base: flag(args, "extends") });
+      console.log(t.teamMade(team.dir));
     } else {
-      const { teams } = await conn.request<{ teams: TeamInfo[] }>(Teams.list);
-      for (const team of teams) console.log(`${team.id.padEnd(12)} ${t.used(team.used)}  ${team.title}: ${team.roles.map((r) => r.name).join(", ")}`);
+      const { teams, problems } = await conn.request<{ teams: TeamInfo[]; problems: PresetProblem[] }>(Teams.list);
+      const say = (p: PresetProblem): string => `  ${t.problem(p.severity)}: ${p.detail} (${p.path})`;
+      if (action === "check") {
+        const found = [...(id ? [] : problems), ...teams.filter((team) => !id || team.id === id).flatMap((team) => team.problems)];
+        console.log(found.length ? found.map(say).join("\n") : t.noProblems);
+        if (found.some((p) => p.severity === "error")) process.exitCode = 1;
+        return;
+      }
+      for (const team of teams) {
+        const about = [t.teamSource(team.source), ...(team.extends ? [t.teamExtends(team.extends)] : [])].join(", ");
+        console.log(`${team.id.padEnd(12)} ${t.used(team.used)}  ${team.title} (${about}): ${team.roles.map((r) => r.name).join(", ")}${team.problems.length ? `  [${team.problems.length}]` : ""}`);
+      }
+      for (const p of problems) console.log(say(p));
     }
   } finally {
     conn.close();
   }
+}
+
+/** `xsb team eval <team>`: how often each scenario of the team passes, run on a real backend (eval.ts). */
+async function evalTeam(args: Args, id: string): Promise<void> {
+  if (!id) throw new Error(t.evalUsage);
+  const lang = (flag(args, "language") ?? language) as Language;
+  const only = flag(args, "only")?.split(",");
+  const scenarios = scenariosOf(lang, id).filter((s) => !only || only.includes(s.id));
+  if (!scenarios.length) return console.log(t.noScenarios(id));
+  const options = { team: id, backend: flag(args, "backend") ?? "claude", runs: Number(flag(args, "runs") ?? 3), language: lang, timeoutMs: Number(flag(args, "timeout") ?? 300) * 1000 };
+  console.log(t.evalStart(scenarios.length, options.runs, options.backend));
+  const outcomes = await evaluate(scenarios, options, ({ scenario, runs }) => {
+    const passed = runs.filter((r) => r.passed).length;
+    console.log(`${scenario.id.padEnd(5)} ${passed}/${runs.length}  ${scenario.title}`);
+    for (const failure of [...new Set(runs.flatMap((r) => r.failures))]) console.log(`      ${failure}`);
+  });
+  const passed = outcomes.reduce((n, o) => n + o.runs.filter((r) => r.passed).length, 0);
+  const total = outcomes.reduce((n, o) => n + o.runs.length, 0);
+  console.log(t.evalTotal(passed, total));
 }
 
 function printAgents(agents: AgentInfo[]): void {

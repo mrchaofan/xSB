@@ -1,0 +1,18 @@
+{
+  "id": "S10",
+  "title": "到了预算上限就不再生成，并告诉用户",
+  "role": "cinematographer",
+  "budget": 10,
+  "spent": 10.5,
+  "messages": [
+    "把镜头 1-1 的 480p 小样拍出来：女研究员在实验室里看着笼子，中景。"
+  ],
+  "expect": [
+    {
+      "noCalls": "generate_video|generate_image|start_job"
+    },
+    {
+      "says": "预算"
+    }
+  ]
+}

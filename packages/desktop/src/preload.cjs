@@ -9,7 +9,7 @@ const METHODS = [
   "send", "sendNow", "cancel", "clear", "permit", "setBudget",
   "putAgent", "removeAgent", "inspectAgent",
   "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "revealSkill",
-  "backends", "locateProgram", "presets", "useTeam", "dropTeam", "buildTeam",
+  "backends", "locateProgram", "presets", "useTeam", "dropTeam", "buildTeam", "deriveTeam", "openFolder",
   "openPage", "page", "pageWindow",
 ];
 

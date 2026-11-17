@@ -136,7 +136,7 @@ export class LiveSession {
       mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), ...this.hub.toolServers(agent, this.clientMcp).map((t) => t.server)],
       ...(backend.caps.systemPrompt ? { systemPrompt: { mode: "append", content: [text(instructions)] } } : {}),
       ...(backend.caps.additionalDirectories
-        ? { additionalDirectories: [paths.shared, paths.assets, ...(role ? [role.dir] : [])] }
+        ? { additionalDirectories: [paths.shared, paths.assets, ...(role ? (role.layers ?? [role.dir]) : [])] }
         : {}),
     };
 

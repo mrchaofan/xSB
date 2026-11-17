@@ -19,7 +19,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserWindow, app, dialog, ipcMain, net, protocol, session, shell, webContents } from "electron";
 import type { WebPreferences } from "electron";
-import { Paths, describeBackends, stopHub } from "@xsb/hub";
+import { Paths, describeBackends, presetRoots, stopHub } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
@@ -257,7 +257,7 @@ async function pickFolder(win: BrowserWindow): Promise<{ path: string; initializ
 // ---- window.xsb -------------------------------------------------------------
 
 /** The calls that are a method of the window's workspace, arguments and all. */
-const WORKSPACE_CALLS = new Set(["send", "sendNow", "cancel", "clear", "permit", "setBudget", "putAgent", "removeAgent", "inspectAgent", "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "useTeam", "dropTeam", "buildTeam"]);
+const WORKSPACE_CALLS = new Set(["send", "sendNow", "cancel", "clear", "permit", "setBudget", "deriveTeam", "putAgent", "removeAgent", "inspectAgent", "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "useTeam", "dropTeam", "buildTeam"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();
@@ -306,6 +306,15 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
   }
   if (!workspace) throw new Error("this window has no workspace open");
   if (method === "presets") return workspace.teams((command) => clis.missing(command));
+  if (method === "openFolder") {
+    // Only folders of preset teams: the user's own preset folder when none is named (made if there is none yet).
+    const roots = presetRoots();
+    const user = roots.find((root) => root.source === "user")!.dir;
+    const dir = typeof args[0] === "string" ? args[0] : user;
+    if (!roots.some((root) => !path.relative(root.dir, dir).startsWith(".."))) throw new Error("not a folder of preset teams");
+    fs.mkdirSync(dir, { recursive: true });
+    return shell.openPath(dir);
+  }
   if (method === "revealSkill") return workspace.skillDir(args[0], args[1]).then((dir) => dir && shell.openPath(dir));
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);
   throw new Error(`unknown method ${method}`);
@@ -385,7 +394,7 @@ void app.whenReady().then(() => {
   for (const served of [protocol, session.fromPartition(PREVIEW_PARTITION).protocol]) {
     served.handle(ARTIFACT_SCHEME, (request) => {
       const file = decodeURIComponent(new URL(request.url).pathname.slice(1));
-      const shown = [...projects.values()].some((w) => w.artifacts.has(file));
+      const shown = [...projects.values()].some((w) => w.artifacts.has(file) || w.avatars.has(file));
       return shown ? serveFile(file, request) : new Response(null, { status: 404 });
     });
   }

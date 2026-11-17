@@ -1,0 +1,27 @@
+{
+  "id": "S4",
+  "title": "Finals are a gate: the user is asked with the total and the expiry",
+  "role": "director",
+  "budget": 150,
+  "spent": 40,
+  "messages": [
+    "The cinematographer just reported: drafts 1-1, 1-2 and 2-1 passed its checks, 480p, and their links expire at 9 tomorrow morning. Take it from here."
+  ],
+  "peers": [
+    "cinematographer"
+  ],
+  "expect": [
+    {
+      "calls": "ask_user"
+    },
+    {
+      "says": "expir"
+    },
+    {
+      "says": "total|about \\d"
+    },
+    {
+      "noCalls": "dispatch_task|start_job"
+    }
+  ]
+}

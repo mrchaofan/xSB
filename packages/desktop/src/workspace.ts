@@ -14,7 +14,7 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import { Agents, Assets, Backends, Boundaries, Connection, SpendExt, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
-import type { AgentInfo, Asset, BackendInfo, Boundary, Spend, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
+import type { AgentInfo, Asset, BackendInfo, Boundary, Spend, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, PresetProblem, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
 import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
@@ -39,6 +39,8 @@ export class Workspace {
   readonly paths: Paths;
   /** Absolute path -> artifact. Only these files are served to the renderer. */
   readonly artifacts = new Map<string, Artifact>();
+  /** Pictures of roles (`avatar` "role") the window may load, by path: only those the hub named. */
+  readonly avatars = new Set<string>();
 
   private conn: Connection;
   private say: (e: unknown) => string;
@@ -118,7 +120,7 @@ export class Workspace {
     conn.onNotification(Agents.removed, (p) => this.onAgentRemoved(p.id));
     conn.onNotification(Assets.update, (p) => this.asset(p.asset));
     conn.onNotification(Roles.update, (p) => {
-      const role = roleView(p.role);
+      const role = this.roleView(p.role);
       this.roles.set(role.name, role);
       this.emit({ role });
     });
@@ -205,7 +207,7 @@ export class Workspace {
     // Roles and tasks are kept as they are answered. The hub answers in order on one connection, so what changes
     // while the rest still loads arrives after the answer, as an event, and is the newer word.
     const [, { teams }, { agents }, , { assets }, { spend }] = await Promise.all([
-      this.conn.request<{ roles: RoleDetail[] }>(Roles.list).then(({ roles }) => (this.roles = new Map(roles.map((r) => [r.name, roleView(r)])))),
+      this.conn.request<{ roles: RoleDetail[] }>(Roles.list).then(({ roles }) => (this.roles = new Map(roles.map((r) => [r.name, this.roleView(r)])))),
       this.conn.request<{ teams: TeamInfo[] }>(Teams.list),
       this.conn.request<{ agents: AgentInfo[] }>(Agents.list),
       this.conn.request<{ tasks: Task[] }>(Tasks.list, {}).then(({ tasks }) => tasks.forEach((task) => this.tasks.set(task.id, task))),
@@ -568,7 +570,7 @@ export class Workspace {
 
   async putRole(view: RoleView): Promise<RoleView> {
     const { role } = await this.conn.request<{ role: RoleDetail }>(Roles.put, { role: roleInput(view) });
-    return roleView(role);
+    return this.roleView(role);
   }
 
   /**
@@ -582,12 +584,27 @@ export class Workspace {
   // ---- preset teams -------------------------------------------------------------
 
   /** The teams the hub ships. `missing` says whether a program a role works with cannot be found on this machine. */
-  async teams(missing: (command: string) => boolean): Promise<Pack[]> {
-    const { teams } = await this.conn.request<{ teams: TeamInfo[] }>(Teams.list);
-    return teams.map((team) => ({
-      ...team,
-      roles: team.roles.map(({ name, role, requires }) => ({ name, role: roleView(role), missing: requires.filter((program) => missing(program.command)) })),
-    }));
+  async teams(missing: (command: string) => boolean): Promise<{ teams: Pack[]; problems: PresetProblem[] }> {
+    const { teams, problems } = await this.conn.request<{ teams: TeamInfo[]; problems: PresetProblem[] }>(Teams.list);
+    return {
+      teams: teams.map((team) => ({
+        ...team,
+        roles: team.roles.map(({ name, role, requires }) => ({ name, role: this.roleView(role), missing: requires.filter((program) => missing(program.command)) })),
+      })),
+      problems,
+    };
+  }
+
+  /** Start a team of the user's that builds on `base`, in their preset folder. */
+  async deriveTeam(id: string, base: string): Promise<string> {
+    const { team } = await this.conn.request<{ team: TeamInfo }>(Teams.derive, { id, base });
+    return team.dir;
+  }
+
+  /** A role as the window shows it; its own picture, if it has one, may be loaded from then on. */
+  private roleView(role: Omit<RoleDetail, "agents">): RoleView {
+    if (role.avatarFile) this.avatars.add(role.avatarFile);
+    return { ...roleView(role), ...(role.avatarFile ? { avatarUrl: `${ARTIFACT_SCHEME}://file/${encodeURIComponent(role.avatarFile)}` } : {}) };
   }
 
   /** Use a team's roles in this workspace, or stop. The roles that come and go arrive as events. */
