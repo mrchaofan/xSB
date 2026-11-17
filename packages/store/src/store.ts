@@ -69,6 +69,51 @@ export class Store {
     return readLines(this.abs(file));
   }
 
+  /**
+   * The records of a log from the last to the first, read in chunks from the end of the file: a reader that wants
+   * only the recent part of a long log (a transcript up to its last boundary) stops early and never reads the rest.
+   * A torn last line is skipped, as `read` does.
+   */
+  *readBackward(file: string, chunkBytes = 64 * 1024): Generator<Record_> {
+    const abs = this.abs(file);
+    if (!fs.existsSync(abs)) return;
+    const fd = fs.openSync(abs, "r");
+    try {
+      let position = fs.fstatSync(fd).size;
+      /** Bytes of the line that the chunks read so far end in the middle of: its start is further back. */
+      let rest = Buffer.alloc(0);
+      const parse = (line: Buffer): Record_ | undefined => {
+        if (line.length === 0) return undefined;
+        try {
+          return JSON.parse(line.toString("utf8"));
+        } catch {
+          return undefined; // torn line
+        }
+      };
+      while (position > 0) {
+        const size = Math.min(chunkBytes, position);
+        position -= size;
+        const chunk = Buffer.alloc(size);
+        fs.readSync(fd, chunk, 0, size, position);
+        const data = Buffer.concat([chunk, rest]);
+        // Lines are cut at byte 0x0a, which never occurs inside a UTF-8 character.
+        let end = data.length;
+        for (;;) {
+          const nl = end > 0 ? data.lastIndexOf(0x0a, end - 1) : -1;
+          if (nl < 0) break;
+          const rec = parse(data.subarray(nl + 1, end));
+          if (rec) yield rec;
+          end = nl;
+        }
+        rest = data.subarray(0, end);
+      }
+      const first = parse(rest);
+      if (first) yield first;
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
   /** Append one record. `sync` forces it to disk before returning. */
   append(file: string, rec: Record_, sync = true): void {
     const abs = this.abs(file);

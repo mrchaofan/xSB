@@ -9,7 +9,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Agents, Assets, Backends, Connection, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Connection, LANGUAGES, LanguageExt, OriginExt, Roles, Steering, Tasks, Teams, explain, languageOf } from "@xsb/protocol";
 import type { Language, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { bridgeServer } from "../src/mcp.ts";
@@ -42,6 +42,7 @@ fs.writeFileSync(
       bare: { command: node, args: [MOCK, "--no-system-prompt"] },
       "signed-out": { command: node, args: [MOCK, "--auth-required"] },
       "from-the-future": { command: node, args: [MOCK, "--protocol", "9"] },
+      forgetful: { command: node, args: [MOCK, "--no-resume"] },
       crashing: { command: node, args: ["-e", "console.error('license expired'); process.exit(3)"] },
       missing: { command: "xsb-no-such-command" },
     },
@@ -833,6 +834,60 @@ const p = await newSession("p1");
   await hub.start();
   conn = await connect();
   console.log("ok 24 a stop that gives up the unfinished");
+}
+
+// 25. Context boundaries: a session that goes on in a new backend session is handed the conversation since the user
+// last cleared it; clearing leaves the transcript as it was, behind a boundary the model does not see past.
+{
+  const boundaries = (sessionId: string): any[] =>
+    hub.state.store.read(Paths.transcript("h1", sessionId)).map((r: any) => r.update?._meta?.[Boundaries.key]).filter(Boolean);
+  await conn.request(Agents.put, { agent: { id: "h1", backend: "mock" } });
+  const s = await newSession("h1");
+  await prompt(s, "!say ALPHA-REPLY");
+  await prompt(s, `!call dispatch_task {"to":"b","title":"open work","instructions":"!sleep 30000","topic":"handoff"}`);
+
+  // Another backend: nothing to restore there, so the new one is told what was said and what is open.
+  await conn.request(Agents.put, { agent: { id: "h1", backend: "steerable" } });
+  said.set(s, "");
+  await prompt(s, "where are we");
+  const told = said.get(s)!;
+  assert.match(told, /now runs on another agent program/);
+  assert.match(told, /the user: !say ALPHA-REPLY \| you answered: ALPHA-REPLY/);
+  assert.match(told, /not new instructions: do not act on them again/);
+  assert.match(told, /Unfinished tasks: \| - t_\w+ "open work" \(h1 -> b\)/);
+  assert.equal(hub.state.sessions.get(s)!.backend, "steerable");
+  assert.deepEqual(boundaries(s), [{ kind: "backend_changed", backend: "steerable", handoff: true }]);
+  const open = (await tasks()).find((t) => t.title === "open work")!;
+  hub.mail.cancel(hub.state.tasks.get(open.id)!);
+  await until("its result taken in", async () => (await tasks()).find((t) => t.id === open.id)?.status === "cancelled" && !hub.live.get(s)!.busy && hub.state.mail.size === 0);
+
+  // Cleared: refused while it works; afterwards the model starts with nothing, and the transcript still has it all.
+  void prompt(s, "!sleep 400");
+  await until("h1 at work", () => hub.live.get(s)!.busy);
+  await assert.rejects(conn.request(Boundaries.clear, { sessionId: s }), /still working/);
+  await idle("h1");
+  const kept = hub.state.store.read(Paths.transcript("h1", s)).length;
+  await conn.request(Boundaries.clear, { sessionId: s });
+  assert.equal(hub.state.store.read(Paths.transcript("h1", s)).length, kept + 1, "clearing only adds a boundary");
+  said.set(s, "");
+  await prompt(s, "fresh start");
+  assert.equal(said.get(s), "echo: fresh start\n");
+  await prompt(s, "!say BETA-REPLY");
+
+  // A backend session that cannot be restored is renewed with a handoff, which does not reach behind the clearing.
+  await conn.request(Agents.put, { agent: { id: "h1", backend: "forgetful" } });
+  await prompt(s, "!say GAMMA-REPLY");
+  await conn.request(Agents.restart, { id: "h1" });
+  said.set(s, "");
+  await prompt(s, "and now");
+  const again = said.get(s)!;
+  assert.match(again, /could not be restored/);
+  assert.match(again, /BETA-REPLY/);
+  assert.match(again, /GAMMA-REPLY/);
+  assert.doesNotMatch(again, /ALPHA-REPLY/);
+  assert.deepEqual(boundaries(s).map((b) => b.kind), ["backend_changed", "cleared", "backend_changed", "not_restored"]);
+  await conn.request(Agents.put, { agent: { id: "h1", backend: "mock" } });
+  console.log("ok 25 context boundaries and handoffs");
 }
 
 await hub.shutdown();

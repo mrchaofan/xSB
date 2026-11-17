@@ -342,6 +342,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     sendNow,
     pathOf: (file) => file.name,   // Electron：文件在磁盘上的路径
     cancel: stop,
+    clear(agentId) { put(agentId, { id: `b${Date.now()}`, kind: "boundary", boundary: { kind: "cleared", handoff: false } }); },
     permit(entryId, allow) {
       const [agentId, entries] = Object.entries(data.transcripts).find(([, list]) => list.some((e) => e.id === entryId));
       const pending = entries.find((e) => e.id === entryId);

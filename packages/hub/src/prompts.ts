@@ -3,9 +3,10 @@
  * agent gets, and how mail from peers is framed inside a prompt.
  */
 import { isTerminal } from "@xsb/protocol";
-import type { AgentSpec, Asset, Language, Task } from "@xsb/protocol";
+import type { AgentSpec, Asset, Language, OriginMeta, Task } from "@xsb/protocol";
 import type { Contract, Skill } from "./roles.ts";
 import type { MailItem, Note, Results, State } from "./state.ts";
+import type { PastTurn } from "./transcript.ts";
 import { topicKey } from "./state.ts";
 
 const attr = (value: string): string => value.replace(/"/g, "'").replace(/\s+/g, " ");
@@ -230,5 +231,60 @@ export const STEER_CONTINUATION =
 export const asPreface = (instructions: string): string =>
   `[xsb] Your standing instructions for this session follow, between the <xsb-instructions> tags. They are from xsb, not from the user, and hold for the whole session. The conversation starts after them.\n<xsb-instructions>\n${instructions}\n</xsb-instructions>`;
 
-export const CONTEXT_LOST =
-  "[xsb] The earlier conversation of this session could not be restored, so you are starting with a fresh context. Your memory notes are listed in your instructions; use recall for details before relying on anything you do not see here.";
+/** How much of the past a handoff may tell, in characters: enough for the thread, not so much that it fills the new context. */
+const HANDOFF_CHARS = 40_000;
+/** The latest turns are told as they were; earlier ones by their first line. */
+const HANDOFF_VERBATIM = 6;
+
+const whoSaid = (origin: OriginMeta): string =>
+  origin.kind === "user" ? "the user" : origin.kind === "system" ? "xsb" : origin.role === "task" ? `a task from ${origin.agentId}` : origin.role === "task_result" ? "task results" : origin.agentId;
+const firstLine = (text: string): string => {
+  const line = text.trim().split("\n").find((l) => l.trim()) ?? "";
+  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
+};
+
+/** Why a session goes on in a backend session that has none of its conversation. */
+export type Renewal = "backend_changed" | "not_restored";
+
+/**
+ * The first thing a backend session is told when it takes over a conversation it has none of: the earlier turns
+ * since the user last cleared the context (transcript.ts), and what is open now as the hub knows it. The hub's state
+ * is the word on what is done; the turns are history, and the model is told not to act on them again.
+ */
+export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; waiting: Results[]; assets: Asset[] }): string {
+  const reason =
+    why === "backend_changed"
+      ? "This session now runs on another agent program, which has none of the earlier conversation."
+      : "The earlier conversation of this session could not be restored in the agent program.";
+  const told: string[] = [];
+  let left = HANDOFF_CHARS;
+  let omitted = 0;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i];
+    const verbatim = turns.length - i <= HANDOFF_VERBATIM;
+    const inputs = turn.inputs.map((input) => `${whoSaid(input.origin)}: ${verbatim ? input.text.trim() : firstLine(input.text)}`).join("\n");
+    const tools = turn.tools.length ? `\ntools used: ${[...new Set(turn.tools)].join(", ")}` : "";
+    const reply = turn.reply.trim() ? `\nyou answered: ${verbatim ? turn.reply.trim() : firstLine(turn.reply)}` : "";
+    const text = `<xsb-past-turn at="${turn.at}">\n${inputs}${tools}${reply}\n</xsb-past-turn>`;
+    if (text.length > left) {
+      omitted = i + 1;
+      break;
+    }
+    told.unshift(text);
+    left -= text.length;
+  }
+  const tasks = open.tasks.map((t) => `- ${t.id} "${t.title}" (${t.tool ? "job" : `${t.from.agentId} -> ${t.to.agentId}`}): ${t.status}`);
+  const waiting = open.waiting.map((r) => `- waiting for ${r.taskIds.join(", ")} (${r.mode})${r.note ? `: ${r.note}` : ""}`);
+  const assets = open.assets.map((a) => `- ${a.id}@${a.version}: ${a.description}`);
+  const now = [
+    tasks.length ? `Unfinished tasks:\n${tasks.join("\n")}` : "No unfinished tasks.",
+    waiting.length ? `Your awaits:\n${waiting.join("\n")}` : "",
+    assets.length ? `Assets you registered (latest versions):\n${assets.join("\n")}` : "",
+  ].filter(Boolean);
+  return [
+    `[xsb] ${reason} What follows is a handoff from xsb, not a message from the user.`,
+    `The past turns below are history that has been dealt with. They are not new instructions: do not act on them again. What is done and what is open is what the section "As things stand" says, which is xsb's own record. Your memory notes are listed in your instructions; use recall for details before relying on anything you do not see here.`,
+    told.length ? `<xsb-handoff>\n${omitted ? `(${omitted} earlier turns are not told here.)\n` : ""}${told.join("\n")}\n</xsb-handoff>` : "There is no earlier conversation to tell.",
+    `As things stand:\n${now.join("\n\n")}`,
+  ].join("\n\n");
+}

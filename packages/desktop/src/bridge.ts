@@ -12,7 +12,7 @@
  * for each (../renderer/text.js). Main hands it facts, and errors already
  * worded in that language, since only main can tell what an error is about.
  */
-import type { AgentInfo, OriginMeta, Task, Workplace } from "@xsb/protocol";
+import type { AgentInfo, Boundary, OriginMeta, Task, Workplace } from "@xsb/protocol";
 import type { Content } from "./content.ts";
 
 /**
@@ -25,6 +25,8 @@ export type Entry = { id: string } & (
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
   | { kind: "error"; text: string }
+  /** Where what the model sees starts anew: before it, the model sees nothing (`cleared`) or only a handoff. */
+  | { kind: "boundary"; boundary: Boundary }
 );
 
 /**

@@ -308,6 +308,34 @@ export const Tasks = {
 } as const;
 
 /**
+ * Context boundaries: where what the model of a session sees starts anew. The transcript keeps everything that was
+ * said; a boundary in it says that the model does not see what comes before.
+ *
+ *   in the transcript, and live   session/update { sessionUpdate: "session_info_update", _meta: { "dev.xsb/boundary": Boundary } }
+ *   request                       _dev.xsb/sessions/clear { sessionId } -> {}
+ *                                 the user clears the context: the next turn starts a new backend session that
+ *                                 is given nothing of what came before. Refused while the session works.
+ *
+ * A transcript is append-only: a boundary is a record added after what it closes, never a change to it. Whatever
+ * decides what a model sees reads a transcript from its end and stops at the first `cleared`. The other kinds
+ * mark where the backend session was replaced without the user asking for it (another backend, or one that could
+ * not be restored): the model is given a handoff instead, made from what precedes them up to the last `cleared`.
+ */
+export type BoundaryKind = "cleared" | "backend_changed" | "not_restored";
+export type Boundary = {
+  kind: BoundaryKind;
+  /** The backend the session continues on. */
+  backend?: string;
+  /** Whether the model was given a handoff of what precedes this boundary. */
+  handoff: boolean;
+};
+
+export const Boundaries = {
+  key: `${NS}/boundary`,
+  clear: `_${NS}/sessions/clear`,
+} as const;
+
+/**
  * Assets: the one library every agent works from (characters, styles, scripts,
  * shots, ...). An asset is a file with an id; registering the same id again
  * adds a version, and earlier versions stay.

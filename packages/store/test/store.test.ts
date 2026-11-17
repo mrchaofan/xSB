@@ -79,5 +79,22 @@ for (const at of ["after-begin", "after-op-0", "after-op-1", "after-op-2"]) {
   assert.deepEqual(strip(reopened.read("sub/c.jsonl")), [{ n: 3 }]);
 }
 
+// Reading backward yields the same records last first, whatever the chunk size cuts through (lines, characters of
+// several bytes), skips a torn last line, and stops reading where the reader stops.
+{
+  const store = new Store(path.join(dir, "backward"));
+  const recs = Array.from({ length: 50 }, (_, n) => ({ n, text: "长生".repeat(n % 7) }));
+  for (const rec of recs) store.append("t.jsonl", rec, false);
+  fs.appendFileSync(path.join(dir, "backward", "t.jsonl"), '{"torn":');
+  for (const chunk of [1, 3, 7, 64, 1 << 16]) assert.deepEqual([...store.readBackward("t.jsonl", chunk)], recs.slice().reverse(), `chunk ${chunk}`);
+  const seen: number[] = [];
+  for (const rec of store.readBackward("t.jsonl", 16)) {
+    seen.push(rec.n);
+    if (rec.n === 47) break;
+  }
+  assert.deepEqual(seen, [49, 48, 47]);
+  assert.deepEqual([...store.readBackward("none.jsonl")], []);
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log("store: ok");
