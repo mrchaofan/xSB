@@ -8,6 +8,7 @@ import type { Contract, Skill } from "./roles.ts";
 import type { MailItem, Note, Results, State } from "./state.ts";
 import type { PastTurn } from "./transcript.ts";
 import { topicKey } from "./state.ts";
+import { lineDiff } from "./util.ts";
 
 const attr = (value: string): string => value.replace(/"/g, "'").replace(/\s+/g, " ");
 
@@ -137,10 +138,24 @@ Your working directory is ${agent.workspace}. Work in progress stays there.${sha
 ${memoryDigest(state, agent.id)}`;
 }
 
-function memoryHint(state: State, agentId: string, topic: string | undefined): string {
+/** The agent's note on a topic, unless the session was given that very version of it already. */
+function memoryHint(state: State, agentId: string, topic: string | undefined, given: Given | undefined, gives: Gives): string {
   const note: Note | undefined = topic ? state.notes.get(agentId)?.get(topicKey(topic)) : undefined;
-  return note ? `\nYour own note on this topic:\n<xsb-memory topic="${attr(note.topic)}">\n${note.content}\n</xsb-memory>` : "";
+  if (!note) return "";
+  const key = topicKey(note.topic);
+  if (given?.notes.get(key) === note.updatedAt) return "";
+  gives.notes.push({ key, updatedAt: note.updatedAt });
+  return `\nYour own note on this topic:\n<xsb-memory topic="${attr(note.topic)}">\n${note.content}\n</xsb-memory>`;
 }
+
+/** What a session's model was given in full so far (LiveSession.given). */
+type Given = { assets: Map<string, { version: number; taskId?: string }>; notes: Map<string, string> };
+
+/** What one prompt gives in full: the session takes note of it once the turn begins (LiveSession.take). */
+export type Gives = { assets: { id: string; version: number; taskId?: string }[]; notes: { key: string; updatedAt: string }[] };
+
+/** How much of a result that was a task's input is told with the task that builds on it; the rest is a get_task away. */
+const PREREQUISITE_CHARS = 1500;
 
 /** An asset as a model sees it. `text` is its content, when it is small enough to show. */
 export function renderAsset(asset: Asset, text?: string): string {
@@ -148,7 +163,7 @@ export function renderAsset(asset: Asset, text?: string): string {
   return `${head}\n${asset.description}${text === undefined ? "" : `\n---\n${text}`}\n</xsb-asset>`;
 }
 
-function resultBlock(state: State, task: Task): string {
+function resultBlock(state: State, task: Task, short = false): string {
   const by = task.tool ? `${task.tool.server}/${task.tool.name}` : task.to.agentId;
   const head = `task-id="${task.id}" by="${attr(by)}" topic="${attr(task.topic)}" title="${attr(task.title)}" status="${task.status}"`;
   if (!isTerminal(task.status)) return `<xsb-task-result ${head} />`;
@@ -159,37 +174,66 @@ function resultBlock(state: State, task: Task): string {
     task.produces && !assets.some((a) => a.type === task.produces)
       ? `\nNo "${attr(task.produces)}" asset was registered, although the task had to produce one.`
       : "";
-  return `<xsb-task-result ${head}>\n${task.result ?? ""}${registered}${missing}\n</xsb-task-result>`;
+  const result = task.result ?? "";
+  const told = short && result.length > PREREQUISITE_CHARS ? `${result.slice(0, PREREQUISITE_CHARS)}…\n(The result goes on; get_task ${task.id} has all of it.)` : result;
+  return `<xsb-task-result ${head}>\n${told}${registered}${missing}\n</xsb-task-result>`;
 }
 
 /** What the hub adds to a task beyond the dispatcher's words. */
 export type TaskContext = {
-  /** The assets the task works from, with the text of those small enough to show. */
-  inputs: { asset: Asset; text?: string }[];
+  /**
+   * The assets the task works from, with the text of those small enough to show; and of a text, the one of the
+   * version the session was given before, when that was another (`before`).
+   */
+  inputs: { asset: Asset; text?: string; before?: { version: number; text?: string } }[];
   /** The assignee's own procedure for the asset type the task has to produce. */
   skill?: Skill & { body: string };
 };
 
-/** The prompt text a mail item becomes for its recipient. `context` is given for a task. */
-export function renderMail(state: State, item: MailItem, context?: TaskContext): string {
+/**
+ * An input of a task as the session is to be given it: in full the first time; by reference when the session was
+ * given this very version before; with what changed when it was given another version.
+ */
+function renderInput(input: TaskContext["inputs"][number], given: Given | undefined, gives: Gives["assets"], taskId: string): string {
+  const { asset, text, before } = input;
+  const had = given?.assets.get(asset.id);
+  if (text !== undefined && had?.version === asset.version) {
+    return `${renderAsset(asset)}\n(Its text is the version you were given${had.taskId ? ` with task ${had.taskId}` : ""} earlier in this conversation, unchanged: it is not repeated here.)`;
+  }
+  if (text !== undefined) gives.push({ id: asset.id, version: asset.version, taskId });
+  const diff = text !== undefined && before?.text !== undefined ? lineDiff(before.text, text) : undefined;
+  const changes = diff ? `\nWhat changed since version ${before!.version}, which you were given before:\n<xsb-changes asset="${attr(asset.id)}">\n${diff}\n</xsb-changes>` : "";
+  return `${changes}${changes ? "\n" : ""}${renderAsset(asset, text)}`;
+}
+
+/**
+ * The prompt text a mail item becomes for its recipient, and what it gives in full (assets, notes): the session
+ * notes those once the turn begins, and is not given them again (`given`). `context` is given for a task.
+ */
+export function renderMail(state: State, item: MailItem, context?: TaskContext, given?: Given): { text: string; gives: Gives } {
+  const gives: Gives = { assets: [], notes: [] };
+  const hint = (topic: string | undefined): string => memoryHint(state, item.to.agentId, topic, given, gives);
+  return { text: mailText(state, item, context, given, gives, hint), gives };
+}
+
+function mailText(state: State, item: MailItem, context: TaskContext | undefined, given: Given | undefined, gives: Gives, hint: (topic: string | undefined) => string): string {
   const from = item.from.kind === "agent" ? item.from.agentId : item.from.kind === "system" ? "xsb" : "user";
-  const to = item.to.agentId;
   switch (item.kind) {
     case "message": {
       const topic = item.topic ? ` topic="${attr(item.topic)}"` : "";
-      return `<xsb-message from="${from}"${topic} id="${item.id}">\n${item.content ?? ""}\n</xsb-message>${memoryHint(state, to, item.topic)}`;
+      return `<xsb-message from="${from}"${topic} id="${item.id}">\n${item.content ?? ""}\n</xsb-message>${hint(item.topic)}`;
     }
     case "task": {
       const task = state.tasks.get(item.taskId!)!;
       const deps = task.after
         .map((id) => state.tasks.get(id))
         .filter((t): t is Task => !!t)
-        .map((t) => resultBlock(state, t));
+        .map((t) => resultBlock(state, t, true));
       const prerequisites = deps.length
         ? `\nThis task was held until the following tasks finished. Their results are your input; if one of them failed or is not sufficient, say so in your result instead of guessing.\n${deps.join("\n")}`
         : "";
       const inputs = context?.inputs.length
-        ? `\nThis task works from the following assets. They are the reference: keep to them, and do not redefine what they define.\n${context.inputs.map((i) => renderAsset(i.asset, i.text)).join("\n")}`
+        ? `\nThis task works from the following assets. They are the reference: keep to them, and do not redefine what they define.\n${context.inputs.map((i) => renderInput(i, given, gives.assets, task.id)).join("\n")}`
         : "";
       const produces = task.produces
         ? `\nThis task has to produce a "${attr(task.produces)}" asset. Register it with put_asset before you end your turn and name its id in your result.`
@@ -197,7 +241,7 @@ export function renderMail(state: State, item: MailItem, context?: TaskContext):
       const skill = context?.skill
         ? `\nYour skill for this (files it refers to are in ${context.skill.dir}):\n<xsb-skill name="${attr(context.skill.name)}">\n${context.skill.body.trim()}\n</xsb-skill>`
         : "";
-      return `<xsb-task from="${from}" task-id="${task.id}" topic="${attr(task.topic)}" title="${attr(task.title)}">\n${task.instructions}\n</xsb-task>${prerequisites}${inputs}${produces}${skill}${memoryHint(state, to, task.topic)}`;
+      return `<xsb-task from="${from}" task-id="${task.id}" topic="${attr(task.topic)}" title="${attr(task.title)}">\n${task.instructions}\n</xsb-task>${prerequisites}${inputs}${produces}${skill}${hint(task.topic)}`;
     }
     case "results": {
       // Results that were awaited for a task: the turn they start is the one that ends it. (A task that ends
@@ -206,7 +250,7 @@ export function renderMail(state: State, item: MailItem, context?: TaskContext):
       const resumes = task
         ? `\nYou awaited these for the task "${attr(task.title)}" (${task.id}) from ${task.from.agentId}, which is still open. Finish it now: the final message of this turn is returned as its result${task.produces ? `, and a "${attr(task.produces)}" asset has to be registered before the turn ends` : ""}. If it needs more jobs or tasks first, await them again.`
         : "";
-      return renderResults(state, item.results!) + resumes + memoryHint(state, to, item.topic);
+      return renderResults(state, item.results!) + resumes + hint(item.topic);
     }
   }
 }
@@ -248,7 +292,7 @@ const firstLine = (text: string): string => {
 };
 
 /** Why a session goes on in a backend session that has none of its conversation. */
-export type Renewal = "backend_changed" | "not_restored";
+export type Renewal = "backend_changed" | "not_restored" | "renewed";
 
 /**
  * The first thing a backend session is told when it takes over a conversation it has none of: the earlier turns
@@ -259,16 +303,20 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
   const reason =
     why === "backend_changed"
       ? "This session now runs on another agent program, which has none of the earlier conversation."
-      : "The earlier conversation of this session could not be restored in the agent program.";
+      : why === "renewed"
+        ? "This session takes over the work of this topic from an earlier session of yours, which had grown long. You have none of that conversation but this handoff."
+        : "The earlier conversation of this session could not be restored in the agent program.";
   const told: string[] = [];
   let left = HANDOFF_CHARS;
   let omitted = 0;
   for (let i = turns.length - 1; i >= 0; i--) {
     const turn = turns[i];
     const verbatim = turns.length - i <= HANDOFF_VERBATIM;
-    const inputs = turn.inputs.map((input) => `${whoSaid(input.origin)}: ${verbatim ? input.text.trim() : firstLine(input.text)}`).join("\n");
+    // What was said is set off by an indent, so that it reads as quoted history, not as the handoff's own words.
+    const quote = (text: string): string => (verbatim ? text.trim() : firstLine(text)).split("\n").map((line) => `  ${line}`).join("\n");
+    const inputs = turn.inputs.map((input) => `${whoSaid(input.origin)}:\n${quote(input.text)}`).join("\n");
     const tools = turn.tools.length ? `\ntools used: ${[...new Set(turn.tools)].join(", ")}` : "";
-    const reply = turn.reply.trim() ? `\nyou answered: ${verbatim ? turn.reply.trim() : firstLine(turn.reply)}` : "";
+    const reply = turn.reply.trim() ? `\nyou answered:\n${quote(turn.reply)}` : "";
     const text = `<xsb-past-turn at="${turn.at}">\n${inputs}${tools}${reply}\n</xsb-past-turn>`;
     if (text.length > left) {
       omitted = i + 1;

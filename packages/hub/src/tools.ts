@@ -182,7 +182,7 @@ export const TOOLS: Tool[] = [
       const topic: string | undefined = args.topic?.trim() || undefined;
       const steer = args.interject === true;
       const note = continuityNote(ctx, topic, to);
-      const delivery = !ctx.hub.mainSession(to).busy ? "delivered" : steer ? "interjected" : "queued behind the peer's current work";
+      const delivery = !(ctx.hub.findWorkSession(to, topic) ?? ctx.hub.mainSession(to)).busy ? "delivered" : steer ? "interjected" : "queued behind the peer's current work";
       const item = ctx.hub.mail.send(ctx.session, to, content, topic, steer);
       return json({ message_id: item.id, delivery, ...(note ? { note } : {}) });
     },

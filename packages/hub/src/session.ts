@@ -25,7 +25,7 @@ import type { Hub } from "./hub.ts";
 import { bridgeServer } from "./mcp.ts";
 import { Paths } from "./paths.ts";
 import { asPreface, handoff, resumeNote } from "./prompts.ts";
-import type { Renewal } from "./prompts.ts";
+import type { Gives, Renewal } from "./prompts.ts";
 import { turnsSinceCleared } from "./transcript.ts";
 import type { MailItem, SessionRec } from "./state.ts";
 import { ops } from "./state.ts";
@@ -35,6 +35,8 @@ import { deferred, newId, now } from "./util.ts";
 export type TurnRequest = {
   origin: OriginMeta;
   prompt: ContentBlock[];
+  /** What the prompt gives in full (prompts.ts, `renderMail`). */
+  gives?: Gives;
   /** The mail this turn delivers, if it came from the mailbox. */
   item?: MailItem;
   /** The client that sent it. It is not sent its own message back unless it asked to be (`Client.echo`). */
@@ -85,6 +87,14 @@ export class LiveSession {
   private prefaces: string[] = [];
   /** What this session was last told of the project's spending: it is told again when that changes. */
   private toldSpend?: string;
+  /**
+   * What the model of this session has been given in full, so that it is not given the same again: asset id ->
+   * the version and the task it came with, and memory notes by topic key -> the version (updatedAt) it saw. Only
+   * for as long as the backend session has it: a boundary empties both, and so does a restart of the hub.
+   */
+  readonly given = { assets: new Map<string, { version: number; taskId?: string }>(), notes: new Map<string, string>() };
+  /** Context in use at the end of the backend's last report, in tokens. */
+  private used?: number;
 
   constructor(hub: Hub, rec: SessionRec) {
     this.hub = hub;
@@ -133,6 +143,8 @@ export class LiveSession {
     const prior = this.rec.backendSessionId;
     // A backend session of another backend is not that backend's to restore: the conversation is handed over instead.
     let renewal: Renewal | undefined = prior && this.rec.backend && this.rec.backend !== agent.backend ? "backend_changed" : undefined;
+    // A work session that continues one that grew too long is handed that one's conversation, once.
+    if (!prior && this.rec.continues && !this.rec.backend) renewal = "renewed";
     if (prior && !renewal) {
       try {
         if (backend.caps.resume) {
@@ -161,24 +173,41 @@ export class LiveSession {
     backend.open(created.sessionId, this);
     this.backend = backend;
     if (renewal) {
+      this.forget();
       // The handoff is made before the boundary is written: what it tells is what precedes the boundary.
       this.prefaces.push(this.handoff(renewal));
       this.boundary({ kind: renewal, backend: agent.backend, handoff: true });
-      this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : "backend session renewed"}, with a handoff of the conversation`);
+      this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : renewal === "renewed" ? `continues ${this.rec.continues}` : "backend session renewed"}, with a handoff of the conversation`);
     }
   }
 
   /** What a new backend session is told of this session's conversation, and of what is open (prompts.ts, `handoff`). */
   private handoff(why: Renewal): string {
     const { state } = this.hub;
-    const tasks = [...state.tasks.values()].filter((t) => !isTerminal(t.status) && (t.from.sessionId === this.id || t.to.sessionId === this.id));
-    const waiting = [...state.gates.values()].filter((g) => g.owner.sessionId === this.id).map((g) => ({ taskIds: g.taskIds, mode: g.mode, note: g.note }));
+    // A renewed work session is told the conversation of the one it continues; the others their own.
+    const source = why === "renewed" ? this.rec.continues! : this.id;
+    const ours = (sessionId: string): boolean => sessionId === source || sessionId === this.id;
+    const tasks = [...state.tasks.values()].filter((t) => !isTerminal(t.status) && (ours(t.from.sessionId) || ours(t.to.sessionId)));
+    const waiting = [...state.gates.values()].filter((g) => ours(g.owner.sessionId)).map((g) => ({ taskIds: g.taskIds, mode: g.mode, note: g.note }));
     const assets = [...state.assets.values()]
       .map((versions) => versions.at(-1)!)
       .filter((a) => a.by === this.agentId)
       .sort((x, y) => y.createdAt.localeCompare(x.createdAt))
       .slice(0, HANDOFF_ASSETS);
-    return handoff(why, turnsSinceCleared(state.store, this.agentId, this.id), { tasks, waiting, assets });
+    return handoff(why, turnsSinceCleared(state.store, this.agentId, source), { tasks, waiting, assets });
+  }
+
+  /** Note that the model now has what a prompt gave it in full. */
+  take(gives: Gives | undefined): void {
+    for (const a of gives?.assets ?? []) this.given.assets.set(a.id, { version: a.version, taskId: a.taskId });
+    for (const n of gives?.notes ?? []) this.given.notes.set(n.key, n.updatedAt);
+  }
+
+  /** The model starts anew: it has nothing it was given before. */
+  private forget(): void {
+    this.given.assets.clear();
+    this.given.notes.clear();
+    this.used = undefined;
   }
 
   /** Text to put in front of the next prompt of this session, whichever turn that is. */
@@ -198,6 +227,7 @@ export class LiveSession {
   clear(): void {
     if (this.busy) throw failure("session_busy", { agent: this.agentId });
     this.prefaces = [];
+    this.forget();
     this.backend = undefined;
     this.save({ backendSessionId: undefined });
     this.boundary({ kind: "cleared", handoff: false });
@@ -244,6 +274,9 @@ export class LiveSession {
         break;
       case "session_info_update":
         if (typeof update.title === "string" && update.title !== this.rec.title) this.save({ title: update.title });
+        break;
+      case "usage_update":
+        if (typeof (update as any).used === "number") this.used = (update as any).used;
         break;
     }
     this.emit(update);
@@ -315,6 +348,7 @@ export class LiveSession {
       backend = await this.ensureBackend();
       if (!turn.cancelled) {
         turn.started = true;
+        this.take(req.gives);
         const spend = this.hub.spending.line();
         if (spend && spend !== this.toldSpend) this.prefaces.push(spend);
         this.toldSpend = spend;
@@ -328,6 +362,7 @@ export class LiveSession {
     // From here to `pump` nothing awaits: a steer either reached the turn
     // above or finds none and starts its own.
     this.current = undefined;
+    if (this.used !== undefined && this.used !== this.rec.used) this.save({ used: this.used });
     // While the hub stops, nothing is acknowledged: the turn runs again on the next start.
     if (!this.hub.stopping) {
       if (failure) this.hub.log(`${this.agentId}/${this.id}: turn failed: ${errorMessage(failure)}`);

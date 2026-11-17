@@ -91,6 +91,25 @@ async function connect(): Promise<Connection> {
   return conn;
 }
 
+/** What an agent was given, in every session of its own, as its transcripts have it (work goes to work sessions). */
+const received = (agentId: string): { text: string; origin: any }[] =>
+  [...hub.state.sessions.values()]
+    .filter((s) => s.agentId === agentId)
+    .flatMap((s) => hub.state.store.read(Paths.transcript(agentId, s.id)))
+    .map((r: any) => r.update)
+    .filter((u: any) => u?.sessionUpdate === "user_message_chunk")
+    .map((u: any) => ({ text: u.content.text ?? "", origin: u._meta?.[OriginExt.key] }));
+
+/** What an agent said, in every session of its own, as its transcripts have it. */
+const answered = (agentId: string): string =>
+  [...hub.state.sessions.values()]
+    .filter((s) => s.agentId === agentId)
+    .flatMap((s) => hub.state.store.read(Paths.transcript(agentId, s.id)))
+    .map((r: any) => r.update)
+    .filter((u: any) => u?.sessionUpdate === "agent_message_chunk")
+    .map((u: any) => u.content.text)
+    .join("");
+
 async function until<T>(what: string, probe: () => T | Promise<T>, ms = 8000): Promise<NonNullable<T>> {
   const end = Date.now() + ms;
   for (;;) {
@@ -228,7 +247,8 @@ const a = await newSession("a");
   await conn.request("session/resume", { sessionId: bMain, cwd: project, mcpServers: [] });
   const busy = prompt(bMain, "!sleep 5000\n!say B-SLOW");
   await until("b running", () => hub.session(bMain).current?.started);
-  await prompt(a, `!call send_message {"to":"b","content":"stop, plan changed","topic":"scene 3 lighting","interject":true}`);
+  // A topic b has no work session of: the message goes to its main session, where the user keeps it busy.
+  await prompt(a, `!call send_message {"to":"b","content":"stop, plan changed","topic":"plans","interject":true}`);
   assert.match(said.get(a)!, /"delivery": "interjected"/);
   assert.equal((await busy).stopReason, "end_turn");
   const got = inputs.get(bMain)!.find((i) => i.text.includes("plan changed"))!;
@@ -475,7 +495,7 @@ const p = await newSession("p1");
     a,
     call("dispatch_task", { to: "p1", title: "shots", instructions: work.join("\n"), topic: "scene 1", inputs: ["character/lin"], produces: "shot_list" }),
   );
-  const given = await until("task in p1", () => inputs.get(p)?.find((i) => i.text.includes('title="shots"')));
+  const given = await until("task in p1", () => received("p1").find((i) => i.text.includes('title="shots"')));
   assert.match(given.text, /<xsb-asset id="character\/lin" version="1" by="a"[^>]*>\nthe lead\n---\nLIN: red coat/);
   assert.match(given.text, /has to produce a "shot_list" asset/);
   assert.match(given.text, /<xsb-skill name="shots">\n[\s\S]*SHOT-PROCEDURE/);
@@ -518,14 +538,14 @@ const p = await newSession("p1");
     `!await ${JSON.stringify({ note: `\n${then.join("\n")}` })}`,
   ];
   await prompt(a, call("dispatch_task", { to: "p1", title: "render", instructions: take.join("\n"), topic: "scene 1", produces: "shot" }));
-  await until("p1 waiting", () => said.get(p)!.includes("The task you are working on"));
+  await until("p1 waiting", () => answered("p1").includes("The task you are working on"));
   await idle("p1");
   assert.equal((await tasks()).find((t) => t.title === "render")!.status, "running");
   assert.ok(!inputs.get(a)!.some((i) => i.text.includes('title="render"')), "no result while the task waits");
   const rendered = await until("render result", () => inputs.get(a)!.find((i) => i.text.includes('title="render"')));
   assert.match(rendered.text, /status="completed">\n[\s\S]*TAKE-DONE[\s\S]*<xsb-asset id="shot\/s1" version="1" by="p1"/);
   assert.doesNotMatch(rendered.text, /No "shot" asset/);
-  assert.match(inputs.get(p)!.at(-1)!.text, /rendered: dawn[\s\S]*You awaited these for the task "render" \(t_\w+\) from a, which is still open/);
+  assert.ok(received("p1").some((i) => /rendered: dawn[\s\S]*You awaited these for the task "render" \(t_\w+\) from a, which is still open/.test(i.text)));
 
   // Cancelling a task that waits cancels what it waits for: nobody wants that any more.
   const slow = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "dusk", ms: 5000 }, title: "take 2" }), "!await {}"];
@@ -540,14 +560,15 @@ const p = await newSession("p1");
   assert.ok(![...hub.state.gates.values()].some((gate) => gate.taskId === again.id), "cancelled task leaves no join to resume it");
   await until("a told", () => inputs.get(a)!.some((i) => i.text.includes('title="render again"') && i.text.includes('status="cancelled"')));
   await idle("p1");
-  assert.ok(!inputs.get(p)!.some((i) => i.text.includes('title="take 2"')), "p1 is not handed a result nobody wants");
+  assert.ok(!received("p1").some((i) => i.text.includes('title="take 2"')), "p1 is not handed a result nobody wants");
 
   // When the user stops the turn, that is not cancelling the work: the task stays open, what it awaits goes on,
   // and the turn that brings the results ends it. Its dispatcher is told.
   const stoppable = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "noon", ms: 700 }, title: "take 3" }), "!await {}", "!sleep 5000"];
   await prompt(a, call("dispatch_task", { to: "p1", title: "render once more", instructions: stoppable.join("\n"), topic: "scene 1" }));
   const third = await until("take 3 running", async () => (await tasks()).find((t) => t.title === "take 3" && t.status === "running"));
-  conn.notify("session/cancel", { sessionId: p });
+  // The task runs in p1's work session of its topic; that is the turn the user stops.
+  conn.notify("session/cancel", { sessionId: hub.findWorkSession("p1", "scene 1")!.id });
   await until("a told of the stop", () => inputs.get(a)!.some((i) => i.text.includes('The user stopped p1\'s turn on your task "render once more"')));
   const done = await until("take 3 done", async () => (await tasks()).find((t) => t.id === third.id && t.status === "completed"));
   assert.match(done.result!, /rendered: noon/);
@@ -879,7 +900,7 @@ const p = await newSession("p1");
   const twice = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "dusk", ms: 400 }, title: "dusk take" }), call("await_tasks", { task_ids: ["$last"] }), call("await_tasks", { task_ids: ["$last"] })];
   await prompt(p, twice.join("\n"));
   assert.equal([...hub.state.gates.values()].filter((g) => g.owner.sessionId === p).length, 1);
-  await until("delivered once", () => inputs.get(p)!.filter((i) => i.text.includes('title="dusk take"')).length === 1);
+  await until("delivered once", () => (inputs.get(p) ?? []).filter((i) => i.text.includes('title="dusk take"')).length === 1);
   await idle("r9");
   console.log("ok 25 task lifecycle");
 }
@@ -900,7 +921,7 @@ const p = await newSession("p1");
   await prompt(s, "where are we");
   const told = said.get(s)!;
   assert.match(told, /now runs on another agent program/);
-  assert.match(told, /the user: !say ALPHA-REPLY \| you answered: ALPHA-REPLY/);
+  assert.match(told, /the user: \|   !say ALPHA-REPLY \| you answered: \|   ALPHA-REPLY/);
   assert.match(told, /not new instructions: do not act on them again/);
   assert.match(told, /Unfinished tasks: \| - t_\w+ "open work" \(h1 -> b\)/);
   assert.equal(hub.state.sessions.get(s)!.backend, "steerable");
@@ -976,6 +997,65 @@ const p = await newSession("p1");
   await until("q4 done", async () => (await byTitle("q4")).status === "completed");
   await idle("r9");
   console.log("ok 27 spending and jobs at a time");
+}
+
+// 28. Work sessions: a peer's work goes to the agent's session of its topic, not to its main one; one that grew past
+// the limit takes no new work, and the session that continues it is handed its conversation. A session is not given
+// again what it was given already: an unchanged asset is referred to, a changed one comes with what changed.
+{
+  const bInfo = async () => (await conn.request(Agents.list)).agents.find((x: any) => x.id === "b");
+  const sessionOf = (title: string) => hub.state.tasks.get([...hub.state.tasks.values()].find((t) => t.title === title)!.id)!.to.sessionId;
+  const done = (title: string) => until(`${title} done`, async () => (await tasks()).find((t) => t.title === title)?.status === "completed");
+  const send = async (title: string, topic: string, instructions: string, more: object = {}) => {
+    await prompt(a, call("dispatch_task", { to: "b", title, instructions, topic, ...more }));
+    await done(title);
+  };
+  await send("w1", "Story ROOM", "!say W1-DONE");
+  await send("w2", "story room", "!say W2-DONE");
+  await send("w3", "other room", "!say W3-DONE");
+  const main = (await bInfo()).mainSessionId;
+  assert.equal(sessionOf("w1"), sessionOf("w2"), "one topic, one work session");
+  assert.notEqual(sessionOf("w1"), sessionOf("w3"));
+  assert.ok(![sessionOf("w1"), sessionOf("w3")].includes(main), "not the main session");
+  assert.deepEqual((await bInfo()).workSessions.filter((w: any) => /room/.test(w.topic)).map((w: any) => [w.topic, w.retired]), [["story room", false], ["other room", false]]);
+
+  // Grown past the limit: the next work of the topic goes to a new session that continues it, with a handoff.
+  const config = JSON.parse(fs.readFileSync(paths.config, "utf8"));
+  fs.writeFileSync(paths.config, JSON.stringify({ ...config, limits: { sessionTokens: 1000 } }));
+  await send("w4", "story room", "!usage 5000\n!say W4-DONE");
+  await send("w5", "story room", "what do you know");
+  const old = sessionOf("w1");
+  const renewed = sessionOf("w5");
+  assert.notEqual(renewed, old);
+  assert.deepEqual([hub.state.sessions.get(old)!.retired, hub.state.sessions.get(renewed)!.continues], [true, old]);
+  const handed = hub.state.store.read(Paths.transcript("b", renewed)).map((r: any) => r.update).filter((u: any) => u.sessionUpdate === "agent_message_chunk").map((u: any) => u.content.text).join("");
+  assert.match(handed, /takes over the work of this topic from an earlier session of yours/);
+  assert.match(handed, /W1-DONE[^]*W4-DONE/);
+  assert.ok(hub.state.store.read(Paths.transcript("b", renewed)).some((r: any) => r.update._meta?.[Boundaries.key]?.kind === "renewed"));
+  fs.writeFileSync(paths.config, JSON.stringify(config));
+
+  // Given once in full; then by reference; then, changed, with what changed.
+  await prompt(a, call("put_asset", { type: "doc", name: "plan", description: "the plan", content: "LINE A\nLINE B\nLINE D" }));
+  await send("i1", "inputs", "!say I1", { inputs: ["doc/plan"] });
+  await send("i2", "inputs", "!say I2", { inputs: ["doc/plan"] });
+  await prompt(a, call("put_asset", { type: "doc", name: "plan", description: "the plan", content: "LINE A\nLINE C\nLINE D" }));
+  await send("i3", "inputs", "!say I3", { inputs: ["doc/plan"] });
+  const taskText = (title: string) => received("b").find((i) => i.text.includes(`title="${title}"`))!.text;
+  assert.match(taskText("i1"), /---\nLINE A\nLINE B\nLINE D/);
+  assert.match(taskText("i2"), /Its text is the version you were given with task t_\w+ earlier in this conversation, unchanged: it is not repeated here\./);
+  assert.doesNotMatch(taskText("i2"), /LINE B/);
+  assert.match(taskText("i3"), /What changed since version 1, which you were given before:\n<xsb-changes asset="doc\/plan">\n@@ line 2\n\+ LINE C\n- LINE B\n<\/xsb-changes>\n<xsb-asset id="doc\/plan" version="2"[^]*LINE C/);
+
+  // A long result that a task builds on is told in part; the rest is a get_task away.
+  const long = "R".repeat(3000);
+  await prompt(a, call("dispatch_task", { to: "b", title: "long result", instructions: `!say ${long}`, topic: "chain" }));
+  const first = (await tasks()).find((t) => t.title === "long result")!;
+  await prompt(a, call("dispatch_task", { to: "b", title: "builds on it", instructions: "!say OK", topic: "chain", after: [first.id] }));
+  await done("builds on it");
+  assert.match(taskText("builds on it"), new RegExp(`R{1500}…\\n\\(The result goes on; get_task ${first.id} has all of it\\.\\)`));
+  await idle("b");
+  await idle("a");
+  console.log("ok 28 work sessions and what a session is given");
 }
 
 await hub.shutdown();

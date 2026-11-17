@@ -19,6 +19,17 @@ export type SessionRec = {
   main: boolean;
   /** The backend the backend session belongs to: one of another backend cannot be restored in this one. */
   backend?: string;
+  /**
+   * Of a work session: the topic (its key) whose tasks it takes. Work from peers goes to the agent's work session of
+   * its topic, not to its main session, so that one session does not carry every matter of the project.
+   */
+  topic?: string;
+  /** A work session that grew past the limit: the next work of its topic goes to a new one that continues it. */
+  retired?: boolean;
+  /** The work session this one took over from: its first turn is handed that one's conversation. */
+  continues?: string;
+  /** How much of the backend's context window the conversation used at the end of its last turn, in tokens. */
+  used?: number;
   title?: string;
   createdAt: string;
   updatedAt: string;

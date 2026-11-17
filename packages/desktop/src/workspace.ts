@@ -59,6 +59,10 @@ export class Workspace {
   private sessionAgent = new Map<string, string>();
   /** Agent id -> the output entry that is still growing. */
   private growing = new Map<string, Extract<Entry, { kind: "output" }>>();
+  /** Work sessions this client is attached to (their history is replayed into the agent's transcript). */
+  private works = new Set<string>();
+  /** Agent id -> the session its transcript last showed something of: a change of session gets a heading. */
+  private shown = new Map<string, string>();
   /** The user's messages that were sent but are not yet part of a turn, by id: shown, to be replaced by the hub's echo. */
   private pending = new Map<string, Content>();
   /** Agent id -> what it is doing, while it has a turn running, and the tool calls of it that have not ended. */
@@ -242,7 +246,17 @@ export class Workspace {
     this.agents.set(agent.id, agent);
     if (!this.transcripts.has(agent.id)) this.transcripts.set(agent.id, []);
     // A history that cannot be read is said so, where it would have been shown.
-    if (agent.mainSessionId && !this.mains.has(agent.id)) this.session(agent).catch((e) => this.put(agent.id, { id: this.newId(), kind: "error", text: this.why(e) }));
+    const failed = (e: unknown): void => this.put(agent.id, { id: this.newId(), kind: "error", text: this.why(e) });
+    if (agent.mainSessionId && !this.mains.has(agent.id)) this.session(agent).catch(failed);
+    // The agent does its peers' work in work sessions of their own: what happens there shows in its transcript too,
+    // under a heading of the topic. They are attached after the main session, so a history reads main first.
+    for (const work of agent.workSessions ?? []) {
+      if (this.works.has(work.sessionId)) continue;
+      this.works.add(work.sessionId);
+      this.sessionAgent.set(work.sessionId, agent.id);
+      const load = Promise.resolve(this.mains.get(agent.id)).catch(() => undefined).then(() => this.conn.request("session/load", { cwd: agent.workspace, mcpServers: [], sessionId: work.sessionId }));
+      load.catch(failed);
+    }
     if (agent.state === "idle") {
       this.settle(agent.id);
       this.does(agent.id, null);
@@ -263,7 +277,7 @@ export class Workspace {
 
   private onAgentRemoved(id: string): void {
     for (const [sessionId, agentId] of this.sessionAgent) if (agentId === id) this.sessionAgent.delete(sessionId);
-    for (const perAgent of [this.agents, this.transcripts, this.mains, this.growing, this.activities, this.tools]) perAgent.delete(id);
+    for (const perAgent of [this.agents, this.transcripts, this.mains, this.growing, this.activities, this.tools, this.shown]) perAgent.delete(id);
     this.emit({ removedAgent: id });
   }
 
@@ -309,6 +323,19 @@ export class Workspace {
     return `e${++this.seq}`;
   }
 
+  /** When the transcript goes on with another session of the agent than before, say which: a work session's topic, or the main one. */
+  private heading(agentId: string, sessionId: string): void {
+    const agent = this.agents.get(agentId);
+    const prior = this.shown.get(agentId);
+    this.shown.set(agentId, sessionId);
+    if (!agent?.workSessions?.length || prior === sessionId) return;
+    // An agent's history begins in its main session without a heading; a heading marks every change after that.
+    if (prior === undefined && sessionId === agent.mainSessionId) return;
+    this.settle(agentId);
+    const topic = agent.workSessions.find((w) => w.sessionId === sessionId)?.topic;
+    this.put(agentId, { id: this.newId(), kind: "thread", ...(topic ? { topic } : {}) });
+  }
+
   /** The agent's output so far is complete: whatever comes next starts a new entry. */
   private settle(agentId: string): void {
     const entry = this.growing.get(agentId);
@@ -333,6 +360,7 @@ export class Workspace {
   private onUpdate(sessionId: string, update: SessionUpdate): void {
     const agentId = this.sessionAgent.get(sessionId);
     if (!agentId) return;
+    this.heading(agentId, sessionId);
     if (update.sessionUpdate === "agent_thought_chunk") return this.does(agentId, "thinking");
     const boundary = update.sessionUpdate === "session_info_update" ? (update._meta?.[Boundaries.key] as Boundary | undefined) : undefined;
     if (boundary) {
