@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { BrowserWindow, app, dialog, ipcMain, net, protocol, session, shell, webContents } from "electron";
+import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, net, protocol, session, shell, webContents } from "electron";
 import type { WebPreferences } from "electron";
 import { Paths, describeBackends, presetRoots, stopHub } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
@@ -187,6 +187,13 @@ async function createWindow(project?: string): Promise<void> {
     event.preventDefault();
     follow(url);
   });
+  win.webContents.on("context-menu", (_event, params) => {
+    const items: Electron.MenuItemConstructorOptions[] = [];
+    if (params.isEditable) items.push({ role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" });
+    if (params.selectionText || params.isEditable) items.push({ role: "copy" });
+    if (params.isEditable) items.push({ role: "paste" }, { role: "selectAll" });
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: win });
+  });
   // The last window does not close: it hides, with its workspace as it is, until the app is shown again or quits.
   win.on("close", (event) => {
     if (quitting || panels.size - leaving.size > 1) return void leaving.add(id);
@@ -279,8 +286,16 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
   const pages = panels.get(event.sender.id) ?? [...panels.values()].find((p) => p.shownIn(event.sender));
   if (!pages) throw new Error("this window is closing");
   switch (method) {
+    case "copyText":
+      if (typeof args[0] !== "string") throw new Error("text is required");
+      return clipboard.writeText(args[0]);
+    case "openArtifact":
+      if (!workspace) throw new Error("this window has no workspace open");
+      return workspace.openArtifact(args[0], args[1], args[2]);
     case "openPage":
-      return Pages.supported ? pages.open(args[0], { embedded: args[1] === true }) : null;
+      if (Pages.supported) return pages.open(args[0], { embedded: args[1] === true });
+      if (args[1] !== true && /^https?:\/\//i.test(args[0])) return shell.openExternal(args[0]);
+      return null;
     case "page":
       try {
         return pages.call(args[0], args[1], args[2]);

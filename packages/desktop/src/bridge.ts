@@ -39,7 +39,7 @@ export type Entry = { id: string } & (
 export type Activity = { kind: "waiting" | "thinking" | "writing" | "tool"; detail?: string; since: string };
 
 /** A file an agent wrote, as something the renderer can show. `assetType` is set for assets of the library. */
-export type Artifact = { id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string };
+export type Artifact = { id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string; assetId?: string; assetVersion?: number; description?: string };
 
 /**
  * A web page of the side panel (pages.ts). `contentsId` is what `<webview2 web-contents-id>` shows it by.

@@ -25,6 +25,8 @@ const present = (children) => children.filter((c) => c != null && c !== false);
 
 /** 界面用到的几个图标。 */
 export const ICON = {
+  copy: '<svg viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-3h-8v8h3"/></svg>',
+  check: '<svg viewBox="0 0 16 16"><path d="M3 8l3 3 7-7"/></svg>',
   settings: '<svg viewBox="0 0 16 16"><path d="M6 2h4l.5 2 2 .7 1.5 2.6-1.5 1.5.3 2.1-3 1.7L8 12l-1.8.6-3-1.7.3-2.1L2 7.3l1.5-2.6 2-.7z"/><circle cx="8" cy="7.5" r="2"/></svg>',
   appearance: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11"/></svg>',
   code: '<svg viewBox="0 0 16 16"><path d="M5 4L1.5 8 5 12M11 4l3.5 4-3.5 4M9 2L7 14"/></svg>',
@@ -32,6 +34,8 @@ export const ICON = {
   people: '<svg viewBox="0 0 16 16"><circle cx="6" cy="5" r="2.5"/><path d="M1.5 14v-2a4.5 4.5 0 0 1 9 0v2M11 3a2.5 2.5 0 0 1 0 5M12 10a3 3 0 0 1 2.5 3v1"/></svg>',
   grid: '<svg viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>',
   back: '<svg viewBox="0 0 16 16"><path d="M10 3L5 8l5 5"/></svg>',
+  forward: '<svg viewBox="0 0 16 16"><path d="M6 3l5 5-5 5"/></svg>',
+  play: '<svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 5l5 3-5 3z"/></svg>',
 
   plus: '<svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>',

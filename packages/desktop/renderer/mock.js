@@ -336,6 +336,13 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     on(listener) { listeners.add(listener); },
     // 网页由 Electron 的主进程持有，浏览器里没有：标签栏不出现，HTML 制品退回到 iframe 预览
     openPage: async () => null,
+    copyText: (text) => navigator.clipboard.writeText(text),
+    async openArtifact(href) {
+      const decoded = decodeURIComponent(href).replace(/:\d+(?::\d+)?$/, "");
+      const artifact = data.artifacts.find((a) => a.id === decoded || a.url === href || decoded.endsWith(a.path) || decoded.endsWith(a.name));
+      if (!artifact) throw new Error(`File not found: ${href}`);
+      return structuredClone(artifact);
+    },
     async page() {},
 
     // ---------- 对话 ----------

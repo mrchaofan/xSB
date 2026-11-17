@@ -12,9 +12,67 @@ import { t } from "./i18n.js";
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.tagName === "IMG" && !node.getAttribute("src")?.startsWith("data:image/")) node.remove();
 });
+DOMPurify.addHook("beforeSanitizeAttributes", (node) => {
+  // 本地地址不交给浏览器导航；保留给点击处理器，再由主进程解析。
+  if (node.tagName === "A" && /^(file:|xsb-artifact:)/i.test(node.getAttribute("href") ?? "")) {
+    node.setAttribute("data-file-href", node.getAttribute("href"));
+    node.setAttribute("href", "#");
+  }
+});
 
 /** markdown 文本 → 可以放进页面的 HTML。单个换行就是换行，和聊天里打字的习惯一致。 */
 export const markdownHtml = (text) => DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }));
+
+/** 复制源码而非按钮文字或渲染后的排版；失败时在按钮上反馈，允许重试。 */
+function copyButton(text, label, className = "") {
+  const button = h("button", { type: "button", class: `icon-btn copy ${className}`, title: t(label), "aria-label": t(label), html: ICON.copy });
+  let timer;
+  button.onclick = async () => {
+    try {
+      await xsb.copyText(text);
+      button.innerHTML = ICON.check;
+      button.title = t("content.copied");
+    } catch {
+      button.title = t("content.copyFailed");
+    }
+    button.setAttribute("aria-label", button.title);
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      button.innerHTML = ICON.copy;
+      button.title = t(label);
+      button.setAttribute("aria-label", button.title);
+    }, 2000);
+  };
+  return button;
+}
+
+/** 对话和文档共用：链接交给侧栏，代码块有独立复制按钮。 */
+export function markdownView(text, openLink, className = "md") {
+  const el = h("div", { class: className, html: markdownHtml(text) });
+  el.onclick = (event) => {
+    const link = event.target.closest("a");
+    if (!link || !el.contains(link)) return;
+    const href = link.dataset.fileHref ?? link.getAttribute("href");
+    if (!href) return;
+    if (href.startsWith("#")) {
+      event.preventDefault();
+      [...el.querySelectorAll("[id]")].find((node) => node.id === href.slice(1))?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    event.preventDefault();
+    openLink?.(href, el);
+  };
+  el.querySelectorAll("pre > code").forEach((code) => {
+    const pre = code.parentElement;
+    const toolbar = h("div", { class: "code-toolbar" },
+      h("span", {}, [...code.classList].find((c) => c.startsWith("language-"))?.slice(9) ?? ""),
+      copyButton(code.textContent, "content.copyCode"));
+    const wrapper = h("div", { class: "code-block" }, toolbar);
+    pre.replaceWith(wrapper);
+    wrapper.append(pre);
+  });
+  return el;
+}
 
 /** 文本以外的一块：图片显示本身，文件显示名字，不认识的类型显示类型名。 */
 function partNode(block) {
@@ -23,9 +81,15 @@ function partNode(block) {
 }
 
 /** 内容 → 对话里的样子：文本按 markdown 渲染，其余各占一块。 */
-export function contentView(content) {
-  return h("div", { class: "content" }, ...content.map((block) =>
-    (block.type === "text" ? h("div", { class: "md", html: markdownHtml(block.text) }) : partNode(block))));
+export function contentView(content, openLink, { streaming = false } = {}) {
+  const el = h("div", { class: "content" }, ...content.map((block) => {
+    if (block.type === "text") return markdownView(block.text, openLink);
+    if (block.type === "resource_link") return h("button", { type: "button", class: "part chip", title: block.uri, html: ICON.file, onclick: () => openLink?.(block.uri, el) }, block.name);
+    return partNode(block);
+  }));
+  if (!streaming && content.some((block) => block.type === "text")) el.append(h("div", { class: "content-actions" },
+    copyButton(content.map((block) => block.type === "text" ? block.text : block.uri ?? "").filter(Boolean).join("\n\n"), "content.copyMessage")));
+  return el;
 }
 
 const base64 = (file) => new Promise((resolve, reject) => {

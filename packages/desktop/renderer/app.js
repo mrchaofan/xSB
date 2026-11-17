@@ -3,8 +3,9 @@
 // Agent 的创建与编辑在 agent.js，角色与产出总览在 team.js。
 // xsb 是全局对象：Electron 里由 preload 注入，浏览器里直接打开时由 mock.js 提供。
 import { avatarImage } from "./avatars.js";
+import { createArtifactBrowser, artifactNavigation } from "./artifacts.js";
 import { editAgent } from "./agent.js";
-import { contentView, createEditor, markdownHtml } from "./content.js";
+import { contentView, createEditor, markdownView } from "./content.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { clock, t } from "./i18n.js";
 import { onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
@@ -259,7 +260,8 @@ function upsertEntry(agentId, entry) {
 function entryNode(agentId, entry) {
   const base = { class: `entry ${entry.kind}`, "data-id": entry.id };
 
-  if (entry.kind === "output") return h("div", { ...base, "data-streaming": entry.streaming }, contentView(entry.content));
+  const openLink = (href, container) => followContentLink(href, container, agentId);
+  if (entry.kind === "output") return h("div", { ...base, "data-streaming": entry.streaming }, contentView(entry.content, openLink, { streaming: entry.streaming }));
   if (entry.kind === "error") return h("div", base, entry.text);
   // 同一个智能体在不同会话里干活：主对话是用户和它的对话，工作会话是它替别人做某个话题的工作。换了会话就标一行。
   if (entry.kind === "thread") return h("div", base, h("span", {}, entry.topic ? t("entry.thread.work", { topic: entry.topic }) : t("entry.thread.main")));
@@ -276,7 +278,7 @@ function entryNode(agentId, entry) {
       o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId), roleOf(agentOf(o.agentId)?.role)),
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
       o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),
-      h("div", { class: "said" }, contentView(entry.content)),
+      h("div", { class: "said" }, contentView(entry.content, openLink)),
       tag && h("span", { class: "tag" }, tag,
         // 排队中的消息可以不等了：插进正在进行的这一轮。智能体在等批准时不能插话。
         entry.queued && h("button", { class: "link now", title: t("entry.sendnow.title"), onclick: () => xsb.sendNow(agentId, entry.id) }, t("entry.sendnow"))));
@@ -304,9 +306,38 @@ function entryNode(agentId, entry) {
 
 // ---------- 右栏：制品 ----------
 
+async function followContentLink(href, container, agentId, baseFile) {
+  container.querySelector(".content-error")?.remove();
+  try {
+    if (/^https?:\/\//i.test(href)) {
+      await xsb.openPage(href);
+      return;
+    }
+    const artifact = await xsb.openArtifact(href, agentId, baseFile);
+    upsert(state.artifacts, artifact);
+    state.mode = "preview";
+    showArtifact(artifact.id);
+  } catch (error) {
+    container.append(h("div", { class: "content-error", role: "status" }, t("content.openFailed", { error: error.message })));
+  }
+}
+
 function showArtifact(id) {
+  if (state.listing) catalogScroll = $("#artifact-body").scrollTop;
   state.artifactId = id;
   state.listing = false;
+  state.tab = null;
+  revealArtifacts();
+  renderSide();
+  renderArtifact();
+}
+
+let catalogScroll = 0;
+const artifactBrowser = createArtifactBrowser(showArtifact, nameOf, assetName);
+let artifactRender = 0;
+
+function browseArtifacts() {
+  state.listing = true;
   state.tab = null;
   revealArtifacts();
   renderSide();
@@ -329,24 +360,30 @@ function closeEmbedded() {
 }
 
 async function renderArtifact() {
+  const request = ++artifactRender;
   const artifact = state.listing ? null : artifactOf(state.artifactId);
   const caption = (a) => t("artifact.caption", { agent: nameOf(a.agentId), time: clock(a.updatedAt), path: a.path });
   document.querySelectorAll(".chip").forEach((chip) => chip.setAttribute("aria-pressed", String(chip.dataset.artifact === artifact?.id)));
   const body = $("#artifact-body");
   const modes = $("#artifact-modes");
+  const navigation = $("#artifact-navigation");
+  $("#artifact-list").hidden = !artifact;
+  navigation.hidden = !artifact;
+  artifactBrowser.update(state.artifacts, state.artifactId);
   if (!(artifact?.kind === "html" && state.mode === "preview")) closeEmbedded();
 
   if (!artifact) {
     $("#artifact-name").textContent = t("artifact.list.title");
-    $("#artifact-meta").textContent = t("artifact.list.count", { count: state.artifacts.length });
+    $("#artifact-meta").textContent = t("artifact.catalog.count", { count: artifactBrowser.groups().length, files: state.artifacts.length });
     modes.hidden = true;
-    fill(body, h("div", { class: "listing" }, ...state.artifacts.map((a) =>
-      h("button", { class: "row", "aria-pressed": String(a.id === state.artifactId), onclick: () => showArtifact(a.id) },
-        h("span", { html: ICON.file }),
-        h("span", { class: "row-text" }, h("strong", {}, a.name), h("small", {}, caption(a)))))));
-    if (!state.artifacts.length) fill(body, h("div", { class: "empty" }, t("artifact.list.empty")));
+    if (artifactBrowser.el.parentElement !== body) {
+      fill(body, artifactBrowser.el);
+      body.scrollTop = catalogScroll;
+    }
     return;
   }
+
+  fill(navigation, artifactNavigation(artifactBrowser, artifact, showArtifact));
 
   // 文本只有源码，图片和视频只有预览，markdown 和 html 两者都有
   const media = artifact.kind === "image" || artifact.kind === "video";
@@ -362,15 +399,24 @@ async function renderArtifact() {
     // 显示不了网页的 Electron 上，退回到不执行脚本的 iframe
     if (!state.pages) return fill(body, h("iframe", { src: artifact.url, sandbox: "", title: artifact.name }));
     const page = await embed(artifact.url);
-    if (embedded?.url === artifact.url) showWeb(body, page);     // 等待期间可能换了别的
+    if (request === artifactRender && embedded?.url === artifact.url) showWeb(body, page);
     return;
   }
 
-  const text = await (await fetch(artifact.url)).text();
-  if (state.artifactId !== artifact.id || state.listing) return;   // 等待期间换了别的
-  fill(body, preview
-    ? h("article", { class: "doc md", html: markdownHtml(text) })
-    : h("pre", { class: "source" }, ...text.split("\n").map((line) => h("span", {}, line + "\n"))));
+  fill(body, h("div", { class: "catalog-empty", role: "status" }, t("artifact.loading")));
+  try {
+    const response = await fetch(artifact.url);
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const text = await response.text();
+    if (request !== artifactRender) return;
+    fill(body, preview
+      ? markdownView(text, (href, container) => followContentLink(href, container, artifact.agentId, artifact.id), "doc md")
+      : h("pre", { class: "source" }, ...text.split("\n").map((line) => h("span", {}, line + "\n"))));
+  } catch (error) {
+    if (request !== artifactRender) return;
+    fill(body, h("div", { class: "catalog-empty", role: "status" }, t("content.openFailed", { error: error.message }),
+      h("button", { class: "btn", onclick: renderArtifact }, t("artifact.retry"))));
+  }
   body.scrollTop = 0;
 }
 
@@ -403,7 +449,7 @@ $("#toggle-artifact").onclick = () => {
     document.body.classList.toggle("artifact-expanded");
   } else document.body.classList.toggle("no-artifact");
 };
-$("#artifact-list").onclick = () => { state.listing = !state.listing || !state.artifactId; renderArtifact(); };
+$("#artifact-list").onclick = browseArtifacts;
 $("#artifact-modes").onclick = (e) => {
   if (!e.target.dataset.mode) return;
   state.mode = e.target.dataset.mode;
@@ -483,7 +529,10 @@ xsb.on((event) => {
 
 /** 读一次快照并画出整个窗口。打开工作区之后再调用一次。 */
 export async function start() {
-  Object.assign(state, { activities: {} }, await xsb.load(), { open: [], pinned: false, page: null, settings: null, listing: false, tab: null });
+  Object.assign(state, { activities: {} }, await xsb.load(), { open: [], pinned: false, page: null, settings: null, listing: true, tab: null });
+  catalogScroll = 0;
+  $("#artifact-body").scrollTop = 0;
+  artifactBrowser.reset();
   document.body.classList.toggle("no-workspace", !state.workspace);
   document.body.classList.remove("paging", "settings-open");
   $("#ws-name").textContent = document.title = state.workspace?.name ?? t("app.title");
