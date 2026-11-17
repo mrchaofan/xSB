@@ -1203,9 +1203,9 @@ const p = await newSession("p1");
   console.log("ok 31 parallel work");
 }
 
-// 32. One stop is enough, and the transcript says what the model saw: the user's messages that wait for a turn and
-// interjections the backend was not given yet are discarded, and recorded so; an interjection a backend with
-// steering of its own took counts as seen.
+// 32. A stop is Esc: what the hub still holds is discarded and recorded so (the user's messages that wait for a
+// turn); an interjection the backend was not given yet is given now and the turn goes on, until stopped again; an
+// interjection a backend with steering of its own took counts as seen.
 {
   const socket = net.connect(paths.socket("acp"));
   await new Promise((resolve) => socket.once("connect", resolve));
@@ -1226,14 +1226,17 @@ const p = await newSession("p1");
   const running = watching.request("session/prompt", mine(s, "stop-1", "!busy 600\n!say LATE"));
   const waiting = watching.request("session/prompt", mine(s, "stop-2", "!say QUEUED"));
   await until("the turn running", () => hub.session(s).current?.started);
-  assert.equal((await watching.request(Steering.method, mine(s, "stop-3", "!say MID"))).outcome, "injected");
+  assert.equal((await watching.request(Steering.method, mine(s, "stop-3", "!say MID\n!sleep 3000\n!say NEVER"))).outcome, "injected");
   watching.notify("session/cancel", { sessionId: s });
-  assert.deepEqual([await running, await waiting], [{ stopReason: "cancelled" }, { stopReason: "cancelled" }]);
+  assert.deepEqual(await waiting, { stopReason: "cancelled" });
+  await until("the interjection handed over", () => seen.includes("out MID"));
+  watching.notify("session/cancel", { sessionId: s });
+  assert.deepEqual(await running, { stopReason: "cancelled" });
   await idle("a");
-  assert.equal(hub.session(s).busy, false, "nothing runs after the stop");
-  assert.deepEqual(seen, ["in stop-1", "in stop-3", "discarded stop-2: !say QUEUED", "discarded stop-3: !say MID"]);
+  assert.equal(hub.session(s).busy, false, "nothing runs after the second stop");
+  assert.deepEqual(seen, ["in stop-1", "in stop-3", "discarded stop-2: !say QUEUED", "out MID"]);
   const record = hub.state.store.read(Paths.transcript("a", s)).map((r: any) => r.update._meta?.[Discarded.key]?.messageId).filter(Boolean);
-  assert.deepEqual(record, ["stop-2", "stop-3"], "the transcript keeps what was discarded");
+  assert.deepEqual(record, ["stop-2"], "the transcript keeps what was discarded");
 
   // With steering of its own: what it took is seen, nothing is discarded.
   seen.length = 0;
@@ -1245,7 +1248,7 @@ const p = await newSession("p1");
   assert.equal((await turn).stopReason, "cancelled");
   assert.deepEqual(seen, ["in stop-4", "in stop-5"]);
   watching.close();
-  console.log("ok 32 one stop, and what the model did not see is discarded");
+  console.log("ok 32 a stop is Esc: queued messages discarded, interjections handed over");
 }
 
 await hub.shutdown();

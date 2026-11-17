@@ -54,6 +54,7 @@ export type Turn = {
   prompt: ContentBlock[];
   /** The backend has been prompted. */
   started: boolean;
+  /** Stopped before the backend was prompted: it never will be. */
   cancelled: boolean;
   /** Who stopped it: the user (their client) or the dispatcher of the task it works on (`cancel_task`). */
   cancelledBy?: "user" | "dispatcher";
@@ -423,7 +424,7 @@ export class LiveSession {
     // Named before it goes anywhere: if the turn is stopped before the backend is given it, that is what is discarded.
     const steered = { ...origin, messageId: origin.messageId ?? newId("m"), steered: true };
     let how: "injected" | "interrupted" | "idle" = "idle";
-    if (turn && !turn.started) {
+    if (turn && !turn.started && !turn.cancelled) {
       turn.prompt.push(...prompt);
       how = "injected";
     } else if (turn && this.backend) {
@@ -440,25 +441,23 @@ export class LiveSession {
   }
 
   /**
-   * Stop the running turn. `by`: the user, or the dispatcher of the task the turn works on.
+   * Stop, as Esc does in Claude Code and Codex. `by`: the user, or the dispatcher of the task the turn works on.
    *
-   * Input of the turn that the model has not seen is discarded, and shown so: all of it if the backend was not
-   * prompted yet, else what was steered in and not handed over yet (Backend.cancel). The user stops their own
-   * messages that wait for a turn too, so that one stop is enough; mail that waits stays, it is not theirs.
+   * What the hub still holds is discarded, and shown so: a turn that has not reached the backend yet, with what was
+   * steered into it, and, when the user stops, their own messages that wait for a turn (mail that waits stays, it is
+   * not theirs). A turn the backend runs is the backend's to stop (Backend.cancel): messages steered into it that
+   * it has not been given yet are handed over now, and the turn goes on with them.
    */
   cancel(by: "user" | "dispatcher" = "user"): void {
     if (by === "user") this.dropQueued();
     const turn = this.current;
     if (!turn) return;
-    const again = turn.cancelled;
-    turn.cancelled = true;
     turn.cancelledBy = by;
     this.hub.permissions.cancel(this);
-    const unseen = turn.started ? (this.backend?.cancel(this.rec.backendSessionId!) ?? []).map((o) => o.messageId!) : again ? [] : [...turn.shown.keys()];
-    for (const id of unseen) {
-      const input = turn.shown.get(id);
-      if (input) this.discard(id, input.origin, input.content);
-    }
+    if (turn.started) return this.backend?.cancel(this.rec.backendSessionId!);
+    if (turn.cancelled) return;
+    turn.cancelled = true;
+    for (const [id, input] of turn.shown) this.discard(id, input.origin, input.content);
   }
 
   /** Drop the user's messages that wait for a turn: their `session/prompt` ends as cancelled. */

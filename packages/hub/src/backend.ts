@@ -32,7 +32,7 @@ export type BackendCaps = {
 /** A `session/prompt` in flight, as the hub sees it: one turn, however often the backend is re-prompted. */
 type Run = {
   /** Messages to hand over once the interrupted prompt has returned. Until then the model has not seen them. */
-  steers: { prompt: ContentBlock[]; origin: OriginMeta }[];
+  steers: ContentBlock[][];
   cancelled: boolean;
 };
 
@@ -89,7 +89,7 @@ export class Backend {
           });
         if (run.cancelled) return "cancelled";
         if (run.steers.length === 0) return stopReason;
-        prompt = [text(STEER_CONTINUATION), ...run.steers.splice(0).flatMap((s) => s.prompt)];
+        prompt = [text(STEER_CONTINUATION), ...run.steers.splice(0).flat()];
       }
     } finally {
       this.runs.delete(sessionId);
@@ -116,21 +116,21 @@ export class Backend {
       if (answer?.outcome === "injected") return "injected";
       if (this.runs.get(sessionId) !== run || run.cancelled) return "idle";
     }
-    run.steers.push({ prompt, origin });
+    run.steers.push(prompt);
     if (run.steers.length === 1) this.conn.notify("session/cancel", { sessionId });
     return "interrupted";
   }
 
   /**
-   * Stop the running turn; `prompt` then answers "cancelled". Answers the origins of the messages steered in that
-   * the model has not been given: they never will be.
+   * Stop where the backend is, as Esc does in Claude Code and Codex. Messages steered in that it has not been given
+   * yet are not dropped: its prompt is being interrupted already to hand them over, and the turn goes on with them.
+   * Otherwise `prompt` answers "cancelled".
    */
-  cancel(sessionId: string): OriginMeta[] {
+  cancel(sessionId: string): void {
     const run = this.runs.get(sessionId);
-    if (!run) return [];
+    if (!run || run.steers.length) return;
     run.cancelled = true;
     this.conn.notify("session/cancel", { sessionId });
-    return run.steers.splice(0).map((s) => s.origin);
   }
 
   /** Start the backend `backendName` for the agent `name` and shake hands. */
