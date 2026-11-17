@@ -57,6 +57,8 @@ const removed: string[] = [];
 const roleEvents: string[] = [];
 /** Asset versions the hub announced. */
 const assetEvents: string[] = [];
+/** Agents that said they wait for the user (`ask_user`), with their question. */
+const asks: string[] = [];
 
 async function connect(): Promise<Connection> {
   const socket = net.connect(paths.socket("acp"));
@@ -74,6 +76,7 @@ async function connect(): Promise<Connection> {
   conn.onNotification(Roles.update, ({ role }) => roleEvents.push(`${role.name}: ${role.description}`));
   conn.onNotification(Assets.update, ({ asset }) => assetEvents.push(`${asset.id}@${asset.version}`));
   conn.onNotification(Roles.removed, ({ name }) => roleEvents.push(name));
+  conn.onNotification(Agents.asks, ({ agentId, question }) => asks.push(`${agentId}: ${question}`));
   conn.onRequest("session/request_permission", (p) => {
     permissionAsked++;
     return { outcome: { outcome: "selected", optionId: p.options[0].optionId } };
@@ -414,6 +417,10 @@ const p = await newSession("p1");
   assert.match(said.get(p)!, /servers: xsb, gen\n/);
   await prompt(p, call("load_skill", { name: "grading" }));
   assert.match(said.get(p)!, /GRADE-PROCEDURE/);
+  // An agent that waits for the user says so, and the observers hear of it.
+  await prompt(p, call("ask_user", { question: "Which cast?" }));
+  assert.match(said.get(p)!, /End your turn now/);
+  await until("ask announced", () => asks.includes("p1: Which cast?"));
 
   // The team is what the roles of its agents declare: every agent is told who makes what from what.
   assert.match(first, /# The team .* - shot_list: you, from character, script \|/);
@@ -586,6 +593,14 @@ const p = await newSession("p1");
   assert.equal(shown.instructions, "You are p1.");
   assert.match(shown.systemPrompt, /You are "p1"[\s\S]*ROLE-RULES[\s\S]*You are p1\.[\s\S]*- shots: How to break a scene into shots/);
 
+  // A server every agent has gives way to the role's of the same name.
+  process.env.XSB_MCP_SERVERS = JSON.stringify({ gen: { command: "common-gen" } });
+  await conn.request(Agents.restart, { id: "p1" });
+  await until("p1 backend gone", () => !hub.session(p)["backend"]);
+  await prompt(p, "!servers");
+  assert.match(said.get(p)!, /servers: xsb, gen\n$/);
+  delete process.env.XSB_MCP_SERVERS;
+
   // A changed role reaches a running agent once its backend is restarted.
   await prompt(p, "!servers");
   await conn.request(Roles.put, { role: { name: "painter", mcpServers: {} } });
@@ -593,6 +608,14 @@ const p = await newSession("p1");
   await until("p1 backend gone", () => !hub.session(p)["backend"]);
   await prompt(p, "!servers");
   assert.match(said.get(p)!, /servers: xsb\n$/);
+
+  // Servers the client that started the hub gives every agent, whatever its role.
+  process.env.XSB_MCP_SERVERS = JSON.stringify({ browser: { command: "xsb-browser-mcp" } });
+  await conn.request(Agents.restart, { id: "p1" });
+  await until("p1 backend gone", () => !hub.session(p)["backend"]);
+  await prompt(p, "!servers");
+  assert.match(said.get(p)!, /servers: xsb, browser\n$/);
+  delete process.env.XSB_MCP_SERVERS;
 
   await assert.rejects(conn.request(Roles.remove, { name: "painter" }), /in use by p1/);
   await conn.request(Agents.put, { agent: { id: "w1", role: "writer", backend: "mock" } });

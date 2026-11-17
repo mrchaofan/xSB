@@ -1,11 +1,5 @@
 {
   "description": "Designs and runs tests against the acceptance criteria, and delivers an evidence-backed test report with a release verdict",
   "workspace": "project",
-  "mcpServers": {
-    "browser": {
-      "command": "xsb-browser-mcp",
-      "args": []
-    }
-  },
   "avatar": "person-qa"
 }

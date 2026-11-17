@@ -119,6 +119,8 @@ export type Event =
   | { hub: "down" }
   /** Make this page's tab the current one of the side panel. */
   | { revealPage: string }
+  /** Show this agent's conversation: the user clicked a notification of it. */
+  | { showAgent: string }
   /** What the agent is doing now; `null` when its turn is over. */
   | { agentId: string; activity: Activity | null }
   | { agentId: string; entry: Entry }

@@ -12,7 +12,7 @@
  * This file is the model-facing side only: argument checking, and the wording
  * of what a tool answers. What a tool does to mail and tasks is in mailroom.ts.
  */
-import { isTerminal } from "@xsb/protocol";
+import { Agents, isTerminal } from "@xsb/protocol";
 import type { Asset, Task } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
 import { renderAsset, renderResults } from "./prompts.ts";
@@ -361,6 +361,16 @@ export const TOOLS: Tool[] = [
       const skill = skills.find((s) => s.name === need(args, "name"));
       if (!skill) throw new Error(`no skill "${args.name}". Your skills: ${skills.map((s) => s.name).join(", ") || "none"}`);
       return `Files this skill refers to are in ${skill.dir}.\n\n${skillBody(skill).trim()}`;
+    },
+  },
+  {
+    name: "ask_user",
+    description:
+      "Say that you are waiting for the user to decide or confirm something before the work can go on. Put the question, with its options, in your reply to the user as usual; this tool only lets the user know, wherever they are, that you are waiting for them. Call it once, then end your turn.",
+    inputSchema: schema({ question: str("The question in one line, as the user will see it in a notification.") }, ["question"]),
+    run(ctx, args) {
+      ctx.hub.broadcast(Agents.asks, { agentId: ctx.session.agentId, question: need(args, "question") });
+      return "The user has been told that you are waiting for them. End your turn now; their answer comes as a new message.";
     },
   },
   {

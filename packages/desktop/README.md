@@ -14,6 +14,7 @@ npm start -w @xsb/desktop -- <文件夹>      # 直接打开一个工作区
 | [src/preload.cjs](src/preload.cjs) | `window.xsb`：界面与 main 之间唯一的通道 |
 | [src/bridge.ts](src/bridge.ts) | main 与界面之间的契约，只有类型 |
 | [src/pages.ts](src/pages.ts) | 右栏的网页：主进程持有的 WebContents，界面用 `<webview2>` 显示；独立窗口 |
+| [src/notices.ts](src/notices.ts) | 系统通知：工作完成、失败、等用户确认或授权时告诉用户；macOS 与 Windows 的差别 |
 | [src/browser.ts](src/browser.ts) | browser use：Agent 经 MCP 操控右栏的网页，走 CDP（`webContents.debugger`） |
 | [renderer/](renderer) | 界面。打包后在浏览器里直接打开 `dist/renderer/index.html`，会用 `mock.js` 的假数据运行 |
 

@@ -6,4 +6,5 @@
 export { Hub } from "./hub.ts";
 export { hubSocket, readHubInfo, stopHub } from "./daemon.ts";
 export { Paths, findProject } from "./paths.ts";
+export { COMMON_SERVERS_ENV } from "./mcp.ts";
 export { describeBackends, findCommand, globalConfigPath, initProject } from "./config.ts";

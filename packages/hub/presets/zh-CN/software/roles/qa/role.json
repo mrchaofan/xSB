@@ -1,11 +1,5 @@
 {
   "description": "按验收标准设计并执行测试，给出带证据的测试报告与是否可发布的结论",
   "workspace": "project",
-  "mcpServers": {
-    "browser": {
-      "command": "xsb-browser-mcp",
-      "args": []
-    }
-  },
   "avatar": "person-qa"
 }

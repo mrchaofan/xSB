@@ -55,6 +55,15 @@ export type Role = {
   skills: Skill[];
 };
 
+/** Servers in the shape of `.mcp.json` (name -> how to start it), as a backend session is given them. */
+export const mcpServers = (specs: Record<string, McpServerSpec>): McpServer[] =>
+  Object.entries(specs).map(([name, spec]) => ({
+    name,
+    command: spec.command,
+    args: spec.args ?? [],
+    env: Object.entries(spec.env ?? {}).map(([key, value]) => ({ name: key, value })),
+  }));
+
 /** `role.json`. `mcpServers` is in the shape of `.mcp.json`: name -> how to start it. */
 type RoleFile = { avatar?: string; description?: string; backend?: string; workspace?: Workplace; mcpServers?: Record<string, McpServerSpec> };
 
@@ -110,12 +119,7 @@ export function readRole(dir: string, name: string): Role {
     workspace: json.workspace,
     instructions: read(path.join(dir, "instructions.md")),
     servers: json.mcpServers ?? {},
-    mcpServers: Object.entries(json.mcpServers ?? {}).map(([server, spec]) => ({
-      name: server,
-      command: spec.command,
-      args: spec.args ?? [],
-      env: Object.entries(spec.env ?? {}).map(([key, value]) => ({ name: key, value })),
-    })),
+    mcpServers: mcpServers(json.mcpServers ?? {}),
     skills,
   };
 }
