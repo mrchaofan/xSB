@@ -43,7 +43,7 @@ const TOOLS = [
   {
     name: "browser_navigate",
     description:
-      "Open a web page in the browser of the app's side panel, where the user watches and can take over. The first call opens your tab; later calls load in the same tab. Sign-ins made in this browser are kept between sessions. Returns a snapshot of the page (see browser_snapshot).",
+      "Open a web page in the browser of the xsb app's side panel, where the user watches and can take over. This is the browser the user means by \"the browser\", \"the built-in browser\", \"the side-panel browser\" or \"IAB\" (in Chinese 浏览器, 内置浏览器, 右栏浏览器); use another browser or a computer-use tool only when the user names an application of their own computer. The first call opens your tab; later calls load in the same tab. Sign-ins made in this browser are kept between sessions. Returns a snapshot of the page (see browser_snapshot).",
     inputSchema: { type: "object", required: ["url"], properties: { url: str("The address to load: a web page (http or https; without a scheme https:// is assumed, http:// for localhost). A local file (file:// or an absolute path) is also accepted.") } },
   },
   {
@@ -220,7 +220,7 @@ export function serveBrowser(socketPath: string, pagesFor: (cwd: string) => Page
     void conn.closed.then(() => tab?.driven.release());
 
     conn.onNotification(ATTACH, (p) => (cwd = p.cwd));
-    conn.onRequest("initialize", (p) => ({ protocolVersion: p.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "xsb-browser-mcp", version: "0.1.0" } }));
+    conn.onRequest("initialize", (p) => ({ protocolVersion: p.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "xsb-browser-mcp", version: "0.1.0" }, instructions: "The browser in the side panel of the xsb app, shared with the user. Requests for \"the browser\", \"the built-in browser\" or \"IAB\" mean this one." }));
     conn.onRequest("ping", () => ({}));
     conn.onRequest("tools/list", () => ({ tools: TOOLS }));
     conn.onRequest("tools/call", async (p) => {
@@ -234,7 +234,7 @@ export function serveBrowser(socketPath: string, pagesFor: (cwd: string) => Page
         if (p.name === "browser_navigate") {
           if (!tab || tab.contents.isDestroyed()) {
             const pages = pagesFor(cwd);
-            if (!pages) throw new Error("the xsb app has no window open for this workspace, so there is no browser to use");
+            if (!pages) throw new Error("the xsb app has no window open for this workspace, so there is no side-panel browser to use. Tell the user to open the workspace in the xsb app; do not switch to another browser unless they ask for one.");
             const { id } = pages.open("about:blank", { agent: true });
             const contents = pages.contents(id)!;
             tab = { pages, id, contents, driven: new Driven(contents) };

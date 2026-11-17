@@ -22,10 +22,11 @@ import { Assets } from "./assets.ts";
 import { BackendPool } from "./backends.ts";
 import { DEFAULT_BACKEND, loadProjectConfig, projectLanguage } from "./config.ts";
 import { Mailroom } from "./mailroom.ts";
-import { serveMcp } from "./mcp.ts";
+import { commonServers, serveMcp } from "./mcp.ts";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
 import { systemPrompt } from "./prompts.ts";
+import type { ToolOrigin } from "./prompts.ts";
 import { loadRole } from "./roles.ts";
 import type { Contract, Role } from "./roles.ts";
 import { LiveSession } from "./session.ts";
@@ -192,11 +193,27 @@ export class Hub {
     });
   }
 
-  /** The role's instructions, then the agent's own. */
-  systemPromptFor(agent: AgentSpec): string {
+  /**
+   * The MCP servers a session of the agent gets besides the hub's own: those every agent has (what the client that
+   * started the hub gives them, such as the desktop app's browser), the role's (one of the same name takes the place
+   * of a common one), and those the client that created the session asked for. Each with where it comes from.
+   */
+  toolServers(agent: AgentSpec, clientMcp: McpServer[] = []): { server: McpServer; from: ToolOrigin }[] {
+    const own = this.role(agent)?.mcpServers ?? [];
+    const common = commonServers().filter((server) => !own.some((s) => s.name === server.name));
+    return [
+      ...common.map((server) => ({ server, from: "app" as const })),
+      ...own.map((server) => ({ server, from: "role" as const })),
+      ...clientMcp.map((server) => ({ server, from: "client" as const })),
+    ];
+  }
+
+  /** The role's instructions, then the agent's own; and where the tools a session of it gets come from. */
+  systemPromptFor(agent: AgentSpec, clientMcp: McpServer[] = []): string {
     const role = this.role(agent);
     const instructions = [role?.instructions, this.instructions(agent.id)].filter((t) => t?.trim()).join("\n\n");
-    return systemPrompt(agent, instructions, role?.skills ?? [], this.team(), this.paths, this.state, projectLanguage(this.paths));
+    const tools = this.toolServers(agent, clientMcp).map(({ server, from }) => ({ name: server.name, from }));
+    return systemPrompt(agent, instructions, role?.skills ?? [], this.team(), this.paths, this.state, projectLanguage(this.paths), tools);
   }
 
   agentChanged(agentId: string): void {

@@ -40,10 +40,12 @@ Grain, sharpness, lens characteristics (halation, distortion).
 ## 6. What to avoid
 What should not appear in this film: certain colors, certain kinds of camera movement, an overly effects-heavy look, text in the frame.
 
+List here, one by one, the hard requirements the user has stated ("animals are not humanised", "this location has no window"), each with who said it and when. The storyboard artist and the cinematographer check against this list before they generate.
+
 ## 7. Style suffix (required)
-Condense all of the above into **one passage of 25–50 words**, which the cinematographer appends verbatim to the end of every shot's prompt. Write only visual traits, no plot.
+Condense all of the above into **one passage of 25–50 words**, which the cinematographer appends verbatim to the end of every shot's prompt. Write only traits that hold for the whole film (image quality, palette, quality of light, lens character), no plot, and nothing that belongs to one location (a street outside a window, the furnishings of a room). The reason: the suffix goes into every shot verbatim, so what is written for one location appears in all of them. What belongs to a location goes into section 8.
 
 > Realistic cinematic look, low-key lighting, warm tungsten light with teal shadows, shallow depth of field, film grain, slow and steady camera movement, restrained color, no text in frame.
 
 ## 8. Scene design
-For each main location in the script's location list: spatial layout, key furnishings, light source positions, color. Generate one **scene reference image** per location (an empty shot, with no characters), registered as `reference/scene-<scene>`.
+For each main location in the script's location list: spatial layout, key furnishings, light source positions, color. Generate one **scene reference image** per location (an empty shot, with no characters), registered as `reference/scene-<scene>`. Write a **location suffix** of 12–25 words for each one too (place, furnishings, light sources): the cinematographer puts it before the style suffix, in the shots of that location only.

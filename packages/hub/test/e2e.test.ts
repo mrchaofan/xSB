@@ -415,6 +415,14 @@ const p = await newSession("p1");
   assert.match(first, /- grading: Grading a shot.*- shots: How to break a scene into shots \(arrives with tasks that produce "shot_list"\)/);
   await prompt(p, "!servers");
   assert.match(said.get(p)!, /servers: xsb, gen\n/);
+  // Where each tool comes from is in the system prompt: the servers it was given, and that every other tool is the agent program's own.
+  const shown = (await conn.request(Agents.get, { id: "p1" })).systemPrompt;
+  assert.match(shown, /# Where your tools come from\n[^#]*- xsb: the hub of this team[^#]*- gen: your role's\.[^#]*comes with the agent program itself/);
+  assert.doesNotMatch(shown, /- browser:/);
+  process.env.XSB_MCP_SERVERS = JSON.stringify({ browser: { command: "xsb-browser-mcp" } });
+  assert.match((await conn.request(Agents.get, { id: "p1" })).systemPrompt, /- browser: given to every agent by the app the user runs xsb in\./);
+  delete process.env.XSB_MCP_SERVERS;
+  assert.match(shown, /# How you work\n- Say how you checked\./);
   await prompt(p, call("load_skill", { name: "grading" }));
   assert.match(said.get(p)!, /GRADE-PROCEDURE/);
   // An agent that waits for the user says so, and the observers hear of it.
