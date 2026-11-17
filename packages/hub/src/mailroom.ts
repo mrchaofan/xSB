@@ -88,7 +88,7 @@ export class Mailroom {
   dispatch(
     from: LiveSession,
     to: string,
-    input: { title: string; topic: string; instructions: string; after: string[]; produces?: string; inputs?: string[] },
+    input: { title: string; topic: string; instructions: string; after: string[]; produces?: string; inputs?: string[]; parallel?: boolean },
   ): Task {
     const held = input.after.some((id) => !this.finished(id));
     const task: Task = {

@@ -25,6 +25,8 @@ import { DEFAULT_BACKEND, loadProjectConfig, migrateProjectConfig, projectLangua
 /** Past this much context a work session takes no new work, unless the project says otherwise (`limits.sessionTokens`). */
 const SESSION_TOKENS = 150_000;
 const sessionTokens = (paths: Paths): number => loadProjectConfig(paths).limits?.sessionTokens ?? SESSION_TOKENS;
+/** How many work sessions of one agent run at a time for parallel work, unless the project says otherwise. */
+const SESSIONS_AT_ONCE = 2;
 import { Mailroom } from "./mailroom.ts";
 import { commonServers, serveMcp } from "./mcp.ts";
 import { Paths } from "./paths.ts";
@@ -34,7 +36,7 @@ import type { ToolOrigin } from "./prompts.ts";
 import { loadRole } from "./roles.ts";
 import type { Contract, Role } from "./roles.ts";
 import { LiveSession } from "./session.ts";
-import type { SessionRec } from "./state.ts";
+import type { MailItem, SessionRec } from "./state.ts";
 import { Spending } from "./spend.ts";
 import { State, ops, topicKey } from "./state.ts";
 import { newId, now } from "./util.ts";
@@ -278,6 +280,24 @@ export class Hub {
     if (current && (current.rec.used ?? 0) < sessionTokens(this.paths)) return current;
     if (current) current.save({ retired: true });
     return this.createSession(agentId, [], { topic: topicKey(topic), continues: current?.id });
+  }
+
+  /**
+   * Whether a session may run the turn it has next. The user's sessions always may; a work session may while the
+   * agent has fewer other work sessions running a turn than the work allows: one, or `limits.sessionsAtOnce` for
+   * a task dispatched as `parallel` (and for the results that come back to it).
+   */
+  mayRun(session: LiveSession, item: MailItem | undefined): boolean {
+    if (!session.rec.topic) return true;
+    const task = item?.taskId ? this.state.tasks.get(item.taskId) : undefined;
+    const allowed = task?.parallel ? (loadProjectConfig(this.paths).limits?.sessionsAtOnce ?? SESSIONS_AT_ONCE) : 1;
+    const running = [...this.live.values()].filter((s) => s !== session && s.agentId === session.agentId && s.rec.topic && s.current).length;
+    return running < allowed;
+  }
+
+  /** Let the agent's other sessions that wait for a place try again. */
+  wake(agentId: string, except: LiveSession): void {
+    for (const s of this.live.values()) if (s !== except && s.agentId === agentId && s.rec.topic) s.pump();
   }
 
   /** The agent's current work session of a topic, if it has one. */

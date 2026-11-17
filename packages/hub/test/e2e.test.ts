@@ -1175,6 +1175,34 @@ const p = await newSession("p1");
   console.log("ok 30 two film teams, and the move of earlier projects");
 }
 
+// 31. Parallel work: an agent's peer work runs one turn at a time, unless the dispatcher says a task depends on no
+// other (`parallel`): then up to `limits.sessionsAtOnce` of its work sessions run at once. The user is never kept waiting.
+{
+  const statusOf = async (title: string) => (await tasks()).find((t) => t.title === title)?.status;
+  const send = (title: string, parallel?: boolean) => prompt(a, call("dispatch_task", { to: "b", title, instructions: "!sleep 900\n!say DONE", topic: `par ${title}`, ...(parallel ? { parallel } : {}) }));
+  // Without it: one after the other, though the topics differ.
+  await send("serial 1");
+  await send("serial 2");
+  await until("serial 1 running", async () => (await statusOf("serial 1")) === "running");
+  assert.equal(await statusOf("serial 2"), "queued", "waits for its place");
+  await until("serial 2 done", async () => (await statusOf("serial 2")) === "completed", 8000);
+  // With it: two at once, the third waits.
+  await send("par 1", true);
+  await send("par 2", true);
+  await send("par 3", true);
+  await until("two running", async () => (await statusOf("par 1")) === "running" && (await statusOf("par 2")) === "running");
+  assert.equal(await statusOf("par 3"), "queued");
+  // Meanwhile the user is answered at once.
+  const bMain = (await conn.request(Agents.list)).agents.find((x: any) => x.id === "b").mainSessionId;
+  said.set(bMain, "");
+  await prompt(bMain, "are you there");
+  assert.match(said.get(bMain)!, /echo: [^\n]*are you there/);
+  await until("all done", async () => (await statusOf("par 3")) === "completed", 8000);
+  await idle("b");
+  await idle("a");
+  console.log("ok 31 parallel work");
+}
+
 await hub.shutdown();
 fs.rmSync(project, { recursive: true, force: true });
 console.log("e2e: ok");

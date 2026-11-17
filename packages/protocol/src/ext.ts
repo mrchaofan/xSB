@@ -325,6 +325,12 @@ export type Task = {
   tool?: { server: string; name: string; arguments: unknown };
   /** Of a job: the task its dispatcher was working on when it started it. That task does not end before the job. */
   partOf?: string;
+  /**
+   * The dispatcher said the task depends on no other work of the assignee's, so the assignee may work on it alongside
+   * that, in a session of its own, up to the project's `limits.sessionsAtOnce`. Without it, the assignee's peer work
+   * runs one turn at a time.
+   */
+  parallel?: boolean;
   status: TaskStatus;
   result?: string;
   createdAt: string;
