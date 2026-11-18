@@ -13,8 +13,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
-import { Agents, Assets, Backends, Boundaries, Connection, Discarded, SpendExt, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
-import type { AgentInfo, Asset, BackendInfo, Boundary, Spend, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, PresetProblem, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
+import { Agents, Assets, Backends, History, Boundaries, Connection, Discarded, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
+import type { HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, PresetProblem, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
 import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
@@ -53,6 +53,7 @@ export class Workspace {
   /** No window shows this workspace (`setShown`). */
   private hidden = false;
   private agents = new Map<string, AgentInfo>();
+  private agentVersions = new Map<string, number>();
   private tasks = new Map<string, Task>();
   /** The roles as last heard of, by name: what a window is shown when it loads. */
   private roles = new Map<string, RoleView>();
@@ -70,6 +71,11 @@ export class Workspace {
   /** Entry id -> how to answer the permission request it shows. */
   private asking = new Map<string, { agentId: string; entry: Extract<Entry, { kind: "permission" }>; request: PermissionRequest; answer: (r: PermissionResponse) => void }>();
   private seq = 0;
+  private replaying = false;
+  private historyUpdates = new Map<string, SessionUpdate[]>();
+  private historyCursors = new Map<string, number | null>();
+  private historyLoading = new Map<string, Promise<{ entries: Entry[]; cursor: number | null }>>();
+  private historyImages = new Set<string>();
   private notify: (notice: Omit<Notice, "name">) => void;
   /**
    * Whether some agent was at work when last looked, and what happened since the workspace last went quiet: an
@@ -91,7 +97,7 @@ export class Workspace {
       protocolVersion: PROTOCOL_VERSION,
       info: { name: "xsb-desktop", version: "0.1.0" },
       // An observer of all agents, and a transcript: sent its own input too, when it gets into the conversation.
-      capabilities: { _meta: { [Agents.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
+      capabilities: { _meta: { [Agents.capability]: {}, [History.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
     });
     return new Workspace(paths, conn, say, emit, notify);
   }
@@ -104,7 +110,7 @@ export class Workspace {
       if (this.live) notify({ ...notice, name: this.agents.get(notice.agentId)?.name ?? notice.agentId });
     };
     this.emit = (event) => {
-      if (this.live) emit(event);
+      if (this.live && !this.replaying) emit(event);
     };
     // The hub stopped, or died: the window says so, whatever it is in the middle of. Not when it was this side that left.
     void conn.closed.then(() => this.left || this.onHubGone(emit));
@@ -122,7 +128,6 @@ export class Workspace {
       this.emit({ removedRole: p.name });
     });
     conn.onNotification(Tasks.update, (p) => this.onTask(p.task));
-    conn.onNotification(SpendExt.update, (p) => this.emit({ spend: p.spend }));
     conn.onNotification(Agents.asks, (p) => {
       this.asked = true;
       this.notify({ agentId: p.agentId, kind: "confirm", detail: p.question });
@@ -199,13 +204,12 @@ export class Workspace {
     this.live = false;
     // Roles and tasks are kept as they are answered. The hub answers in order on one connection, so what changes
     // while the rest still loads arrives after the answer, as an event, and is the newer word.
-    const [, { teams }, { agents }, , { assets }, { spend }] = await Promise.all([
+    const [, { teams }, { agents }, , { assets }] = await Promise.all([
       this.conn.request<{ roles: RoleDetail[] }>(Roles.list).then(({ roles }) => (this.roles = new Map(roles.map((r) => [r.name, this.roleView(r)])))),
       this.conn.request<{ teams: TeamInfo[] }>(Teams.list),
       this.conn.request<{ agents: AgentInfo[] }>(Agents.list),
       this.conn.request<{ tasks: Task[] }>(Tasks.list, {}).then(({ tasks }) => tasks.forEach((task) => this.tasks.set(task.id, task))),
       this.conn.request<{ assets: Asset[] }>(Assets.list, {}),
-      this.conn.request<{ spend: Spend }>(SpendExt.get),
     ]);
     agents.forEach((agent) => this.onAgent(agent));
     assets.forEach((asset) => this.asset(asset));
@@ -225,7 +229,7 @@ export class Workspace {
       assetNames: Object.assign({}, ...teams.map((team) => team.assets)),
       transcripts: Object.fromEntries(this.transcripts),
       activities: Object.fromEntries(this.activities),
-      spend,
+      history: Object.fromEntries(this.historyCursors),
     };
   }
 
@@ -238,6 +242,7 @@ export class Workspace {
   // ---- agents and their transcripts -------------------------------------------
 
   private onAgent(agent: AgentInfo): void {
+    this.agentVersions.set(agent.id, (this.agentVersions.get(agent.id) ?? 0) + 1);
     this.agents.set(agent.id, agent);
     if (!this.transcripts.has(agent.id)) this.transcripts.set(agent.id, []);
     // A history that cannot be read is said so, where it would have been shown.
@@ -246,6 +251,7 @@ export class Workspace {
     if (agent.state === "idle") {
       this.settle(agent.id);
       this.does(agent.id, null);
+      this.finishTools(agent.id);
     } else if (!this.activities.has(agent.id)) {
       this.does(agent.id, "waiting"); // a turn began: nothing has come back yet
     }
@@ -263,7 +269,7 @@ export class Workspace {
 
   private onAgentRemoved(id: string): void {
     for (const [sessionId, agentId] of this.sessionAgent) if (agentId === id) this.sessionAgent.delete(sessionId);
-    for (const perAgent of [this.agents, this.transcripts, this.mains, this.growing, this.activities, this.tools]) perAgent.delete(id);
+    for (const perAgent of [this.agents, this.transcripts, this.mains, this.growing, this.activities, this.tools, this.historyUpdates, this.historyCursors]) perAgent.delete(id);
     this.emit({ removedAgent: id });
   }
 
@@ -273,9 +279,17 @@ export class Workspace {
     if (!session) {
       const setup = { cwd: agent.workspace, mcpServers: [] };
       if (agent.mainSessionId) {
-        // Loading replays the session's history as updates, before it answers.
+        // The first page attaches atomically; subsequent live updates may arrive before its promise resolves.
         this.sessionAgent.set(agent.mainSessionId, agent.id);
-        session = this.conn.request("session/resume", { ...setup, sessionId: agent.mainSessionId, replayFrom: { type: "start" } }).then(() => agent.mainSessionId!);
+        this.historyUpdates.set(agent.id, []);
+        const version = this.agentVersions.get(agent.id);
+        session = Promise.resolve().then(() => this.conn.request<HistoryPage>(History.page, { sessionId: agent.mainSessionId })).then((page) => {
+          this.historyUpdates.set(agent.id, [...page.updates, ...(this.historyUpdates.get(agent.id) ?? [])]);
+          this.historyCursors.set(agent.id, page.cursor);
+          this.rebuildHistory(agent.id);
+          if (this.agentVersions.get(agent.id) === version) this.onAgent(page.agent);
+          return agent.mainSessionId!;
+        });
       } else {
         session = this.conn.request("session/new", { ...setup, _meta: { [Agents.sessionKey]: agent.id } }).then((created) => {
           this.sessionAgent.set(created.sessionId, agent.id);
@@ -289,6 +303,57 @@ export class Workspace {
   }
 
   /** Show an entry of an agent's transcript, in place of the one with its id if there is one. Nothing, once the agent is gone. */
+  private imageReferences(update: SessionUpdate): SessionUpdate {
+    const content = (block: any) => {
+      const ref = block?._meta?.[History.imageKey] as HistoryImage | undefined;
+      if (!ref) return block;
+      const key = JSON.stringify(ref);
+      this.historyImages.add(key);
+      return { ...block, url: `${ARTIFACT_SCHEME}://history/image?workspace=${encodeURIComponent(this.paths.project)}&ref=${encodeURIComponent(key)}` };
+    };
+    const discarded = update._meta?.[Discarded.key] as Discarded | undefined;
+    if (discarded) return { ...update, _meta: { ...update._meta, [Discarded.key]: { ...discarded, content: discarded.content.map(content) } } };
+    return update.content ? { ...update, content: content(update.content) } : update;
+  }
+
+  async historyImage(key: string): Promise<{ data: string; mimeType: string }> {
+    if (!this.historyImages.has(key)) throw new Error("unknown history image");
+    return this.conn.request(History.image, JSON.parse(key));
+  }
+
+  private rebuildHistory(agentId: string): void {
+    this.transcripts.set(agentId, []);
+    this.growing.delete(agentId);
+    this.replaying = true;
+    try {
+      const sessionId = this.agents.get(agentId)?.mainSessionId;
+      if (sessionId) for (const update of this.historyUpdates.get(agentId) ?? []) this.onUpdate(sessionId, update);
+      if (this.agents.get(agentId)?.state === "idle") {
+        this.settle(agentId);
+        this.finishTools(agentId);
+      }
+    } finally { this.replaying = false; }
+  }
+
+  /** Prepend one older page; concurrent clicks share the same request. */
+  history(agentId: string): Promise<{ entries: Entry[]; cursor: number | null }> {
+    const prior = this.historyLoading.get(agentId);
+    if (prior) return prior;
+    const cursor = this.historyCursors.get(agentId) ?? null;
+    const sessionId = this.agents.get(agentId)?.mainSessionId;
+    if (cursor === null || !sessionId) return Promise.resolve({ entries: this.transcripts.get(agentId) ?? [], cursor: null });
+    const loading = this.conn.request<HistoryPage>(History.page, { sessionId, before: cursor }).then((page) => {
+      this.historyUpdates.set(agentId, [...page.updates, ...(this.historyUpdates.get(agentId) ?? [])]);
+      this.historyCursors.set(agentId, page.cursor);
+      const pending = (this.transcripts.get(agentId) ?? []).filter((entry) => this.pending.has(entry.id) || entry.kind === "permission");
+      this.rebuildHistory(agentId);
+      pending.forEach((entry) => this.put(agentId, entry));
+      return { entries: this.transcripts.get(agentId) ?? [], cursor: page.cursor };
+    }).finally(() => this.historyLoading.delete(agentId));
+    this.historyLoading.set(agentId, loading);
+    return loading;
+  }
+
   private put(agentId: string, entry: Entry): void {
     const entries = this.transcripts.get(agentId);
     if (!entries) return;
@@ -317,8 +382,15 @@ export class Workspace {
     this.put(agentId, { ...entry, streaming: false });
   }
 
+  private finishTools(agentId: string): void {
+    for (const entry of this.transcripts.get(agentId) ?? []) {
+      if (entry.kind === "tool" && entry.status === "running") this.put(agentId, { ...entry, status: "failed" });
+    }
+  }
+
   /** Note what an agent is doing, when that is news. `null`: its turn is over. */
   private does(agentId: string, kind: Activity["kind"] | null, detail?: string): void {
+    if (this.replaying) return;
     const prior = this.activities.get(agentId);
     if (kind === null) {
       this.tools.delete(agentId);
@@ -333,6 +405,20 @@ export class Workspace {
   private onUpdate(sessionId: string, update: SessionUpdate): void {
     const agentId = this.sessionAgent.get(sessionId);
     if (!agentId) return;
+    if (!this.replaying) this.historyUpdates.get(agentId)?.push(update);
+    if (update.sessionUpdate === "state_update") {
+      if (this.replaying) return;
+      const agent = this.agents.get(agentId);
+      if (update.state === "idle") {
+        this.settle(agentId);
+        this.does(agentId, null);
+        this.finishTools(agentId);
+        for (const [entryId, asked] of this.asking) if (asked.agentId === agentId) this.answer(entryId, "cancelled");
+      }
+      if (agent && ["idle", "running", "requires_action"].includes(update.state)) this.onAgent({ ...agent, state: update.state });
+      return;
+    }
+    update = this.imageReferences(update);
     if (update.sessionUpdate === "agent_thought_chunk") return this.does(agentId, "thinking");
     const boundary = update.sessionUpdate === "session_info_update" ? (update._meta?.[Boundaries.key] as Boundary | undefined) : undefined;
     if (boundary) {
@@ -349,11 +435,12 @@ export class Workspace {
     }
     const failed = update.sessionUpdate === "session_info_update" ? (update._meta?.[TurnFailure.key] as { message: string; data?: unknown } | undefined) : undefined;
     if (failed) {
+      this.does(agentId, null);
       // A turn that a task or a message started failed: nobody else would hear of it.
       this.settle(agentId);
       const text = this.say(new RpcError(-32603, failed.message, failed.data));
       this.put(agentId, { id: this.newId(), kind: "error", text });
-      if (this.live) this.notify({ agentId, kind: "failed", detail: text });
+      if (this.live && !this.replaying) this.notify({ agentId, kind: "failed", detail: text });
       return;
     }
     if (update.sessionUpdate === "agent_message_chunk") {

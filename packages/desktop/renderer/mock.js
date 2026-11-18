@@ -125,7 +125,6 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     backends: BACKENDS,
     teams: [],            // 这个工作区使用的预设团队
     assetNames: { script: "剧本", lighting_plan: "布光方案", storyboard: "分镜表" },
-    spend: { spent: 37.5, unpriced: 0, dearest: {} },      // 资产类型的显示名
     roles: [
       { avatar: "person-director", name: "director", preset: null, description: "统筹全片，拆解并派发工作", backend: "claude",
         instructions: "你是这部短片的导演。把用户的要求拆成任务派给合适的同事，等结果到齐后再做决定。不要自己写剧本或出布光方案。",
@@ -191,7 +190,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
   let data = null;      // 这个窗口打开的工作区；null = 还没打开
   let turns = {};
   const agent = (agentId) => data.agents.find((a) => a.id === agentId);
-  const blank = (path) => ({ workspace: { name: path.split("/").pop(), path }, backends: BACKENDS, teams: [], assetNames: {}, roles: [], agents: [], tasks: [], artifacts: [], transcripts: {}, spend: { spent: 0, unpriced: 0, dearest: {} } });
+  const blank = (path) => ({ workspace: { name: path.split("/").pop(), path }, backends: BACKENDS, teams: [], assetNames: {}, roles: [], agents: [], tasks: [], artifacts: [], transcripts: {} });
 
   function put(agentId, entry) {
     const list = data.transcripts[agentId];

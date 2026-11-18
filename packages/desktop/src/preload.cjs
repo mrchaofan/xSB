@@ -6,7 +6,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 const METHODS = [
   "load", "pickFolder", "open", "newWindow",
-  "send", "cancel", "clear", "permit",
+  "history", "send", "cancel", "clear", "permit",
   "putAgent", "removeAgent", "inspectAgent",
   "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "revealSkill",
   "backends", "locateProgram", "presets", "useTeam", "dropTeam", "buildTeam", "deriveTeam", "openFolder",

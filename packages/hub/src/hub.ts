@@ -18,7 +18,7 @@
  */
 import fs from "node:fs";
 import net from "node:net";
-import { AGENT_ID, Agents, Connection, Ledger, RpcError, SpendExt, Tasks, failure } from "@xsb/protocol";
+import { AGENT_ID, Agents, Connection, Ledger, RpcError, Tasks, failure } from "@xsb/protocol";
 import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Client } from "./acp-server.ts";
@@ -41,7 +41,6 @@ import { loadRole } from "./roles.ts";
 import type { Contract, Role } from "./roles.ts";
 import { LiveSession } from "./session.ts";
 import type { MailItem, SessionRec } from "./state.ts";
-import { Spending } from "./spend.ts";
 import { State, ops, topicKey } from "./state.ts";
 import { newId, now } from "./util.ts";
 
@@ -56,12 +55,10 @@ export class Hub {
   readonly jobs: Jobs;
   readonly permissions: Permissions;
   readonly assets: Assets;
-  readonly spending: Spending;
   /** Set by `shutdown`: turns that die with it stay unacknowledged and run again on the next start. */
   stopping = false;
 
   private servers: net.Server[] = [];
-  private unwatchSpend?: () => void;
   /** Bridge token -> session: how a tool call is known to come from that session. */
   private bridgeTokens = new Map<string, LiveSession>();
 
@@ -80,7 +77,6 @@ export class Hub {
     hooks.on("message.ledger", (entry) => this.broadcast(Ledger.update, { entry }));
     this.permissions = new Permissions(this);
     this.assets = new Assets(this);
-    this.spending = new Spending(this.paths);
     // One conversation per agent (docs/DESIGN.md): sessions a client once opened besides it are history, not live.
     for (const rec of this.state.sessions.values()) if (rec.main) this.track(new LiveSession(this, rec));
   }
@@ -111,7 +107,6 @@ export class Hub {
       fs.rmSync(this.paths.abandonMark);
       this.log(`gave up what the last stop left unfinished, as asked: ${mail} mail items, ${tasks} tasks`);
     }
-    this.unwatchSpend = this.spending.watch((spend) => this.broadcast(SpendExt.update, { spend }));
     const pending = this.state.mail.size;
     this.kernel.resume();
     this.log(`hub up: ${this.state.agents.size} agents, ${pending} mail items pending`);
@@ -132,7 +127,6 @@ export class Hub {
 
   async shutdown(): Promise<void> {
     this.stopping = true;
-    this.unwatchSpend?.();
     for (const server of this.servers) server.close();
     for (const client of this.clients) client.conn.close();
     await this.backends.stopAll();
@@ -232,8 +226,7 @@ export class Hub {
     const common = commonServers().filter(({ server }) => !own.some((s) => s.name === server.name));
     return [
       ...common.map(({ server, about }) => ({ server, from: "app" as const, about })),
-      // A role's servers are told where the project counts what generation costs, and whom they work for.
-      ...own.map((server) => ({ server: this.spending.withLedger(server, agent.id), from: "role" as const, about: role?.servers[server.name]?.about })),
+      ...own.map((server) => ({ server, from: "role" as const, about: role?.servers[server.name]?.about })),
       ...clientMcp.map((server) => ({ server, from: "client" as const })),
     ];
   }

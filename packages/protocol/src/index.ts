@@ -11,4 +11,3 @@ export * from "./jsonrpc.ts";
 export * from "./acp.ts";
 export * from "./ext.ts";
 export * from "./errors.ts";
-export * from "./spend.ts";

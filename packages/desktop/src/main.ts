@@ -264,7 +264,7 @@ async function pickFolder(win: BrowserWindow): Promise<{ path: string; initializ
 // ---- window.xsb -------------------------------------------------------------
 
 /** The calls that are a method of the window's workspace, arguments and all. */
-const WORKSPACE_CALLS = new Set(["send", "cancel", "clear", "permit", "deriveTeam", "putAgent", "removeAgent", "inspectAgent", "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "useTeam", "dropTeam", "buildTeam"]);
+const WORKSPACE_CALLS = new Set(["history", "send", "cancel", "clear", "permit", "deriveTeam", "putAgent", "removeAgent", "inspectAgent", "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "useTeam", "dropTeam", "buildTeam"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();
@@ -407,7 +407,16 @@ void app.whenReady().then(() => {
   });
   // Artifacts are served to the app's own pages and to the previews of HTML artifacts (pages.ts), not to websites.
   for (const served of [protocol, session.fromPartition(PREVIEW_PARTITION).protocol]) {
-    served.handle(ARTIFACT_SCHEME, (request) => {
+    served.handle(ARTIFACT_SCHEME, async (request) => {
+      const url = new URL(request.url);
+      if (url.hostname === "history") {
+        const workspace = projects.get(url.searchParams.get("workspace") ?? "");
+        if (!workspace) return new Response(null, { status: 404 });
+        try {
+          const image = await workspace.historyImage(url.searchParams.get("ref") ?? "");
+          return new Response(Buffer.from(image.data, "base64"), { headers: { "Content-Type": image.mimeType, "Cache-Control": "private, max-age=3600" } });
+        } catch { return new Response(null, { status: 404 }); }
+      }
       const file = decodeURIComponent(new URL(request.url).pathname.slice(1));
       const shown = [...projects.values()].some((w) => w.artifacts.has(file) || w.avatars.has(file));
       return shown ? serveFile(file, request) : new Response(null, { status: 404 });

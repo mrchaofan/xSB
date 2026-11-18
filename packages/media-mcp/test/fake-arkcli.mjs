@@ -31,16 +31,6 @@ if (flag("format") !== "json") fail("the caller did not ask for --format json");
 
 if (process.env.FAKE_ARK_SIGNED_OUT) answer({ ok: false, error: { type: "auth", message: "not configured", hint: "run `arkcli auth login` and retry" } });
 // The real one can also rewrite the configuration of the agents on the machine. Nothing here may ask it to.
-if (words[0] === "pricing" && words[1] === "models") {
-  if (process.env.FAKE_ARK_NO_PRICES) fail("pricing is not available");
-  // As the real one answers for a pay-as-you-go account (2026-11-17), cut down to two models.
-  answer({ page_number: 1, page_size: 50, total_count: 2, items: [
-    { FoundationModelName: "doubao-seedance-2-5-flash", ChargeItems: [
-      { Type: "NV2VCompletion", Price: 0.046, UnitCode: "千tokens" }, { Type: "V2VCompletion", Price: 0.028, UnitCode: "千tokens" },
-      { Type: "NV2V1080Completion", Price: 0.077, UnitCode: "千tokens" }, { Type: "FinetuneNV2VCompletion", Price: 0.2, UnitCode: "千tokens" } ] },
-    { FoundationModelName: "doubao-seedream-5-0", ChargeItems: [ { Type: "T2ICompletion", Price: 0.22, UnitCode: "张" }, { Type: "I2ICompletion", Price: 0.22, UnitCode: "张" } ] },
-  ] });
-}
 if (!["+gen", "gen", "api"].includes(words[0])) fail(`the fake arkcli was asked for something that is not generation: ${words.join(" ")}`);
 
 if (words[0] === "api") {

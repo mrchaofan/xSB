@@ -11,8 +11,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { Agents, Assets, Backends, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, SpendExt, Tasks, Teams, errorMessage, failure, isTerminal } from "@xsb/protocol";
-import type { Connection, McpServerCheck, OriginMeta, RoleDetail, PresetProblem, TeamInfo } from "@xsb/protocol";
+import { Agents, Assets, Backends, History, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Tasks, Teams, errorMessage, failure, isTerminal } from "@xsb/protocol";
+import type { Connection, HistoryImage, McpServerCheck, OriginMeta, RoleDetail, PresetProblem, TeamInfo } from "@xsb/protocol";
 import { backends, describeBackends, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
 import { isVeto } from "./hooks.ts";
@@ -24,6 +24,7 @@ import type { Role } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { catalog, check, clashes, derive, teamRole, teamRoleNames } from "./presets.ts";
 import type { Catalog, TeamEntry } from "./presets.ts";
+import { historyPage, historyImage } from "./history.ts";
 import { VERSION } from "./util.ts";
 
 /** One connected ACP client, as the hub sees it. */
@@ -33,6 +34,7 @@ export class Client {
   observer = false;
   /** Opted in to being sent its own input when it becomes part of a turn (see `OriginExt`). */
   echo = false;
+  history = false;
   private hub: Hub;
   private attached = new Set<LiveSession>();
 
@@ -48,6 +50,7 @@ export class Client {
       const meta = p.capabilities?._meta;
       this.observer = meta?.[Agents.capability] != null;
       this.echo = meta?.[OriginExt.capability] != null;
+      this.history = meta?.[History.capability] != null;
       // The project works in the language of the first user who says which one they read.
       const language = meta?.[LanguageExt.key];
       const config = loadProjectConfig(hub.paths);
@@ -61,12 +64,12 @@ export class Client {
           session: { prompt: { image: {} }, mcp: { stdio: {} } },
           _meta: {
             [Agents.capability]: { version: 1 },
+            [History.capability]: { version: 1 },
             [Roles.capability]: { version: 1 },
             [Teams.capability]: { version: 1 },
             [Backends.capability]: { version: 1 },
             [Tasks.capability]: { version: 1 },
             [Assets.capability]: { version: 1 },
-            [SpendExt.capability]: { version: 1 },
             [OriginExt.capability]: { version: 1 },
           },
         },
@@ -100,6 +103,19 @@ export class Client {
       conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "state_update", state: session.current ? "running" : "idle" } });
       this.attach(session);
       return { ...setup(session), _meta: sessionMeta(session) };
+    });
+
+    conn.onRequest(History.page, (p) => {
+      const session = hub.session(p.sessionId);
+      if (p.before !== undefined && (!Number.isSafeInteger(p.before) || p.before < 0)) throw RpcError.invalidParams("invalid history cursor");
+      const page = historyPage(hub.state.store, session.agentId, session.id, p.before);
+      if (p.before === undefined) this.attach(session);
+      return { ...page, state: session.busy ? "running" : "idle", agent: hub.agentInfo(hub.agent(session.agentId)) };
+    });
+    conn.onRequest(History.image, (p: HistoryImage) => {
+      const session = hub.session(p.sessionId);
+      if (!this.attached.has(session)) throw RpcError.notFound("unattached session");
+      return historyImage(hub.state.store, session.agentId, p);
     });
 
     conn.onRequest("session/list", (p) => {
@@ -137,10 +153,6 @@ export class Client {
       const session = hub.live.get(p?.sessionId);
       if (session) hub.delivery.userStop(session);
     });
-
-    // ---- spending ---------------------------------------------------------
-
-    conn.onRequest(SpendExt.get, () => ({ spend: hub.spending.read() }));
 
     conn.onRequest(Boundaries.clear, (p) => {
       hub.session(p.sessionId).clear();

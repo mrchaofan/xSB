@@ -11,6 +11,7 @@
     "node": ">=22.18"
   },
   "scripts": {
+    "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   }
 }

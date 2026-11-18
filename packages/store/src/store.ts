@@ -75,43 +75,59 @@ export class Store {
    * A torn last line is skipped, as `read` does.
    */
   *readBackward(file: string, chunkBytes = 64 * 1024): Generator<Record_> {
+    for (const { record } of this.readBackwardEntries(file, undefined, chunkBytes)) yield record;
+  }
+
+  /** Records with stable byte offsets; `before` excludes that byte and everything after it. */
+  *readBackwardEntries(file: string, before?: number, chunkBytes = 64 * 1024): Generator<{ offset: number; record: Record_ }> {
     const abs = this.abs(file);
     if (!fs.existsSync(abs)) return;
     const fd = fs.openSync(abs, "r");
     try {
-      let position = fs.fstatSync(fd).size;
-      /** Bytes of the line that the chunks read so far end in the middle of: its start is further back. */
-      let rest = Buffer.alloc(0);
-      const parse = (line: Buffer): Record_ | undefined => {
-        if (line.length === 0) return undefined;
-        try {
-          return JSON.parse(line.toString("utf8"));
-        } catch {
-          return undefined; // torn line
-        }
+      let position = Math.min(before ?? Infinity, fs.fstatSync(fd).size);
+      let fragments: Buffer[] = [];
+      const parse = (first: Buffer): Record_ | undefined => {
+        const line = fragments.length ? Buffer.concat([first, ...fragments.reverse()]) : first;
+        fragments = [];
+        if (!line.length) return;
+        try { return JSON.parse(line.toString("utf8")); } catch { return; }
       };
       while (position > 0) {
         const size = Math.min(chunkBytes, position);
         position -= size;
         const chunk = Buffer.alloc(size);
         fs.readSync(fd, chunk, 0, size, position);
-        const data = Buffer.concat([chunk, rest]);
-        // Lines are cut at byte 0x0a, which never occurs inside a UTF-8 character.
-        let end = data.length;
+        let end = chunk.length;
         for (;;) {
-          const nl = end > 0 ? data.lastIndexOf(0x0a, end - 1) : -1;
+          const nl = end > 0 ? chunk.lastIndexOf(0x0a, end - 1) : -1;
           if (nl < 0) break;
-          const rec = parse(data.subarray(nl + 1, end));
-          if (rec) yield rec;
+          const record = parse(chunk.subarray(nl + 1, end));
+          if (record) yield { offset: position + nl + 1, record };
           end = nl;
         }
-        rest = data.subarray(0, end);
+        if (end > 0) fragments.push(chunk.subarray(0, end));
       }
-      const first = parse(rest);
-      if (first) yield first;
-    } finally {
-      fs.closeSync(fd);
-    }
+      const record = parse(Buffer.alloc(0));
+      if (record) yield { offset: 0, record };
+    } finally { fs.closeSync(fd); }
+  }
+
+  /** One record addressed by a history image reference. */
+  readAt(file: string, offset: number): Record_ | undefined {
+    const fd = fs.openSync(this.abs(file), "r");
+    try {
+      const fragments: Buffer[] = [];
+      let position = offset;
+      for (;;) {
+        const chunk = Buffer.alloc(64 * 1024);
+        const count = fs.readSync(fd, chunk, 0, chunk.length, position);
+        if (!count) return;
+        const nl = chunk.subarray(0, count).indexOf(0x0a);
+        fragments.push(chunk.subarray(0, nl < 0 ? count : nl));
+        if (nl >= 0) return JSON.parse(Buffer.concat(fragments).toString("utf8"));
+        position += count;
+      }
+    } finally { fs.closeSync(fd); }
   }
 
   /** Append one record. `sync` forces it to disk before returning. */

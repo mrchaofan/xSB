@@ -20,8 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { arkcli } from "./arkcli.ts";
 import { QUIET, flags, input, saved } from "./ark.ts";
-import { arkCost } from "./ark-pricing.ts";
-import type { Usage, VideoProvider, VideoRequest, VideoStatus } from "./provider.ts";
+import type { VideoProvider, VideoRequest, VideoStatus } from "./provider.ts";
 
 /** The task as it is now, with nothing saved. */
 const taskOf = (id: string): Promise<any> => arkcli(["gen", "get", id, "--save-to=", "--no-open"]);
@@ -70,12 +69,9 @@ export const seedance: VideoProvider = {
       fs.mkdirSync(path.dirname(path.resolve(to.lastFrame!)), { recursive: true });
       fs.writeFileSync(to.lastFrame!, Buffer.from(await frame.arrayBuffer()));
     }
-    const tokens = raw?.usage?.completion_tokens ?? raw?.usage?.total_tokens;
-    const usage: Usage | undefined = typeof tokens === "number" ? { unit: "tokens", units: tokens, model: raw?.model, resolution: raw?.resolution } : undefined;
-    return { seed: raw?.seed, lastFrame: !!frame?.ok, usage };
+    return { seed: raw?.seed, lastFrame: !!frame?.ok };
   },
 
-  cost: arkCost,
 
   /**
    * Ark cancels only what has not started: a task that is already running finishes and is billed. Only a queued

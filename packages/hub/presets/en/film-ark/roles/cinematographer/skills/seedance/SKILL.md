@@ -19,7 +19,6 @@ Seedance takes no image that shows a real person's face; it trusts only original
 
 When a shot needs a change within it, have the storyboard artist split it first. When it must be one prompt: the 2.0 series follows numbered shots ("shot 1 …, shot 2 …"), the 2.5 series whole-second timestamps ("0–3 s …, 3–6 s …"). Spoken lines go in quotation marks.
 
-## Results and cost
+## Results
 
 - The links in a result expire after 24 hours; the file is saved locally already. When a draft's result is to be processed further, mind that deadline.
-- After every generation the tool reports an estimated amount (from the account's discounted prices in `arkcli pricing models`, the highest applicable one). Report the number it gave.
