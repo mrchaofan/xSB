@@ -229,11 +229,17 @@ function busyNote(ctx: Ctx, task: Task, replaced: Task[]): string | undefined {
 function send(ctx: Ctx, to: string, content: string, topic: string | undefined) {
   reach(ctx, "message", to);
   const note = continuityNote(ctx, topic, to);
-  const session = ctx.hub.findWorkSession(to, topic) ?? ctx.hub.mainSession(to);
-  const { item, route } = ctx.hub.kernel.post({ to: { agentId: to, sessionId: session.id }, from: { kind: "agent", ...self(ctx) }, kind: "message", topic, content, pref: "wake" });
+  const session = ctx.hub.mainSession(to);
+  const { item } = ctx.hub.kernel.post({ to: { agentId: to, sessionId: session.id }, from: { kind: "agent", ...self(ctx) }, kind: "message", topic, content, pref: "wake" });
   const queued = ctx.hub.state.ledger.get(item.id)?.state === "queued";
-  const delivery = route === "interject" ? "interjected" : queued ? "queued behind the peer's current work" : "delivered";
-  return { message_id: item.id, delivery, ...(note ? { note } : {}) };
+  // Nothing an agent says goes into another's running work (kernel.ts, `deliveryPolicy`): said to change a task of the
+  // sender's that the peer is doing, it comes too late, once that task is done. What does change it is a replacement.
+  const mine = queued ? ctx.hub.kernel.openTasks(session.id).filter((t) => t.initiator.kind === "agent" && t.initiator.agentId === ctx.session.agentId) : [];
+  const late = mine.length
+    ? `${to} is at work on ${mine.map((t) => `${t.id} "${t.title}"`).join(", ")} of yours, and sees this message only once that is done. To change what it does, dispatch_task the new instructions with onBusy "replace".`
+    : undefined;
+  const delivery = queued ? "queued behind the peer's current work" : "delivered";
+  return { message_id: item.id, delivery, ...(late ? { warning: late } : {}), ...(note ? { note } : {}) };
 }
 
 export const TOOLS: Tool[] = [
@@ -251,17 +257,12 @@ export const TOOLS: Tool[] = [
         after: { type: "array", items: { type: "string" }, description: "Task ids that must finish before this task starts. The peer receives their results as input." },
         inputs: { type: "array", items: { type: "string" }, description: "Ids of the assets the task works from (e.g. character/lin). The peer receives them with the task." },
         produces: str("Asset type the task has to result in (e.g. shot_list). The peer must register one; it is asked for it if it does not."),
-        parallel: {
-          type: "boolean",
-          description:
-            "The task depends on no other work you gave the same peer (another scene, say), so the peer may work on it alongside that, a few at a time. Leave it out for work that builds on other work (a shot that continues from the last frame of another): that runs one at a time.",
-        },
         grants: GRANTS,
         onBusy: {
           type: "string",
           enum: ["queue", "replace"],
           description:
-            'If the peer is at work on a task of yours on this topic. "queue" (default): this task waits until that work is done, and both are done. "replace": this task takes its place: that task is stopped (with what was started for it) and ends as superseded, and the peer starts on this one. Use it when you changed what you want, not to run work alongside.',
+            'If the peer is at work on a task of yours. "queue" (default): this task waits until that work is done, and both are done. "replace": this task takes its place: that task is stopped (with what was started for it) and ends as superseded, and the peer starts on this one. Use it when you changed what you want, not to run work alongside.',
         },
       },
       ["to", "title", "instructions"],
@@ -278,10 +279,9 @@ export const TOOLS: Tool[] = [
       const inputs: string[] = Array.isArray(args.inputs) ? args.inputs : [];
       const produces: string | undefined = args.produces?.trim() || undefined;
       const note = [continuityNote(ctx, topic, to), contractNote(ctx, to, produces, inputs.map((ref) => asset(ctx, ref)))].filter(Boolean).join(" ");
-      const parallel = args.parallel === true ? true : undefined;
-      // A peer's work goes to the agent's work session of its topic (Hub.workSession).
-      const session = ctx.hub.workSession(to, topic ?? title);
-      const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: to, sessionId: session.id }, { title, topic: topic ?? title, instructions, after, inputs, produces, parallel, deliveryPref, grants }));
+      // An agent has one conversation, and does all its work there, one turn at a time (Hub.mainSession).
+      const session = ctx.hub.mainSession(to);
+      const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: to, sessionId: session.id }, { title, topic: topic ?? title, instructions, after, inputs, produces, deliveryPref, grants }));
       const replaced = args.onBusy === "replace" ? ctx.hub.kernel.replace(task) : [];
       const held = task.status === "blocked";
       const answer = { task_id: task.id, status: held ? "held until the tasks in `after` finish" : busyNote(ctx, task, replaced) ?? "dispatched", delivery: deliveryPref, ...(note ? { note } : {}) };
@@ -345,7 +345,7 @@ export const TOOLS: Tool[] = [
       const upward = ctx.hub.kernel.openTasks(ctx.session.id).find((t) => t.initiator.kind === "agent" && t.initiator.agentId === asked && t.from);
       if (!upward) reach(ctx, "message", asked);
       const topic: string = args.topic?.trim() || upward?.topic || "question";
-      const session = upward?.from ? ctx.hub.live.get(upward.from.sessionId)! : ctx.hub.workSession(asked, topic);
+      const session = upward?.from ? ctx.hub.live.get(upward.from.sessionId)! : ctx.hub.mainSession(asked);
       const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: asked, sessionId: session.id }, { title: `Question from ${ctx.session.agentId}`, topic, instructions: `${ctx.session.agentId} asks you, and waits for your answer (what you say back is the answer):\n${question}`, after: [], deliveryPref: "sync" }));
       const late = `No answer from ${asked} within ${awaitMs(ctx) / 1000} seconds. It wakes you when it comes (task ${task.id}).`;
       return ctx.hub.delivery.awaitResult(ctx.session, task.id, awaitMs(ctx), late);

@@ -164,14 +164,13 @@ export class Delivery {
     const to = { agentId: session.agentId, sessionId: session.id };
     const waiting = deferred<void>();
     this.inserted.set(messageId, { done: waiting, client });
-    this.hub.nudges.userWrote(session.agentId, prompt);
     try {
       const open = kernel.userTask(session.id);
       if (open) {
         userSaid(this.hub, open, prompt);
         kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", taskId: open.id, prompt, pref: "wake" });
       } else {
-        const task = kernel.dispatchUser(to, prompt, messageId, session.rec.topic ?? topicKey(session.rec.title ?? "conversation"));
+        const task = kernel.dispatchUser(to, prompt, messageId, topicKey(session.rec.title ?? "conversation"));
         if (isVeto(task)) throw new Error(task.veto);
       }
       await waiting.promise;

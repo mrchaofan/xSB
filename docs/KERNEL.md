@@ -20,10 +20,10 @@ tools.ts（team 工具面）   acp-server.ts（客户端：CLI、桌面端、编
 │ Hooks（hooks.ts）：裁决链 + 观察者                          │
 └───────────────┬───────────────────────────────────────────┘
                 │ 观察者（异步扇出）
-   ┌────────────┼──────────────┬──────────────┬──────────────┬──────────────┐
-   ▼            ▼              ▼              ▼              ▼              ▼
-Delivery     Jobs         Capabilities     Nudges         Audit         UserFeed
-(delivery.ts)(jobs.ts)   (capabilities.ts)(nudges.ts)    (audit.ts)    (hub.ts)
+   ┌────────────┼──────────────┬──────────────┬──────────────┐
+   ▼            ▼              ▼              ▼              ▼
+Delivery     Jobs         Capabilities     Audit         UserFeed
+(delivery.ts)(jobs.ts)   (capabilities.ts)(audit.ts)    (hub.ts)
    │
    ▼
 LiveSession（session.ts）──ACP v2──▶ Backend（backend.ts）──▶ claude-agent-acp / codex-acp / @xsb/adapter

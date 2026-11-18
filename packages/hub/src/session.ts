@@ -23,6 +23,7 @@ import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
 import { bridgeServer } from "./mcp.ts";
+import { sessionTokens } from "./config.ts";
 import { Paths } from "./paths.ts";
 import { asPreface, handoff } from "./prompts.ts";
 import type { Gives, Renewal } from "./prompts.ts";
@@ -180,8 +181,8 @@ export class LiveSession {
     const prior = this.rec.backendSessionId;
     // A backend session of another backend is not that backend's to restore: the conversation is handed over instead.
     let renewal: Renewal | undefined = prior && this.rec.backend && this.rec.backend !== agent.backend ? "backend_changed" : undefined;
-    // A work session that continues one that grew too long is handed that one's conversation, once.
-    if (!prior && this.rec.continues && !this.rec.backend) renewal = "renewed";
+    // A conversation that grew too long goes on in a new backend session, handed what came before (`renew`).
+    if (!prior && this.rec.renew) renewal = "renewed";
     if (prior && !renewal) {
       try {
         // Every ACP v2 agent resumes; the history is not replayed (the hub has it).
@@ -200,7 +201,7 @@ export class LiveSession {
     this.setup = created;
     // Without the system prompt capability the instructions ride on the first prompt.
     if (!backend.caps.systemPrompt) this.prefaces.push(asPreface(instructions));
-    this.save({ backendSessionId: created.sessionId, backend: agent.backend });
+    this.save({ backendSessionId: created.sessionId, backend: agent.backend, renew: undefined });
     backend.open(created.sessionId, this);
     this.backend = backend;
     if (renewal) {
@@ -208,16 +209,14 @@ export class LiveSession {
       // The handoff is made before the boundary is written: what it tells is what precedes the boundary.
       this.prefaces.push(this.handoff(renewal));
       this.boundary({ kind: renewal, backend: agent.backend, handoff: true });
-      this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : renewal === "renewed" ? `continues ${this.rec.continues}` : "backend session renewed"}, with a handoff of the conversation`);
+      this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : renewal === "renewed" ? "renewed, its conversation having grown long" : "backend session renewed"}, with a handoff of the conversation`);
     }
   }
 
   /** What a new backend session is told of this session's conversation, and of what is open (prompts.ts, `handoff`). */
   private handoff(why: Renewal): string {
     const { state } = this.hub;
-    // A renewed work session is told the conversation of the one it continues; the others their own.
-    const source = why === "renewed" ? this.rec.continues! : this.id;
-    const ours = (sessionId: string): boolean => sessionId === source || sessionId === this.id;
+    const ours = (sessionId: string): boolean => sessionId === this.id;
     const tasks = [...state.tasks.values()].filter((t) => !isTerminal(t.status) && ((t.from && ours(t.from.sessionId)) || ours(t.to.sessionId)));
     const waiting = [...state.gates.values()].filter((g) => ours(g.owner.sessionId)).map((g) => ({ taskIds: g.taskIds, mode: g.mode, note: g.note }));
     const assets = [...state.assets.values()]
@@ -225,7 +224,7 @@ export class LiveSession {
       .filter((a) => a.by === this.agentId)
       .sort((x, y) => y.createdAt.localeCompare(x.createdAt))
       .slice(0, HANDOFF_ASSETS);
-    return handoff(why, turnsSinceCleared(state.store, this.agentId, source), { tasks, waiting, assets });
+    return handoff(why, turnsSinceCleared(state.store, this.agentId, this.id), { tasks, waiting, assets });
   }
 
   /** Note that the model now has what a prompt gave it in full. */
@@ -250,6 +249,18 @@ export class LiveSession {
   private boundary(boundary: Boundary): void {
     this.emit({ sessionUpdate: "session_info_update", _meta: { [Boundaries.key]: boundary } } as SessionUpdate);
     this.hub.kernel.hooks.emit("acp.session_renewed", { agentId: this.agentId, sessionId: this.id });
+  }
+
+  /**
+   * Past `limits.sessionTokens` of context the conversation goes on in a new backend session, from its next turn:
+   * that one is handed what came before (`renewed`). The session, and with it what the user and peers see of the
+   * agent, stays the one it was.
+   */
+  private renewIfLong(): void {
+    if (this.used === undefined || this.used < sessionTokens(this.hub.paths) || !this.backend) return;
+    this.hub.log(`${this.agentId}/${this.id}: ${this.used} tokens of context; its next turn starts a new backend session`);
+    this.backend = undefined;
+    this.save({ backendSessionId: undefined, renew: true });
   }
 
   /**
@@ -405,15 +416,11 @@ export class LiveSession {
     return taken;
   }
 
-  /**
-   * Start the next queued turn, when there is one and it may run now. A work session's turn waits while the agent
-   * has as many other work sessions running as the work allows (Hub.mayRun); it is started when one of them ends.
-   */
+  /** Start the next queued turn, when there is one and none runs. */
   pump(): void {
     if (this.current) return;
-    const next = this.queue[0];
-    if (!next || !this.hub.mayRun(this, next.item)) return;
-    this.queue.shift();
+    const next = this.queue.shift();
+    if (!next) return;
     void this.run(next);
   }
 
@@ -531,9 +538,8 @@ export class LiveSession {
     }
     this.state("idle", end);
     turn.done.resolve(end);
+    this.renewIfLong();
     this.pump();
-    // A place may have come free for another session of the agent that waits for one.
-    this.hub.wake(this.agentId, this);
   }
 
   /**

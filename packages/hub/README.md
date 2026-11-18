@@ -59,7 +59,6 @@ await hub.shutdown();
 | [audit.ts](src/audit.ts) | AuditHook：事件、否决、死信写进 `audit.jsonl` |
 | [delivery.ts](src/delivery.ts) | Effector：把 Kernel 的投递决定落到会话上（新一轮、插话、工具返回、收件箱摘要），用户输入的裁决，停掉只为已撤工作而跑的一轮 |
 | [jobs.ts](src/jobs.ts) | Effector：后台任务（执行者是工具的任务）的排队与调用 |
-| [nudges.ts](src/nudges.ts) | 提醒：任务开着却没有东西会唤醒的会话、用户越过派发者说的话 |
 | [roles.ts](src/roles.ts) | 角色：`.xsb/roles/<角色>/` 下的说明、MCP 配置、skills。每次使用时读取 |
 | [assets.ts](src/assets.ts) | 资产库：有 id 和版本的文件，团队一致性的唯一事实来源 |
 | [mcp-client.ts](src/mcp-client.ts) | 调用一次 stdio MCP server 的一个工具，后台任务（job）用 |

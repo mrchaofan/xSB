@@ -237,7 +237,7 @@ export class Kernel {
   dispatch(
     from: Addr,
     to: Addr,
-    input: { title: string; topic: string; instructions: string; after: string[]; produces?: string; inputs?: string[]; parallel?: boolean; deliveryPref?: DeliveryPref; grants?: Grant[] },
+    input: { title: string; topic: string; instructions: string; after: string[]; produces?: string; inputs?: string[]; deliveryPref?: DeliveryPref; grants?: Grant[] },
   ): Task | Veto {
     const held = input.after.some((id) => !this.finished(id));
     const parents = this.openTasks(from.sessionId).map((t) => t.id);

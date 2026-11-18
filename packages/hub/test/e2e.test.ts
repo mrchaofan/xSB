@@ -170,7 +170,7 @@ const call = (tool: string, args: unknown): string => `!call ${tool} ${JSON.stri
 /** What the tools do, called directly: as the session `from`. */
 const addr = (s: LiveSession) => ({ agentId: s.agentId, sessionId: s.id });
 const dispatch = (from: LiveSession, to: string, input: { title: string; topic: string; instructions: string; after: string[] }): Task => {
-  const task = hub.kernel.dispatch(addr(from), { agentId: to, sessionId: hub.workSession(to, input.topic).id }, { deliveryPref: "wake", ...input });
+  const task = hub.kernel.dispatch(addr(from), { agentId: to, sessionId: hub.mainSession(to).id }, { deliveryPref: "wake", ...input });
   assert.ok(!isVeto(task));
   return task;
 };
@@ -306,10 +306,11 @@ const a = await newSession("a");
 // whoever gave the peer that work; to change that work, its dispatcher replaces it with a new task (onBusy "replace").
 {
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "c", title: "long take", instructions: "!sleep 1500\n!done LONG", topic: "interject" }));
-  await until("c at work", () => [...hub.live.values()].find((l) => l.agentId === "c" && l.rec.topic === "interject" && l.current?.started));
+  await until("c at work", () => (hub.mainSession("c").current?.started ? hub.mainSession("c") : undefined));
   said.set(a, "");
   await prompt(a, call("send_message", { to: "c", content: "plan changed", topic: "interject" }));
   assert.match(said.get(a)!, /"delivery": "queued behind the peer's current work"/);
+  assert.match(said.get(a)!, /"warning": "c is at work on t_\w+ \\"long take\\" of yours, and sees this message only once that is done\. To change what it does, dispatch_task the new instructions with onBusy \\"replace\\"\."/);
   assert.ok(!received("c").some((i) => i.text.includes("plan changed")));
   const later = await until("read after the turn", () => received("c").find((i) => i.text.includes("plan changed")));
   assert.notEqual(later.origin.steered, true);
@@ -318,7 +319,7 @@ const a = await newSession("a");
 
   // A second task of the same dispatcher waits behind the first, and both are done.
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "take 1", instructions: "!sleep 800\n!done TAKE-1", topic: "interject" }));
-  await until("b at work", () => [...hub.live.values()].find((l) => l.agentId === "b" && l.rec.topic === "interject" && l.current?.started));
+  await until("b at work", () => (hub.mainSession("b").current?.started ? hub.mainSession("b") : undefined));
   said.set(a, "");
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "take 2", instructions: "!done TAKE-2", topic: "interject" }));
   assert.match(said.get(a)!, /queued: b is at work on t_\w+ \\"take 1\\" of yours/);
@@ -327,7 +328,7 @@ const a = await newSession("a");
 
   // Replaced: the work is stopped and ends as superseded; the new task runs; the dispatcher is told of nothing.
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "old cut", instructions: "!sleep 5000\n!done OLD", topic: "interject" }));
-  await until("b at work again", () => [...hub.live.values()].find((l) => l.agentId === "b" && l.rec.topic === "interject" && l.current?.started));
+  await until("b at work again", () => (hub.mainSession("b").current?.started ? hub.mainSession("b") : undefined));
   said.set(a, "");
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "new cut", instructions: "!done NEW", topic: "interject", onBusy: "replace" }));
   assert.match(said.get(a)!, /it replaces t_\w+ \\"old cut\\"/);
@@ -690,8 +691,8 @@ const p = await newSession("p1");
   const stoppable = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "noon", ms: 3000 }, title: "take 3" }), "!sleep 5000"];
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "p1", title: "render once more", instructions: stoppable.join("\n"), topic: "scene 1" }));
   const third = await until("take 3 running", async () => (await tasks()).find((t) => t.title === "take 3" && t.status === "running"));
-  // The task runs in p1's work session of its topic; that is the work the user stops.
-  conn.notify("session/cancel", { sessionId: hub.findWorkSession("p1", "scene 1")!.id });
+  // The task runs in p1's conversation, where the user stops it.
+  conn.notify("session/cancel", { sessionId: hub.mainSession("p1").id });
   const once = await until("render once more stopped", async () => (await tasks()).find((t) => t.title === "render once more" && t.status === "cancelled"));
   assert.deepEqual(once.ended, { reason: "cancelled", stopper: { kind: "user" } });
   const take3 = await until("take 3 called off", async () => (await tasks()).find((t) => t.id === third.id && t.status === "cancelled"));
@@ -992,7 +993,7 @@ const p = await newSession("p1");
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "r9", title: "rainy", instructions: [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "rain", ms: 600 }, title: "rain take" }), "!say STARTED"].join("\n"), topic: "lifecycle" }));
   const job = await until("rain take running", async () => (await tasks()).find((t) => t.title === "rain take" && t.status === "running"));
   const parent = (await tasks()).find((t) => t.title === "rainy")!;
-  await until("r9's first turn over", () => answered("r9").includes("STARTED") && !hub.findWorkSession("r9", "lifecycle")!.busy);
+  await until("r9's first turn over", () => answered("r9").includes("STARTED") && !hub.mainSession("r9").busy);
   assert.equal(hub.state.tasks.get(parent.id)!.status, "running", "not ended while the job runs");
   const result = await until("result in a", () => inputs.get(a)!.find((i) => i.text.includes(`task-id="${parent.id}"`) && i.text.includes("<xsb-task-result")));
   assert.match(result.text, new RegExp(`status="completed">\\necho: [^]*task-id="${job.id}"[^]*rendered: rain`));
@@ -1008,15 +1009,15 @@ const p = await newSession("p1");
   await idle("r9");
   await idle("a");
 
-  // The user writes to p1 while it works on a's task: a is told, once for what is said within a short while.
-  hub.nudges.ccDelayMs = 100;
+  // The user writes to an agent while it works on a's task: a is not told. What the user's word changes shows in the
+  // result a gets; a stop by the user is told by the task's end.
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "r9", title: "long one", instructions: "!sleep 1200\n!say LONG", topic: "lifecycle" }));
   await until("long one running", async () => (await tasks()).find((t) => t.title === "long one")?.status === "running");
-  void prompt(p, "make it BLUE");
-  void prompt(p, "and wider");
-  await until("a told", () => inputs.get(a)!.some((i) => /The user wrote directly to r9, which works on your task "long one":\n"make it BLUE"\n"and wider"/.test(i.text)));
+  await prompt(p, "make it BLUE");
+  await until("long one done", async () => (await tasks()).find((t) => t.title === "long one")?.status === "completed");
   await idle("r9");
   await idle("a");
+  assert.ok(!inputs.get(a)!.some((i) => i.text.includes("wrote directly")), "the dispatcher is not copied");
 
   // A message that cannot be run (the backend is not installed) is recorded as failed in the recipient's transcript.
   await conn.request(Agents.put, { agent: { id: "m1", backend: "missing" } });
@@ -1134,9 +1135,10 @@ const p = await newSession("p1");
   console.log("ok 27 spending and jobs at a time");
 }
 
-// 28. Work sessions: a peer's work goes to the agent's session of its topic, not to its main one; one that grew past
-// the limit takes no new work, and the session that continues it is handed its conversation. A session is not given
-// again what it was given already: an unchanged asset is referred to, a changed one comes with what changed.
+// 28. One conversation per agent: a peer's work, of whatever topic, goes to the agent's main session, the one the user
+// talks to it in. Grown past the limit, the conversation goes on in a new backend session, handed what came before;
+// the session stays the same. A session is not given again what it was given already: an unchanged asset is referred
+// to, a changed one comes with what changed.
 {
   const bInfo = async () => (await conn.request(Agents.list)).agents.find((x: any) => x.id === "b");
   const sessionOf = (title: string) => hub.state.tasks.get([...hub.state.tasks.values()].find((t) => t.title === title)!.id)!.to.sessionId;
@@ -1146,27 +1148,23 @@ const p = await newSession("p1");
     await done(title);
   };
   await send("w1", "Story ROOM", "!done W1-DONE");
-  await send("w2", "story room", "!done W2-DONE");
   await send("w3", "other room", "!done W3-DONE");
   const main = (await bInfo()).mainSessionId;
-  assert.equal(sessionOf("w1"), sessionOf("w2"), "one topic, one work session");
-  assert.notEqual(sessionOf("w1"), sessionOf("w3"));
-  assert.ok(![sessionOf("w1"), sessionOf("w3")].includes(main), "not the main session");
-  assert.deepEqual((await bInfo()).workSessions.filter((w: any) => /room/.test(w.topic)).map((w: any) => [w.topic, w.retired]), [["story room", false], ["other room", false]]);
+  assert.deepEqual([sessionOf("w1"), sessionOf("w3")], [main, main], "every topic, the one conversation");
 
-  // Grown past the limit: the next work of the topic goes to a new session that continues it, with a handoff.
+  // Grown past the limit: the next turn starts a new backend session in the same conversation, with a handoff.
   const config = JSON.parse(fs.readFileSync(paths.config, "utf8"));
   fs.writeFileSync(paths.config, JSON.stringify({ ...config, limits: { sessionTokens: 1000 } }));
+  const before = hub.state.sessions.get(main)!.backendSessionId;
   await send("w4", "story room", "!usage 5000\n!done W4-DONE");
   await send("w5", "story room", "!echo\n!done W5-DONE");
-  const old = sessionOf("w1");
-  const renewed = sessionOf("w5");
-  assert.notEqual(renewed, old);
-  assert.deepEqual([hub.state.sessions.get(old)!.retired, hub.state.sessions.get(renewed)!.continues], [true, old]);
-  const handed = hub.state.store.read(Paths.transcript("b", renewed)).map((r: any) => r.update).filter((u: any) => u.sessionUpdate === "agent_message_chunk").map((u: any) => u.content.text).join("");
-  assert.match(handed, /takes over the work of this topic from an earlier session of yours/);
+  assert.equal(sessionOf("w5"), main);
+  assert.notEqual(hub.state.sessions.get(main)!.backendSessionId, before, "a new backend session");
+  assert.ok(!hub.state.sessions.get(main)!.renew);
+  const handed = hub.state.store.read(Paths.transcript("b", main)).map((r: any) => r.update).filter((u: any) => u.sessionUpdate === "agent_message_chunk").map((u: any) => u.content.text).join("");
+  assert.match(handed, /This conversation had grown long, and goes on in a new session of the agent program/);
   assert.match(handed, /W1-DONE[^]*W4-DONE/);
-  assert.ok(hub.state.store.read(Paths.transcript("b", renewed)).some((r: any) => r.update._meta?.[Boundaries.key]?.kind === "renewed"));
+  assert.ok(hub.state.store.read(Paths.transcript("b", main)).some((r: any) => r.update._meta?.[Boundaries.key]?.kind === "renewed"));
   fs.writeFileSync(paths.config, JSON.stringify(config));
 
   // Given once in full; then by reference; then, changed, with what changed.
@@ -1308,32 +1306,22 @@ const p = await newSession("p1");
   console.log("ok 30 two film teams, and the move of earlier projects");
 }
 
-// 31. Parallel work: an agent's peer work runs one turn at a time, unless the dispatcher says a task depends on no
-// other (`parallel`): then up to `limits.sessionsAtOnce` of its work sessions run at once. The user is never kept waiting.
+// 31. One agent, one conversation, one thing at a time: its peer work runs a turn after the other, whatever the topic,
+// and the user's word goes into the work under way.
 {
   const statusOf = async (title: string) => (await tasks()).find((t) => t.title === title)?.status;
-  const send = (title: string, parallel?: boolean) => prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title, instructions: "!sleep 900\n!done DONE", topic: `par ${title}`, ...(parallel ? { parallel } : {}) }));
-  // Without it: one after the other, though the topics differ.
-  await send("serial 1");
-  await send("serial 2");
-  await until("serial 1 running", async () => (await statusOf("serial 1")) === "running");
-  assert.equal(await statusOf("serial 2"), "queued", "waits for its place");
-  await until("serial 2 done", async () => (await statusOf("serial 2")) === "completed", 8000);
-  // With it: two at once, the third waits.
-  await send("par 1", true);
-  await send("par 2", true);
-  await send("par 3", true);
-  await until("two running", async () => (await statusOf("par 1")) === "running" && (await statusOf("par 2")) === "running");
-  assert.equal(await statusOf("par 3"), "queued");
-  // Meanwhile the user is answered at once.
-  const bMain = (await conn.request(Agents.list)).agents.find((x: any) => x.id === "b").mainSessionId;
-  said.set(bMain, "");
+  const send = (title: string) => prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title, instructions: "!sleep 300\n!done DONE", topic: `one ${title}` }));
+  await send("one 1");
+  await send("one 2");
+  await until("one 1 running", async () => (await statusOf("one 1")) === "running");
+  assert.equal(await statusOf("one 2"), "queued", "waits, though the topic differs");
+  const bMain = hub.mainSession("b").id;
   await prompt(bMain, "are you there");
-  assert.match(said.get(bMain)!, /echo: [^\n]*are you there/);
-  await until("all done", async () => (await statusOf("par 3")) === "completed", 8000);
+  assert.ok(received("b").find((i) => i.text === "are you there")!.origin.steered, "the user's word goes into the work under way");
+  await until("both done", async () => (await statusOf("one 2")) === "completed");
   await idle("b");
   await idle("a");
-  console.log("ok 31 parallel work");
+  console.log("ok 31 one conversation per agent");
 }
 
 // 32. A stop is the user's (Esc): the work of the session stops, and so do the tasks it works on, the user being the
@@ -1396,7 +1384,7 @@ const p = await newSession("p1");
 
   // The dispatcher's cancel stops the work that ran only for the task, and records the task once it stopped.
   await watching.turn(s, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "esc", instructions: "!sleep 3000\n!say WORK", topic: "esc" }));
-  const work = await until("b at work", () => [...hub.live.values()].find((l) => l.agentId === "b" && l.rec.topic === "esc" && l.current?.started));
+  const work = await until("b at work", () => (hub.mainSession("b").current?.started ? hub.mainSession("b") : undefined));
   const task = [...hub.state.tasks.values()].find((t) => t.title === "esc")!;
   await until("esc running", () => hub.state.tasks.get(task.id)!.status === "running");
   assert.equal(cancel(task).stopping, true);
@@ -1424,7 +1412,7 @@ const p = await newSession("p1");
 // and is a turn of its own after it; each is finished on its own.
 {
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "c", title: "cut 1", instructions: "!sleep 800\n!done CUT-1", topic: "edit" }));
-  await until("c at work", () => [...hub.live.values()].find((l) => l.agentId === "c" && l.rec.topic === "edit" && l.current?.started));
+  await until("c at work", () => (hub.mainSession("c").current?.started ? hub.mainSession("c") : undefined));
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "c", title: "cut 2", instructions: "!done CUT-2", topic: "edit" }));
   const result = (title: string) => until(`result of ${title}`, () => inputs.get(a)!.find((i) => i.text.includes(`title="${title}"`) && i.text.includes("<xsb-task-result")));
   const given = await until("cut 2 given", () => received("c").find((i) => i.text.includes('title="cut 2"')));
