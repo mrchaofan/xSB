@@ -335,6 +335,11 @@ export type Task = {
   status: TaskStatus;
   /** Once it has ended: why, and who ended it (for `cascaded`, who stopped the task it went with, `cause`). */
   ended?: { reason: EndReason; stopper: Principal; cause?: string };
+  /**
+   * It is being stopped, and ends as this says once its executor confirmed the stop (or xsb restarted). Written in
+   * the transaction that decided the stop, so a crash does not lose it. `quiet`: its initiator is not told.
+   */
+  stopping?: { status: "cancelled" | "failed"; reason: EndReason; stopper: Principal; cause?: string; result: string; quiet?: boolean };
   result?: string;
   /** The assets the assignee named as what the task delivered (`id@version`), when it finished it. */
   assets?: string[];

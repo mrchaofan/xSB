@@ -238,6 +238,35 @@ const settle = () => hooks.settled();
   console.log("ok 8 observers");
 }
 
+// A stop that waits for its session is recorded when it is decided: xsb restarting meanwhile ends the task as the stop
+// said, never as done by a turn that happened to end. What got into the conversation is not said never to have.
+{
+  busy.add("sb");
+  const t = handed(give(A, B, "stopped across a restart"));
+  const mail = [...state.mail.values()].find((m) => m.taskId === t.id)!;
+  kernel.mark(mail.id, "inserted");
+  const stopped = kernel.stop(t, agentPrincipal("a"), { status: "cancelled", reason: "cancelled", result: "no" });
+  assert.ok(!isVeto(stopped) && stopped.stopping);
+  const twice = kernel.stop(state.tasks.get(t.id)!, USER, { status: "cancelled", reason: "cancelled", result: "" });
+  assert.ok(!isVeto(twice) && twice.stopping && !twice.with.length, "stopped once");
+  assert.equal(state.ledger.get(mail.id)!.state, "inserted", "the ledger keeps what happened");
+  kernel.turnEnded("sb", "end_turn", "unrelated words");
+  assert.equal(state.tasks.get(t.id)!.status, "running", "a turn's end does not complete a task being stopped");
+  // Another hub, from what is on disk.
+  const again = new State(new Store(dir));
+  again.load();
+  assert.equal(again.tasks.get(t.id)!.stopping?.reason, "cancelled");
+  new Kernel(again, new Hooks(reports), () => ({ exists: true, busy: false, awaits: () => false })).resume();
+  assert.deepEqual([again.tasks.get(t.id)!.status, again.tasks.get(t.id)!.ended], ["cancelled", { reason: "cancelled", stopper: agentPrincipal("a") }]);
+  assert.equal(again.tasks.get(t.id)!.stopping, undefined);
+  // This hub: the session confirms.
+  busy.delete("sb");
+  hooks.emit("acp.turn_ended", { agentId: "b", sessionId: "sb", stopReason: "cancelled", failed: false });
+  await settle();
+  assert.equal(state.tasks.get(t.id)!.status, "cancelled");
+  console.log("ok 7b a stop survives a restart; the ledger is not rewritten");
+}
+
 // Abandon: everything open ends as interrupted by the user; who has to know is notified to its inbox, waking nobody.
 {
   const { tasks } = kernel.abandon();

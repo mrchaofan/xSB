@@ -40,7 +40,7 @@ const en = {
                                         run the team's scenarios (evals/) on a real backend: costs model use
   xsb backends                          the backends of this machine, and whether each is installed
 
-  xsb chat <agent> [--new] [--history]  talk to an agent
+  xsb chat <agent> [--new] [--history]  talk to an agent (--new: clear its context first)
   xsb send <agent> <message> [--new]
                                         one message, print the reply
   xsb watch                             follow every agent
@@ -143,7 +143,7 @@ const zh: typeof en = {
                                         用真实后端跑团队的场景评估（evals/），会产生模型费用
   xsb backends                          这台机器上的后端，以及各自是否已安装
 
-  xsb chat <智能体> [--new] [--history] 与一个智能体对话
+  xsb chat <智能体> [--new] [--history] 与一个智能体对话（--new：先清空它的上下文）
   xsb send <智能体> <消息> [--new]
                                         发一条消息并打印回复
   xsb watch                             跟随所有智能体

@@ -56,10 +56,10 @@ export class Delivery {
 
   /** What the kernel is to know of a session. */
   recipient(to: Addr): Recipient {
-    const exists = this.hub.state.agents.has(to.agentId);
-    const session = exists ? (this.hub.live.get(to.sessionId) ?? this.hub.mainSession(to.agentId)) : undefined;
+    // Asking makes nothing: a session that is not registered is not there to deliver to.
+    const session = this.hub.state.agents.has(to.agentId) ? this.hub.live.get(to.sessionId) : undefined;
     return {
-      exists,
+      exists: !!session,
       busy: !!session?.busy,
       awaits: (taskId) => {
         const waiter = this.waiters.get(taskId);
@@ -75,7 +75,8 @@ export class Delivery {
     const waiting = user?.done;
     if (route === "drop") return waiting?.reject(new Error(`agent "${item.to.agentId}" no longer exists`));
     if (route === "inbox" || !this.hub.state.mail.has(item.id)) return waiting?.resolve();
-    const session = this.hub.live.get(item.to.sessionId) ?? this.hub.mainSession(item.to.agentId);
+    const session = this.hub.live.get(item.to.sessionId);
+    if (!session) return waiting?.reject(new Error(`session ${item.to.sessionId} is not registered`));
     const rendered = this.render(item, session);
     const delivered = rendered && user ? { ...rendered, from: user.client } : rendered;
     if (!delivered) return waiting?.reject(new Error("the message was refused"));

@@ -66,7 +66,7 @@ try {
 
   // 3. A switch does not swallow the argument after it.
   assert.match(ok("send", "--new", "a", "again"), /echo: again/);
-  assert.equal(ok("sessions").trim().split("\n").length, 2);
+  assert.equal(ok("sessions").trim().split("\n").length, 1);
   console.log("ok 3 switches");
 
   // 3b. Roles: created from the command line, shown, checked, and what an agent of one is told.

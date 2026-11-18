@@ -80,8 +80,9 @@ export class Client {
     conn.onRequest("session/new", async (p) => {
       const agentId = p._meta?.[Agents.sessionKey] ?? hub.defaultAgent();
       if (!agentId) throw failure("no_agents");
-      // The agent works in its own workspace; the client's cwd does not move it.
-      const session = hub.createSession(agentId, Array.isArray(p.mcpServers) ? p.mcpServers : []);
+      // An agent has one conversation: a new session of it is that one (Hub.mainSession). The agent works in its own
+      // workspace; the client's cwd does not move it.
+      const session = hub.mainSession(agentId, Array.isArray(p.mcpServers) ? p.mcpServers : []);
       await session.ensureBackend();
       this.attach(session);
       return { sessionId: session.id, ...setup(session), _meta: sessionMeta(session) };
@@ -108,7 +109,7 @@ export class Client {
         .map((s) => ({
           sessionId: s.id,
           cwd: hub.agent(s.agentId).workspace,
-          title: s.rec.title ?? `${s.agentId}${s.rec.main ? " (main)" : ""}`,
+          title: s.rec.title ?? s.agentId,
           updatedAt: s.rec.updatedAt,
           _meta: sessionMeta(s),
         }));

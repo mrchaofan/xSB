@@ -515,11 +515,11 @@ export class LiveSession {
 
   /**
    * Input that did not get in. The user's is discarded: they stopped it. Mail is not theirs: it waits for a turn of
-   * its own, and leaves this one.
+   * its own, and leaves this one; unless the kernel took it back meanwhile (its task was stopped).
    */
   private giveBack(input: Input): void {
     const turn = this.current;
-    if (users(input) || !input.item) return this.discard(input);
+    if (users(input) || !input.item || !this.hub.state.mail.has(input.item.id)) return this.discard(input);
     if (turn) {
       turn.items = turn.items.filter((m) => m !== input.item);
       turn.inputs = turn.inputs.filter((i) => i !== input);
