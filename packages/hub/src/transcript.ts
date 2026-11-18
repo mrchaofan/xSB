@@ -76,3 +76,111 @@ export function turnsSinceCleared(store: Store, agentId: string, sessionId: stri
   }
   return turns;
 }
+
+/** How long the record of a task's work may be, in characters, before its messages are shortened. */
+export const RECORD_LIMIT = 12_000;
+/** How much is kept of a message that is shortened. */
+const SHORT = 300;
+/** How much is kept of an input other than the user's: its first line, at most this long. */
+const LINE = 160;
+
+type Entry =
+  | { kind: "said"; id: string; text: string }
+  | { kind: "user"; id: string; text: string }
+  | { kind: "input"; id: string; source: string; text: string }
+  | { kind: "tool"; id: string; title: string; status: string };
+
+/** Who an input other than the user's came from, as a record names it. */
+function sourceOf(origin: OriginMeta): string {
+  const who = origin.kind === "agent" ? origin.agentId : origin.kind === "system" ? "xsb" : origin.kind;
+  return origin.role === "task_result" ? `task results for ${who}` : origin.role === "task" ? `task from ${who}` : `message from ${who}`;
+}
+
+const firstLine = (s: string): string => {
+  const line = s.trim().split("\n")[0];
+  return line.length > LINE ? `${line.slice(0, LINE)}…` : line;
+};
+
+/**
+ * The record of the work on a task (docs/DESIGN.md 3.1, 10): what happened in its executor's session from the moment
+ * its input got into the conversation, in order. Everything the agent said, in full; what the user said in the
+ * meantime, in full; every other input and every tool call, a line each. Thoughts and what the tools returned are
+ * left out, and so is the task's own input. Past `limit`, the messages but the last are shortened, then the tool
+ * calls left out, then only the end kept. A record that is one message and nothing else is that message.
+ */
+export function taskRecord(store: Store, agentId: string, sessionId: string, taskId: string, limit = RECORD_LIMIT): string {
+  const updates: any[] = [];
+  for (const rec of store.readBackward(Paths.transcript(agentId, sessionId))) {
+    const update = (rec as { update?: any }).update;
+    if (boundaryOf(update)?.kind === "cleared") break;
+    const origin: OriginMeta | undefined = update?._meta?.[OriginExt.key];
+    if (update?.sessionUpdate === "user_message_chunk" && origin?.taskId === taskId && origin.role === "task") break;
+    updates.push(update);
+  }
+  updates.reverse();
+
+  const entries: Entry[] = [];
+  const tools = new Map<string, Extract<Entry, { kind: "tool" }>>();
+  for (const update of updates) {
+    const last = entries.at(-1);
+    switch (update?.sessionUpdate) {
+      case "user_message_chunk": {
+        const origin: OriginMeta = update._meta?.[OriginExt.key] ?? { kind: "user" };
+        const id = String(update.messageId);
+        const piece = said(update.content);
+        if (last && last.kind !== "tool" && last.kind !== "said" && last.id === id) last.text += `\n${piece}`;
+        else if (origin.kind === "user") entries.push({ kind: "user", id, text: piece });
+        else entries.push({ kind: "input", id, source: sourceOf(origin), text: piece });
+        break;
+      }
+      case "agent_message_chunk":
+      case "agent_message": {
+        const piece = update.sessionUpdate === "agent_message" ? (update.content ?? []).map(said).join("") : update.content?.type === "text" ? update.content.text : "";
+        const id = String(update.messageId ?? "");
+        if (last?.kind === "said" && last.id === id) last.text += piece;
+        else if (piece) entries.push({ kind: "said", id, text: piece });
+        break;
+      }
+      case "tool_call":
+      case "tool_call_update": {
+        const id = String(update.toolCallId ?? "");
+        let entry = tools.get(id);
+        if (!entry) {
+          entry = { kind: "tool", id, title: "", status: "" };
+          tools.set(id, entry);
+          entries.push(entry);
+        }
+        if (update.title) entry.title = String(update.title);
+        if (update.status) entry.status = String(update.status);
+        break;
+      }
+    }
+  }
+
+  const lastSaid = entries.findLast((e) => e.kind === "said");
+  if (entries.length === 1 && lastSaid) return lastSaid.text.trim();
+  const line = (e: Entry, shorten: boolean, withTools: boolean): string | undefined => {
+    switch (e.kind) {
+      case "said": {
+        const text = e.text.trim();
+        return shorten && e !== lastSaid && text.length > SHORT ? `${text.slice(0, SHORT)}…` : text;
+      }
+      case "user":
+        return `[the user] ${e.text.trim()}`;
+      case "input":
+        return `[${e.source}] ${firstLine(e.text)}`;
+      case "tool":
+        return withTools ? `[tool] ${e.title || "(untitled)"}${e.status ? `: ${e.status}` : ""}` : undefined;
+    }
+  };
+  const render = (shorten: boolean, withTools: boolean): string =>
+    entries
+      .map((e) => line(e, shorten, withTools))
+      .filter((l) => l)
+      .join("\n");
+  for (const [shorten, withTools] of [[false, true], [true, true], [true, false]] as const) {
+    const text = render(shorten, withTools);
+    if (text.length <= limit) return text;
+  }
+  return `…${render(true, false).slice(-limit)}`;
+}

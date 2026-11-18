@@ -23,9 +23,9 @@ import { inboxDigest, renderMail } from "./prompts.ts";
 import type { Gives, TaskContext } from "./prompts.ts";
 import { skillBody } from "./roles.ts";
 import type { LiveSession, Turn, TurnEnd } from "./session.ts";
-import { lastText } from "./session.ts";
 import type { MailItem } from "./state.ts";
 import { topicKey } from "./state.ts";
+import { taskRecord } from "./transcript.ts";
 import { deferred, newId } from "./util.ts";
 import type { Deferred } from "./util.ts";
 
@@ -154,9 +154,10 @@ export class Delivery {
   // ---- the user -----------------------------------------------------------------
 
   /**
-   * What the user says in a session. Said where no task of the user's is open, it is a new task the user initiates
-   * (its executor works for the user, with what the user's words give it, capabilities.ts); said while one is, it is
-   * more of it. Either way it is a message in the session's inbox like any other, from the user, which never waits
+   * What the user says in a session (docs/DESIGN.md 3.1, 1-2). Said while a task of the user's is open there, it is
+   * more of it. Said while the session works on tasks, it goes into that work: no task of its own, and what the
+   * user's words give (capabilities.ts) goes to those tasks. Otherwise it is a new task the user initiates (into the
+   * work under way, if there is any). Either way it is a message in the session's inbox like any other, from the user, which never waits
    * behind work (kernel.ts, `deliveryPolicy`). Resolves when it is inserted into the conversation.
    */
   async fromUser(session: LiveSession, prompt: ContentBlock[], origin: OriginMeta, client: Client): Promise<{ messageId: string }> {
@@ -170,6 +171,9 @@ export class Delivery {
       if (open) {
         userSaid(this.hub, open, prompt);
         kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", taskId: open.id, prompt, pref: "wake" });
+      } else if (session.busy && kernel.openTasks(session.id).length) {
+        for (const task of kernel.openTasks(session.id)) userSaid(this.hub, task, prompt);
+        kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", prompt, pref: "wake" });
       } else {
         const task = kernel.dispatchUser(to, prompt, messageId, topicKey(session.rec.title ?? "conversation"));
         if (isVeto(task)) throw new Error(task.veto);
@@ -194,14 +198,25 @@ export class Delivery {
 
   // ---- turns ----------------------------------------------------------------------
 
-  /** Mail was given to the model, in a turn or into one: the tasks it brings are its executor's now. */
+  /**
+   * A turn begins with what the user said without it being a task (`LiveSession.resume`, `pump`): unless a task of
+   * the user's is open there, it is a new one, given already. Returns its id.
+   */
+  userTurn(session: LiveSession, input: { prompt: ContentBlock[] }): string | undefined {
+    if (this.hub.kernel.userTask(session.id)) return undefined;
+    const task = this.hub.kernel.adoptUser({ agentId: session.agentId, sessionId: session.id }, input.prompt, topicKey(session.rec.title ?? "conversation"));
+    return isVeto(task) ? undefined : task.id;
+  }
+
+  /** Mail was given to the backend: the tasks it brings are its executor's now. */
   given(items: MailItem[]): void {
     for (const item of items) if (item.kind === "task") this.hub.kernel.started(item.taskId!);
   }
 
   /**
    * A turn ended. Its mail leaves the inbox. The kernel is told how it ended, which ends the tasks that ended with it
-   * (implicit completion), or fails them. The sender of a message that could not be read is told.
+   * (implicit completion: the result is the record of the work on the task, transcript.ts), or fails them. The sender
+   * of a message that could not be read is told.
    */
   turnEnded(session: LiveSession, turn: Turn, end: TurnEnd): void {
     const { kernel } = this.hub;
@@ -220,7 +235,8 @@ export class Delivery {
         if (task?.status === "queued") kernel.started(task.id);
       }
     }
-    kernel.turnEnded(session.id, end.stopReason, lastText(turn), end.failure ? errorMessage(end.failure) : undefined);
+    const record = (task: { id: string }): string => taskRecord(this.hub.state.store, session.agentId, session.id, task.id);
+    kernel.turnEnded(session.id, end.stopReason, record, end.failure ? errorMessage(end.failure) : undefined);
   }
 
   /**

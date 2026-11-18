@@ -5,9 +5,10 @@
  * There is no per-vendor code: an official ACP agent and a wrapped third-party
  * one (@xsb/adapter) differ only in the command that starts them and in the
  * capabilities they report. ACP v2 takes a prompt while the agent works and
- * inserts it when it can (steered at once, or held), answering with the id of
- * the inserted message; so upstream sees every backend alike: `prompt` resolves
- * on insertion, `cancel` stops the work, and `state_update` says how it goes.
+ * inserts it when it can (claude: into the work under way, at its next tool
+ * call; codex: after it), answering with the id of the inserted message. To put
+ * input into the work under way, a backend that reports `steering` (codex) is
+ * given it with `_session/steering` instead (docs/DESIGN.md 3.1).
  */
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -23,7 +24,18 @@ export type BackendCaps = {
   additionalDirectories: boolean;
   /** Reads `image` content blocks. Text and `resource_link` are what every ACP agent reads. */
   image: boolean;
+  /**
+   * Takes `_session/steering`, which puts input into the work under way (codex-acp). Without it, a prompt sent while
+   * the agent works is what goes into that work (claude-agent-acp).
+   */
+  steering: boolean;
 };
+
+/**
+ * What `_session/steering` did with input: handed it to the work under way (`injected`; it is in the conversation
+ * once the backend shows it, and dropped if the work ends first), or nothing, as no work runs (`idle`).
+ */
+export type Steered = "injected" | "idle";
 
 export type BackendEvents = {
   onExit(reason: string): void;
@@ -32,7 +44,7 @@ export type BackendEvents = {
 
 export class Backend {
   readonly conn: Connection;
-  caps: BackendCaps = { systemPrompt: false, additionalDirectories: false, image: false };
+  caps: BackendCaps = { systemPrompt: false, additionalDirectories: false, image: false, steering: false };
   info = "";
   /** Names of the ways this agent can be signed in, as it reported them. */
   authMethods: string[] = [];
@@ -64,6 +76,21 @@ export class Backend {
   async prompt(sessionId: string, prompt: ContentBlock[], origin: OriginMeta): Promise<string> {
     const answer = await this.conn.request<PromptResponse>("session/prompt", { sessionId, prompt: this.readable(prompt), _meta: { [OriginExt.key]: origin } });
     return answer.messageId;
+  }
+
+  /**
+   * Put input into the session's work under way; only for a backend with `steering`. With no work running, nothing
+   * is done (`idleBehavior: "promptRequired"`): the hub gives it as a prompt then. Rejects when it could not be done.
+   */
+  async steer(sessionId: string, prompt: ContentBlock[]): Promise<Steered> {
+    const answer = await this.conn.request<{ outcome: string }>("_session/steering", {
+      sessionId,
+      prompt: this.readable(prompt),
+      _meta: { steering: { idleBehavior: "promptRequired" } },
+    });
+    if (answer.outcome === "injected") return "injected";
+    if (answer.outcome === "promptRequired") return "idle";
+    throw new RpcError(-32603, `the agent could not take the input into its work (${answer.outcome})`);
   }
 
   /** Stop the session's work, as Esc does in Claude Code and Codex; prompts not inserted yet are answered with -32800. */
@@ -150,6 +177,7 @@ export class Backend {
       systemPrompt: session.systemPrompt != null,
       additionalDirectories: session.additionalDirectories != null,
       image: session.prompt?.image != null,
+      steering: (init._meta as { steering?: { supported?: boolean } } | null | undefined)?.steering?.supported === true,
     };
     backend.authMethods = (init.authMethods ?? []).map((m: any) => m?.name ?? m?.methodId ?? m?.id).filter(Boolean);
     backend.info = init.info ? `${init.info.name} ${init.info.version}` : name;
