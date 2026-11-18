@@ -2,7 +2,6 @@
   "id": "S4",
   "title": "Finals are a gate: the user is asked with the total and the expiry",
   "role": "director",
-  "spent": 40,
   "messages": [
     "You already reviewed the drafts 1-1, 1-2 and 2-1 with dailies-review, and all three passed; no need to review them again. They are 480p, and their links expire at 9 tomorrow morning. Take it from here."
   ],

@@ -12,7 +12,7 @@
  * `initialize`, an unknown request answers -32601 and an unknown notification
  * is ignored.
  */
-import type { ContentBlock } from "./acp.ts";
+import type { ContentBlock, SessionUpdate } from "./acp.ts";
 
 /** Namespace of the extensions this project defines itself. */
 export const NS = "dev.xsb";
@@ -421,6 +421,16 @@ export const TurnFailure = { key: `${NS}/turn_failed` } as const;
  */
 export const Discarded = { key: `${NS}/discarded` } as const;
 export type Discarded = { messageId: string; origin: OriginMeta; content: ContentBlock[] };
+
+/** Desktop history pages use byte cursors and image references, leaving ACP replay unchanged. */
+export const History = {
+  capability: `${NS}/history`,
+  page: `_${NS}/history/page`,
+  image: `_${NS}/history/image`,
+  imageKey: `${NS}/history-image`,
+} as const;
+export type HistoryImage = { sessionId: string; offset: number; index: number };
+export type HistoryPage = { updates: SessionUpdate[]; cursor: number | null; state: "idle" | "running"; agent: AgentInfo };
 
 export const Boundaries = {
   key: `${NS}/boundary`,

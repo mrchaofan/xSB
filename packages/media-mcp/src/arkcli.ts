@@ -17,7 +17,7 @@
  */
 import { spawn } from "node:child_process";
 
-const ALLOWED = ["+gen", "gen get", "gen delete", "api arkruntime.get_content_generation_task", "pricing models"];
+const ALLOWED = ["+gen", "gen get", "gen delete", "api arkruntime.get_content_generation_task"];
 
 /**
  * Said after every failure arkcli reports. Its messages advise whoever owns the account (sign in, choose a model,

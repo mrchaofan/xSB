@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 /**
  * A live session: one conversation of one agent, and the engine that runs its
  * turns over ACP v2.
@@ -25,6 +27,7 @@ import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
 import { bridgeServer } from "./mcp.ts";
 import { sessionTokens } from "./config.ts";
+import { historyUpdate } from "./history.ts";
 import { Paths } from "./paths.ts";
 import { asPreface, handoff } from "./prompts.ts";
 import type { Gives, Renewal } from "./prompts.ts";
@@ -124,8 +127,6 @@ export class LiveSession {
   private binding?: Promise<void>;
   /** Text to put in front of the next prompt. */
   private prefaces: string[] = [];
-  /** What this session was last told of the project's spending: it is told again when that changes. */
-  private toldSpend?: string;
   /**
    * What the model of this session has been given in full, so that it is not given the same again: asset id ->
    * the version and the task it came with, and memory notes by topic key -> the version (updatedAt) it saw. Only
@@ -357,9 +358,14 @@ export class LiveSession {
 
   /** Record an update and show it to every attached client but `except`. */
   emit(update: SessionUpdate, except?: Client): void {
-    this.hub.state.store.append(Paths.transcript(this.agentId, this.id), { ts: now(), update }, false);
+    const file = Paths.transcript(this.agentId, this.id);
+    const offset = fs.statSync(path.join(this.hub.paths.dir, file), { throwIfNoEntry: false })?.size ?? 0;
+    this.hub.state.store.append(file, { ts: now(), update }, false);
     for (const client of this.clients) {
-      if (client !== except) client.conn.notify("session/update", { sessionId: this.id, update });
+      if (client !== except) {
+        const view = client.history ? historyUpdate(update, this.id, offset) : update;
+        if (view) client.conn.notify("session/update", { sessionId: this.id, update: view });
+      }
     }
   }
 
@@ -456,9 +462,6 @@ export class LiveSession {
     const digest = this.hub.delivery.digest(this).map((d) => inputOf(d));
     turn.inputs.splice(1, 0, ...digest);
     turn.items.push(...itemsOf(digest));
-    const spend = this.hub.spending.line();
-    if (spend && spend !== this.toldSpend) this.prefaces.push(spend);
-    this.toldSpend = spend;
     this.send([first, ...digest]);
   }
 

@@ -12,7 +12,6 @@
  *     "role": "director",                       the role under test
  *     "messages": ["..."],                      what the user says, in order (sent at once: later ones wait their turn)
  *     "peers": ["cinematographer"],             other roles of the team present as agents (not run)
- *     "spent": 12.5,                            what the project has spent on generation already (optional)
  *     "fixture": "film-basic",                  assets the project starts with: evals/fixtures/<name>.json, a list of
  *                                               { type, name, description, content } (or "file": "png" | "mp4" for a
  *                                               placeholder file); written into the library before the hub starts
@@ -55,7 +54,7 @@ type Check =
   | { says: string }
   | { saysNot: string };
 
-export type Scenario = { id: string; title: string; role: string; messages: string[]; peers?: string[]; spent?: number; fixture?: string; expect: Check[]; file?: string; fixtures?: string[] };
+export type Scenario = { id: string; title: string; role: string; messages: string[]; peers?: string[]; fixture?: string; expect: Check[]; file?: string; fixtures?: string[] };
 
 type FixtureAsset = { type: string; name: string; description: string; content?: string; file?: "png" | "mp4" };
 
@@ -160,12 +159,6 @@ async function runOnce(scenario: Scenario, team: string, backend: string, langua
     const file = (scenario.fixtures ?? []).map((d) => path.join(d, `${scenario.fixture}.json`)).find((f) => fs.existsSync(f));
     if (!file) throw new Error(`no fixture "${scenario.fixture}" for scenario ${scenario.id}`);
     seed(paths, JSON.parse(fs.readFileSync(file, "utf8")));
-  }
-  // What was spent before, as drafts of a few yuan each (one record of the whole would read as one costly call).
-  for (let left = scenario.spent ?? 0, n = 1; left > 0; n++) {
-    const amount = Math.min(left, 4.5);
-    fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: new Date().toISOString(), tool: "generate_video", output: `earlier-${n}.mp4`, usage: "a 480p draft", amount, basis: "the scenario's" }) + "\n");
-    left -= amount;
   }
   let conn: HubConnection | undefined;
   try {

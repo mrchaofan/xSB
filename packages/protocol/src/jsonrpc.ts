@@ -59,7 +59,7 @@ export class Connection {
   private inflight = new Map<Id, AbortController>();
   private requestHandlers = new Map<string, RequestHandler>();
   private notificationHandlers = new Map<string, NotificationHandler>();
-  private buffer = "";
+  private fragments: string[] = [];
   private markClosed!: () => void;
 
   constructor(input: Readable, output: Writable, name = "rpc") {
@@ -120,6 +120,7 @@ export class Connection {
     this.pending.clear();
     for (const c of this.inflight.values()) c.abort();
     this.inflight.clear();
+    this.fragments = [];
     this.output.end();
     this.markClosed();
   }
@@ -130,12 +131,17 @@ export class Connection {
   }
 
   private onData(chunk: string): void {
-    this.buffer += chunk;
+    let start = 0;
     for (;;) {
-      const nl = this.buffer.indexOf("\n");
-      if (nl < 0) return;
-      const line = this.buffer.slice(0, nl).trim();
-      this.buffer = this.buffer.slice(nl + 1);
+      const nl = chunk.indexOf("\n", start);
+      if (nl < 0) {
+        if (start < chunk.length) this.fragments.push(chunk.slice(start));
+        return;
+      }
+      this.fragments.push(chunk.slice(start, nl));
+      const line = this.fragments.join("").trim();
+      this.fragments = [];
+      start = nl + 1;
       if (!line) continue;
       let message: any;
       try {

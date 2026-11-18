@@ -21,6 +21,7 @@ export const state = {
   assetNames: {},       // 资产类型 -> 显示名
   pages: [],            // 右栏打开的网页；null 表示这个 Electron 显示不了网页
   tab: null,            // 右栏的当前标签：null = 制品，否则是网页的 id
+  history: {},
   transcripts: {},      // agentId -> Entry[]
   open: [],             // 已打开对话栏的 agentId，按显示顺序。最多两个：第一栏，和分屏出来的第二栏
   pinned: false,        // 第一栏是否固定：固定后，再点别的智能体是分屏，而不是换掉它
@@ -97,8 +98,6 @@ function renderRail() {
   $("#settings").setAttribute("aria-pressed", String(!!state.settings));
   $("#overview").setAttribute("aria-pressed", String(state.page === "overview"));
   // 生成花费：已花的估算，有没能计价的生成时一并说出来。只是记账，不限制生成。
-  const spend = state.spend ?? { spent: 0, unpriced: 0 };
-  $("#spend span").textContent = t(spend.unpriced ? "rail.spend.unpriced" : "rail.spend", { spent: spend.spent.toFixed(2), n: spend.unpriced });
   const showCompleted = workspacePreferences(state.workspace?.path).showCompleted;
   const visibleTasks = state.tasks.filter((task) => showCompleted || !["completed", "cancelled"].includes(task.status));
 
@@ -174,7 +173,7 @@ function openLane(agentId) {
       h("span", { class: "lane-state" }, h("i", { class: "state" }), h("span", {})),
       h("button", { class: "icon-btn pin", html: ICON.pin, onclick: () => { state.pinned = !state.pinned; state.open.forEach(syncLane); } }),
       h("button", { class: "icon-btn", title: t("lane.close"), "aria-label": t("lane.close"), html: ICON.close, onclick: () => closeLane(agentId) })),
-    h("div", { class: "transcript" }, h("div", { class: "entries" })),
+    h("div", { class: "transcript" }, h("button", { class: "btn history-more", hidden: state.history?.[agentId] == null, onclick: () => loadHistory(agentId) }, t("history.more")), h("div", { class: "entries" })),
     h("div", { class: "composer" },
       editor.el,
       h("div", { class: "composer-row" },
@@ -189,6 +188,30 @@ function openLane(agentId) {
   renderRail();
   const scroller = lane.querySelector(".transcript");
   scroller.scrollTop = scroller.scrollHeight;
+}
+
+async function loadHistory(agentId) {
+  const lane = laneOf(agentId);
+  if (!lane) return;
+  const button = lane.querySelector(".history-more");
+  if (button.disabled) return;
+  const scroller = lane.querySelector(".transcript");
+  const height = scroller.scrollHeight;
+  const top = scroller.scrollTop;
+  button.disabled = true;
+  button.textContent = t("history.loading");
+  try {
+    const page = await xsb.history(agentId);
+    state.transcripts[agentId] = page.entries;
+    state.history[agentId] = page.cursor;
+    lane.querySelector(".entries").replaceChildren(...page.entries.map((entry) => entryNode(agentId, entry)));
+    button.hidden = page.cursor == null;
+    scroller.scrollTop = top + scroller.scrollHeight - height;
+  } catch (e) {
+    button.textContent = e.message;
+    return;
+  } finally { button.disabled = false; }
+  button.textContent = t("history.more");
 }
 
 function closeLane(agentId) {
@@ -503,7 +526,6 @@ xsb.on((event) => {
   else if (event.role) onRole(event.role);
   else if (event.removedRole) { state.roles = state.roles.filter((r) => r.name !== event.removedRole); renderRail(); refreshSettings(); state.open.forEach(syncLane); }
   else if (event.task) { upsert(state.tasks, event.task); renderRail(); }
-  else if (event.spend) { state.spend = event.spend; renderRail(); refreshSettings(); }
   else if (event.artifact) {
     upsert(state.artifacts, event.artifact);
     if (state.listing || !state.artifactId || state.artifactId === event.artifact.id) renderArtifact();

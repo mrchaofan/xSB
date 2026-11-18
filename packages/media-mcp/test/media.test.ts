@@ -129,33 +129,22 @@ const call = (conn: Connection, args: unknown, name = "generate_video"): Promise
   stop();
 }
 
-// 9. In an xsb project, every generation is written into the project's ledger with what it is estimated to cost, from
-// Ark's price list. The ledger counts and holds nothing back; a cost that is not known is not taken for zero.
+// 9. Generation has no pricing calls or accounting side effects, even with legacy environment settings.
 {
   const ledger = path.join(dir, "spend.jsonl");
-  const write = (rec: object) => fs.appendFileSync(ledger, JSON.stringify(rec) + "\n");
-  const records = () => fs.readFileSync(ledger, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  const priced = () => ran().filter((c) => c.startsWith("pricing models")).length;
-  // A record of an earlier version (a budget) is not a reason to hold anything back.
-  write({ op: "budget", at: "t", amount: 0.01 });
+  const prior = '{"legacy":true}\n';
+  fs.writeFileSync(ledger, prior);
   const { conn, stop } = await server({ XSB_SPEND: ledger, XSB_AGENT: "camera1" });
-  const shot = await call(conn, { prompt: "Lin at dusk", output: "s.mp4" });
-  // 48437 tokens at the highest of the model's 480p prices (0.046 of NV2V, over 0.028 of V2V): 2.23 yuan.
-  assert.match(shot.content[0].text, /\nCost: about 2\.23 yuan; 48437 tokens of doubao-seedance-2-5-flash-261115; 0\.046 yuan per thousand tokens, the highest of doubao-seedance-2-5-flash's applicable prices\. Spent so far: about 2\.23 yuan \(estimates/);
+  const video = await call(conn, { prompt: "Lin at dusk", output: "s.mp4" });
   const image = await call(conn, { prompt: "Lin", output: "l.png" }, "generate_image");
-  assert.match(image.content[0].text, /Cost: about 0\.22 yuan; 1 image of doubao-seedream-5-0-260128; 0\.22 yuan per image, .*\. Spent so far: about 2\.45 yuan/);
-  assert.equal(priced(), 1, "the price list is read once, then kept");
-  assert.deepEqual(records().filter((r) => r.op === "spend").map((r) => [r.agent, r.tool, r.amount?.toFixed(2)]), [["camera1", "generate_video", "2.23"], ["camera1", "generate_image", "0.22"]]);
+  for (const result of [video, image]) {
+    assert.equal(result.isError, undefined);
+    assert.doesNotMatch(result.content[0].text, /Cost:|Spent so far|yuan|not priced/);
+  }
+  assert.equal(ran().some((c) => c.startsWith("pricing ")), false);
+  assert.equal(fs.readFileSync(ledger, "utf8"), prior);
+  assert.equal(fs.existsSync(path.join(dir, "run", "prices.json")), false);
   stop();
-
-  // Without a price, the cost is unknown: written down as such, and generation goes on.
-  fs.rmSync(path.join(dir, "run"), { recursive: true, force: true });
-  const unpriced = await server({ XSB_SPEND: ledger, FAKE_ARK_NO_PRICES: "1" });
-  assert.match((await call(unpriced.conn, { prompt: "z", output: "z.png" }, "generate_image")).content[0].text, /Cost: unknown \(no price found\); 1 image of doubao-seedream-5-0-260128; Ark's price list could not be read\. Spent so far: about 2\.45 yuan and 1 not priced/);
-  const again = await call(unpriced.conn, { prompt: "z", output: "z2.png" }, "generate_image");
-  assert.equal(again.isError, undefined);
-  assert.match(again.content[0].text, /and 2 not priced/);
-  unpriced.stop();
 }
 
 fs.rmSync(dir, { recursive: true, force: true });

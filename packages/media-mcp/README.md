@@ -33,19 +33,9 @@ agent ──start_job──▶ Hub ──▶ xsb-media-mcp ──VideoProvider�
 | `FFMPEG` | 可选：ffmpeg 的路径。只在提供方没给尾帧时用来从视频里取最后一帧 |
 | `VIDEO_POLL_MS` / `VIDEO_TIMEOUT_S` | 轮询间隔（默认 5000）与最长等待（默认 1800） |
 
-## 花费（在 xSB 项目里）
+## 并发
 
-Hub 启动角色的 MCP server 时给它两个环境变量：`XSB_SPEND`（项目的账本 `.xsb/spend.jsonl`）和 `XSB_AGENT`（为哪个智能体工作）。有账本时只记账，不拦截生成：
-
-- **每次生成后**往账本追加一条记录：用量、估算金额、依据。生成在提供方那边已经开始、又被放弃的，记为"计费、金额未知"。
-- **估价**来自 `arkcli pricing models --modality ComputerVision --page-all`，这是账号折后的单价，按只读命令加进白名单，每 12 小时最多读一次，缓存在 `.xsb/run/prices.json`。
-  - 视频取该模型、该清晰度档位下最高的适用单价（V2V 与 NV2V 无法从结果分辨，宁可估高），按千 tokens 计。
-  - 图片按张计。
-  - 结果里的模型名对不上价目时（例如接入点标识），取同类模型的最高单价。
-  - 没有价格就记为"未知"，不当成 0。
-- 同一个进程里，同时出图最多 3 张，其余排队。视频的并发由 Hub 控制（`start_job` 排队，见 hub 的 `limits.jobsAtOnce`，默认 2）。
-
-账本的格式和合计规则在 `@xsb/protocol` 的 `spend.ts` 里，Hub 和这里共用。
+同一个进程里，同时出图最多 3 张，其余排队。视频的并发由 Hub 控制（`start_job` 排队，见 hub 的 `limits.jobsAtOnce`，默认 2）。
 
 ## 换一个模型
 

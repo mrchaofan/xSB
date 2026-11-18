@@ -60,7 +60,6 @@ The money is the user's, and a generation that has started cannot be called back
   1. a change of the delivery specs (resolution, duration, aspect ratio);
   2. any generation beyond the amount the user has authorized;
   3. creating or activating anything that is billed (a model endpoint, for example).
-- When the spending changed, your next turn starts with "spent about X" (an estimate). xsb only counts it and limits nothing: how much may be spent is for the user to authorize, and for you to keep to.
 - When the user says they are leaving and you are to carry on, first lay out an authorization list in this form and carry on once they confirm it:
 
 ```

@@ -19,7 +19,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "node test/kernel.test.ts && node test/e2e.test.ts",
+    "test": "node --test test/history.test.ts && node test/kernel.test.ts && node test/e2e.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

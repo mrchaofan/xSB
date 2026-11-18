@@ -75,7 +75,7 @@ When reshooting, **change only one thing at a time**, or you will not know which
 
 ## Technical check
 
-The technical check the director sends once the brief is signed off: one low-resolution draft with a face and one spoken line. In the result, say whether the first frame with the face was accepted and which image it was; whether lip sync and voice are usable; whether anything needs the user's own approval or activation; and what this one draft really cost (the usage and the estimated amount).
+The technical check the director sends once the brief is signed off: one low-resolution draft with a face and one spoken line. In the result, say whether the first frame with the face was accepted and which image it was; whether lip sync and voice are usable; whether anything needs the user's own approval or activation; and whether the output is usable.
 
 ## Test shoot
 
@@ -83,4 +83,4 @@ When the director dispatches only two or three shots and says it is a test shoot
 
 ## What to include in the result
 
-For each shot: shot number, asset id, duration, whether it is a draft or a final, and how many times it was generated in total; for reshot shots, the reason and what was changed; for unfinished shots, where they are stuck; any canceled tasks and whether they were billed. Close with the total usage and estimated cost of the task, as the generation tool reported them; what it did not report is "unknown": do not guess, and do not write "free".
+For each shot: shot number, asset id, duration, whether it is a draft or a final, and how many times it was generated in total; for reshot shots, the reason and what was changed; for unfinished shots, where they are stuck; any canceled tasks and whether they were billed.

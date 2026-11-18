@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Paths } from "@xsb/hub";
-import { Agents, Assets, Roles, Tasks, Teams } from "@xsb/protocol";
+import { Agents, Assets, History, Roles, Tasks, Teams } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
@@ -80,11 +80,73 @@ test("roles are one list answer, and an event after it is the newer word", async
 test("history failures are visible in the agent transcript", async () => {
   const peer = new Peer();
   snapshot(peer, [{ ...agent("a"), mainSessionId: "main-a" }]);
-  peer.requests.set("session/resume", () => {
+  peer.requests.set(History.page, () => {
     throw new Error("history unavailable");
   });
   const ws = workspace(peer);
   assert.equal((await ws.load()).transcripts.a[0].text, "history unavailable");
+  ws.close();
+});
+
+test("idle after an abnormal end clears waiting, streaming output and unfinished tools", async () => {
+  const peer = new Peer();
+  snapshot(peer, [agent("a")]);
+  const ws = workspace(peer);
+  await ws.load();
+  ws["sessionAgent"].set("s", "a");
+  peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "state_update", state: "running" } });
+  peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "tool_call_update", toolCallId: "c", status: "in_progress" } });
+  peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial" } } });
+  peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "state_update", state: "idle", stopReason: "error" } });
+  assert.deepEqual(ws.working(), []);
+  assert.equal(ws["activities"].has("a"), false);
+  assert.equal(ws["agents"].get("a").state, "idle");
+  assert.equal(ws["transcripts"].get("a").find(e => e.kind === "output").streaming, false);
+  assert.equal(ws["transcripts"].get("a").find(e => e.kind === "tool").status, "failed");
+  ws.close();
+});
+
+test("older pages preserve live updates and do not restore historical waiting", async () => {
+  const peer = new Peer();
+  const a = { ...agent("a"), mainSessionId: "s" };
+  snapshot(peer, [a]);
+  let resolvePage;
+  const input = (id, text) => ({ sessionUpdate: "user_message_chunk", messageId: id, content: { type: "text", text } });
+  peer.requests.set(History.page, ({ before }) => before === undefined
+    ? { updates: [input("new", "new")], cursor: 10, state: "idle", agent: a }
+    : new Promise(resolve => resolvePage = resolve));
+  const ws = workspace(peer);
+  const loaded = await ws.load();
+  assert.equal(loaded.history.a, 10);
+  assert.deepEqual(loaded.activities, {});
+  const older = ws.history("a");
+  assert.equal(ws.history("a"), older);
+  peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "state_update", state: "running" } });
+  peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "live" } } });
+  resolvePage({ updates: [input("old", "old"), { sessionUpdate: "state_update", state: "idle" }], cursor: null, agent: a, state: "idle" });
+  const page = await older;
+  assert.deepEqual(page.entries.filter(e => e.kind === "input").map(e => e.content[0].text), ["old", "new"]);
+  assert.equal(page.entries.find(e => e.kind === "output").content[0].text, "live");
+  assert.equal(ws["agents"].get("a").state, "running");
+  assert.equal(ws["activities"].get("a").kind, "writing");
+  peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "state_update", state: "idle" } });
+  assert.deepEqual(ws.working(), []);
+  ws.close();
+});
+
+test("live work arriving with the first page wins over that page's idle snapshot", async () => {
+  const peer = new Peer();
+  const a = { ...agent("a"), mainSessionId: "s" };
+  snapshot(peer, [a]);
+  peer.requests.set(History.page, () => {
+    peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "state_update", state: "running" } });
+    peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "user_message_chunk", messageId: "live", content: { type: "text", text: "live input" } } });
+    return { updates: [], cursor: null, agent: a, state: "idle" };
+  });
+  const ws = workspace(peer);
+  const loaded = await ws.load();
+  assert.equal(loaded.agents[0].state, "running");
+  assert.equal(loaded.transcripts.a[0].content[0].text, "live input");
   ws.close();
 });
 

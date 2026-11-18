@@ -76,7 +76,7 @@ export function markdownView(text, openLink, className = "md") {
 
 /** 文本以外的一块：图片显示本身，文件显示名字，不认识的类型显示类型名。 */
 function partNode(block) {
-  if (block.type === "image") return h("img", { class: "part", src: `data:${block.mimeType};base64,${block.data}`, alt: t("content.image.alt") });
+  if (block.type === "image") return h("img", { class: "part", src: block.url || `data:${block.mimeType};base64,${block.data}`, loading: "lazy", decoding: "async", alt: t("content.image.alt") });
   return h("span", { class: "part chip", title: block.uri, html: ICON.file }, block.type === "resource_link" ? block.name : block.type);
 }
 
