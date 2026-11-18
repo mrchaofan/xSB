@@ -23,12 +23,12 @@
  * kernel's; the tools are one of its users, with the caller's identity.
  */
 import { Agents, isTerminal } from "@xsb/protocol";
-import type { Addr, Asset, DeliveryPref, Grant, LedgerState, Task } from "@xsb/protocol";
+import type { Addr, Asset, DeliveryPref, Grant, LedgerState, PermissionOption, Task } from "@xsb/protocol";
 import { loadProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
 import { isVeto } from "./hooks.ts";
 import type { Veto } from "./hooks.ts";
-import { capabilities, has, reaches } from "./capabilities.ts";
+import { allowAlways, capabilities, reaches } from "./capabilities.ts";
 import type { Capabilities } from "./capabilities.ts";
 import { agentPrincipal } from "./kernel.ts";
 import { renderAsset, renderMail, renderResults } from "./prompts.ts";
@@ -36,7 +36,7 @@ import { skillBody } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { ops, topicKey } from "./state.ts";
 import { startedFor } from "./task-graph.ts";
-import { now } from "./util.ts";
+import { newId, now } from "./util.ts";
 
 type Ctx = { hub: Hub; session: LiveSession; caps: Capabilities };
 type Tool = {
@@ -144,10 +144,29 @@ function ownTask(ctx: Ctx, id: string, mustOwn = false): Task {
   return task;
 }
 
-/** Whether the work this session does lets it reach `to` with `cap`; else what the model is told. */
-function reach(ctx: Ctx, cap: "dispatch" | "message", to: string): void {
-  if (reaches(ctx.caps[cap], to)) return;
-  throw new Error(`the work you are doing does not let you ${cap === "dispatch" ? "dispatch tasks" : "send messages"} to "${to}". You can reach whoever gave you your task (report_result, ask), and the user (escalate_to_user).`);
+const ALLOW: PermissionOption[] = [
+  { optionId: "once", name: "Allow once", kind: "allow_once" },
+  { optionId: "always", name: "Always allow", kind: "allow_always" },
+  { optionId: "no", name: "Reject", kind: "reject_once" },
+];
+
+/**
+ * Whether this agent may reach `to` with `cap` (capabilities.ts). What its role is not allowed is put to the user,
+ * and the call waits for the answer, however long; allowed always, it is written to the project's config.
+ */
+async function authorize(ctx: Ctx, cap: Grant["cap"], to: string[]): Promise<void> {
+  const asked = to.filter((id) => !reaches(ctx.caps[cap], id));
+  if (!asked.length) return;
+  const what = cap === "dispatch" ? "give a task to" : "send a message to";
+  const answer = await ctx.hub.permissions.request(ctx.session, {
+    sessionId: ctx.session.id,
+    title: `${ctx.session.agentId} wants to ${what} ${asked.join(", ")}`,
+    subject: { type: "tool_call", toolCall: { toolCallId: newId("perm"), title: `team/${cap === "dispatch" ? "dispatch_task" : "send_message"}` } },
+    options: ALLOW,
+  });
+  const chosen = answer.outcome.outcome === "selected" ? answer.outcome.optionId : undefined;
+  if (chosen === "always") allowAlways(ctx.hub, ctx.session.agentId, cap, asked);
+  if (chosen !== "once" && chosen !== "always") throw new Error(`the user did not allow you to ${what} ${asked.join(", ")}.`);
 }
 
 const DELIVERY = {
@@ -155,12 +174,6 @@ const DELIVERY = {
   enum: ["sync", "wake", "lazy"],
   description:
     'How the result reaches you. "sync": this call waits for it, up to a minute, for a short task you need the answer of to go on. "wake": as soon as it is there, waking you. "lazy" (default): kept for your next turn, waking nobody.',
-};
-
-const GRANTS = {
-  type: "array",
-  items: { type: "object", properties: { cap: { type: "string", enum: ["dispatch", "message"] }, to: { type: "array", items: { type: "string" } } }, required: ["cap"] },
-  description: "What the peer may do for this task beyond reaching you: dispatch tasks to, or message, other agents (all, or those in `to`). Only what you may do yourself.",
 };
 
 /**
@@ -227,7 +240,6 @@ function busyNote(ctx: Ctx, task: Task, replaced: Task[]): string | undefined {
 
 /** A message to a peer, as send_message and broadcast send it. */
 function send(ctx: Ctx, to: string, content: string, topic: string | undefined) {
-  reach(ctx, "message", to);
   const note = continuityNote(ctx, topic, to);
   const session = ctx.hub.mainSession(to);
   const { item } = ctx.hub.kernel.post({ to: { agentId: to, sessionId: session.id }, from: { kind: "agent", ...self(ctx) }, kind: "message", topic, content, pref: "wake" });
@@ -246,7 +258,7 @@ export const TOOLS: Tool[] = [
   {
     name: "dispatch_task",
     description:
-      "Give another agent a task. Its result is what the agent says last when it is done. Say with deliveryPref how you want the result: in this call (sync), waking you (wake), or with your next turn (lazy, the default). To go on only once several tasks are done, dispatch them, subscribe to them and end your turn. A peer that is busy gets the task after its current work (onBusy \"queue\", the default); to change what you asked of it while it works on it, dispatch the new task with onBusy \"replace\".",
+      "Give another agent a task. Its result is the record of the agent's work on it. Say with deliveryPref how you want the result: in this call (sync), waking you (wake), or with your next turn (lazy, the default). To go on only once several tasks are done, dispatch them, subscribe to them and end your turn. A peer that is busy gets the task after its current work (onBusy \"queue\", the default); to change what you asked of it while it works on it, dispatch the new task with onBusy \"replace\".",
     inputSchema: schema(
       {
         to: str("Agent id."),
@@ -257,7 +269,6 @@ export const TOOLS: Tool[] = [
         after: { type: "array", items: { type: "string" }, description: "Task ids that must finish before this task starts. The peer receives their results as input." },
         inputs: { type: "array", items: { type: "string" }, description: "Ids of the assets the task works from (e.g. character/lin). The peer receives them with the task." },
         produces: str("Asset type the task has to result in (e.g. shot_list). The peer must register one; it is asked for it if it does not."),
-        grants: GRANTS,
         onBusy: {
           type: "string",
           enum: ["queue", "replace"],
@@ -267,12 +278,11 @@ export const TOOLS: Tool[] = [
       },
       ["to", "title", "instructions"],
     ),
-    run(ctx, args) {
+    async run(ctx, args) {
       const to = peer(ctx, need(args, "to"));
-      reach(ctx, "dispatch", to);
+      await authorize(ctx, "dispatch", [to]);
       const after: string[] = Array.isArray(args.after) ? args.after : [];
       const deliveryPref: DeliveryPref = ["sync", "wake"].includes(args.deliveryPref) ? args.deliveryPref : "lazy";
-      const grants: Grant[] = Array.isArray(args.grants) ? args.grants.filter((g: any) => g?.cap === "dispatch" || g?.cap === "message") : [];
       const title = need(args, "title");
       const instructions = need(args, "instructions");
       const topic: string | undefined = args.topic?.trim() || undefined;
@@ -281,7 +291,7 @@ export const TOOLS: Tool[] = [
       const note = [continuityNote(ctx, topic, to), contractNote(ctx, to, produces, inputs.map((ref) => asset(ctx, ref)))].filter(Boolean).join(" ");
       // An agent has one conversation, and does all its work there, one turn at a time (Hub.mainSession).
       const session = ctx.hub.mainSession(to);
-      const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: to, sessionId: session.id }, { title, topic: topic ?? title, instructions, after, inputs, produces, deliveryPref, grants }));
+      const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: to, sessionId: session.id }, { title, topic: topic ?? title, instructions, after, inputs, produces, deliveryPref }));
       const replaced = args.onBusy === "replace" ? ctx.hub.kernel.replace(task) : [];
       const held = task.status === "blocked";
       const answer = { task_id: task.id, status: held ? "held until the tasks in `after` finish" : busyNote(ctx, task, replaced) ?? "dispatched", delivery: deliveryPref, ...(note ? { note } : {}) };
@@ -343,7 +353,7 @@ export const TOOLS: Tool[] = [
       if (!asked) throw new Error("you have no task given by an agent; name whom to ask in `to`");
       // Upward, it goes to the session of the initiator that gave the task, which has the matter in mind.
       const upward = ctx.hub.kernel.openTasks(ctx.session.id).find((t) => t.initiator.kind === "agent" && t.initiator.agentId === asked && t.from);
-      if (!upward) reach(ctx, "message", asked);
+      if (!upward) await authorize(ctx, "message", [asked]);
       const topic: string = args.topic?.trim() || upward?.topic || "question";
       const session = upward?.from ? ctx.hub.live.get(upward.from.sessionId)! : ctx.hub.mainSession(asked);
       const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: asked, sessionId: session.id }, { title: `Question from ${ctx.session.agentId}`, topic, instructions: `${ctx.session.agentId} asks you, and waits for your answer (what you say back is the answer):\n${question}`, after: [], deliveryPref: "sync" }));
@@ -444,19 +454,22 @@ export const TOOLS: Tool[] = [
     description:
       "Send a message to another agent. If the peer is working on a task you gave it, it goes into its running work; otherwise, if it is busy, it is read as its next turn. The result says which; message_status tells later whether its model has seen it.",
     inputSchema: schema({ to: str("Agent id."), content: str("The message."), topic: TOPIC }, ["to", "content"]),
-    run(ctx, args) {
-      return json(send(ctx, peer(ctx, need(args, "to")), need(args, "content"), args.topic?.trim() || undefined));
+    async run(ctx, args) {
+      const to = peer(ctx, need(args, "to"));
+      await authorize(ctx, "message", [to]);
+      return json(send(ctx, to, need(args, "content"), args.topic?.trim() || undefined));
     },
   },
   {
     name: "broadcast",
     description: "Send the same message to several agents, each as with send_message.",
     inputSchema: schema({ to: { type: "array", items: { type: "string" }, description: "Agent ids." }, content: str("The message."), topic: TOPIC }, ["to", "content"]),
-    run(ctx, args) {
-      const to: string[] = Array.isArray(args.to) ? [...new Set<string>(args.to)] : [];
+    async run(ctx, args) {
+      const to: string[] = Array.isArray(args.to) ? [...new Set<string>(args.to)].map((id) => peer(ctx, id)) : [];
       if (!to.length) throw new Error(`"to" is required`);
       const content = need(args, "content");
-      return json(to.map((id) => ({ to: id, ...send(ctx, peer(ctx, id), content, args.topic?.trim() || undefined) })));
+      await authorize(ctx, "message", to);
+      return json(to.map((id) => ({ to: id, ...send(ctx, id, content, args.topic?.trim() || undefined) })));
     },
   },
   {
@@ -610,17 +623,11 @@ export const TOOLS: Tool[] = [
   },
 ];
 
-/** The tools a session has now (capabilities.ts). */
-export function toolsFor(hub: Hub, session: LiveSession): Tool[] {
-  const caps = capabilities(hub.kernel, session.id, session.senders());
-  return TOOLS.filter((t) => has(caps, t.name));
-}
-
 export async function callTool(hub: Hub, session: LiveSession, name: string, args: unknown): Promise<{ text: string; isError: boolean }> {
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) return { text: `Unknown tool: ${name}`, isError: true };
-  const caps = capabilities(hub.kernel, session.id, session.senders());
-  if (!has(caps, name)) return { text: `${name} is not available in the work you are doing now.`, isError: true };
+  const caps = capabilities(hub, session.agentId, session.id, session.senders());
+  if (name === "report_result" && !caps.upward.size) return { text: "report_result is not available in the work you are doing now: no agent gave you a task you have open.", isError: true };
   try {
     return { text: await tool.run({ hub, session, caps }, args ?? {}), isError: false };
   } catch (e) {

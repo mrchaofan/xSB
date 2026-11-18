@@ -24,7 +24,6 @@ import { Store } from "@xsb/store";
 import { Client } from "./acp-server.ts";
 import { Assets } from "./assets.ts";
 import { auditHook, auditReports } from "./audit.ts";
-import { capabilityHook } from "./capabilities.ts";
 import { BackendPool } from "./backends.ts";
 import { DEFAULT_BACKEND, loadProjectConfig, migrateProjectConfig, projectLanguage } from "./config.ts";
 
@@ -63,8 +62,6 @@ export class Hub {
 
   private servers: net.Server[] = [];
   private unwatchSpend?: () => void;
-  /** The bridges of the team's tools, and how to tell each that its session's tools may have changed (mcp.ts). */
-  readonly bridges = new Map<Connection, () => void>();
   /** Bridge token -> session: how a tool call is known to come from that session. */
   private bridgeTokens = new Map<string, LiveSession>();
 
@@ -77,14 +74,9 @@ export class Hub {
     this.kernel = new Kernel(this.state, hooks, (to) => this.delivery.recipient(to));
     this.delivery = new Delivery(this);
     this.jobs = new Jobs(this);
-    capabilityHook(this);
     auditHook(hooks, this.state.store);
     // UserFeedHook: what the clients are shown of tasks and of the ledger.
     hooks.on("task.changed", (task) => this.broadcast(Tasks.update, { task }));
-    // What a session's work gives it changes with its tasks: its tools are listed anew.
-    hooks.on("task.changed", () => {
-      for (const changed of this.bridges.values()) changed();
-    });
     hooks.on("message.ledger", (entry) => this.broadcast(Ledger.update, { entry }));
     this.permissions = new Permissions(this);
     this.assets = new Assets(this);

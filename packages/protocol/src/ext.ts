@@ -330,8 +330,6 @@ export type Task = {
   tool?: { server: string; name: string; arguments: unknown };
   /** How its result reaches its initiator. Absent: `lazy`. */
   deliveryPref?: DeliveryPref;
-  /** What its executor may do beyond reaching its initiator (docs/KERNEL.md, capabilities). */
-  grants?: Grant[];
   status: TaskStatus;
   /** Once it has ended: why, and who ended it (for `cascaded`, who stopped the task it went with, `cause`). */
   ended?: { reason: EndReason; stopper: Principal; cause?: string };

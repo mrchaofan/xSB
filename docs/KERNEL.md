@@ -91,7 +91,7 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 
 | 阶段 | 点 | 类型 | 内置处理者 | 谁触发 |
 | - | - | - | - | - |
-| 任务 | `task.pre_create` | 裁决 | `after` 只能指已有任务；CapabilityHook 定出任务的授予 | 创建任务 |
+| 任务 | `task.pre_create` | 裁决 | `after` 只能指已有任务 | 创建任务 |
 | | `task.created` | 观察 | Jobs（开始后台任务）、Audit | 创建后 |
 | | `task.started` | 观察 | Audit | 交给执行方 |
 | | `task.changed` | 观察 | UserFeed（`tasks/update`）、工具列表变化通知 | 任务的每次变化 |
@@ -118,7 +118,7 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 
 - **裁决**：按注册顺序成链，每个处理者拿到前一个的结果，原样或改写后返回，或者否决；处理者抛异常也算否决（fail-closed）。否决写进审计。Kernel 自己的策略最先注册，后注册的看得到它的答案，可以推翻。
 - **观察**：在变化提交之后异步扇出，按发出的顺序，但不在发出它的那次调用之内。每个处理者都拿到每个事件；失败的重试两次，仍失败就记为死信（写进审计）；一个失败不影响其他。
-- **内置 Hooks**：NotificationHook（第 7 节）、CascadeHook（第 9 节）、CapabilityHook（第 8 节）、ResultExtractionHook 与 QualityGateHook（第 4 节）、LedgerHook（第 10 节）、AuditHook（`.xsb/audit.jsonl`）、UserFeedHook（推给客户端）。
+- **内置 Hooks**：NotificationHook（第 7 节）、CascadeHook（第 9 节）、ResultExtractionHook 与 QualityGateHook（第 4 节）、LedgerHook（第 10 节）、AuditHook（`.xsb/audit.jsonl`）、UserFeedHook（推给客户端）。
 - **通知在事务里，投递在事务外**：谁被通知在 `finish` 的同一个 WAL 事务里写定，崩溃不会丢；怎么投递是提交之后的裁决与 Effector。
 
 ## 6. 唯一的投递管线：被通知 ≠ 调用后端
@@ -160,24 +160,20 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 - 发起会话本身因这次撤销被停下的，它派出的任务也不通知：它的那份工作已经整体撤掉，没有可做的事。
 - 执行方：它的工作被整体停下（见第 9 节），就不再告诉它；它还有别的任务开着、或它当时空闲，就告诉它哪些撤了、哪些因还服务于别的工作而没撤（`lazy`：在工作就插进去，空闲就随下一轮附上）。方案只要求通知发起方；这样做是为了不让执行方的模型以为一件已撤的事还在等它。
 
-## 8. 能力按任务上下文动态授予（CapabilityHook）
+## 8. 权限按角色（capabilities.ts）
 
-没有"协调型/工具型"这样的静态角色。一个会话的协作工具，每次被问到时按它手上开着的任务计算（[capabilities.ts](../packages/hub/src/capabilities.ts)）：
+**工具清单固定**：每个会话的 `team` 工具服务始终列出全部工具，不随任务变化。后端可能只取一次清单，之后不再取（codex 0.166 收到 `notifications/tools/list_changed` 也不重取，已实测）；所以清单不能依赖运行时状态，能不能用在调用时判断。
 
-| 能力 | 来源 | 工具 |
+**派活和发消息的权限以角色为单位**（没有角色的 Agent 以自己的 id 为角色）。一个角色能联系谁：
+
+| 来源 | 写在哪 | 说明 |
 | - | - | - |
-| 向上 | 每个由 Agent 发起的任务：执行方总能触达发起方 | `report_result`、`ask`（问发起方） |
-| 派发 | 授予 | `dispatch_task`、`list_agents` |
-| 消息 | 授予；或正在读的这条聊天的发送方（可以回话） | `send_message`、`broadcast`、`message_status`、`ask`（问别人）、`list_agents` |
-| 始终 | — | `escalate_to_user`；查看、订阅、撤销自己发起的东西（`task_status`、`subscribe`、`cancel_task`、`inbox`）；非协作工具（资产、记忆、技能、后台任务） |
+| 角色定义的默认值 | `role.json` 的 `grants: ["dispatch", "message"]` | 能联系所有人；预设团队里导演、技术负责人有 |
+| 项目配置 | `.xsb/config.json` 的 `permissions: { "<角色>": { "dispatch": ["<角色>" 或 "*"], "message": [...] } }` | 用户运行时选"始终允许"时写入 |
 
-授予的来源：
+**没有这些权限时，运行时问用户**：`dispatch_task`、`send_message`、`broadcast`、`ask`（问发起方以外的人）调用时，中枢经权限请求（`session/request_permission`）问用户，选项是"允许一次 / 始终允许 / 拒绝"；调用一直等到用户回答。"始终允许"写进项目配置，之后不再问。拒绝时调用返回原因。
 
-- **团队策略**：角色的 `role.json` 里 `grants: ["dispatch", "message"]`，对这个角色的 Agent 执行的每个任务都有效。预设团队里统筹的角色（导演、技术负责人）有它。
-- **用户的话**：用户对 Agent 说的话里点名的其他 Agent（id 或名字），这个用户任务就能向它们派发、发消息；之后在同一个任务里再点名的也加上。
-- **派发方**：`dispatch_task` 的 `grants`，只能是派发方自己有的。
-
-授予随任务结束而结束。用户停下一个会话后再说话，是一个新的用户任务，能力按它重算，原来的协作授予不再有效（"接管"）。工具列表变了，中枢向桥发 `notifications/tools/list_changed`，后端会重新拉取；调用时也再校验一遍，所以即使后端没有及时刷新列表，越权调用也会被拒绝。
+**不需要权限**（随工作而来）：向派自己活的 Agent 交差、提问（`report_result`、`ask`）；回复正在读的消息的发送方；`escalate_to_user`；查看、订阅、撤销自己发起的东西；非协作工具（资产、记忆、技能、后台任务）。`report_result` 在没有 Agent 派来的任务时被拒，并说明原因。
 
 ## 9. 停止与传染（CascadeHook + 任务图）
 
@@ -208,7 +204,7 @@ inboxed ──随下一轮──► inserted …
 | 工具名 `team.dispatch_task` 等 | MCP server 名为 `team`，工具名不带点；后端里显示为 `team/dispatch_task`、`mcp__team__dispatch_task` | 工具名只能是 `[a-zA-Z0-9_-]`（Claude API 的要求），点会让工具无法调用 |
 | `cancel_task`、`task_status`、`subscribe`、`inbox` 随派发能力授予 | 始终可用，只作用于调用者自己发起的东西 | Agent 能自己启动后台任务（`start_job` 不是协作），就必须能撤销、订阅它；所有权校验已是权限边界 |
 | 方案的工具清单里没有汇合 | `subscribe(task_ids, mode, note)`：订阅多个即汇合 | 派出几件活、全部回来再继续是常用的模式；把它放进 `subscribe` 不多一个工具 |
-| 用户意图由 CapabilityHook 识别 | 点名即授予：话里出现其他 Agent 的 id 或名字 | 确定、可审计；不依赖另一个模型去猜意图 |
+| 权限随任务授予 | 权限按角色，未授权时运行时问用户，"始终允许"写进项目配置 | 后端只取一次工具清单，随任务变化的清单会和模型看到的脱节 |
 | 只通知发起方 | 执行方没被停下工作时也告诉它（`lazy`） | 不让它的模型以为一件已撤的事还在等它 |
 | 等 `idle(cancelled)` 确认后落账 | 照做，另加 10 秒的兜底 | 后端一直不确认时，任务不该永远悬着 |
 | Gemini P1、Grok P2 | 不内置 | 两者都只说 v1，按决定不做 v1 桥 |
@@ -230,4 +226,4 @@ inboxed ──随下一轮──► inserted …
 | Kernel 零 ACP/UI 依赖 | kernel.ts 只引用 protocol 与 store 的类型、hooks、ledger、state、task-graph、prompts（措辞）、util | kernel.test.ts |
 | 后端无感知 | 后端只收到标准的 v2 请求 | 全部 e2e（mock 后端说 v2） |
 | 隐式协作优先：任务完结不依赖模型调用工具 | 隐式完结；契约由 QualityGate 追问 | kernel 6、e2e 2、14、25 |
-| 能力动态授予，无静态角色 | `capabilities.ts`；工具列表随任务计算并通知变化 | e2e 8、33、35；cli 2 |
+| 权限按角色，工具清单固定 | `capabilities.ts`；`tools.ts` 的 `authorize` | e2e 8、33、35；cli 2 |
