@@ -48,11 +48,18 @@ await hub.shutdown();
 | 模块 | 拥有 |
 | - | - |
 | [hub.ts](src/hub.ts) | 组合根：Agent、会话、已连接客户端的登记，socket 的生命周期 |
-| [acp-server.ts](src/acp-server.ts) | 对外的 ACP agent：标准的 `session/*`，加上插话、多 Agent、任务三个扩展 |
+| [acp-server.ts](src/acp-server.ts) | 对外的 ACP agent：标准的 `session/*`，加上插话、多 Agent、任务（含用户撤任务）等扩展 |
 | [session.ts](src/session.ts) | 一个会话的回合引擎：一个队列、一次一轮；与后端会话的绑定和恢复。对所有后端一视同仁 |
-| [backend.ts](src/backend.ts) | 一个后端进程，链路的末端，后端之间唯一有差别的地方：启动、握手、读取能力，并在这里补齐缺的能力（如没有原生插话时"取消再续接"），对上只提供统一的 `prompt` / `steer` / `cancel`。没有按厂商的分支 |
+| [backend.ts](src/backend.ts) | 一个后端进程，链路的末端，后端之间唯一有差别的地方：启动、握手、读取能力，并在这里补齐缺的能力（没有原生插话时，用户的话"取消再续接"，其余的扣住到 prompt 返回再续接），对上只提供统一的 `prompt` / `steer` / `cancel`。没有按厂商的分支 |
 | [backends.ts](src/backends.ts) | 进程池：每个 Agent 至多一个进程，首次需要时启动 |
-| [mailroom.ts](src/mailroom.ts) | Agent 之间的一切：消息、任务、后台任务（执行者是工具的任务）、结果（单个任务的，或汇合的一组）。先记入邮箱再投递，一轮结束才确认；跨日志的修改是一个事务 |
+| [kernel.ts](src/kernel.ts) | 任务调度框架（Kernel），与后端无关：任务的开始与统一收口的结束、任务图上的撤销与传染、汇合、收件箱、通知、台账、内置策略（投递裁决、通知投递）。不引用 ACP、会话、客户端，可单独测试（test/kernel.test.ts） |
+| [hooks.ts](src/hooks.ts) | Hook 引擎：裁决链（可改写、可否决、异常即否决）与观察者（异步扇出、失败隔离、重试、死信） |
+| [task-graph.ts](src/task-graph.ts) | 任务图上的纯算法：支撑者、撤销集、放行（docs/TASK-GRAPH.md） |
+| [ledger.ts](src/ledger.ts) | LedgerHook：由 ACP v2 的插入回执与工作状态推进每条消息的台账状态 |
+| [audit.ts](src/audit.ts) | AuditHook：事件、否决、死信写进 `audit.jsonl` |
+| [delivery.ts](src/delivery.ts) | Effector：把 Kernel 的投递决定落到会话上（新一轮、插话、工具返回、收件箱摘要），用户输入的裁决，停掉只为已撤工作而跑的一轮 |
+| [jobs.ts](src/jobs.ts) | Effector：后台任务（执行者是工具的任务）的排队与调用 |
+| [nudges.ts](src/nudges.ts) | 提醒：任务开着却没有东西会唤醒的会话、用户越过派发者说的话 |
 | [roles.ts](src/roles.ts) | 角色：`.xsb/roles/<角色>/` 下的说明、MCP 配置、skills。每次使用时读取 |
 | [assets.ts](src/assets.ts) | 资产库：有 id 和版本的文件，团队一致性的唯一事实来源 |
 | [mcp-client.ts](src/mcp-client.ts) | 调用一次 stdio MCP server 的一个工具，后台任务（job）用 |
@@ -68,7 +75,7 @@ await hub.shutdown();
 
 | 文件 | 字段 | 含义 |
 | - | - | - |
-| `~/.xsb/config.json`（可用环境变量 `XSB_HOME` 改目录） | `backends.<名称>.command` / `.args` | 这台机器上的后端：一条在 stdio 上说 ACP 的命令。与内置的 claude / codex / gemini / grok 按名称合并 |
+| `~/.xsb/config.json`（可用环境变量 `XSB_HOME` 改目录） | `backends.<名称>.command` / `.args` | 这台机器上的后端：一条在 stdio 上说 ACP 的命令。与内置的 claude / codex 按名称合并；必须说 ACP v2 |
 | `<项目>/.xsb/config.json` | `defaultAgent` | 客户端不指定时连到哪个 Agent；不写则是第一个 |
 
 两个文件都在每次使用时读取，修改后不必重启 Hub。新增一个后端：

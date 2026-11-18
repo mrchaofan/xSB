@@ -6,7 +6,7 @@
  * the WAL when there are several) and then applies the same records. What is
  * in memory is therefore always what a restart would rebuild.
  */
-import type { Addr, AgentSpec, Asset, Origin, Task } from "@xsb/protocol";
+import type { Addr, AgentSpec, Asset, ContentBlock, DeliveryPref, LedgerEntry, Origin, Task } from "@xsb/protocol";
 import type { Op, Record_, Store } from "@xsb/store";
 import { Paths } from "./paths.ts";
 import { addEdges } from "./task-graph.ts";
@@ -59,6 +59,7 @@ export type MailItem = {
   id: string;
   to: Addr;
   from: Origin;
+  /** A chat message, a task given to its executor, or the results of tasks (a notification to their initiator). */
   kind: "message" | "task" | "results";
   topic?: string;
   /** Of a message. */
@@ -67,8 +68,12 @@ export type MailItem = {
   taskId?: string;
   /** Of results: whose they are. With `mode`, they answer a join; without, it is one task's own result. */
   results?: Results;
-  /** Of xsb's word on work the recipient has open: it goes into the running turn like its dispatcher's (Mailroom.interjects). */
+  /** What the user said, as they said it (a task of theirs, or more on it). */
+  prompt?: ContentBlock[];
+  /** Of xsb's word on work the recipient has open: it goes into the running turn (kernel.ts, `deliveryPolicy`). */
   steer?: boolean;
+  /** How it is to reach its recipient (kernel.ts, `deliveryPolicy`). Absent: `wake`. */
+  pref?: DeliveryPref;
   ts: string;
 };
 
@@ -84,6 +89,7 @@ export const F = {
   tasks: "tasks.jsonl",
   gates: "gates.jsonl",
   mailbox: "mailbox.jsonl",
+  ledger: "ledger.jsonl",
   assets: "assets.jsonl",
 } as const;
 
@@ -96,6 +102,7 @@ export const ops = {
   closeGate: (id: string): Op => ({ file: F.gates, rec: { op: "close", id } }),
   enqueue: (item: MailItem): Op => ({ file: F.mailbox, rec: { op: "enqueue", item } }),
   ack: (id: string): Op => ({ file: F.mailbox, rec: { op: "ack", id } }),
+  mark: (entry: LedgerEntry): Op => ({ file: F.ledger, rec: { op: "mark", entry } }),
   putAsset: (asset: Asset): Op => ({ file: F.assets, rec: { op: "put", asset } }),
   putNote: (agentId: string, note: Note): Op => ({ file: Paths.memory(agentId), rec: { op: "put", note } }),
   removeNote: (agentId: string, topic: string): Op => ({ file: Paths.memory(agentId), rec: { op: "remove", topic } }),
@@ -107,8 +114,10 @@ export class State {
   sessions = new Map<string, SessionRec>();
   tasks = new Map<string, Task>();
   gates = new Map<string, Gate>();
-  /** Mail not yet acknowledged, in arrival order. */
+  /** Mail not yet acknowledged, in arrival order: the inboxes of all sessions. */
   mail = new Map<string, MailItem>();
+  /** Message id -> what became of it, last word (ext.ts, `LedgerState`). */
+  ledger = new Map<string, LedgerEntry>();
   /** Asset id -> its versions, oldest first. */
   assets = new Map<string, Asset[]>();
   /** agent -> topic key -> note. Maintained by the agent itself. */
@@ -118,7 +127,7 @@ export class State {
    * mail that actually flowed, so it is right even if an agent forgets to take
    * notes. This is what keeps a topic with the peer who already handled it.
    */
-  ledger = new Map<string, Map<string, { topic: string; peers: Map<string, TopicPeer> }>>();
+  topics = new Map<string, Map<string, { topic: string; peers: Map<string, TopicPeer> }>>();
   /** The edges between tasks, reversed (task-graph.ts): task -> the tasks started for it, and those that wait for it (`after`). */
   graph: Graph = { children: new Map(), waiters: new Map() };
 
@@ -128,7 +137,7 @@ export class State {
 
   load(): void {
     this.store.recover();
-    for (const file of [F.agents, F.sessions, F.tasks, F.gates, F.mailbox, F.assets]) {
+    for (const file of [F.agents, F.sessions, F.tasks, F.gates, F.mailbox, F.ledger, F.assets]) {
       for (const rec of this.store.read(file)) this.apply(file, rec);
     }
     for (const id of this.agents.keys()) {
@@ -160,7 +169,8 @@ export class State {
       case F.tasks:
         // A task's edges are set when it is made and never change: they are indexed when it is first seen.
         if (!this.tasks.has(rec.task.id)) addEdges(this.graph, rec.task);
-        this.tasks.set(rec.task.id, rec.task);
+        // Records from before tasks named their initiator had an agent's session as `from`.
+        this.tasks.set(rec.task.id, rec.task.initiator ? rec.task : { ...rec.task, initiator: { kind: "agent", agentId: rec.task.from.agentId } });
         return;
       case F.gates:
         if (rec.op === "open") this.gates.set(rec.gate.id, rec.gate);
@@ -171,6 +181,9 @@ export class State {
           this.mail.set(rec.item.id, rec.item);
           this.recordTopic(rec.item);
         } else this.mail.delete(rec.id);
+        return;
+      case F.ledger:
+        this.ledger.set(rec.entry.messageId, rec.entry);
         return;
       case F.assets: {
         const versions = this.assets.get(rec.asset.id);
@@ -195,8 +208,8 @@ export class State {
       [item.to.agentId, item.from.agentId],
     ];
     for (const [self, peer] of pairs) {
-      let topics = this.ledger.get(self);
-      if (!topics) this.ledger.set(self, (topics = new Map()));
+      let topics = this.topics.get(self);
+      if (!topics) this.topics.set(self, (topics = new Map()));
       let entry = topics.get(topicKey(item.topic));
       if (!entry) topics.set(topicKey(item.topic), (entry = { topic: item.topic, peers: new Map() }));
       const seen = entry.peers.get(peer);

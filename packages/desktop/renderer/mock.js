@@ -108,8 +108,6 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
   const BACKENDS = [
     { name: "claude", command: "claude-agent-acp", installed: true },
     { name: "codex", command: "codex-acp", installed: true },
-    { name: "gemini", command: "gemini --acp", installed: true },
-    { name: "grok", command: "grok agent stdio", installed: false, missing: "grok" },
   ];
   const skill = (name, produces, description, body, inputs = "") => ({ name, produces, inputs, description, body });
 
@@ -136,7 +134,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
         instructions: "你是编剧。只改被要求改的那一场，改动之处在文末列出。",
         mcpServers: [],
         skills: [skill("script", "script", "写或改一场戏的剧本", "# 剧本\n\n1. 先读原稿和相关的人物资产\n2. 按「场景、人物、正文、改动说明」四段来写\n3. 用 put_asset 登记为 script/<场次>")] },
-      { avatar: "animal-deer", name: "gaffer", preset: null, description: "设计布光方案", backend: "gemini",
+      { avatar: "animal-deer", name: "gaffer", preset: null, description: "设计布光方案", backend: "codex",
         instructions: "你是灯光师。方案必须以剧本资产为准，实景光源要在图上标出色温。",
         mcpServers: [{ name: "render", command: "npx", args: ["-y", "@acme/light-render-mcp"], env: [{ name: "RENDER_API_KEY", value: "demo-key-not-real" }] }],
         skills: [
@@ -147,7 +145,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     agents: [
       spec("director", "导演", "director", "claude", "统筹全片，拆解并派发工作", "idle"),
       spec("writer", "编剧", "writer", "codex", "写剧本和对白", "idle"),
-      spec("gaffer1", "灯光师1", "gaffer", "gemini", "设计布光方案", "running"),
+      spec("gaffer1", "灯光师1", "gaffer", "codex", "设计布光方案", "running"),
       spec("gaffer2", "灯光师2", "gaffer", "claude", "核对器材与预算", "requires_action", "你主要负责器材和预算，布光图交给灯光师1。"),
     ],
     tasks: [
@@ -259,10 +257,8 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     const turn = turns[agentId];
     const next = turn.queue.shift();
     if (next) {
-      // 轮到它了：等待中的那一条撤掉，在这一轮开始的位置重新出现
-      data.transcripts[agentId] = data.transcripts[agentId].filter((e) => e.id !== next.entry.id);
-      emit({ agentId, removedEntry: next.entry.id });
-      put(agentId, { ...next.entry, id: id() });
+      // 排着的邮件轮到了：它在这一轮开始的位置第一次出现
+      put(agentId, next.entry);
       runTurn(agentId, next.steps);
     } else {
       turn.busy = false;
@@ -271,23 +267,12 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     }
   }
 
-  /** 排队中的一条不等了：从队列里拿出来，插进正在进行的这一轮。 */
-  function sendNow(agentId, entryId) {
-    const turn = turns[agentId];
-    const index = turn.queue.findIndex((queued) => queued.entry.id === entryId);
-    if (index < 0) return;
-    const [{ entry }] = turn.queue.splice(index, 1);
-    data.transcripts[agentId] = data.transcripts[agentId].filter((e) => e.id !== entryId);
-    emit({ agentId, removedEntry: entryId });
-    put(agentId, { ...entry, id: id(), origin: { ...entry.origin, steered: true } });
-  }
-
-  /** 把一条输入送进会话：空闲则开始一轮，忙则排队，插话则直接进入当前这一轮。 */
-  function deliver(agentId, entry, steps, interject = false) {
+  /** 把一条输入送进会话：空闲则开始一轮；忙时，用户的话插进当前这一轮（永不排队），邮件排到这一轮之后。 */
+  function deliver(agentId, entry, steps) {
     const turn = turns[agentId];
     if (!turn.busy) { put(agentId, entry); runTurn(agentId, steps); }
-    else if (interject) put(agentId, { ...entry, origin: { ...entry.origin, steered: true } });
-    else { put(agentId, { ...entry, queued: true }); turn.queue.push({ entry, steps }); }
+    else if (entry.origin.kind === "user") put(agentId, { ...entry, origin: { ...entry.origin, steered: true } });
+    else turn.queue.push({ entry, steps });
   }
 
   const reply = (agentId) => [{ say: `收到，我按这个来调整。（这是原型里的示意回复，真实内容来自 ${agent(agentId).backend} 后端。）` }];
@@ -312,8 +297,6 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
   /** 停止当前这一轮。重启后端进程在原型里也是它：正在进行的那一轮就此结束。 */
   function stop(agentId) {
     turns[agentId].cancelled = true;
-    // 排队中的消息随这一轮一起放弃：模型没看到过，标成已丢弃。一次停止就让 Agent 停下。
-    for (const { entry } of turns[agentId].queue.splice(0)) put(agentId, { ...entry, queued: false, discarded: true });
     if (agent(agentId).state !== "requires_action") return;
     const pending = data.transcripts[agentId].find((e) => e.kind === "permission" && !e.outcome);
     put(agentId, { ...pending, outcome: "cancelled" });
@@ -348,8 +331,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
     async page() {},
 
     // ---------- 对话 ----------
-    send(agentId, content, interject) { deliver(agentId, fromUser(content), reply(agentId), interject); },
-    sendNow,
+    send(agentId, content) { deliver(agentId, fromUser(content), reply(agentId)); },
     pathOf: (file) => file.name,   // Electron：文件在磁盘上的路径
     cancel: stop,
     async setBudget(amount) { data.spend = { ...data.spend, budget: amount, unpriced: 0 }; emit({ spend: data.spend }); },

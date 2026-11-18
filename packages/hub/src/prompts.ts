@@ -10,11 +10,14 @@ import type { PastTurn } from "./transcript.ts";
 import { topicKey } from "./state.ts";
 import { lineDiff } from "./util.ts";
 
+/** Who started a task, as a model is told: an agent's id, or the user. */
+export const initiatorName = (t: Task): string => (t.initiator.kind === "agent" ? t.initiator.agentId : "the user");
+
 const attr = (value: string): string => value.replace(/"/g, "'").replace(/\s+/g, " ");
 
 export function memoryDigest(state: State, agentId: string, limit = 30): string {
   const notes = [...(state.notes.get(agentId)?.values() ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  const ledger = state.ledger.get(agentId);
+  const ledger = state.topics.get(agentId);
   const lines: string[] = [];
   for (const note of notes.slice(0, limit)) {
     lines.push(`- ${note.topic}${note.peers.length ? ` (with ${note.peers.join(", ")})` : ""}: ${note.content}`);
@@ -41,7 +44,7 @@ const ORIGIN: Record<ToolOrigin, string> = {
  * what each is; this only tells the servers apart from one another and from the agent program's own tools.
  */
 function toolSources(tools: { name: string; from: ToolOrigin; about?: string }[]): string {
-  const lines = [`- xsb: the hub of this team (collaboration, tasks, assets, memory).`, ...tools.map((t) => `- ${t.name}: ${ORIGIN[t.from]}.${t.about ? ` ${t.about.trim()}` : ""}`)];
+  const lines = [`- team: the hub of this team (collaboration, tasks, assets, memory).`, ...tools.map((t) => `- ${t.name}: ${ORIGIN[t.from]}.${t.about ? ` ${t.about.trim()}` : ""}`)];
   return `
 
 # Where your tools come from
@@ -102,28 +105,29 @@ ${instructions.trim()}
 The user reads ${LANGUAGE_NAME[language]}. Write everything a person will read in it: what you say to the user, the messages and tasks you send to peers, and the content of what you make (documents, descriptions of assets, notes). Names that tools and files go by stay as they are: asset ids and types, tool and parameter names, paths, code.
 
 # Working with the team
-You are one of several peer agents coordinated by xsb. A human user can talk to each agent directly, and agents talk to each other with the tools of the "xsb" MCP server:
+You are one of several peer agents coordinated by xsb. A human user can talk to each agent directly, and agents work together through the tools of the "team" MCP server. Which of them you have depends on the work you are doing: every task lets you reach whoever gave it to you; dispatching tasks and messaging others you can do when the work grants it (your role, the user asking for it, or whoever gave you the task). A tool you do not see is one this work does not give you.
 
+- dispatch_task: hand a peer a piece of work. The peer's answer is the last thing it says when it is done (or what it reports with report_result). Say with \`deliveryPref\` how you want it: "sync" waits for it inside the call, up to a minute, for a short task you need the answer of to go on; "wake" delivers it as soon as it is there, waking you; "lazy" (the default) keeps it for your next turn, waking nobody. The peer sees nothing of your conversation, so the task has to carry everything it needs. Give \`after\` when the task must not start before other tasks have finished; the peer then receives their results too.
+- subscribe: when you need the results of several tasks or jobs before you can go on, call this once with their ids and end your turn: they come together in one message, waking you, when all (or any) have finished. For one task, it makes a lazy result wake you.
+- ask: ask whoever gave you your task (or, if your work allows it, another agent) a question, and wait in the call for the answer.
+- report_result: report a task you were given before your turn ends, or with a result other than your last words (a structured one, or that it failed). Usually not needed: ending your turn ends your task, and what you said last is its result.
+- task_status, cancel_task: look at tasks, or stop tasks and jobs you started. A task you cancel ends at once; no result comes back for it.
+- send_message, broadcast, message_status: tell one or several peers something; see whether a peer's model has seen a message of yours. A message about work you gave the peer reaches it in its running turn; anything else waits until its turn ends.
+- inbox: what is waiting for your next turn (lazy results and notices), if you need it now.
 - list_agents: who is on the team, what each of them can produce, and which topics you already handled with each.
-- send_message: tell or ask a peer something. A peer only receives what you send with this tool; your ordinary reply text goes to whoever is in your own session. A message about work you gave the peer reaches it in its running turn where that is possible; anything else waits until the peer's turn ends.
-- dispatch_task: hand a peer a piece of work. It returns immediately; the result comes back to you later as an <xsb-task-result> message. The peer sees nothing of your conversation, so the task has to carry everything it needs. Give \`after\` when the task must not start before other tasks have finished; the peer then receives their results too.
-- await_tasks: when you need the results of several tasks or jobs before you can continue, call this once with their ids and then end your turn. You receive all results together in one message when the condition holds. Results are delivered as a new turn, so they cannot reach you while this one is still running: polling or sleeping only delays them.
-- start_job: run one slow tool call (rendering, generation, anything that takes minutes) in the background. Like a task it returns immediately, its result comes back as an <xsb-task-result>, and it can be awaited and cancelled. Sitting in a slow call keeps you from everyone who needs you meanwhile, so make it a job.
-- complete_task: finish a task you were given, with its result. This is the only way a task ends on your side.
-- get_task, cancel_task: inspect your tasks, or stop tasks and jobs you started. A task you cancel ends at once; no result comes back for it.
+- start_job: run one slow tool call (rendering, generation, anything that takes minutes) in the background. Like a task it returns immediately; its result comes back as an <xsb-task-result>, waking you, and it can be subscribed to and cancelled. Sitting in a slow call keeps you from everyone who needs you meanwhile, so make it a job.
 - put_asset, find_assets, get_asset: the shared asset library (see Assets).
 - remember, recall: your long-term memory, kept per topic.
-- ask_user: when the work cannot go on until the user decides or confirms something, ask in your reply as usual and call this so the user is told you are waiting for them; then end your turn. Not for questions you can settle yourself or with a peer.
+- escalate_to_user: when the work cannot go on until the user decides or confirms something, ask in your reply as usual and call this so the user is told you are waiting for them; then end your turn. Not for questions you can settle yourself or with a peer.
 
 Messages wrapped in <xsb-message>, <xsb-task>, <xsb-task-result> or <xsb-task-results> come from peers or from xsb, not from the user. An <xsb-memory> block after one is your own note on its topic.
 
 # Tasks you are given
-An <xsb-task> stays yours until you call complete_task for it; ending a turn does not end it. You may have several at a time, and more may arrive while you work, put into your running turn. Decide yourself how they go together: a later task that corrects or extends an earlier one changes what you are doing; one that replaces it ends the earlier one with a result that says so; one on its own waits its turn. Finish each as soon as it is done, not all at the end: its sender is waiting for it.
-- The result goes to the sender as it is, so make it complete and self-contained. Say in it plainly what you could not do, did not finish or did not verify: the sender builds on what you report. When you cannot do the task, finish it as failed and say why.
-- A task that has to produce an asset type is finished by naming the asset you registered for it in \`assets\`.
-- When a task needs jobs or tasks of your own, call await_tasks for them and end your turn: their results come back as a turn, and you finish the task then.
-- If you end a turn with a task still open and nothing on its way to you, xsb reminds you of it; if you do not act on the reminder, its sender is told. When you wait for something xsb cannot see (the user's answer, say), say so when reminded.
-- If its sender cancels a task, you are told: stop working on it and give no result. What you started while you had it, and not for other work too, is cancelled with it; you are told what.
+An <xsb-task> ends when your turn ends: what you said last is its result, and it goes to whoever gave it to you as it is. So end your turn with the result, complete and self-contained, and say in it plainly what you could not do, did not finish or did not verify: the sender builds on what you report. When you cannot do the task, say so and why.
+- Your turn's end does not end a task while something you started for it is to come back to you (a job, a task whose result wakes you, a subscription): then you finish it in the turn that brings that back.
+- A task that has to produce an asset type has to have one registered with put_asset before your turn ends; if not, xsb asks you for it.
+- You may have several tasks at a time, and more may arrive while you work, put into your running turn. A later task that corrects or extends an earlier one changes what you are doing.
+- If a task is stopped (by its sender, the user, or with work it was for), the work you are doing for it is stopped too, and so is what you started only for it.
 
 While tasks you dispatched are still running, the user may talk to you. Answer them normally; pending results will still arrive. If a set of results comes with conditions you set yourself, check them by reasoning over what you received, and dispatch follow-up work if they are not met.
 
@@ -161,7 +165,7 @@ type Given = { assets: Map<string, { version: number; taskId?: string }>; notes:
 /** What one prompt gives in full: the session takes note of it once the turn begins (LiveSession.take). */
 export type Gives = { assets: { id: string; version: number; taskId?: string }[]; notes: { key: string; updatedAt: string }[] };
 
-/** How much of a result that was a task's input is told with the task that builds on it; the rest is a get_task away. */
+/** How much of a result that was a task's input is told with the task that builds on it; the rest is a task_status away. */
 const PREREQUISITE_CHARS = 1500;
 
 /** An asset as a model sees it. `text` is its content, when it is small enough to show. */
@@ -181,7 +185,7 @@ function resultBlock(state: State, task: Task, short = false): string {
   }).filter((a): a is Asset => !!a);
   const delivered = assets.length ? `\nAssets it delivered:\n${assets.map((a) => renderAsset(a)).join("\n")}` : "";
   const result = task.result ?? "";
-  const told = short && result.length > PREREQUISITE_CHARS ? `${result.slice(0, PREREQUISITE_CHARS)}…\n(The result goes on; get_task ${task.id} has all of it.)` : result;
+  const told = short && result.length > PREREQUISITE_CHARS ? `${result.slice(0, PREREQUISITE_CHARS)}…\n(The result goes on; task_status ${task.id} has all of it.)` : result;
   return `<xsb-task-result ${head}>\n${told}${delivered}\n</xsb-task-result>`;
 }
 
@@ -242,7 +246,7 @@ function mailText(state: State, item: MailItem, context: TaskContext | undefined
         ? `\nThis task works from the following assets. They are the reference: keep to them, and do not redefine what they define.\n${context.inputs.map((i) => renderInput(i, given, gives.assets, task.id)).join("\n")}`
         : "";
       const produces = task.produces
-        ? `\nThis task has to produce a "${attr(task.produces)}" asset. Register it with put_asset, and name it in complete_task's \`assets\`.`
+        ? `\nThis task has to produce a "${attr(task.produces)}" asset. Register it with put_asset before you end your turn.`
         : "";
       const others = [...state.tasks.values()].filter((t) => !t.tool && t.id !== task.id && t.to.sessionId === item.to.sessionId && t.status === "running");
       const open = others.length
@@ -273,11 +277,11 @@ export function renderResults(state: State, results: Results): string {
 
 /** A task given to the model, as one line of a list. */
 const taskLine = (t: Task): string =>
-  `- ${t.id} "${t.title}" from ${t.from.agentId}, topic "${t.topic}"${t.produces ? `, has to produce "${t.produces}"` : ""}`;
+  `- ${t.id} "${t.title}" from ${initiatorName(t)}, topic "${t.topic}"${t.produces ? `, has to produce "${t.produces}"` : ""}`;
 
-/** What a session is told when it ended a turn with tasks open and nothing on its way to it (mailroom.ts). */
-export const taskReminder = (tasks: Task[]): string =>
-  `Your turn ended, and these tasks of yours are still open:\n${tasks.map(taskLine).join("\n")}\nNothing is on its way to you for them: no join, no job, no message. Finish each that is done with complete_task (as failed, with the reason, if it cannot be done). For one that is not done, go on with it now. If you wait for something xsb cannot see, say what; its sender is then told.`;
+/** What a session is told when its turn ended without what its task has to deliver (kernel.ts, QualityGateHook). */
+export const contractReminder = (task: Task, why: string): string =>
+  `Your turn ended, but your task "${task.title}" (${task.id}) is not done: ${why} Register it with put_asset now, then end your turn with the result. If it cannot be done, call report_result with failed and say why.`;
 
 export const STEER_CONTINUATION =
   "[xsb] A new message arrived while you were working and your turn was paused for it. Take it into account, then carry on with whatever you had not finished.";
@@ -332,11 +336,11 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
     told.unshift(text);
     left -= text.length;
   }
-  const tasks = open.tasks.map((t) => `- ${t.id} "${t.title}" (${t.tool ? "job" : `${t.from.agentId} -> ${t.to.agentId}`}): ${t.status}`);
+  const tasks = open.tasks.map((t) => `- ${t.id} "${t.title}" (${t.tool ? "job" : `${initiatorName(t)} -> ${t.to.agentId}`}): ${t.status}`);
   const waiting = open.waiting.map((r) => `- waiting for ${r.taskIds.join(", ")} (${r.mode})${r.note ? `: ${r.note}` : ""}`);
   const assets = open.assets.map((a) => `- ${a.id}@${a.version}: ${a.description}`);
   const now = [
-    tasks.length ? `Unfinished tasks (one given to you ends only when you finish it with complete_task):\n${tasks.join("\n")}` : "No unfinished tasks.",
+    tasks.length ? `Unfinished tasks:\n${tasks.join("\n")}` : "No unfinished tasks.",
     waiting.length ? `Your awaits:\n${waiting.join("\n")}` : "",
     assets.length ? `Assets you registered (latest versions):\n${assets.join("\n")}` : "",
   ].filter(Boolean);
@@ -347,3 +351,35 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
     `As things stand:\n${now.join("\n\n")}`,
   ].join("\n\n");
 }
+
+const taskList = (tasks: Task[]): string => tasks.map((t) => `\n- ${t.tool ? `the job "${t.title}"` : `"${t.title}" to ${t.to.agentId}`} (${t.id})`).join("");
+
+/**
+ * What a session is told when tasks it was handed ended without its word (kernel.ts, `stop`): which of its own, what
+ * it had started for them that went too (`went`), and what did not, for it serves other work as well (`kept`).
+ */
+export function endNotice(
+  own: { task: Task; root: boolean }[],
+  end: { root: Task; cause: string; status: string; result: string },
+  went: Task[],
+  kept: Task[],
+): string {
+  const lines = own.map(({ task: t, root }) => {
+    if (!root) return `The task "${t.title}" (${t.id}) that ${initiatorName(t)} gave you is cancelled with "${end.root.title}" (${end.root.id}), which ${end.cause}. Stop working on it; there is no result to give.`;
+    if (end.status === "cancelled") return `${end.cause} the task "${t.title}" (${t.id}). Stop working on it; there is no result to give.`;
+    return `Your task "${t.title}" (${t.id}) ended as ${end.status}: ${end.result}`;
+  });
+  if (!lines.length) return "";
+  lines.push(went.length ? `xsb cancelled with it what you started for it:${taskList(went)}\nCancel anything else you started only for it.` : "Cancel the tasks and jobs you started only for it.");
+  if (kept.length) lines.push(`Not cancelled, for it is also for other work of yours that goes on:${taskList(kept)}`);
+  lines.push("Your other tasks go on.");
+  return lines.join(" ");
+}
+
+/** What a session is told on its next turn when xsb was quit and the user chose not to continue (kernel.ts, `abandon`). */
+export const abandonNotice = (lines: string[]): string =>
+  `xsb was quit while work of yours was unfinished, and the user chose not to have it continued:\n${lines.join("\n")}\nWhat you were awaiting will not arrive, and what you were given there is no longer to be done. Dispatch again only what is still needed, and say so to the user.`;
+
+/** Notifications that waited in a session's inbox, as they come in front of its next turn (delivery.ts). */
+export const inboxDigest = (count: number): string =>
+  `[xsb] While you were not working here, ${count === 1 ? "this notification" : `these ${count} notifications`} came for you. Nothing woke you for them; take them into account.`;

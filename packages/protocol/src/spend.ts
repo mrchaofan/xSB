@@ -7,7 +7,7 @@
  *                                                one generation; `amount` an estimate in yuan, null when unpriced
  *
  * Client side, over ACP:
- *   advertise  agentCapabilities._meta["dev.xsb/spend"] = { version: 1 }
+ *   advertise  capabilities._meta["dev.xsb/spend"] = { version: 1 }
  *   request    _dev.xsb/spend/get    {}           -> { spend: Spend }
  *              _dev.xsb/spend/budget { amount }   -> { spend: Spend }   the user sets the budget (never an agent)
  *   notify     _dev.xsb/spend/update { spend: Spend }                   whenever the ledger changes

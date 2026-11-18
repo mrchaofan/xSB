@@ -155,13 +155,13 @@ export function focusLane(agentId) {
 }
 
 function openLane(agentId) {
-  const send = (interject) => {
+  const send = () => {
     const content = editor.read();
     if (!content.length) return;
     editor.clear();
     // /clear 是 xsb 自己的命令，不交给后端：由中枢换一个新的后端会话，对哪种后端都一样。
     if (content.length === 1 && content[0].type === "text" && content[0].text.trim() === "/clear") return xsb.clear(agentId);
-    xsb.send(agentId, content, interject);
+    xsb.send(agentId, content);
   };
   // 一个按钮管两件事：输入框里有内容就是发送；没有内容而智能体在工作，就是停止。
   const press = () => (lane.dataset.action === "stop" ? xsb.cancel(agentId) : send(false));
@@ -274,15 +274,13 @@ function entryNode(agentId, entry) {
   if (entry.kind === "input") {
     const o = entry.origin;
     // 停止时模型还没看到的输入被丢弃了：照样留在记录里，但标明模型没有看到。
-    const tag = entry.discarded ? t("entry.tag.discarded") : entry.queued ? t("entry.tag.queued") : o.steered ? t("entry.tag.interjected") : null;
-    return h("div", { ...base, "data-origin": o.kind, "data-queued": entry.queued, "data-discarded": entry.discarded, title: entry.discarded ? t("entry.tag.discarded.title") : undefined },
+    const tag = entry.discarded ? t("entry.tag.discarded") : o.steered ? t("entry.tag.interjected") : null;
+    return h("div", { ...base, "data-origin": o.kind, "data-discarded": entry.discarded, title: entry.discarded ? t("entry.tag.discarded.title") : undefined },
       o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId), roleOf(agentOf(o.agentId)?.role)),
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
       o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),
       h("div", { class: "said" }, contentView(entry.content, openLink)),
-      tag && h("span", { class: "tag" }, tag,
-        // 排队中的消息可以不等了：插进正在进行的这一轮。智能体在等批准时不能插话。
-        entry.queued && h("button", { class: "link now", title: t("entry.sendnow.title"), onclick: () => xsb.sendNow(agentId, entry.id) }, t("entry.sendnow"))));
+      tag && h("span", { class: "tag" }, tag));
   }
 
   if (entry.kind === "tool") {

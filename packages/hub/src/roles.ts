@@ -4,7 +4,7 @@
  * A role is a directory, the project's own (`.xsb/roles/<role>/`, written by
  * the user) or that of a preset team the project uses (presets.ts):
  *
- *   role.json                 { description?, backend?, mcpServers? }
+ *   role.json                 { description?, backend?, mcpServers?, grants? }
  *   instructions.md           what the role is and how it works
  *   skills/<name>/SKILL.md    how to do one kind of work; may have files next to it
  *
@@ -29,7 +29,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NAME, failure, RpcError } from "@xsb/protocol";
-import type { McpServer, McpServerSpec, RoleDetail, RoleInput } from "@xsb/protocol";
+import type { Grant, McpServer, McpServerSpec, RoleDetail, RoleInput } from "@xsb/protocol";
 import { loadProjectConfig, projectLanguage } from "./config.ts";
 import type { Paths } from "./paths.ts";
 import { catalog, teamRole, teamRoleNames } from "./presets.ts";
@@ -52,6 +52,8 @@ export type Role = {
   avatarFile?: string;
   description?: string;
   backend?: string;
+  /** Team policy: what the role's agents may do in every task they execute, beyond reaching its initiator (capabilities.ts). */
+  grants?: Grant["cap"][];
   instructions: string;
   /** The servers as `role.json` has them, and as a backend session is given them. */
   servers: Record<string, McpServerSpec>;
@@ -62,6 +64,7 @@ export type Role = {
 /** Servers in the shape of `.mcp.json` (name -> how to start it), as a backend session is given them. */
 export const mcpServers = (specs: Record<string, McpServerSpec>): McpServer[] =>
   Object.entries(specs).map(([name, spec]) => ({
+    type: "stdio" as const,
     name,
     command: spec.command,
     args: spec.args ?? [],
@@ -69,7 +72,7 @@ export const mcpServers = (specs: Record<string, McpServerSpec>): McpServer[] =>
   }));
 
 /** `role.json`. `mcpServers` is in the shape of `.mcp.json`: name -> how to start it. */
-type RoleFile = { avatar?: string; description?: string; backend?: string; mcpServers?: Record<string, McpServerSpec> };
+type RoleFile = { avatar?: string; description?: string; backend?: string; grants?: Grant["cap"][]; mcpServers?: Record<string, McpServerSpec> };
 
 const read = (file: string): string => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "");
 
@@ -124,6 +127,7 @@ export function readRole(dir: string, name: string): Role {
     ...(avatarFile ? { avatarFile } : {}),
     description: json.description,
     backend: json.backend,
+    ...(json.grants?.length ? { grants: json.grants } : {}),
     instructions: read(path.join(dir, "instructions.md")),
     servers: json.mcpServers ?? {},
     mcpServers: mcpServers(json.mcpServers ?? {}),
@@ -149,8 +153,8 @@ export function saveRole(paths: Paths, input: RoleInput): void {
   if (!has(paths.roles, input.name) && roleNames(paths).includes(input.name)) materialize(loadRole(paths, input.name), dir);
   fs.mkdirSync(dir, { recursive: true });
   const prior: RoleFile = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-  const { avatar = prior.avatar, description = prior.description, backend = prior.backend, mcpServers = prior.mcpServers } = input;
-  fs.writeFileSync(file, JSON.stringify({ avatar, description, backend, mcpServers } satisfies RoleFile, null, 2) + "\n");
+  const { avatar = prior.avatar, description = prior.description, backend = prior.backend, grants = prior.grants, mcpServers = prior.mcpServers } = input;
+  fs.writeFileSync(file, JSON.stringify({ avatar, description, backend, grants, mcpServers } satisfies RoleFile, null, 2) + "\n");
   if (input.instructions !== undefined) fs.writeFileSync(path.join(dir, "instructions.md"), input.instructions);
   if (!input.skills) return;
   const skillsDir = path.join(dir, "skills");
@@ -166,7 +170,7 @@ export function saveRole(paths: Paths, input: RoleInput): void {
 /** Write a role out as a directory of its own: one role.json, one instructions.md, and every skill with its files. */
 function materialize(role: Role, dir: string): void {
   fs.mkdirSync(path.join(dir, "skills"), { recursive: true });
-  const json: RoleFile = { avatar: role.avatarFile ? "role" : role.avatar, description: role.description, backend: role.backend, mcpServers: role.servers };
+  const json: RoleFile = { avatar: role.avatarFile ? "role" : role.avatar, description: role.description, backend: role.backend, grants: role.grants, mcpServers: role.servers };
   fs.writeFileSync(path.join(dir, "role.json"), JSON.stringify(json, null, 2) + "\n");
   fs.writeFileSync(path.join(dir, "instructions.md"), role.instructions);
   if (role.avatarFile) fs.copyFileSync(role.avatarFile, path.join(dir, "avatar.png"));
@@ -182,6 +186,7 @@ export function describeRole(role: Role): Omit<RoleDetail, "agents"> {
     ...(role.avatarFile ? { avatarFile: role.avatarFile } : {}),
     description: role.description,
     backend: role.backend,
+    ...(role.grants ? { grants: role.grants } : {}),
     instructions: role.instructions,
     mcpServers: role.servers,
     skills: role.skills.map((skill) => ({ ...skill, content: skillBody(skill) })),

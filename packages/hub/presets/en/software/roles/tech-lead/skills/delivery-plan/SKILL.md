@@ -7,7 +7,7 @@ description: Break a requirement into tasks that can be dispatched
 
 - Slice by **user-visible behavior**, not by technical layer (not "finish all the APIs first, then all the UI"). Each slice can be verified independently.
 - A task goes to one person only and produces one type of asset only.
-- Use `after` for tasks with ordering dependencies; dispatch tasks with no dependencies at the same time, then bring them together with `await_tasks`.
+- Use `after` for tasks with ordering dependencies; dispatch tasks with no dependencies at the same time, then bring them together with `subscribe`.
 
 ## Every task must state
 

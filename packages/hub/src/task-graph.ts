@@ -48,9 +48,9 @@ function holders(g: Tasks, id: string, memo: Map<string, Set<string>>): Set<stri
 /**
  * What stopping `root` takes along: every unfinished task below it (through tasks that ended, too) that nothing but
  * what is stopped holds up, in the order they were made (`doomed`, `root` first). `spared`: unfinished tasks that
- * the stopped ones held up together with something that goes on, which therefore go on.
+ * the stopped ones held up together with something that goes on, which therefore go on. `force`: those go too.
  */
-export function doom(g: Tasks, root: Task): { doomed: Task[]; spared: Task[] } {
+export function doom(g: Tasks, root: Task, force = false): { doomed: Task[]; spared: Task[] } {
   // Nothing holding a task up any more (every parent of it was stopped) is no reason to keep it: it goes too.
   const below = new Set<string>();
   const queue = [root.id];
@@ -68,7 +68,7 @@ export function doom(g: Tasks, root: Task): { doomed: Task[]; spared: Task[] } {
   for (const task of g.tasks.values()) {
     if (!below.has(task.id) || isTerminal(task.status)) continue;
     const held = [...holders(g, task.id, memo)];
-    if (held.every((h) => stopped.has(h))) {
+    if (held.every((h) => stopped.has(h)) || (force && held.some((h) => stopped.has(h)))) {
       stopped.add(task.id);
       doomed.push(task);
     } else if (held.some((h) => stopped.has(h))) {

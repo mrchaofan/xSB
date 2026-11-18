@@ -14,7 +14,7 @@ import type { Hub } from "./hub.ts";
 import { shipped } from "./paths.ts";
 import { mcpServers } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
-import { TOOLS, callTool } from "./tools.ts";
+import { callTool, toolsFor } from "./tools.ts";
 import { VERSION } from "./util.ts";
 
 const MCP_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -24,10 +24,17 @@ export const BRIDGE_ATTACH = "_xsb/attach";
 export const BRIDGE_SOCKET_ENV = "XSB_MCP_SOCKET";
 export const BRIDGE_TOKEN_ENV = "XSB_MCP_TOKEN";
 
+/**
+ * The name of the hub's own MCP server, as an agent sees it: its tools are the team's (`team.dispatch_task`, ...;
+ * hosts show them as `team/dispatch_task` or `mcp__team__dispatch_task`, for tool names may not contain dots).
+ */
+export const TEAM_SERVER = "team";
+
 /** The `mcpServers` entry that gives a backend session the hub's tools. */
 export function bridgeServer(socketPath: string, token: string): McpServer {
   return {
-    name: "xsb",
+    type: "stdio",
+    name: TEAM_SERVER,
     command: process.execPath,
     args: [BRIDGE],
     env: [
@@ -53,29 +60,41 @@ export function commonServers(): { server: McpServer; about?: string }[] {
   return mcpServers(specs).map((server) => ({ server, about: specs[server.name]?.about }));
 }
 
+/**
+ * Serve the team's tools to one bridge. The tools listed are those the session's work gives it now (capabilities.ts);
+ * when that changes, the bridge is told (`notifications/tools/list_changed`), so that the agent program asks again.
+ */
 export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => LiveSession | undefined): void {
   let session: LiveSession | undefined;
   const attached = (): LiveSession => {
     if (!session) throw new RpcError(-32600, "not attached");
     return session;
   };
+  let listed = "";
+  const names = (): string => toolsFor(hub, attached()).map((t) => t.name).join(",");
 
   conn.onRequest(BRIDGE_ATTACH, (p) => {
     session = lookup(p.token);
     if (!session) throw RpcError.invalidParams("unknown bridge token");
+    hub.bridges.set(conn, () => {
+      if (listed && names() !== listed) conn.notify("notifications/tools/list_changed");
+    });
+    void conn.closed.then(() => hub.bridges.delete(conn));
     return {};
   });
   conn.onRequest("initialize", (p) => ({
     protocolVersion: MCP_VERSIONS.includes(p.protocolVersion) ? p.protocolVersion : MCP_VERSIONS[0],
-    capabilities: { tools: {} },
-    serverInfo: { name: "xsb", version: VERSION },
+    capabilities: { tools: { listChanged: true } },
+    serverInfo: { name: TEAM_SERVER, version: VERSION },
   }));
   conn.onRequest("ping", () => ({}));
-  conn.onRequest("tools/list", () => ({
-    tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
-  }));
-  conn.onRequest("tools/call", (p) => {
-    const result = callTool({ hub, session: attached() }, p.name, p.arguments);
+  conn.onRequest("tools/list", () => {
+    const tools = toolsFor(hub, attached());
+    listed = tools.map((t) => t.name).join(",");
+    return { tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
+  });
+  conn.onRequest("tools/call", async (p) => {
+    const result = await callTool(hub, attached(), p.name, p.arguments);
     return { content: [{ type: "text", text: result.text }], isError: result.isError };
   });
 }

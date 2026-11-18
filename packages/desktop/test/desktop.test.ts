@@ -80,7 +80,7 @@ test("roles are one list answer, and an event after it is the newer word", async
 test("history failures are visible in the agent transcript", async () => {
   const peer = new Peer();
   snapshot(peer, [{ ...agent("a"), mainSessionId: "main-a" }]);
-  peer.requests.set("session/load", () => {
+  peer.requests.set("session/resume", () => {
     throw new Error("history unavailable");
   });
   const ws = workspace(peer);
@@ -209,7 +209,7 @@ test("the user is told when the work is done, failed, or waits for them", async 
   // A permission request is asked of the user.
   notices.length = 0;
   ws["sessionAgent"].set("s-a", "a");
-  void peer.requests.get("session/request_permission")({ sessionId: "s-a", toolCall: { toolCallId: "c", title: "rm -rf build" }, options: [] });
+  void peer.requests.get("session/request_permission")({ sessionId: "s-a", title: "rm -rf build", subject: { type: "tool_call", toolCall: { toolCallId: "c", title: "rm -rf build" } }, options: [] });
   assert.deepEqual(notices, ["permission a rm -rf build"]);
   ws.close();
 });

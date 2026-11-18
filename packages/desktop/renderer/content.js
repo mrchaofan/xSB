@@ -116,7 +116,7 @@ export function fromClipboard(data) {
 
 /**
  * 输入框：内容的编辑形态。文本就是文本（markdown 源码），其余的块是一个不可编辑的小方块，
- * 可以像一个字符那样被光标越过和删除。onEnter(interject) 在按下回车时调用；⇧↩ 换行。
+ * 可以像一个字符那样被光标越过和删除。onEnter() 在按下回车时调用；⇧↩ 换行。
  * onChange 在内容变了之后调用：输入、粘贴、清空。
  */
 export function createEditor(onEnter, onChange = () => {}) {
@@ -160,7 +160,7 @@ export function createEditor(onEnter, onChange = () => {}) {
   el.onkeydown = (e) => {
     if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
     e.preventDefault();
-    onEnter(e.metaKey || e.ctrlKey);
+    onEnter();
   };
   // 删空之后浏览器会留下一个换行，清掉它，占位文字才会回来
   el.oninput = () => { if (!read().length) el.replaceChildren(); onChange(); };

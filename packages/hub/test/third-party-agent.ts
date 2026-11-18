@@ -1,7 +1,7 @@
 /**
  * An agent that does not speak ACP, wrapped with @xsb/adapter: the hub runs it
- * as it runs any backend. It has no steering and cannot resume, so the hub
- * makes up for both. It answers every prompt with what it heard; "wait <ms>"
+ * as it runs any backend. It has no steering (the wrapper holds what comes
+ * while it works) and cannot resume (the hub hands its sessions over). It answers every prompt with what it heard; "wait <ms>"
  * in a prompt makes it take that long (a cancel ends the wait).
  */
 import { serveAdapter } from "@xsb/adapter";
@@ -37,7 +37,7 @@ const adapter: AgentAdapter = {
     }
     if (cancelled) return "cancelled";
     const text = `third party (${session.instructed ? "instructed" : "bare"}) heard: ${heard}\n`;
-    emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+    emit({ sessionUpdate: "agent_message_chunk", messageId: `${id}_${Date.now()}`, content: { type: "text", text } });
     return "end_turn";
   },
 

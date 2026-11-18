@@ -1,18 +1,22 @@
 /**
- * The hub as an ACP agent: what an editor or the CLI talks to.
+ * The hub as an ACP v2 agent: what an editor, the CLI or the desktop app talks to.
  *
- * Standard ACP v1 covers one client talking to one agent's sessions. A client
- * that knows nothing else gets exactly that, against the default agent. The
- * extensions in @xsb/protocol add the rest: choosing an agent, steering, and
- * watching agents and tasks, editing roles, and reading the asset library and
- * the machine's backends.
+ * Standard ACP covers one client talking to one agent's sessions. A client
+ * that knows nothing else gets exactly that, against the default agent: a
+ * prompt is answered once it is inserted into the conversation, and the work
+ * is reported by `state_update`, as with any ACP v2 agent. The extensions in
+ * @xsb/protocol add the rest: choosing an agent, watching agents and tasks,
+ * stopping tasks, editing roles, and reading the asset library and the
+ * machine's backends.
  */
 import fs from "node:fs";
 import path from "node:path";
-import { Agents, Assets, Backends, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, SpendExt, Steering, Tasks, Teams, errorMessage, failure, textOf } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, SpendExt, Tasks, Teams, errorMessage, failure, isTerminal } from "@xsb/protocol";
 import type { Connection, McpServerCheck, OriginMeta, RoleDetail, PresetProblem, TeamInfo } from "@xsb/protocol";
 import { backends, describeBackends, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
+import { isVeto } from "./hooks.ts";
+import { USER } from "./kernel.ts";
 import { mcpRequest } from "./mcp-client.ts";
 import { Paths } from "./paths.ts";
 import { describeRole, loadRole, roleNames, saveRole } from "./roles.ts";
@@ -40,22 +44,21 @@ export class Client {
     });
 
     conn.onRequest("initialize", (p) => {
-      this.observer = p.clientCapabilities?._meta?.[Agents.capability] != null;
-      this.echo = p.clientCapabilities?._meta?.[OriginExt.capability] != null;
+      if (p?.protocolVersion < PROTOCOL_VERSION) throw new RpcError(-32022, `xsb speaks ACP v${PROTOCOL_VERSION}`, { supported: [PROTOCOL_VERSION] });
+      const meta = p.capabilities?._meta;
+      this.observer = meta?.[Agents.capability] != null;
+      this.echo = meta?.[OriginExt.capability] != null;
       // The project works in the language of the first user who says which one they read.
-      const language = p.clientCapabilities?._meta?.[LanguageExt.key];
+      const language = meta?.[LanguageExt.key];
       const config = loadProjectConfig(hub.paths);
       if (!config.language && LANGUAGES.includes(language)) saveProjectConfig(hub.paths, { ...config, language });
       if (this.observer) queueMicrotask(() => hub.permissions.route());
       return {
         protocolVersion: PROTOCOL_VERSION,
-        agentInfo: { name: "xsb", title: "xsb hub", version: VERSION },
-        agentCapabilities: {
-          loadSession: true,
+        info: { name: "xsb", title: "xsb hub", version: VERSION },
+        capabilities: {
           // Images are taken for every agent; a backend that cannot read them is told one was there (backend.ts).
-          promptCapabilities: { image: true, audio: false, embeddedContext: false },
-          mcpCapabilities: { http: false, sse: false },
-          sessionCapabilities: { list: {}, resume: {}, close: {} },
+          session: { prompt: { image: {} }, mcp: { stdio: {} } },
           _meta: {
             [Agents.capability]: { version: 1 },
             [Roles.capability]: { version: 1 },
@@ -68,7 +71,6 @@ export class Client {
           },
         },
         authMethods: [],
-        _meta: { [Steering.metaKey]: { supported: true } },
       };
     });
     conn.onRequest("authenticate", () => ({}));
@@ -85,17 +87,16 @@ export class Client {
       return { sessionId: session.id, ...setup(session), _meta: sessionMeta(session) };
     });
 
-    conn.onRequest("session/load", (p) => {
-      const session = hub.session(p.sessionId);
-      for (const { update } of hub.state.store.read(Paths.transcript(session.agentId, session.id))) {
-        conn.notify("session/update", { sessionId: session.id, update });
-      }
-      this.attach(session);
-      return { ...setup(session), _meta: sessionMeta(session) };
-    });
-
+    // Resuming with `replayFrom` replays the transcript first, then says where the session's work stands.
     conn.onRequest("session/resume", (p) => {
       const session = hub.session(p.sessionId);
+      if (p.replayFrom && p.replayFrom.type !== "start") throw RpcError.invalidParams(`unsupported replayFrom "${p.replayFrom.type}"`);
+      if (p.replayFrom) {
+        for (const { update } of hub.state.store.read(Paths.transcript(session.agentId, session.id))) {
+          conn.notify("session/update", { sessionId: session.id, update });
+        }
+      }
+      conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "state_update", state: session.current ? "running" : "idle" } });
       this.attach(session);
       return { ...setup(session), _meta: sessionMeta(session) };
     });
@@ -125,11 +126,16 @@ export class Client {
     conn.onRequest("session/prompt", (p) => {
       const session = this.own(p.sessionId);
       if (!Array.isArray(p.prompt)) throw RpcError.invalidParams("prompt must be an array of content blocks");
-      hub.mail.userWrote(session.agentId, textOf(p.prompt));
-      return session.enqueue({ origin: userOrigin(p), prompt: p.prompt, from: this });
+      if (!p.prompt.length) throw RpcError.invalidParams("prompt must not be empty");
+      // Answered once it is in the conversation; the user's word never waits behind work (kernel.ts, `deliveryPolicy`).
+      return hub.delivery.fromUser(session, p.prompt, userOrigin(p), this);
     });
 
-    conn.onNotification("session/cancel", (p) => hub.live.get(p?.sessionId)?.cancel());
+    // The user's stop: the session's work, and the tasks it works on (delivery.ts, `userStop`).
+    conn.onNotification("session/cancel", (p) => {
+      const session = hub.live.get(p?.sessionId);
+      if (session) hub.delivery.userStop(session);
+    });
 
     // ---- spending ---------------------------------------------------------
 
@@ -146,25 +152,10 @@ export class Client {
       return {};
     });
 
-    for (const method of ["session/set_mode", "session/set_config_option"]) {
-      conn.onRequest(method, async (p) => {
-        const session = this.own(p.sessionId);
-        const backend = await session.ensureBackend();
-        return backend.conn.request(method, { ...p, sessionId: session.rec.backendSessionId });
-      });
-    }
-
-    // ---- steering ---------------------------------------------------------
-
-    conn.onRequest(Steering.method, (p) => {
+    conn.onRequest("session/set_config_option", async (p) => {
       const session = this.own(p.sessionId);
-      if (!Array.isArray(p.prompt) || p.prompt.length === 0) {
-        throw RpcError.invalidParams("steer params require a non-empty prompt array");
-      }
-      const idle = p._meta?.[Steering.metaKey]?.idleBehavior;
-      if (idle !== undefined && idle !== "promptRequired") throw RpcError.invalidParams("unsupported steering idleBehavior");
-      hub.mail.userWrote(session.agentId, textOf(p.prompt));
-      return session.steer(p.prompt, userOrigin(p), idle === "promptRequired" ? "promptRequired" : "start", this);
+      const backend = await session.ensureBackend();
+      return backend.conn.request("session/set_config_option", { ...p, sessionId: session.rec.backendSessionId });
     });
 
     // ---- agents ------------------------------------------------------------
@@ -313,10 +304,19 @@ export class Client {
     conn.onRequest(Tasks.list, (p) => ({
       tasks: [...hub.state.tasks.values()].filter(
         (t) =>
-          (!p.agentId || t.from.agentId === p.agentId || t.to.agentId === p.agentId) &&
+          (!p.agentId || t.from?.agentId === p.agentId || t.to.agentId === p.agentId) &&
           (!p.status || t.status === p.status),
       ),
     }));
+    // Only a client reaches this, on the user's word: the user may stop any task.
+    conn.onRequest(Tasks.cancel, (p) => {
+      const task = hub.state.tasks.get(p?.taskId);
+      if (!task) throw RpcError.notFound(`task ${p?.taskId}`);
+      if (isTerminal(task.status)) return { task, with: [] };
+      const stopped = hub.kernel.stop(task, USER, { status: "cancelled", reason: "cancelled", result: "Cancelled by the user." });
+      if (isVeto(stopped)) throw RpcError.invalidParams(stopped.veto);
+      return { task: hub.state.tasks.get(task.id), with: stopped.with };
+    });
   }
 
   private attach(session: LiveSession): void {
@@ -340,8 +340,8 @@ function userOrigin(params: any): OriginMeta {
 }
 
 function setup(session: LiveSession): Record<string, unknown> {
-  const { modes, configOptions } = session.setup;
-  return { ...(modes ? { modes } : {}), ...(configOptions ? { configOptions } : {}) };
+  const { configOptions, availableCommands } = session.setup;
+  return { ...(configOptions ? { configOptions } : {}), ...(availableCommands ? { availableCommands } : {}) };
 }
 
 function sessionMeta(session: LiveSession): Record<string, unknown> {

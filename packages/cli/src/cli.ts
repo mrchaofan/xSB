@@ -4,9 +4,10 @@ import path from "node:path";
 import readline from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Paths, describeBackends, findProject, globalConfigPath, hubSocket, initProject, readHubInfo, stopHub } from "@xsb/hub";
-import { Agents, Assets, Backends, Roles, Steering, Tasks, Teams, exitCode, explain, isTerminal, text } from "@xsb/protocol";
-import type { AgentInfo, Asset, BackendInfo, McpServerCheck, RoleDetail, Connection, PermissionRequest, PermissionResponse, SteeringOutcome, Task, TeamInfo, PresetProblem, Language } from "@xsb/protocol";
+import { Agents, Assets, Backends, Roles, Tasks, Teams, exitCode, explain, isTerminal, text } from "@xsb/protocol";
+import type { AgentInfo, Asset, BackendInfo, McpServerCheck, RoleDetail, Connection, PermissionRequest, PermissionResponse, Task, TeamInfo, PresetProblem, Language } from "@xsb/protocol";
 import { connectHub } from "./client.ts";
+import type { HubConnection } from "./client.ts";
 import { evaluate, scenariosOf } from "./eval.ts";
 import { Printer } from "./printer.ts";
 import { language, t } from "./text.ts";
@@ -17,7 +18,7 @@ const why = (e: unknown): string => explain(e, language);
 type Args = { _: string[]; [flag: string]: string | boolean | string[] };
 
 /** Flags that take no value: what follows them is the next argument, not theirs. */
-const SWITCHES = new Set(["new", "history", "interject", "help", "keep"]);
+const SWITCHES = new Set(["new", "history", "help", "keep"]);
 
 function parse(argv: string[]): Args {
   const args: Args = { _: [] };
@@ -74,8 +75,10 @@ async function run(args: Args): Promise<void> {
       return send(args, rest[0], rest.slice(1).join(" "));
     case "watch":
       return watch(args);
-    case "status":
     case "tasks":
+      if (rest[0] === "cancel") return cancelTask(args, rest[1]);
+      return report(args, command);
+    case "status":
     case "sessions":
     case "assets":
       return report(args, command);
@@ -246,13 +249,13 @@ function printAgents(agents: AgentInfo[]): void {
 // ---- talking ----------------------------------------------------------------
 
 /** Open the agent's main session, or a new one. */
-async function openSession(conn: Connection, agentId: string, fresh: boolean, history: boolean): Promise<string> {
+async function openSession(conn: HubConnection, agentId: string, fresh: boolean, history: boolean): Promise<string> {
   const meta = { [Agents.sessionKey]: agentId };
   if (!fresh) {
     const { sessions } = await conn.request("session/list", { _meta: meta });
     const main = sessions.find((s: any) => s._meta?.[Agents.mainKey]);
     if (main) {
-      await conn.request(history ? "session/load" : "session/resume", { sessionId: main.sessionId, cwd: main.cwd, mcpServers: [] });
+      await conn.request("session/resume", { sessionId: main.sessionId, cwd: main.cwd, mcpServers: [], ...(history ? { replayFrom: { type: "start" } } : {}) });
       return main.sessionId;
     }
   }
@@ -264,12 +267,12 @@ async function openSession(conn: Connection, agentId: string, fresh: boolean, hi
  * Answer permission requests at the terminal, one at a time. A command with no terminal does not call this: the
  * hub then finds that it cannot answer, and asks whoever can (permissions.ts in @xsb/hub).
  */
-function servePermissions(conn: Connection, printer: Printer, ask: (question: string) => Promise<string>): void {
+function servePermissions(conn: HubConnection, printer: Printer, ask: (question: string) => Promise<string>): void {
   let turn: Promise<unknown> = Promise.resolve();
   conn.onRequest("session/request_permission", (request: PermissionRequest): Promise<PermissionResponse> => {
     const answer = turn.then(async (): Promise<PermissionResponse> => {
       const who = printer.labels.get(request.sessionId) ?? request.sessionId;
-      const what = request.toolCall.title ?? request.toolCall.name ?? t.useTool;
+      const what = request.title || request.subject?.toolCall?.title || t.useTool;
       printer.line(t.asks(who, what));
       request.options.forEach((o, i) => printer.line(`  ${i + 1}) ${o.name}`));
       const choice = request.options[Number(await ask(t.choose)) - 1];
@@ -288,7 +291,7 @@ async function chat(args: Args, agentId: string | undefined): Promise<void> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ask = (q: string): Promise<string> => new Promise((resolve) => rl.question(q, resolve));
 
-  conn.onNotification("session/update", (p) => printer.update(p.sessionId, p.update));
+  conn.onUpdate((sessionId, update) => printer.update(sessionId, update));
   servePermissions(conn, printer, ask);
   const sessionId = await openSession(conn, agentId, args.new === true, args.history === true);
   printer.labels.set(sessionId, agentId);
@@ -301,17 +304,13 @@ async function chat(args: Args, agentId: string | undefined): Promise<void> {
     const input = line.trim();
     if (input === "/quit") return rl.close();
     if (input === "/cancel") conn.notify("session/cancel", { sessionId });
-    else if (input.startsWith("/i ")) {
-      conn
-        .request(Steering.method, { sessionId, prompt: [text(input.slice(3))] })
-        .then((r: SteeringOutcome) => printer.line(t.steered[r.outcome]), (e) => printer.line(t.steerFailed(why(e))));
-    } else if (input) {
-      // A message sent while the agent works is its next turn, not an interruption.
-      if (running > 0) printer.line(t.queued);
+    else if (input) {
+      // The user's word never waits: sent while the agent works, it goes into the running turn.
+      if (running > 0) printer.line(t.interjecting);
       running++;
       conn
-        .request("session/prompt", { sessionId, prompt: [text(input)] })
-        .then((r) => r.stopReason !== "end_turn" && printer.line(t.stopped(r.stopReason)), (e) => printer.line(t.failed(why(e))))
+        .turn(sessionId, [text(input)])
+        .then((stopReason) => stopReason !== "end_turn" && printer.line(t.stopped(stopReason)), (e) => printer.line(t.failed(why(e))))
         .finally(() => {
           running--;
           printer.endLine();
@@ -326,11 +325,11 @@ async function chat(args: Args, agentId: string | undefined): Promise<void> {
 }
 
 async function send(args: Args, agentId: string | undefined, message: string): Promise<void> {
-  if (!agentId || !message) throw new Error(t.usage("xsb send <agent> <message> [--interject]"));
+  if (!agentId || !message) throw new Error(t.usage("xsb send <agent> <message>"));
   const paths = project(args);
   const conn = await connectHub(paths, process.stdin.isTTY === true);
   const printer = new Printer();
-  conn.onNotification("session/update", (p) => printer.update(p.sessionId, p.update));
+  conn.onUpdate((sessionId, update) => printer.update(sessionId, update));
   let rl: readline.Interface | undefined;
   if (process.stdin.isTTY) {
     servePermissions(conn, printer, (q) => {
@@ -341,21 +340,18 @@ async function send(args: Args, agentId: string | undefined, message: string): P
   const sessionId = await openSession(conn, agentId, args.new === true, false);
   printer.labels.set(sessionId, agentId);
   try {
-    if (args.interject === true) {
-      // With no turn to go into, the hub is asked to leave the message with us: it is then sent as a turn of its own, below, and followed to its end.
-      const params = { sessionId, prompt: [text(message)], _meta: { [Steering.metaKey]: { idleBehavior: "promptRequired" } } };
-      const { outcome } = await conn.request<SteeringOutcome>(Steering.method, params);
-      printer.line(t.steered[outcome === "injected" ? "injected" : "startedNewTurn"]);
-      if (outcome === "injected") return;
-    }
-    const result = await conn.request("session/prompt", { sessionId, prompt: [text(message)] });
-    if (result.stopReason !== "end_turn") printer.line(t.stopped(result.stopReason));
+    // To an agent at work, it goes into the running turn, and this follows that turn to its end.
+    const stopReason = await conn.turn(sessionId, [text(message)]);
+    if (stopReason !== "end_turn") printer.line(t.stopped(stopReason));
   } finally {
     printer.endLine();
     rl?.close();
     conn.close();
   }
 }
+
+/** Who started a task: an agent, or the user. */
+const initiatorOf = (task: Task): string => (task.initiator.kind === "agent" ? task.initiator.agentId : t.user);
 
 /** Who does a task: an agent, or for a job the tool that runs. */
 const doer = (task: Task): string => (task.tool ? `${task.tool.server}/${task.tool.name}` : task.to.agentId);
@@ -375,11 +371,11 @@ async function watch(args: Args): Promise<void> {
       printer.line(t.failed(why(e)));
     });
   };
-  conn.onNotification("session/update", (p) => printer.update(p.sessionId, p.update));
+  conn.onUpdate((sessionId, update) => printer.update(sessionId, update));
   conn.onNotification(Agents.update, (p) => void follow(p.agent));
   conn.onNotification(Agents.removed, (p) => printer.line(t.agentRemoved(p.id)));
   conn.onNotification(Tasks.update, ({ task }: { task: Task }) =>
-    printer.line(t.taskLine(task.id, task.from.agentId, doer(task), task.title, task.status)),
+    printer.line(t.taskLine(task.id, initiatorOf(task), doer(task), task.title, task.status)),
   );
   const rl = process.stdin.isTTY ? readline.createInterface({ input: process.stdin, output: process.stdout }) : undefined;
   if (rl) servePermissions(conn, printer, (q) => new Promise((resolve) => rl.question(q, resolve)));
@@ -401,7 +397,7 @@ async function report(args: Args, what: string): Promise<void> {
       const { tasks } = await conn.request<{ tasks: Task[] }>(Tasks.list, { agentId: flag(args, "agent") });
       const shown = what === "tasks" ? tasks : tasks.filter((task) => !isTerminal(task.status));
       if (what === "status" && shown.length) console.log(t.openTasks);
-      for (const task of shown) console.log(`${task.id}  ${t.taskStatus[task.status].padEnd(10)} ${task.from.agentId} -> ${doer(task)}  [${task.topic}] ${task.title}`);
+      for (const task of shown) console.log(`${task.id}  ${t.taskStatus[task.status].padEnd(10)} ${initiatorOf(task)} -> ${doer(task)}  [${task.topic}] ${task.title}`);
     }
     if (what === "assets") {
       const { assets } = await conn.request<{ assets: Asset[] }>(Assets.list, { type: flag(args, "type") });
@@ -411,6 +407,18 @@ async function report(args: Args, what: string): Promise<void> {
       const { sessions } = await conn.request("session/list", {});
       for (const s of sessions) console.log(`${s.sessionId}  ${String(s._meta[Agents.sessionKey]).padEnd(14)} ${s.updatedAt}  ${s.title}`);
     }
+  } finally {
+    conn.close();
+  }
+}
+
+/** The user stops a task: the user may stop any. */
+async function cancelTask(args: Args, taskId: string | undefined): Promise<void> {
+  if (!taskId) throw new Error(t.usage("xsb tasks cancel <task-id>"));
+  const conn = await connectHub(project(args), false);
+  try {
+    const { with: also } = await conn.request<{ task: Task; with: Task[] }>(Tasks.cancel, { taskId });
+    console.log(t.taskCancelled(taskId, also.map((task) => task.id)));
   } finally {
     conn.close();
   }

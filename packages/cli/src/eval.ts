@@ -37,6 +37,7 @@ import { Paths, catalog, globalConfigPath, initProject, lineage, presetRoots, st
 import { Agents, Roles } from "@xsb/protocol";
 import type { Connection, Language } from "@xsb/protocol";
 import { connectHub } from "./client.ts";
+import type { HubConnection } from "./client.ts";
 
 const STUB = fileURLToPath(new URL("./eval-stub.ts", import.meta.url));
 /** What the desktop app says of its browser to agents (packages/desktop/src/clis.ts); the stand-in is said the same of. */
@@ -87,7 +88,7 @@ type Seen = { tools: string[]; said: string };
  */
 const bare = (name: string): string => {
   const mcp = /^mcp(?:__|\.)(.+?)(?:__|\.)(.+)$/.exec(name);
-  return !mcp ? name : mcp[1] === "xsb" ? mcp[2] : `${mcp[1]}.${mcp[2]}`;
+  return !mcp ? name : mcp[1] === "team" ? mcp[2] : `${mcp[1]}.${mcp[2]}`;
 };
 const re = (pattern: string): RegExp => new RegExp(pattern, "i");
 
@@ -167,7 +168,7 @@ async function runOnce(scenario: Scenario, team: string, backend: string, langua
     fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: new Date().toISOString(), tool: "generate_video", output: `earlier-${n}.mp4`, usage: "a 480p draft", amount, basis: "the scenario's" }) + "\n");
     left -= amount;
   }
-  let conn: Connection | undefined;
+  let conn: HubConnection | undefined;
   try {
     conn = await connectHub(paths, true);
     const role = (await conn.request(Roles.get, { name: scenario.role })).role;
@@ -178,7 +179,7 @@ async function runOnce(scenario: Scenario, team: string, backend: string, langua
     for (const peer of scenario.peers ?? []) await conn.request(Agents.put, { agent: { id: peer, role: peer, backend: ABSENT } });
     await conn.request(Agents.put, { agent: { id: scenario.role, role: scenario.role, backend } });
     const { sessionId } = await conn.request("session/new", { cwd: dir, mcpServers: [], _meta: { [Agents.sessionKey]: scenario.role } });
-    const sent = scenario.messages.map((message, i) => sleep(i * 300).then(() => conn!.request("session/prompt", { sessionId, prompt: [{ type: "text", text: message }] })));
+    const sent = scenario.messages.map((message, i) => sleep(i * 300).then(() => conn!.turn(sessionId, [{ type: "text", text: message }])));
     await Promise.race([Promise.allSettled(sent), sleep(timeoutMs)]);
     // Done when the role has been idle a while (results of what it dispatched may start more turns).
     const idle = async (): Promise<boolean> => (await conn!.request(Agents.list)).agents.find((a: any) => a.id === scenario.role)?.state === "idle";
@@ -187,7 +188,10 @@ async function runOnce(scenario: Scenario, team: string, backend: string, langua
     const updates = fs.readdirSync(sessions).flatMap((file) => fs.readFileSync(path.join(sessions, file), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line).update));
     return {
       ...(keep ? { dir } : {}),
-      tools: updates.filter((u) => u?.sessionUpdate === "tool_call").map((u) => bare(String(u._meta?.claudeCode?.toolName ?? u.name ?? u.title ?? ""))),
+      // A tool call is a run of `tool_call_update` patches; the first that names it is the call.
+      tools: [...new Map(updates.filter((u) => u?.sessionUpdate === "tool_call_update" && (u.name || u.title || u._meta?.claudeCode?.toolName)).reverse().map((u) => [u.toolCallId, u])).values()]
+        .reverse()
+        .map((u) => bare(String(u._meta?.claudeCode?.toolName ?? u.name ?? u.title ?? ""))),
       said: updates.filter((u) => u?.sessionUpdate === "agent_message_chunk").map((u) => u.content?.text ?? "").join(""),
     };
   } finally {

@@ -8,7 +8,7 @@
 | 要等两个任务都回来才继续，是靠对话历史，还是有待办清单 | 第 3.2 节 |
 | 资产有版本吗；用户改了主意，旧产物怎么办 | 第 3.3 节 |
 
-这三个问题的答案，都是由第 2 节的十三个**协作原语**组合出来的。所以建议按顺序读：先看角色是什么（第 1 节），再看原语各自做什么、怎么写（第 2 节），然后看它们怎么组合（第 3 节）。第 4 节讲给角色写说明和技能时，怎么把这些原语写进去。
+这三个问题的答案，都是由第 2 节的**协作原语**组合出来的。所以建议按顺序读：先看角色是什么（第 1 节），再看原语各自做什么、怎么写（第 2 节），然后看它们怎么组合（第 3 节）。第 4 节讲给角色写说明和技能时，怎么把这些原语写进去。
 
 设计动机见 [DESIGN.md](DESIGN.md)。术语：智能体（Agent）、技能（skill）、中枢（Hub）、工具服务（MCP server）。
 
@@ -82,7 +82,7 @@ You are "导演" (agent id: director1). 统筹全片：定创作方向，把工�
 ……
 
 # Language                                                 ← 工作语言
-# Working with the team                                    ← 十三个原语的用法，中枢写的，所有人一样
+# Working with the team                                    ← 原语的用法，中枢写的，所有人一样
 # Topics and continuity                                    ← 话题与记忆的规矩，所有人一样
 # Assets                                                   ← 资产库的规矩，所有人一样
 
@@ -116,28 +116,33 @@ You are "导演" (agent id: director1). 统筹全片：定创作方向，把工�
 | `<xsb-task-results>` | 我等的几个任务，结果一起回来 |
 | `<xsb-asset>`、`<xsb-skill>`、`<xsb-memory>` | 中枢顺带附上的资产、技能正文、我自己的笔记 |
 
-## 2. 协作原语：xsb 的十四个工具
+## 2. 协作原语：xsb 的工具
 
-中枢给每个会话挂上一个名为 `xsb` 的工具服务。智能体之间的一切往来都经过它，没有别的通道：**一个智能体平常的回复文字只给自己会话里的人看，同事看不到。** 想让同事知道什么，就必须调工具。
+中枢给每个会话挂上一个名为 `team` 的工具服务（工具在后端里显示为 `team/dispatch_task` 这样）。智能体之间的往来都经过它，没有别的通道：**一个智能体平常的回复文字只给自己会话里的人看，同事看不到**；唯一的例外是任务的结果：承接者结束一轮时说的最后一句话，就是交给派发者的结果。
+
+**哪些工具在手边，取决于正在做的事**（[KERNEL.md](KERNEL.md) 8）：做同事派来的任务时，总能 `report_result`、`ask` 派活的人；派活、给别人发消息要有授予：角色的团队策略（`role.json` 的 `grants`，预设里导演、技术负责人有）、用户在话里点名、派活的人转授。看不到的工具，就是这件事没给你。
 
 ### 2.0 总览
 
 | 组 | 原语 | 一句话 |
 | - | - | - |
-| 认人 | `list_agents` | 团队里有谁、各自能产出什么、在不在忙、和我谈过哪些话题 |
-| 说话 | `send_message` | 告诉或问同事一件事 |
-| 派活 | `dispatch_task` | 交给同事一件要出结果的工作 |
-| 交差 | `complete_task` | 把派给我的任务做完，交出结果；只有它能结束任务 |
-| 等待 | `await_tasks` | 登记"这几个都回来再叫我"，然后结束本轮 |
+| 认人 | `list_agents` | 团队里有谁、各自能产出什么、在不在忙、和我谈过哪些话题、我能对它做什么 |
+| 说话 | `send_message`、`broadcast`、`message_status` | 告诉同事一件事；查对方的模型看到没有 |
+| 派活 | `dispatch_task` | 交给同事一件要出结果的工作；说明结果怎么回来（`sync`/`wake`/`lazy`） |
+| 提问 | `ask` | 问派活给我的人一个问题，在调用里等答复 |
+| 交差 | 结束这一轮；必要时 `report_result` | 最后一句话就是结果；提前交、分开交、说做不了时用 `report_result` |
+| 等待 | `subscribe` | 登记"这几个都回来再叫我"，然后结束本轮 |
+| 收件箱 | `inbox` | 现在就读等下一轮的结果和通知 |
 | 后台 | `start_job` | 把一次很慢的工具调用放到后台跑 |
-| 查看与撤回 | `get_task`、`cancel_task` | 看任务状态；取消自己派出的任务 |
+| 查看与撤回 | `task_status`、`cancel_task` | 看任务状态；取消自己派出的任务 |
+| 找用户 | `escalate_to_user` | 告诉用户自己在等他决定 |
 | 资产 | `put_asset`、`find_assets`、`get_asset` | 登记、查找、读取共享的产物 |
 | 记忆 | `remember`、`recall` | 按话题写笔记、查记忆 |
 | 技能 | `load_skill` | 读自己角色的一篇技能 |
 
 所有原语共同的四条约定：
 
-1. **全部立即返回。** 没有"调用之后一直等到结果回来"的原语。结果以后作为新的一轮送来。
+1. **几乎都立即返回。** 结果以后送来（唤醒你，或随下一轮附上）。例外是 `sync` 的派发和 `ask`：调用最多等几十秒，结果就是返回值（见 2.3）。
 2. **身份不靠参数。** 每个会话有中枢发的令牌，工具调用天然知道是谁在调，冒充不了别人。
 3. **带 `topic` 的地方都该带上。** 话题是记忆的钥匙（见 3.1）。
 4. **出错时返回的是能照着改的话。** 例如 `no agent "camera3". Agents: writer1, art1, board1, camera1, camera2, editor1`（列出的是除自己以外的同事）。
@@ -180,7 +185,9 @@ You are "导演" (agent id: director1). 统筹全片：定创作方向，把工�
 | `queued behind the peer's current work` | 对方在忙，排在它当前的工作之后 |
 | `interjected` | 插进了对方正在进行的那一轮 |
 
-**插不插话由中枢裁决，发送方不选。** 对方在忙时，只有同时满足两条才插话：发送方给过对方手上**还没结束**的任务（发起方一致），并且对方后端能原生插话、不必打断。其余一律排在这一轮之后，排队期间对方的模型完全看不到它。只能靠打断来插话的后端（相当于 ACP v2 里先把 prompt 扣住的做法），连派发者的话也排队。任务结果从不插话：`await_tasks` 承诺结果作为单独的一轮送达。中枢自己的通知（比如任务被取消）按派发者的话处理。
+**插不插话由中枢裁决，发送方不选**（[KERNEL.md](KERNEL.md) 5）。对方在忙时，发送方给过对方手上**还没结束**的任务（发起方一致）就插话，其余一律排在这一轮之后，排队期间对方的模型完全看不到它。对方后端不能原生插话时，插话被中枢扣住，等它当前的 prompt 返回再在同一轮里送进去，不打断它的工具调用。任务结果和中枢自己的通知（比如任务被取消）在对方忙时也插进去。
+
+**`message_status(message_id)`** 查对方的模型有没有看到这条消息，返回台账的状态：`queued`（还在排队）、`inserted`（进了对方的对话，还没往下做）、`seen`（看到了）、`discarded_unseen`（没看到，也不会看到）等。不要用它轮询。
 
 **场景一：通知。** 用户刚把主演定为 `candidate/阿宁-2`，导演通知美术指导：
 
@@ -223,6 +230,8 @@ send_message(to: "camera1", topic: "渡口-第3场",
 | `inputs` | 否 | 依据的资产 id。**必须存在**，否则直接报错 `no asset "…". Look it up with find_assets.` |
 | `produces` | 否 | 要交的资产类型 |
 | `after` | 否 | 先等哪几个任务结束再开始（见 3.2） |
+| `deliveryPref` | 否 | 结果怎么回来。`lazy`（默认）：不唤醒你，随你的下一轮附上，或用 `inbox` 读。`wake`：结果到了就唤醒你（要等结果才能往下走的活用它）。`sync`：短任务、要拿结果才能往下做时用，调用最多等 `limits.awaitSeconds`（默认 50 秒），结果就是返回值；超时则返回回执，结果之后按 `wake` 送到 |
+| `grants` | 否 | 转授对方能力：给哪些人派活、发消息（只能是你自己有的） |
 
 **返回**：
 
@@ -261,7 +270,7 @@ This task works from the following assets. They are the reference: keep to them,
 （剧本全文）
 </xsb-asset>
 ……（其余输入资产）
-This task has to produce a "shot_list" asset. Register it with put_asset, and name it in complete_task's `assets`.
+This task has to produce a "shot_list" asset. Register it with put_asset before you end your turn.
 Your skill for this (files it refers to are in /…/skills/shot_list):
 <xsb-skill name="shot_list">
 # 镜头表
@@ -295,55 +304,56 @@ dispatch_task(to: "board1", title: "镜头表", instructions: "按我们刚才�
 
 问题：没有话题；没有 `inputs`，分镜师拿不到剧本；没有 `produces`，中枢不会附上技能，也不会核对交付；"刚才讨论的"分镜师根本没看到。
 
-#### 对方怎么交差：`complete_task`
+#### 对方怎么交差：结束这一轮（隐式完结）
 
-**参数**：`task_id`、`result`（派发者读到的结果）、`assets`（为它登记的资产 id，不带版本即最新版）、`failed`（做不了，或已被后来的任务取代）。
+**承接者这一轮正常结束，任务就结束，最后一句话就是结果。** 不需要调用任何工具；模型忘了"交差"这件事，任务也不会悬着（[KERNEL.md](KERNEL.md) 4）。所以：
 
-**一个任务只在承接者调 `complete_task` 时结束，结束一轮不算交差。** 哪一轮在做哪个任务，由模型自己判断，中枢不靠代码把轮次和任务绑在一起。所以：
+- **结果写在最后一句话里。** 它原样交给派发者，要完整、自足，写明没做到、没做完、没核实的。
+- **还有东西要回来，就不算结束。** 为这个任务启动的后台任务、`wake`/`sync` 的子任务、或订阅还有没完的，这一轮的结束不算；带回结果的那一轮结束时再判断。
+- **契约由中枢核对。** 任务有 `produces` 时，回合结束时承接者还没登记那种类型的资产，中枢就追问它：
 
-- **手上可以同时有几个任务。** 同一话题的任务进同一个工作会话。对方正在做事时又来一个任务，后端能原生插话的，就直接插进正在进行的这一轮；不能的，排到这一轮之后，以免打断正在执行的工具调用。新任务后面附一份"这里还开着的任务"，模型据此判断它是修正、补充、取代了哪一个，还是另一件事：
+  ```
+  Your turn ended, but your task "全片镜头表" (t_12) is not done: It did not register a "shot_list" asset, which it had to produce. Register it with put_asset now, then end your turn with the result. If it cannot be done, call report_result with failed and say why.
+  ```
+
+  追问两次仍没有，任务以 `error` 结束，结果里写明原因。
+
+- **手上可以同时有几个任务。** 同一话题的任务进同一个工作会话。对方正在做事时又来一个同一派发者的任务，就插进正在进行的工作（ACP v2：后端立即插入，或扣住到当前工作结束再插入，都不打断工具调用）。新任务后面附一份"这里还开着的任务"，模型据此判断它是修正、补充、取代了哪一个，还是另一件事：
 
   ```
   You still have these tasks open here; see whether this one changes any of them:
   - t_12 "全片镜头表" from director1, topic "渡口-镜头表"
   ```
 
-- **做完一个交一个。** 结果直接送给那个任务的派发者，不用等手上的都做完。被后来的任务取代的，用 `failed` 交掉，结果里说明被哪个取代了。
-- **契约由中枢核对。** 任务有 `produces` 时，`assets` 里没有那种类型的资产就交不了差，报错 `task t_… has to produce a "shot_list" asset: register it with put_asset and name it in "assets". If it cannot be done, set failed and say why.` 只能交自己登记的资产；已被取消的任务交不了，报错 `task t_… was cancelled by director1; there is no result to give`。
-- **忘了交差，中枢兜底。** 一轮结束时，会话里还有开着的任务，而且没有任何东西会再叫醒它（没有排队的消息、没有自己的等待门、没有在跑的后台任务），中枢就提醒它一次：
+  同一轮里开着的几个任务，以同一句话结束；要分开交、提前交、或说做不了，用 `report_result`。
 
-  ```
-  Your turn ended, and these tasks of yours are still open:
-  - t_12 "全片镜头表" from director1, topic "渡口-镜头表"
-  Nothing is on its way to you for them: no join, no job, no message. Finish each that is done with complete_task (as failed, with the reason, if it cannot be done). For one that is not done, go on with it now. If you wait for something xsb cannot see, say what; its sender is then told.
-  ```
+**`report_result`**：参数 `task_id`（只有一个任务时可省）、`result`、`assets`、`failed`。只在承接 Agent 派来的任务时有（用户的任务，结果就是给用户的回答）。有 `produces` 时 `assets` 里没有那种类型就交不了，报错 `task t_… has to produce a "shot_list" asset: register it with put_asset and name it in "assets". If it cannot be done, set failed and say why.`；已被停止的任务交不了，报错 `task t_… was stopped; there is no result to give`。
 
-  提醒之后的那一轮还是这样结束，就告诉派发者 `board1 ended its turn without finishing your task "全片镜头表" (t_12), also after xsb reminded it.`，附上它最后说的话，由派发者决定等、问还是取消。中枢不替它结束任务：它可能在等中枢看不见的东西，比如用户的回答。
-- **用户按停不触发兜底。** 停的是这一轮，任务照样开着，派发者收到一条说明；用户接着说话，模型接着做。中枢重启后，插进一轮却没做完的任务没有邮件会再送来，中枢同样提醒一次。
+**用户按停**：用户在一个会话里按停止，停下它的工作，也停下它正在做的任务（停止方是用户），派发者收到 `cancelled` 的结果。用户接着说话，是一个新的任务。
 
-### 2.4 `await_tasks`：等待
+### 2.4 `subscribe`：等待（订阅与汇合）
 
 **参数**：`task_ids`、`mode`（`all` 默认，或 `any`）、`note`（写给自己的提醒）。
 
 **返回**：
 
 ```
-Registered (0/2 finished). End your turn now; the results arrive together in one message.
+Subscribed (0/2 finished). End your turn now; the results arrive together in one message.
 ```
 
 如果调用时这些任务已经结束了，不登记，结果直接放在返回里：`Nothing to wait for, the results are in: …`。
 
-**它做的事**：在中枢里登记一个"门"。门没满足时，这几个任务的结果被扣住，不打扰你；满足时合成一条 `<xsb-task-results>` 消息，作为你的下一轮，后面跟着你写的 `note`：
+**它做的事**：把这些任务的结果升为 `wake`，并在中枢里登记一个"门"。门没满足时，这几个任务的结果被扣住，不打扰你；满足时合成一条 `<xsb-task-results>` 消息，唤醒你，后面跟着你写的 `note`：
 
 ```
 Your own note for this moment: 两场都回来后逐镜审。全部通过就派 editor1 粗剪；有重拍的先退回，不要派剪辑。
 ```
 
-`any` 模式下，第一个回来就叫醒你，消息末尾列出还在跑的任务，它们的结果之后单独到达。
+`any` 模式下，第一个回来就叫醒你，消息末尾列出还在跑的任务，它们的结果之后单独到达。只订一个任务，就是让它的（默认 `lazy` 的）结果改为唤醒你。
 
 **写法要点**：
 
-- **调完就结束本轮。** 原文："Results are delivered as a new turn, so they cannot reach you while this one is still running: polling or sleeping only delays them." 结果是作为新的一轮送来的，这一轮不结束就收不到，轮询和 sleep 只会让它来得更晚。
+- **调完就结束本轮。** 原文："You receive all results together in one message when the condition holds, as a new turn or, if you are working then, within your turn: polling or sleeping does not bring them sooner." 条件满足时结果才来：你空闲就作为新的一轮，你正忙就插进这一轮。轮询和 sleep 不会让它来得更早，只会白占着这一轮。
 - **只能等自己在这个会话里派出的任务。** 否则报错 `task t_… was dispatched from another session of yours` 或 `no task "t_…" dispatched by you`。
 - **note 写三样：下一步做什么、继续之前查什么、不满足时怎么办。**
 
@@ -354,7 +364,7 @@ Your own note for this moment: 两场都回来后逐镜审。全部通过就派 
 
   note 不会被中枢理解，只会被原样送回。它要能让一个已经忘了前情的你，看完就知道该干什么。
 
-- **接了任务的人也可以用。** 处理别人派来的任务时，等自己的后台任务或子任务回来再交差（详见 3.2 的例子）。任务本来就开着，直到 `complete_task`。
+- **接了任务的人也可以用。** 处理别人派来的任务时，订阅自己的后台任务或子任务，然后结束本轮；任务在它们回来之前不会结束（详见 3.2 的例子）。
 
 ### 2.5 `start_job`：后台跑慢调用
 
@@ -377,7 +387,7 @@ start_job(
 
 `arguments` 和直接调 `media` 的 `generate_video` 时一模一样。区别只是：直接调会卡在那里几分钟，谁找它都找不到；用 `start_job` 立即返回，结果以 `<xsb-task-result>` 送回。
 
-**它是一种任务。** 所以能 `await_tasks` 等、能 `cancel_task` 撤，在任务列表里看得到。
+**它是一种任务。** 所以能 `subscribe` 等、能 `cancel_task` 撤，在任务列表里看得到。
 
 **写法要点**：
 
@@ -386,35 +396,35 @@ start_job(
 - **中枢重启时不会重跑。** 还在跑的后台任务会被标为失败：`xsb stopped while this job ran, so its outcome is unknown. It was not run again; start it again if it is still needed.` 因为一次生成可能已经花了钱，要不要再来一次由模型决定。
 - 后台任务没有 `after`。需要先后顺序（比如接上一镜的尾帧）时，拿到前一个结果再提交下一个。
 
-### 2.6 `get_task`、`cancel_task`：查看与撤回
+### 2.6 `task_status`、`cancel_task`：查看与撤回
 
-**`get_task(task_id)`** 看一个任务（自己派出的，或派给自己的）。不带参数时列出三组：
+**`task_status(task_id)`** 看一个任务（自己派出的，或派给自己的）：状态、谁发起、谁结束、承接者是否已看到。不带参数时列出三组：
 
 ```json
 {
   "dispatched_by_you": [ { "task_id": "t_21", "title": "第2场", "to": "camera1", "status": "running" } ],
   "assigned_to_you": [],
-  "awaiting": [ { "task_ids": ["t_21", "t_22"], "mode": "all", "note": "两场都回来后逐镜审……" } ]
+  "subscribed": [ { "task_ids": ["t_21", "t_22"], "mode": "all", "note": "两场都回来后逐镜审……" } ]
 }
 ```
 
 这就是"我现在手上有什么"的唯一来源（见 3.2）。
 
-被 `await_tasks` 扣住的结果，用 `get_task` 也读不到正文，只看到：`Held for your await_tasks: it arrives together with the others in one message. Do not act on it before then.` 否则模型可能按一半的结果先行动，合并消息到了又处理一遍。
+被订阅扣住的结果，用 `task_status` 也读不到正文，只看到：`Held for your subscription: it arrives together with the others in one message. Do not act on it before then.` 否则模型可能按一半的结果先行动，合并消息到了又处理一遍。
 
-**`cancel_task(task_id)`** 只能撤自己派出的任务或后台任务。**撤的人自己知道，所以不再送回结果**：任务记为 `cancelled`，原因留在 `get_task` 里；`await_tasks` 也不再等它，只等其余的。
+**`cancel_task(task_id)`** 只能撤自己派出的任务或后台任务（用户可以撤任何任务，见 `xsb tasks cancel`）。**撤的人自己知道，所以不再送回结果**，从自己的另一个会话撤也一样：任务记为 `cancelled`，原因和谁撤的留在 `task_status` 里；订阅也不再等它，只等其余的。
 
-**停止会传染。** 中枢记着每件活是为哪些任务而起：派发或启动后台任务时，派发所在会话里已交给模型、还没结束的任务都算，不需要模型声明。撤一个任务时，中枢把只为它而起的活（一层层往下，穿过已经交差的中间任务）在一个事务里一起撤掉；同时还为别的未结束任务而起的活不撤，只告诉派发它的会话。被连带撤掉的任务，结果写成 `Cancelled with "…" (t_…), which director1 cancelled.`。每个承接者只收到一条通知，里面列出它手上被撤的任务、中枢替它撤掉的活、因还有别的用处而没撤的活。撤的人自己不收回音；派发它的会话如果不是撤的人、也没收到那条通知，照常收到 `cancelled` 结果。中枢判任务失败（承接者那一轮出错）时同样连带。数据结构和算法见 [TASK-GRAPH.md](TASK-GRAPH.md)。
+**停止会传染。** 中枢记着每件活是为哪些任务而起：派发或启动后台任务时，派发所在会话里已交给模型、还没结束的任务都算，不需要模型声明。撤一个任务时，中枢把只为它而起的活（一层层往下，穿过已经完成的中间任务）一起撤掉；同时还为别的未结束任务而起的活不撤，只告诉派发它的会话。只为被撤的活在忙的承接者，它的工作被停下，等它停下后整次撤销才落账（所以 `cancel_task` 可能答"正在停"）；还有别的活在做的承接者收到一条通知，列出它手上被撤的任务、中枢替它撤掉的活、因还有别的用处而没撤的活。被连带撤掉的任务，结果写成 `Cancelled with "…" (t_…), which director1 cancelled.`。撤的人自己不收回音；派发它的会话如果不是撤的人、也没收到那条通知、工作也没被停下，照常收到 `cancelled` 结果。中枢判任务失败（承接者那一轮出错）时同样连带。数据结构和算法见 [TASK-GRAPH.md](TASK-GRAPH.md)。
 
 | 任务当时的状态 | 发生什么 | 返回 |
 | - | - | - |
 | 还在对方队列里 | 从队列里拿掉，没开始就结束 | `Task t_… cancelled.` |
-| 对方已经拿到 | 当即记为取消；对方被告知"停下"，并附上中枢一起撤掉的东西，其余的由它自己收手。中枢不停对方这一轮，因为这一轮可能还在做别的任务。能原生插话的后端插进正在进行的这一轮，不能的等这一轮结束 | `Task t_… cancelled.` |
+| 对方已经拿到 | 当即记为取消；对方被告知"停下"，并附上中枢一起撤掉的东西。对方这个会话若因此没有别的任务开着，中枢停下它正在跑的这一轮，通知留在收件箱随它下一轮附上；还有别的任务开着就插进去告诉它 | `Task t_… cancelled.` |
 | 后台任务在跑 | 中止那次工具调用 | `Task t_… is being stopped.` |
 
 **场景**：用户说阿宁的风衣要换成红色。导演立刻撤掉还没开始的第 4 场拍摄任务，止损（完整流程见 3.3）。
 
-**写法要点**：不要用 `get_task` 轮询，工具说明原文是 "Do not poll with it: results are delivered to you." 撤后台生成时要知道：中枢能中止调用，但外部服务那边已经开始生成的，撤不撤得掉、计不计费，由那个服务决定。摄影师说明里因此写了"提交前把提示词再读一遍"。
+**写法要点**：不要用 `task_status` 轮询，工具说明原文是 "Do not poll with it: results are delivered to you." 撤后台生成时要知道：中枢能中止调用，但外部服务那边已经开始生成的，撤不撤得掉、计不计费，由那个服务决定。摄影师说明里因此写了"提交前把提示词再读一遍"。
 
 ### 2.7 `put_asset`、`find_assets`、`get_asset`：资产
 
@@ -431,7 +441,7 @@ put_asset(type: "shot", name: "2-1",
 - 文件被**复制**进资产库，以后不再改写。同一个 id 再登记就是第 2 版，旧版保留（版本规则见 3.3）。
 - `type` 和 `name` 各是一个词，不能含 `/` 或空格，不能以 `.` 开头。`type` 用任务或分工表里的类型名，不要自造同义词：写 `shot_list` 就别写 `shotlist`，否则 `produces` 核对不上。
 - `path` 可以是相对自己工作目录的路径。
-- 交差时在 `complete_task` 的 `assets` 里点名，任务结果里据此列出交付物（见 3.2）。
+- 任务有 `produces` 时，回合结束前登记好那种类型的资产，任务结果里据此列出交付物（见 3.2）；用 `report_result` 交时在 `assets` 里点名。
 
 **`find_assets(type?, query?)`** 只列每样东西的最新版。`query` 在 id 和描述里找子串。
 
@@ -561,27 +571,27 @@ remember(
 
 #### 一条完整的时间线
 
-导演要同时拍第 2、3 场，两场都过了才交剪辑。摄影师那边每个镜头又要后台生成。这里同时用到了 `dispatch_task`、`await_tasks`、`start_job`、`put_asset` 四个原语，跨三个智能体：
+导演要同时拍第 2、3 场，两场都过了才交剪辑。摄影师那边每个镜头又要后台生成。这里同时用到了 `dispatch_task`、`subscribe`、`start_job`、`put_asset` 四个原语，跨三个智能体：
 
 ```
 director1                         camera1                              camera2
 ─────────                         ───────                              ───────
 dispatch_task(camera1,"第2场")→t_21
 dispatch_task(camera2,"第3场")→t_22
-await_tasks([t_21,t_22],
+subscribe([t_21,t_22],
   note:"两场都回来后逐镜审……")
 结束本轮（空闲）
                                   收到 t_21
                                   start_job(2-1 小样)→t_41
                                   start_job(2-2 小样)→t_42
-                                  await_tasks([t_41,t_42],
+                                  subscribe([t_41,t_42],
                                     note:"回来逐个检查，合格的登记")
                                   结束本轮 → t_21 保持开启              收到 t_22，同样处理……
 用户："进度怎么样？"
 回答（普通的一轮）
                                   t_41、t_42 生成完 → 第二轮
                                   检查，put_asset(shot/2-1)、(shot/2-2)
-                                  complete_task(t_21, assets:[…]) → 结果
+                                  以结果结束这一轮 → t_21 完成
                                                                        …… t_22 完成
 门满足 → 合并结果 + note → 下一轮
 逐镜审……
@@ -591,7 +601,7 @@ await_tasks([t_21,t_22],
 
 **① 导演结束本轮后是空闲的。** 用户可以随时找它；`t_21` 先回来时，结果被门扣住，不打扰它。
 
-**② `camera1` 第一轮结束时，`t_21` 没有被交付。** 结束一轮不是交差，`t_21` 一直开着，直到 `camera1` 调 `complete_task`。这一轮结束时它登记了等待门，结果会来叫醒它，所以中枢也不提醒。生成结果回来后，它检查、登记、交差。要是它忘了，那一轮结束时中枢会把开着的任务（哪个任务、谁派的、要交什么）列给它（见 2.3 末尾"对方怎么交差"）。
+**② `camera1` 第一轮结束时，`t_21` 没有完结。** 它为 `t_21` 启动的后台任务还在跑、结果会唤醒它，所以这一轮的结束不算完结（[KERNEL.md](KERNEL.md) 4）。生成结果回来后，它检查、登记，以结果结束那一轮，`t_21` 就此完成。要是它忘了登记要交的 `shot`，中枢会追问它（见 2.3 末尾"对方怎么交差"）。
 
 **③ 导演收到合并结果时，交付物是中枢核对过的。**
 
@@ -635,7 +645,7 @@ This task was held until the following tasks finished. Their results are your in
 
 前一个任务失败了也照样送过去，由剪辑师判断还能不能做。
 
-| | `await_tasks` | `after` |
+| | `subscribe` | `after` |
 | - | - | - |
 | 谁在等 | 派发者 | 下游任务 |
 | 等到之后 | 派发者醒来，自己决定下一步 | 下游直接开工 |
@@ -647,7 +657,7 @@ This task was held until the following tasks finished. Their results are your in
 
 | 记的是什么 | 在哪 | 怎么看 |
 | - | - | - |
-| 哪些任务没结束、谁在等什么 | 中枢（任务和门的日志） | `get_task()` 不带参数 |
+| 哪些任务没结束、谁在等什么 | 中枢（任务和门的日志） | `task_status()` 不带参数 |
 | 等到之后要做什么 | 门上的 note | 随结果送回 |
 | 整个流程的先后 | 统筹角色的说明文字 | 导演说明里的 11 步表格 |
 | 已经定下来的结论 | 笔记 | `recall` |
@@ -684,7 +694,7 @@ This task was held until the following tasks finished. Their results are your in
 | 2 | 用户确认后，立刻撤掉还在排队的第 4 场 | `cancel_task` |
 | 3 | 派美术指导改人物设定 | `dispatch_task(to: "art1", inputs: ["character/阿宁"], produces: "character")` |
 | 4 | 美术指导登记第 2 版 | `put_asset(type: "character", name: "阿宁", …)` |
-| 5 | 依次重派分镜画面、重拍第 2、3、4 场 | `dispatch_task` + `after` 或 `await_tasks` |
+| 5 | 依次重派分镜画面、重拍第 2、3、4 场 | `dispatch_task` + `after` 或 `subscribe` |
 | 6 | 记下现在以哪一版为准 | `remember(topic: "渡口-人物", content: "阿宁改红色风衣，以 character/阿宁 v2 为准；第2、3场已按 v2 重拍。")` |
 
 **其中中枢保证的和只靠模型的：**
@@ -777,7 +787,7 @@ shot/1-1           v1                         ← 空镜，本来就不受影响
 | 说明原文 | 落到哪个原语 |
 | - | - |
 | "前一步定稿，才派发依据它的下一步。派发时用 `inputs` 写明依据哪些资产，用 `produces` 写明要交什么。" | `dispatch_task` 的两个字段 |
-| "镜头互不依赖的场可以同时派给多位摄影师，用 `await_tasks` 等它们都回来。" | 并行 + 汇合 |
+| "镜头互不依赖的场可以同时派给多位摄影师，用 `subscribe` 订阅它们，结果一起回来。" | 并行 + 汇合 |
 | "用户选定后，把决定写进任务再往下派，并用 `remember` 记下来。" | `instructions` 的写法 + `remember` 的时机 |
 | "改了主意立刻通知取消还在排队的任务。" | `cancel_task` 的时机 |
 | "你逐镜审，按技能 `dailies-review`。" | 提醒 `load_skill` |
@@ -790,8 +800,8 @@ shot/1-1           v1                         ← 空镜，本来就不受影响
 
 ```
 3. 为每个镜头写提示词（见下），用 `start_job` 提交：`server: "media"`，`tool: "generate_video"`，小样分辨率。
-4. `await_tasks`，然后结束本轮：任务会保持开启，结果回来时接着做。回来后检查文件，不合格的调整后重拍（再提交、再 `await_tasks`）。
-5. 用 `put_asset` 把每个小样登记为 `shot/<镜号>`（`path` 指向视频文件），描述里写提示词与参数，并注明是小样。用 `complete_task` 交导演审，`assets` 里写上这些小样，这个任务到此结束。
+4. 用 `subscribe` 订阅这些后台任务，然后结束本轮：任务会保持开启，结果回来时接着做。回来后检查文件，不合格的调整后重拍（再提交、再 `subscribe`）。
+5. 用 `put_asset` 把每个小样登记为 `shot/<镜号>`（`path` 指向视频文件），描述里写提示词与参数，并注明是小样。以交给导演审的内容结束本轮，写明这些小样；这个任务到此结束。
 6. 导演通过后会再派任务出正式版：……登记为同一个 `shot/<镜号>` 的新版本，描述里注明是正式版。
 ```
 
@@ -852,10 +862,10 @@ inputs: brief, cut
    用 `ffprobe` 读出总时长。
 2. 按成片列出情绪段落：起止时间、情绪、有没有对白。
 3. 先出 30 秒小样定调：`start_job`，`server: "music"`，`tool: "generate_music"`。
-   然后 `await_tasks` 并结束本轮，任务会保持开启。
+   然后 `subscribe` 订阅它并结束本轮，任务会保持开启。
 4. 结果回来后自己听一遍。不合格就改描述重出，一次只改一处。
 5. 用 `put_asset` 登记为 `score/<片名>`，描述里注明是小样、时长、用的描述词。
-   用 `complete_task` 交导演审，`assets` 里写上它，这个任务到此结束。
+   以交给导演审的内容结束本轮，写明它；这个任务到此结束。
 6. 导演通过后会另派任务出全长：登记为同一个 `score/<片名>` 的新版本，描述里注明是全长。
 
 ## 结果里要写
@@ -888,7 +898,7 @@ inputs: brief, cut
 | - | - |
 | **用得上的时候才递过来** | 镜头表的做法不在分镜师的系统说明里，随"做镜头表"的任务一起到 |
 | **提示，不拦截** | 派给了编剧，任务照发，返回里说"做这个的是 board1" |
-| **让模型把"之后要做的事"存在中枢** | `await_tasks` 的 note，随结果原样送回 |
+| **让模型把"之后要做的事"存在中枢** | `subscribe` 的 note，随结果原样送回 |
 | **事实由中枢写，不由模型说** | "该交镜头，但没登记"是中枢查库写的 |
 | **在模型可能忘的时刻重说一遍** | 任务保持开启后，结果回来时重说"你在替谁做哪个任务、要交什么" |
 | **讲道理，而不只下禁令** | 不说"禁止轮询"，说"结果在这一轮结束后才能送达，轮询只会让它更晚" |
@@ -906,8 +916,9 @@ inputs: brief, cut
 | 内容 | 位置 |
 | - | - |
 | 系统说明、标签的包装、记忆摘要、结果块 | [prompts.ts](../packages/hub/src/prompts.ts) |
-| 十三个原语的参数、说明、返回、三种提示 | [tools.ts](../packages/hub/src/tools.ts) |
-| 派发、汇合、`after`、后台任务、任务保持开启、撤回 | [mailroom.ts](../packages/hub/src/mailroom.ts) |
+| 原语的参数、说明、返回、三种提示 | [tools.ts](../packages/hub/src/tools.ts) |
+| 派发、汇合、`after`、撤回与传染、通知、台账 | [kernel.ts](../packages/hub/src/kernel.ts)（[KERNEL.md](KERNEL.md)） |
+| 投进会话、后台任务、提醒 | [delivery.ts](../packages/hub/src/delivery.ts)、[jobs.ts](../packages/hub/src/jobs.ts)、[nudges.ts](../packages/hub/src/nudges.ts) |
 | 话题账本、笔记、门的数据 | [state.ts](../packages/hub/src/state.ts) |
 | 资产库 | [assets.ts](../packages/hub/src/assets.ts) |
 | 角色与技能声明的读取 | [roles.ts](../packages/hub/src/roles.ts) |

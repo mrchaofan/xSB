@@ -1,6 +1,6 @@
 # xsb
 
-多个主 Agent 的协作系统：每个 Agent 背后是一个 ACP 后端（claude / codex / gemini / grok，或任何 ACP agent），你可以和每个 Agent 直接对话，它们之间也可以直接对话和派发任务。设计见 [docs/DESIGN.md](docs/DESIGN.md)。
+多个主 Agent 的协作系统：每个 Agent 背后是一个 ACP v2 后端（claude / codex，或任何说 ACP v2 的 agent），你可以和每个 Agent 直接对话，它们之间也可以直接对话和派发任务。设计见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 需要 Node ≥ 22.18。Hub 和 CLI 无运行时依赖、无构建步骤；桌面应用依赖 Electron，由 Rolldown 打包。
 
@@ -38,10 +38,10 @@ npx xsb backends
 npx xsb init
 npx xsb agent add director --backend claude --name 导演 --desc "统筹全片，拆解并派发工作" --instructions @director.md
 npx xsb agent add writer   --backend codex  --name 编剧 --desc "写剧本和对白"
-npx xsb agent add gaffer1  --backend gemini --name 灯光师1 --desc "设计布光方案"
-npx xsb agent add gaffer2  --backend grok   --name 灯光师2 --desc "设计布光方案"
+npx xsb agent add gaffer1  --backend claude --name 灯光师1 --desc "设计布光方案"
+npx xsb agent add gaffer2  --backend codex  --name 灯光师2 --desc "设计布光方案"
 
-npx xsb chat director        # 对话；/i <内容> 插话，/cancel 停止，/quit 退出
+npx xsb chat director        # 对话；它工作时你说的话直接插进这一轮，/cancel 停止，/quit 退出
 npx xsb watch                # 另开一个终端，看所有 Agent 在做什么
 npx xsb status               # Agent 状态与未完成的任务
 npx xsb send writer "第三场改成夜戏"

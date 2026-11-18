@@ -1,33 +1,49 @@
 /**
- * The tools agents collaborate with. They reach an agent as an ordinary MCP
- * server, so any ACP agent can use them without knowing about the hub.
+ * The tools of the team: what the hub's MCP server ("team") offers a model.
+ * They reach an agent as an ordinary MCP server, so any ACP agent can use them
+ * without knowing about the hub.
  *
- * MCP can only answer a call; it cannot speak to the model later. Everything
- * that happens after a call returned (a task's result, a message from a peer,
- * a set of awaited results) therefore comes back through the session itself,
- * as a prompt or a steer tagged with its origin. That is why `dispatch_task`
- * returns at once and why there is no blocking wait: an agent that is not
- * stuck inside a tool call stays free to talk to its user.
+ * Which of them a session has depends on the work it is doing
+ * (capabilities.ts): every task lets its executor reach its initiator; the rest
+ * of the collaboration tools need a grant. The list a session is shown is
+ * computed when it is asked for, and a call is checked again.
+ *
+ * Collaboration is implicit first: a task ends when its executor's turn does,
+ * and its last words are the result, so most work needs no tool call at all.
+ * The tools are for what a model has to decide.
+ *
+ * MCP can only answer a call; it cannot speak to the model later. What happens
+ * after a call returned comes back through the session (kernel.ts, delivery
+ * pipeline). The exceptions wait inside the call: `dispatch_task` with
+ * `deliveryPref: "sync"` and `ask`, for a while, since the agent program ends a
+ * call that takes long, and an agent inside one cannot answer its user.
  *
  * This file is the model-facing side only: argument checking, and the wording
- * of what a tool answers. What a tool does to mail and tasks is in mailroom.ts.
+ * of what a tool answers. What a tool does to messages and tasks is the
+ * kernel's; the tools are one of its users, with the caller's identity.
  */
 import { Agents, isTerminal } from "@xsb/protocol";
-import type { Asset, Task } from "@xsb/protocol";
+import type { Addr, Asset, DeliveryPref, Grant, LedgerState, Task } from "@xsb/protocol";
+import { loadProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
-import { renderAsset, renderResults } from "./prompts.ts";
+import { isVeto } from "./hooks.ts";
+import type { Veto } from "./hooks.ts";
+import { capabilities, has, reaches } from "./capabilities.ts";
+import type { Capabilities } from "./capabilities.ts";
+import { agentPrincipal } from "./kernel.ts";
+import { renderAsset, renderMail, renderResults } from "./prompts.ts";
 import { skillBody } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { ops, topicKey } from "./state.ts";
 import { startedFor } from "./task-graph.ts";
 import { now } from "./util.ts";
 
-type Ctx = { hub: Hub; session: LiveSession };
+type Ctx = { hub: Hub; session: LiveSession; caps: Capabilities };
 type Tool = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  run(ctx: Ctx, args: any): string;
+  run(ctx: Ctx, args: any): string | Promise<string>;
 };
 
 const schema = (properties: Record<string, unknown>, required: string[] = []) => ({
@@ -39,6 +55,30 @@ const str = (description: string) => ({ type: "string", description });
 const TOPIC = str("Short, stable label of the matter this belongs to. Reuse the exact topic for everything on the same matter.");
 
 const json = (value: unknown): string => JSON.stringify(value, null, 2);
+
+/** The calling session's address. */
+const self = (ctx: Ctx): Addr => ({ agentId: ctx.session.agentId, sessionId: ctx.session.id });
+
+/** What the kernel refused, as the caller is told. */
+function allowed<T>(answer: T | Veto): T {
+  if (isVeto(answer)) throw new Error(answer.veto);
+  return answer;
+}
+
+/** How long a call waits for a result (`sync`, `ask`), unless the project says otherwise. */
+const AWAIT_SECONDS = 50;
+const awaitMs = (ctx: Ctx): number => (loadProjectConfig(ctx.hub.paths).limits?.awaitSeconds ?? AWAIT_SECONDS) * 1000;
+
+/** What each ledger state means, as a model is told. */
+const SEEN: Record<LedgerState, string> = {
+  inboxed: "kept for the recipient; it reads it with its next turn",
+  queued: "waiting behind the recipient's current work; its model has not seen it",
+  submitted: "given to the recipient's session, not yet to its model",
+  inserted: "in the recipient's conversation; its model has not acted since",
+  seen: "seen: the recipient's model went on after it",
+  inserted_unprocessed: "in the recipient's conversation, but its turn was stopped before it acted; it sees it when it goes on",
+  discarded_unseen: "never reached the recipient's model, and will not",
+};
 
 function need(args: any, key: string): string {
   const value = args?.[key];
@@ -58,7 +98,7 @@ function peer(ctx: Ctx, id: string): string {
 /** Topics this agent already handled, per peer: the hub's own record of who knows what. */
 function topicsWith(ctx: Ctx, peerId: string): string[] {
   const out: string[] = [];
-  for (const entry of ctx.hub.state.ledger.get(ctx.session.agentId)?.values() ?? []) {
+  for (const entry of ctx.hub.state.topics.get(ctx.session.agentId)?.values() ?? []) {
     if (entry.peers.has(peerId)) out.push(entry.topic);
   }
   return out;
@@ -67,7 +107,7 @@ function topicsWith(ctx: Ctx, peerId: string): string[] {
 /** Say so when a topic that has history with one peer is now sent to another. */
 function continuityNote(ctx: Ctx, topic: string | undefined, to: string): string | undefined {
   if (!topic) return "No topic given. Add one next time so this can be found and continued with the same peer.";
-  const peers = ctx.hub.state.ledger.get(ctx.session.agentId)?.get(topicKey(topic))?.peers;
+  const peers = ctx.hub.state.topics.get(ctx.session.agentId)?.get(topicKey(topic))?.peers;
   if (!peers || peers.size === 0 || peers.has(to)) return undefined;
   const history = [...peers].map(([id, p]) => `${id} (${p.count}x, last ${p.lastAt})`).join(", ");
   return `Topic "${topic}" has so far been handled with ${history}, not with "${to}". If you meant to continue with the same peer, cancel this and send it there.`;
@@ -97,16 +137,36 @@ function contractNote(ctx: Ctx, to: string, produces: string | undefined, inputs
 function ownTask(ctx: Ctx, id: string, mustOwn = false): Task {
   const task = ctx.hub.state.tasks.get(id);
   const me = ctx.session.agentId;
-  if (!task || (task.from.agentId !== me && (mustOwn || task.to.agentId !== me))) {
+  const mine = task?.from?.agentId === me;
+  if (!task || (!mine && (mustOwn || task.to.agentId !== me))) {
     throw new Error(`no task "${id}" ${mustOwn ? "dispatched by you" : "of yours"}`);
   }
   return task;
 }
 
+/** Whether the work this session does lets it reach `to` with `cap`; else what the model is told. */
+function reach(ctx: Ctx, cap: "dispatch" | "message", to: string): void {
+  if (reaches(ctx.caps[cap], to)) return;
+  throw new Error(`the work you are doing does not let you ${cap === "dispatch" ? "dispatch tasks" : "send messages"} to "${to}". You can reach whoever gave you your task (report_result, ask), and the user (escalate_to_user).`);
+}
+
+const DELIVERY = {
+  type: "string",
+  enum: ["sync", "wake", "lazy"],
+  description:
+    'How the result reaches you. "sync": this call waits for it, up to a minute, for a short task you need the answer of to go on. "wake": as soon as it is there, waking you. "lazy" (default): kept for your next turn, waking nobody.',
+};
+
+const GRANTS = {
+  type: "array",
+  items: { type: "object", properties: { cap: { type: "string", enum: ["dispatch", "message"] }, to: { type: "array", items: { type: "string" } } }, required: ["cap"] },
+  description: "What the peer may do for this task beyond reaching you: dispatch tasks to, or message, other agents (all, or those in `to`). Only what you may do yourself.",
+};
+
 /**
- * Whether the task's result is promised to its dispatcher through await_tasks:
+ * Whether the task's result is promised to its dispatcher through a subscription:
  * a gate still waits for it, or the joined results are on their way. Reading it
- * early through get_task would make the join arrive as a repeat.
+ * early through task_status would make the join arrive as a repeat.
  */
 function heldForJoin(ctx: Ctx, task: Task): boolean {
   const mine = (owner: { sessionId: string }, ids: string[]): boolean =>
@@ -126,28 +186,222 @@ function asset(ctx: Ctx, ref: string): Asset {
 
 const assetBrief = (a: Asset) => ({ id: a.id, version: a.version, description: a.description, path: a.path, by: a.by });
 
+/** Of a task given to an agent: what became of the message that gave it (the ledger). */
+const deliveryOf = (ctx: Ctx, t: Task) => {
+  if (t.tool) return {};
+  const entry = [...ctx.hub.state.ledger.values()].filter((e) => e.taskId === t.id && e.agentId === t.to.agentId).at(-1);
+  return entry ? { given_to_assignee: SEEN[entry.state] } : {};
+};
+
 const briefFor = (ctx: Ctx, t: Task) => {
-  if (t.result === undefined || !heldForJoin(ctx, t)) return brief(t);
+  if (t.result === undefined || !heldForJoin(ctx, t)) return { ...brief(t), ...deliveryOf(ctx, t) };
   const { result, ...rest } = brief(t);
-  return { ...rest, result_delivery: "Held for your await_tasks: it arrives together with the others in one message. Do not act on it before then." };
+  return { ...rest, result_delivery: "Held for your subscription: it arrives together with the others in one message. Do not act on it before then." };
 };
 
 const brief = (t: Task) => ({
   task_id: t.id,
   title: t.title,
   topic: t.topic,
-  from: t.from.agentId,
+  from: t.initiator.kind === "agent" ? t.initiator.agentId : "the user",
   to: t.tool ? `${t.tool.server}/${t.tool.name}` : t.to.agentId,
   status: t.status,
+  ...(t.deliveryPref ? { delivery: t.deliveryPref } : {}),
+  ...(t.ended ? { ended: t.ended.reason, ended_by: t.ended.stopper.kind === "agent" ? t.ended.stopper.agentId : t.ended.stopper.kind === "user" ? "the user" : "xsb" } : {}),
   ...(t.after.length ? { after: t.after } : {}),
   ...(t.parents?.length ? { started_for: t.parents } : {}),
   ...(t.result !== undefined ? { result: t.result } : {}),
 });
 
+/** A message to a peer, as send_message and broadcast send it. */
+function send(ctx: Ctx, to: string, content: string, topic: string | undefined) {
+  reach(ctx, "message", to);
+  const note = continuityNote(ctx, topic, to);
+  const session = ctx.hub.findWorkSession(to, topic) ?? ctx.hub.mainSession(to);
+  const { item, route } = ctx.hub.kernel.post({ to: { agentId: to, sessionId: session.id }, from: { kind: "agent", ...self(ctx) }, kind: "message", topic, content, pref: "wake" });
+  const queued = ctx.hub.state.ledger.get(item.id)?.state === "queued";
+  const delivery = route === "interject" ? "interjected" : queued ? "queued behind the peer's current work" : "delivered";
+  return { message_id: item.id, delivery, ...(note ? { note } : {}) };
+}
+
 export const TOOLS: Tool[] = [
   {
+    name: "dispatch_task",
+    description:
+      "Give another agent a task. Its result is what the agent says last when it is done. Say with deliveryPref how you want the result: in this call (sync), waking you (wake), or with your next turn (lazy, the default). To go on only once several tasks are done, dispatch them, subscribe to them and end your turn.",
+    inputSchema: schema(
+      {
+        to: str("Agent id."),
+        title: str("Short title."),
+        instructions: str("Everything the peer needs, for it sees nothing of your conversation: the goal, what you already know or decided, the constraints, what done looks like, and what to report back."),
+        topic: TOPIC,
+        deliveryPref: DELIVERY,
+        after: { type: "array", items: { type: "string" }, description: "Task ids that must finish before this task starts. The peer receives their results as input." },
+        inputs: { type: "array", items: { type: "string" }, description: "Ids of the assets the task works from (e.g. character/lin). The peer receives them with the task." },
+        produces: str("Asset type the task has to result in (e.g. shot_list). The peer must register one; it is asked for it if it does not."),
+        parallel: {
+          type: "boolean",
+          description:
+            "The task depends on no other work you gave the same peer (another scene, say), so the peer may work on it alongside that, a few at a time. Leave it out for work that builds on other work (a shot that continues from the last frame of another): that runs one at a time.",
+        },
+        grants: GRANTS,
+      },
+      ["to", "title", "instructions"],
+    ),
+    run(ctx, args) {
+      const to = peer(ctx, need(args, "to"));
+      reach(ctx, "dispatch", to);
+      const after: string[] = Array.isArray(args.after) ? args.after : [];
+      const deliveryPref: DeliveryPref = ["sync", "wake"].includes(args.deliveryPref) ? args.deliveryPref : "lazy";
+      const grants: Grant[] = Array.isArray(args.grants) ? args.grants.filter((g: any) => g?.cap === "dispatch" || g?.cap === "message") : [];
+      const title = need(args, "title");
+      const instructions = need(args, "instructions");
+      const topic: string | undefined = args.topic?.trim() || undefined;
+      const inputs: string[] = Array.isArray(args.inputs) ? args.inputs : [];
+      const produces: string | undefined = args.produces?.trim() || undefined;
+      const note = [continuityNote(ctx, topic, to), contractNote(ctx, to, produces, inputs.map((ref) => asset(ctx, ref)))].filter(Boolean).join(" ");
+      const parallel = args.parallel === true ? true : undefined;
+      // A peer's work goes to the agent's work session of its topic (Hub.workSession).
+      const session = ctx.hub.workSession(to, topic ?? title);
+      const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: to, sessionId: session.id }, { title, topic: topic ?? title, instructions, after, inputs, produces, parallel, deliveryPref, grants }));
+      const held = task.status === "blocked";
+      const answer = { task_id: task.id, status: held ? "held until the tasks in `after` finish" : "dispatched", delivery: deliveryPref, ...(note ? { note } : {}) };
+      if (deliveryPref !== "sync") return json(answer);
+      const late = json({ ...answer, status: `${answer.status}; not finished within ${awaitMs(ctx) / 1000} seconds. Its result wakes you when it is there: end your turn, or go on with other work.` });
+      return ctx.hub.delivery.awaitResult(ctx.session, task.id, awaitMs(ctx), late);
+    },
+  },
+  {
+    name: "report_result",
+    description:
+      "Report a task you were given: before your turn ends, or with a result other than your last words, or that it failed. Usually not needed: when your turn ends, the task ends with what you said last.",
+    inputSchema: schema(
+      {
+        task_id: str("Id of the task, from its <xsb-task>. May be left out when you have one task."),
+        result: str("The result as its sender will read it: complete and self-contained. Say plainly what you could not do, did not finish or did not verify."),
+        assets: { type: "array", items: { type: "string" }, description: "Ids of the assets you registered for it (e.g. shot_list/scene3), the latest version unless you append @<version>." },
+        failed: { type: "boolean", description: "The task could not be done, or is no longer to be done." },
+      },
+      ["result"],
+    ),
+    run(ctx, args) {
+      const me = ctx.session.agentId;
+      const open = ctx.hub.kernel.openTasks(ctx.session.id);
+      const id: string | undefined = typeof args.task_id === "string" && args.task_id.trim() ? args.task_id.trim() : open.length === 1 ? open[0].id : undefined;
+      if (!id) throw new Error(`"task_id" is required: you have ${open.length ? `several tasks (${open.map((t) => t.id).join(", ")})` : "no task"}`);
+      const task = ctx.hub.state.tasks.get(id);
+      if (!task || task.tool || task.to.agentId !== me) throw new Error(`no task "${id}" given to you`);
+      if (task.status === "cancelled") throw new Error(`task ${id} was stopped; there is no result to give`);
+      if (isTerminal(task.status)) throw new Error(`task ${id} is ${task.status} already`);
+      if (task.status !== "running") throw new Error(`task ${id} has not been given to you yet; it arrives as an <xsb-task>`);
+      const result = need(args, "result");
+      const failed = args.failed === true;
+      const assets = (Array.isArray(args.assets) ? args.assets : []).map((ref: string) => asset(ctx, ref));
+      for (const a of assets) if (a.by !== me) throw new Error(`asset ${a.id} was registered by ${a.by}, not by you`);
+      if (!failed && task.produces && !assets.some((a: Asset) => a.type === task.produces)) {
+        throw new Error(`task ${id} has to produce a "${task.produces}" asset: register it with put_asset and name it in "assets". If it cannot be done, set failed and say why.`);
+      }
+      ctx.hub.kernel.complete(task, failed ? "failed" : "completed", result, assets);
+      const left = ctx.hub.kernel.openTasks(task.to.sessionId).map((t) => t.id);
+      // Reporting is the executor's call, and takes nothing along: what it started meanwhile goes on unless it says so.
+      const going = startedFor(ctx.hub.state, id).map((t) => `${t.id} "${t.title}"`);
+      const to = task.initiator.kind === "agent" ? task.initiator.agentId : "the user";
+      return [
+        `Task ${id} ${failed ? "reported as failed" : "completed"}; the result goes to ${to}.`,
+        ...(left.length ? [`Still open: ${left.join(", ")}.`] : []),
+        ...(going.length ? [`Still running, started while you had it: ${going.join(", ")}. Cancel what is no longer needed.`] : []),
+      ].join(" ");
+    },
+  },
+  {
+    name: "ask",
+    description:
+      "Ask a question and wait in this call for the answer, up to a minute: by default of whoever gave you your task; another agent only if your work lets you reach it. The answer is what it says back.",
+    inputSchema: schema({ question: str("The question, with what the other needs to answer it."), to: str("Agent id. Leave out to ask whoever gave you your task."), topic: TOPIC }, ["question"]),
+    async run(ctx, args) {
+      const question = need(args, "question");
+      const asked: string | undefined = typeof args.to === "string" && args.to.trim() ? peer(ctx, args.to.trim()) : [...ctx.caps.upward][0];
+      if (!asked) throw new Error("you have no task given by an agent; name whom to ask in `to`");
+      // Upward, it goes to the session of the initiator that gave the task, which has the matter in mind.
+      const upward = ctx.hub.kernel.openTasks(ctx.session.id).find((t) => t.initiator.kind === "agent" && t.initiator.agentId === asked && t.from);
+      if (!upward) reach(ctx, "message", asked);
+      const topic: string = args.topic?.trim() || upward?.topic || "question";
+      const session = upward?.from ? ctx.hub.live.get(upward.from.sessionId)! : ctx.hub.workSession(asked, topic);
+      const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: asked, sessionId: session.id }, { title: `Question from ${ctx.session.agentId}`, topic, instructions: `${ctx.session.agentId} asks you, and waits for your answer (what you say back is the answer):\n${question}`, after: [], deliveryPref: "sync" }));
+      const late = `No answer from ${asked} within ${awaitMs(ctx) / 1000} seconds. It wakes you when it comes (task ${task.id}).`;
+      return ctx.hub.delivery.awaitResult(ctx.session, task.id, awaitMs(ctx), late);
+    },
+  },
+  {
+    name: "subscribe",
+    description:
+      "Have the results of tasks you dispatched or jobs you started wake you: together in one message, when all (or any) have finished. Then end your turn; meanwhile you remain available to the user.",
+    inputSchema: schema(
+      {
+        task_ids: { type: "array", items: { type: "string" }, description: "Ids of tasks you dispatched or jobs you started, from this session." },
+        mode: { type: "string", enum: ["all", "any"], description: "Wait for all of them (default) or for the first one." },
+        note: str("A reminder to yourself, returned with the results: what to do next, and any condition to check before going on."),
+      },
+      ["task_ids"],
+    ),
+    run(ctx, args) {
+      const ids: string[] = Array.isArray(args.task_ids) ? [...new Set<string>(args.task_ids)] : [];
+      if (ids.length === 0) throw new Error(`"task_ids" is required`);
+      const tasks = ids.map((id) => ownTask(ctx, id, true));
+      for (const t of tasks) if (t.from?.sessionId !== ctx.session.id) throw new Error(`task ${t.id} was dispatched from another session of yours`);
+      const note = typeof args.note === "string" ? args.note : undefined;
+      const mode = args.mode === "any" ? "any" : "all";
+      const { satisfied, finished } = ctx.hub.kernel.subscribe(self(ctx), tasks, mode, note);
+      if (satisfied) return `Nothing to wait for, the results are in:\n${renderResults(ctx.hub.state, { taskIds: ids, mode, note })}`;
+      return `Subscribed (${finished}/${tasks.length} finished). End your turn now; the results arrive together in one message.`;
+    },
+  },
+  {
+    name: "task_status",
+    description: "Look up one task: its state, who started and who ended it, whether its assignee has seen it. Without task_id, list your unfinished tasks and what you are subscribed to. Do not poll with it.",
+    inputSchema: schema({ task_id: str("Task id. Omit to list.") }),
+    run(ctx, args) {
+      if (args?.task_id) return json(briefFor(ctx, ownTask(ctx, args.task_id)));
+      const me = ctx.session.agentId;
+      const open = [...ctx.hub.state.tasks.values()].filter((t) => !isTerminal(t.status));
+      return json({
+        dispatched_by_you: open.filter((t) => t.from?.agentId === me).map(brief),
+        assigned_to_you: open.filter((t) => t.to.agentId === me && !t.tool).map(brief),
+        subscribed: [...ctx.hub.state.gates.values()].filter((g) => g.owner.agentId === me).map((g) => ({ task_ids: g.taskIds, mode: g.mode, note: g.note })),
+      });
+    },
+  },
+  {
+    name: "cancel_task",
+    description:
+      "Stop a task you dispatched or a job you started. What was started for it alone stops with it, and the work its assignee was doing for it is stopped. No result comes back, and a subscription no longer waits for it.",
+    inputSchema: schema({ task_id: str("Task id.") }, ["task_id"]),
+    run(ctx, args) {
+      const task = ownTask(ctx, need(args, "task_id"), true);
+      if (isTerminal(task.status)) return `Task ${task.id} already ${task.status}.`;
+      const { stopping, with: went } = allowed(ctx.hub.kernel.stop(task, agentPrincipal(ctx.session.agentId), { status: "cancelled", reason: "cancelled", result: "Cancelled by the dispatcher." }));
+      const also = went.length ? ` Stopped with it, as started for it: ${went.map((t) => `${t.id} "${t.title}"`).join(", ")}.` : "";
+      return `Task ${task.id} ${stopping ? "is being stopped" : "cancelled"}.${also}`;
+    },
+  },
+  {
+    name: "inbox",
+    description: "What waits for your next turn: results you asked to get lazily, notices. peek shows them; ack shows them and takes them out, so they do not come again.",
+    inputSchema: schema({ action: { type: "string", enum: ["peek", "ack"], description: "peek (default) or ack." } }),
+    run(ctx, args) {
+      const items = ctx.hub.kernel.inbox(ctx.session.id);
+      if (!items.length) return "Your inbox is empty.";
+      const text = items.map((item) => renderMail(ctx.hub.state, item).text).join("\n");
+      if (args?.action === "ack") {
+        ctx.hub.kernel.ack(items.map((i) => i.id));
+        for (const item of items) ctx.hub.kernel.mark(item.id, "seen");
+      }
+      return text;
+    },
+  },
+  {
     name: "list_agents",
-    description: "List the other agents on the team: what each does, the asset types it has a procedure for producing, whether it is busy, and the topics you already handled with it.",
+    description: "List the other agents on the team: what each does, the asset types it has a procedure for producing, whether it is busy, the topics you already handled with it, and whether your work lets you dispatch to or message it.",
     inputSchema: schema({}),
     run(ctx) {
       const team = ctx.hub.team();
@@ -161,6 +415,7 @@ export const TOOLS: Tool[] = [
           produces: team.filter((c) => c.agents.includes(a.id)).map((c) => c.produces),
           state: ctx.hub.agentInfo(a).state,
           topics_with_you: topicsWith(ctx, a.id),
+          you_may: [...(reaches(ctx.caps.dispatch, a.id) ? ["dispatch"] : []), ...(reaches(ctx.caps.message, a.id) ? ["message"] : []), ...(ctx.caps.upward.has(a.id) ? ["report", "ask"] : [])],
         }));
       return json({ you: ctx.session.agentId, agents });
     },
@@ -168,176 +423,48 @@ export const TOOLS: Tool[] = [
   {
     name: "send_message",
     description:
-      "Send a message to another agent. If the peer is working on a task you gave it, the message is put into its running turn where its backend allows that; otherwise it is read as its next turn. The result says which.",
-    inputSchema: schema(
-      {
-        to: str("Agent id."),
-        content: str("The message."),
-        topic: TOPIC,
-      },
-      ["to", "content"],
-    ),
+      "Send a message to another agent. If the peer is working on a task you gave it, it goes into its running work; otherwise, if it is busy, it is read as its next turn. The result says which; message_status tells later whether its model has seen it.",
+    inputSchema: schema({ to: str("Agent id."), content: str("The message."), topic: TOPIC }, ["to", "content"]),
     run(ctx, args) {
-      const to = peer(ctx, need(args, "to"));
+      return json(send(ctx, peer(ctx, need(args, "to")), need(args, "content"), args.topic?.trim() || undefined));
+    },
+  },
+  {
+    name: "broadcast",
+    description: "Send the same message to several agents, each as with send_message.",
+    inputSchema: schema({ to: { type: "array", items: { type: "string" }, description: "Agent ids." }, content: str("The message."), topic: TOPIC }, ["to", "content"]),
+    run(ctx, args) {
+      const to: string[] = Array.isArray(args.to) ? [...new Set<string>(args.to)] : [];
+      if (!to.length) throw new Error(`"to" is required`);
       const content = need(args, "content");
-      const topic: string | undefined = args.topic?.trim() || undefined;
-      const note = continuityNote(ctx, topic, to);
-      const { item, delivery } = ctx.hub.mail.send(ctx.session, to, content, topic);
-      return json({ message_id: item.id, delivery: delivery === "queued" ? "queued behind the peer's current work" : delivery, ...(note ? { note } : {}) });
+      return json(to.map((id) => ({ to: id, ...send(ctx, peer(ctx, id), content, args.topic?.trim() || undefined) })));
     },
   },
   {
-    name: "dispatch_task",
+    name: "message_status",
+    description: "Whether the model of the agent you wrote to has seen a message of yours: give the message_id send_message returned. Do not poll with it.",
+    inputSchema: schema({ message_id: str("Id of a message you sent.") }, ["message_id"]),
+    run(ctx, args) {
+      const id = need(args, "message_id");
+      const entry = ctx.hub.state.ledger.get(id);
+      if (!entry || entry.from.kind !== "agent" || entry.from.agentId !== ctx.session.agentId) throw new Error(`no message "${id}" sent by you`);
+      return json({ message_id: id, to: entry.agentId, state: entry.state, meaning: SEEN[entry.state], since: entry.ts });
+    },
+  },
+  {
+    name: "escalate_to_user",
     description:
-      "Give another agent a task. Returns immediately; the result is delivered to you later as a message. To continue only once several tasks are done, dispatch them, then call await_tasks and end your turn.",
-    inputSchema: schema(
-      {
-        to: str("Agent id."),
-        title: str("Short title."),
-        instructions: str("Everything the peer needs, for it sees nothing of your conversation: the goal, what you already know or decided, the constraints, what done looks like, and what to report back."),
-        topic: TOPIC,
-        after: {
-          type: "array",
-          items: { type: "string" },
-          description: "Task ids that must finish before this task starts. The peer receives their results as input.",
-        },
-        inputs: {
-          type: "array",
-          items: { type: "string" },
-          description: "Ids of the assets the task works from (e.g. character/lin). The peer receives them with the task.",
-        },
-        produces: str("Asset type the task has to result in (e.g. shot_list). The peer must register one; you are told if it did not."),
-        parallel: {
-          type: "boolean",
-          description:
-            "The task depends on no other work you gave the same peer (another scene, say), so the peer may work on it alongside that, a few at a time. Leave it out for work that builds on other work (a shot that continues from the last frame of another): that runs one at a time.",
-        },
-      },
-      ["to", "title", "instructions"],
-    ),
+      "Say that you are waiting for the user to decide or confirm something before the work can go on. Put the question, with its options, in your reply as usual; this tool lets the user know, wherever they are, that you are waiting for them. Call it once, then end your turn.",
+    inputSchema: schema({ question: str("The question in one line, as the user will see it in a notification.") }, ["question"]),
     run(ctx, args) {
-      const to = peer(ctx, need(args, "to"));
-      const after: string[] = Array.isArray(args.after) ? args.after : [];
-      for (const id of after) if (!ctx.hub.state.tasks.has(id)) throw new Error(`"after" names an unknown task: ${id}`);
-      const title = need(args, "title");
-      const instructions = need(args, "instructions");
-      const topic: string | undefined = args.topic?.trim() || undefined;
-      const inputs: string[] = Array.isArray(args.inputs) ? args.inputs : [];
-      const produces: string | undefined = args.produces?.trim() || undefined;
-      const note = [continuityNote(ctx, topic, to), contractNote(ctx, to, produces, inputs.map((ref) => asset(ctx, ref)))].filter(Boolean).join(" ");
-      const parallel = args.parallel === true ? true : undefined;
-      const task = ctx.hub.mail.dispatch(ctx.session, to, { title, topic: topic ?? title, instructions, after, inputs, produces, parallel });
-      const held = task.status === "blocked";
-      return json({
-        task_id: task.id,
-        status: held ? "held until the tasks in `after` finish" : "dispatched",
-        ...(note ? { note } : {}),
-      });
-    },
-  },
-  {
-    name: "await_tasks",
-    description:
-      "Register that you need the results of several tasks you dispatched or jobs you started before continuing, then end your turn. You receive them together in one message once all (or any) have finished; they cannot reach you while your turn is still running. Meanwhile you remain available to the user.",
-    inputSchema: schema(
-      {
-        task_ids: { type: "array", items: { type: "string" }, description: "Ids of tasks you dispatched or jobs you started, from this session." },
-        mode: { type: "string", enum: ["all", "any"], description: "Wait for all of them (default) or for the first one." },
-        note: str("A reminder to yourself, returned with the results: what to do next, and any condition to check before going on."),
-      },
-      ["task_ids"],
-    ),
-    run(ctx, args) {
-      const ids: string[] = Array.isArray(args.task_ids) ? [...new Set<string>(args.task_ids)] : [];
-      if (ids.length === 0) throw new Error(`"task_ids" is required`);
-      const tasks = ids.map((id) => ownTask(ctx, id, true));
-      for (const t of tasks) {
-        if (t.from.sessionId !== ctx.session.id) throw new Error(`task ${t.id} was dispatched from another session of yours`);
-      }
-      const note = typeof args.note === "string" ? args.note : undefined;
-      const mode = args.mode === "any" ? "any" : "all";
-      const { satisfied, finished } = ctx.hub.mail.join(ctx.session, tasks, mode, note);
-      if (satisfied) return `Nothing to wait for, the results are in:\n${renderResults(ctx.hub.state, { taskIds: ids, mode, note })}`;
-      return `Registered (${finished}/${tasks.length} finished). End your turn now; the results arrive together in one message.`;
-    },
-  },
-  {
-    name: "complete_task",
-    description:
-      "Finish a task you were given: the result goes to whoever dispatched it. Ending your turn does not finish a task; this does. Call it once per task, as soon as that task is done. For a task you cannot do, or that a later one replaced, set failed and say why.",
-    inputSchema: schema(
-      {
-        task_id: str("Id of the task, from its <xsb-task>."),
-        result: str("The result as its sender will read it: complete and self-contained. Say plainly what you could not do, did not finish or did not verify."),
-        assets: {
-          type: "array",
-          items: { type: "string" },
-          description: "Ids of the assets you registered for it (e.g. shot_list/scene3), the latest version unless you append @<version>. Required when the task has to produce an asset type.",
-        },
-        failed: { type: "boolean", description: "The task could not be done, or is no longer to be done." },
-      },
-      ["task_id", "result"],
-    ),
-    run(ctx, args) {
-      const me = ctx.session.agentId;
-      const id = need(args, "task_id");
-      const task = ctx.hub.state.tasks.get(id);
-      if (!task || task.tool || task.to.agentId !== me) throw new Error(`no task "${id}" given to you`);
-      if (task.status === "cancelled") throw new Error(`task ${id} was cancelled by ${task.from.agentId}; there is no result to give`);
-      if (isTerminal(task.status)) throw new Error(`task ${id} is ${task.status} already`);
-      if (task.status !== "running") throw new Error(`task ${id} has not been given to you yet; it arrives as an <xsb-task>`);
-      const result = need(args, "result");
-      const failed = args.failed === true;
-      const assets = (Array.isArray(args.assets) ? args.assets : []).map((ref: string) => asset(ctx, ref));
-      for (const a of assets) if (a.by !== me) throw new Error(`asset ${a.id} was registered by ${a.by}, not by you`);
-      if (!failed && task.produces && !assets.some((a: Asset) => a.type === task.produces)) {
-        throw new Error(`task ${id} has to produce a "${task.produces}" asset: register it with put_asset and name it in "assets". If it cannot be done, set failed and say why.`);
-      }
-      ctx.hub.mail.complete(task, failed ? "failed" : "completed", result, assets);
-      const open = ctx.hub.mail.openTasks(task.to.sessionId).map((t) => t.id);
-      // Finishing is the assignee's call, and takes nothing along: what it started meanwhile goes on unless it says so.
-      const going = startedFor(ctx.hub.state, id).map((t) => `${t.id} "${t.title}"`);
-      return [
-        `Task ${id} ${failed ? "finished as failed" : "completed"}; the result goes to ${task.from.agentId}.`,
-        ...(open.length ? [`Still open: ${open.join(", ")}.`] : []),
-        ...(going.length ? [`Still running, started while you had it: ${going.join(", ")}. Cancel what is no longer needed.`] : []),
-      ].join(" ");
-    },
-  },
-  {
-    name: "get_task",
-    description: "Look up one task, or without task_id list your unfinished tasks and what you are waiting for. Do not poll with it: results are delivered to you.",
-    inputSchema: schema({ task_id: str("Task id. Omit to list.") }),
-    run(ctx, args) {
-      if (args?.task_id) return json(briefFor(ctx, ownTask(ctx, args.task_id)));
-      const me = ctx.session.agentId;
-      const open = [...ctx.hub.state.tasks.values()].filter((t) => !isTerminal(t.status));
-      return json({
-        dispatched_by_you: open.filter((t) => t.from.agentId === me).map(brief),
-        assigned_to_you: open.filter((t) => t.to.agentId === me && !t.tool).map(brief),
-        awaiting: [...ctx.hub.state.gates.values()]
-          .filter((g) => g.owner.agentId === me)
-          .map((g) => ({ task_ids: g.taskIds, mode: g.mode, note: g.note })),
-      });
-    },
-  },
-  {
-    name: "cancel_task",
-    description:
-      "Cancel a task you dispatched or a job you started. What its assignee started for it alone is cancelled with it. A task ends at once and its assignee is told to stop; a job is stopped. No result comes back, and await_tasks no longer waits for it.",
-    inputSchema: schema({ task_id: str("Task id.") }, ["task_id"]),
-    run(ctx, args) {
-      const task = ownTask(ctx, need(args, "task_id"), true);
-      if (isTerminal(task.status)) return `Task ${task.id} already ${task.status}.`;
-      const { stopping, with: went } = ctx.hub.mail.cancel(task, { agentId: ctx.session.agentId, sessionId: ctx.session.id });
-      const also = went.length ? ` Cancelled with it, as started for it: ${went.map((t) => `${t.id} "${t.title}"`).join(", ")}.` : "";
-      return `Task ${task.id} ${stopping ? "is being stopped" : "cancelled"}.${also}`;
+      ctx.hub.broadcast(Agents.asks, { agentId: ctx.session.agentId, question: need(args, "question") });
+      return "The user has been told that you are waiting for them. End your turn now; their answer comes as a new message.";
     },
   },
   {
     name: "start_job",
     description:
-      "Run one slow tool call in the background instead of waiting inside it: rendering, generation, anything that takes minutes. Returns immediately with a task id; the tool's result is delivered to you later like a task result, and can be awaited with await_tasks or stopped with cancel_task.",
+      "Run one slow tool call in the background instead of waiting inside it: rendering, generation, anything that takes minutes. Returns immediately with a task id; the tool's result wakes you like a task result, and can be subscribed to with others or stopped with cancel_task.",
     inputSchema: schema(
       {
         server: str("Name of one of your role's MCP servers."),
@@ -350,13 +477,11 @@ export const TOOLS: Tool[] = [
     ),
     run(ctx, args) {
       const title = need(args, "title");
-      const task = ctx.hub.mail.startJob(ctx.session, {
-        title,
-        topic: args.topic?.trim() || title,
-        server: need(args, "server"),
-        tool: need(args, "tool"),
-        arguments: args.arguments ?? {},
-      });
+      const server = need(args, "server");
+      const agent = ctx.hub.agent(ctx.session.agentId);
+      if (!ctx.hub.toolServers(agent).some((t) => t.from === "role" && t.server.name === server)) throw new Error(`your role has no MCP server "${server}"`);
+      const tool = { server, name: need(args, "tool"), arguments: args.arguments ?? {} };
+      const task = allowed(ctx.hub.kernel.createJob(self(ctx), { title, topic: args.topic?.trim() || title, tool }));
       return json({ task_id: task.id, status: "started; the result will be delivered to you" });
     },
   },
@@ -414,16 +539,6 @@ export const TOOLS: Tool[] = [
     },
   },
   {
-    name: "ask_user",
-    description:
-      "Say that you are waiting for the user to decide or confirm something before the work can go on. Put the question, with its options, in your reply to the user as usual; this tool only lets the user know, wherever they are, that you are waiting for them. Call it once, then end your turn.",
-    inputSchema: schema({ question: str("The question in one line, as the user will see it in a notification.") }, ["question"]),
-    run(ctx, args) {
-      ctx.hub.broadcast(Agents.asks, { agentId: ctx.session.agentId, question: need(args, "question") });
-      return "The user has been told that you are waiting for them. End your turn now; their answer comes as a new message.";
-    },
-  },
-  {
     name: "remember",
     description:
       "Write your note for a topic, replacing the previous one. Keep it current: what was decided, which peer owns it, what is open. Empty content deletes the note.",
@@ -443,7 +558,7 @@ export const TOOLS: Tool[] = [
         ctx.hub.state.commit([ops.removeNote(me, topic)]);
         return `Note "${topic}" deleted.`;
       }
-      const known = ctx.hub.state.ledger.get(me)?.get(topicKey(topic))?.peers.keys() ?? [];
+      const known = ctx.hub.state.topics.get(me)?.get(topicKey(topic))?.peers.keys() ?? [];
       const peers: string[] = Array.isArray(args.peers) && args.peers.length ? args.peers : [...known];
       ctx.hub.state.commit([ops.putNote(me, { topic, content, peers, updatedAt: now() })]);
       return `Note "${topic}" saved.`;
@@ -461,14 +576,14 @@ export const TOOLS: Tool[] = [
         !query || fields.some((f) => f?.toLowerCase().includes(query));
 
       const notes = [...(ctx.hub.state.notes.get(me)?.values() ?? [])].filter((n) => hit(n.topic, n.content, n.peers.join(" ")));
-      const topics = [...(ctx.hub.state.ledger.get(me)?.values() ?? [])]
+      const topics = [...(ctx.hub.state.topics.get(me)?.values() ?? [])]
         .filter((e) => hit(e.topic, [...e.peers.keys()].join(" ")))
         .map((e) => ({
           topic: e.topic,
           handled_with: [...e.peers].map(([id, p]) => ({ agent: id, interactions: p.count, last: p.lastAt })),
         }));
       const tasks = [...ctx.hub.state.tasks.values()]
-        .filter((t) => (t.from.agentId === me || t.to.agentId === me) && hit(t.topic, t.title))
+        .filter((t) => (t.from?.agentId === me || t.to.agentId === me) && hit(t.topic, t.title))
         .slice(-15)
         .map(({ result, ...rest }) => brief(rest as Task));
       return json({ notes, topics, tasks });
@@ -476,11 +591,19 @@ export const TOOLS: Tool[] = [
   },
 ];
 
-export function callTool(ctx: Ctx, name: string, args: unknown): { text: string; isError: boolean } {
+/** The tools a session has now (capabilities.ts). */
+export function toolsFor(hub: Hub, session: LiveSession): Tool[] {
+  const caps = capabilities(hub.kernel, session.id, session.senders());
+  return TOOLS.filter((t) => has(caps, t.name));
+}
+
+export async function callTool(hub: Hub, session: LiveSession, name: string, args: unknown): Promise<{ text: string; isError: boolean }> {
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) return { text: `Unknown tool: ${name}`, isError: true };
+  const caps = capabilities(hub.kernel, session.id, session.senders());
+  if (!has(caps, name)) return { text: `${name} is not available in the work you are doing now.`, isError: true };
   try {
-    return { text: tool.run(ctx, args ?? {}), isError: false };
+    return { text: await tool.run({ hub, session, caps }, args ?? {}), isError: false };
   } catch (e) {
     return { text: e instanceof Error ? e.message : String(e), isError: true };
   }

@@ -104,7 +104,7 @@ dist/renderer/            页面：index.html、styles.css、打成一个文件�
 | - | - |
 | 完成 | 工作区从"有人在工作"变成"没有智能体在工作、也没有未结束的任务"。一件事经过几个智能体，只在最后一个停下时通知一次，标题是最后停下的那个 |
 | 失败 | 一个任务（或后台作业）失败；用户发出的消息没能成为一轮或这一轮出错 |
-| 需要确认 | 智能体调用了中枢的 `ask_user`：工作要等用户拍板才能继续。问题本身照常写在它的回复里，这个工具只负责让用户知道 |
+| 需要确认 | 智能体调用了中枢的 `escalate_to_user`：工作要等用户拍板才能继续。问题本身照常写在它的回复里，这个工具只负责让用户知道 |
 | 需要授权 | 智能体的工具调用要用户批准（`session/request_permission`） |
 
 - **不重复**：智能体请用户确认过，或用户点了停止，之后工作区变空闲不再报"完成"；中枢断开也不报。
@@ -129,7 +129,7 @@ dist/renderer/            页面：index.html、styles.css、打成一个文件�
 | Agent 是谁 | 应用自带的头像；名称仍显示在旁边。智能体头像 → 角色头像 → 默认猫头鹰，详见 [头像资源](avatars.md) |
 | Agent 状态 | ○ 空闲　● 正在工作（呼吸）　◆ 在等你批准 |
 | 这句话是谁说的 | 你说的：靠右的灰底块。同事派来的任务、Hub 送回的任务结果：靠左、带一道竖线和来源。Agent 自己的输出：不加装饰 |
-| 排队 / 插话 | 消息下方的小字；排队中的消息半透明 |
+| 插话 | 消息下方的小字 |
 | 制品 | 工具调用下面的文件按钮；正在右栏查看的那个反色显示 |
 | 需要你决定的事 | 黑色边框的块：对话里的权限请求、保存后的生效提示、总览里的缺口（◆） |
 
@@ -179,17 +179,15 @@ dist/renderer/            页面：index.html、styles.css、打成一个文件�
 
 ### 发消息
 
-发消息的规则直接来自 Hub 的回合语义（DESIGN.md 3.1）：**默认不是插话**。每条对话栏有自己的输入框，所以"发给谁"由位置决定。输入框旁只有一个按钮，它此刻是什么由两件事决定：智能体是否在工作，输入框里有没有内容。
+发消息的规则直接来自 Hub 的投递裁决（DESIGN.md 3.1、KERNEL.md 5）：**用户的话永不排队**。每条对话栏有自己的输入框，所以"发给谁"由位置决定。输入框旁只有一个按钮，它此刻是什么由两件事决定：智能体是否在工作，输入框里有没有内容。
 
 | 智能体状态 | 输入框有内容：↩ 或按钮 | 输入框为空：按钮 |
 | - | - | - |
 | 空闲 | 发送，开始一轮 | 发送（没有内容，不做事） |
-| 正在工作 / 在等你批准 | 发送，排到这一轮之后 | 停止这一轮 |
+| 正在工作 / 在等你批准 | 发送，插进正在进行的这一轮 | 停止这一轮 |
 
-- **排队的消息**在对话里半透明显示，带"排队中"和一个"立即发送"。点"立即发送"，这条消息不再等，插进正在进行的这一轮；Hub 按消息的标识认出它是同一条，所以它不会之后再作为单独一轮执行一次（DESIGN.md 3.1）。智能体在等你批准时不能插话，这时不显示"立即发送"。
-- **排队标识何时去掉**：Hub 把消息交给模型的那一刻会把它回送给窗口（`dev.xsb/origin`），窗口用回送的那条替换等待中的那条。轮到它自己开始一轮时不带标记；是插进去的，带"插话"。
-- ⌘↩ 仍是"直接插话"：智能体在工作时不排队，立刻插进当前这一轮。
-- **停止与 Esc 相同**：后端停在当前这一步，排队中的消息一并放弃；还没送到的插话立刻送出，智能体带着它继续，再点一次停止才停到空闲；插话送到之前就再点，它也一并放弃（DESIGN.md 3.1）。被放弃的消息留在对话里，划线、半透明，带"已丢弃"，悬停说明模型没有看到它。
+- **回显**：Hub 把消息交给会话的那一刻会把它回送给窗口（`dev.xsb/origin`），窗口用回送的那条替换刚发出的那条。开始一轮的不带标记；插进去的，带"插话"。
+- **停止与 Esc 相同**：后端停在当前这一步；还没送到的插话立刻送出，智能体带着它继续，再点一次停止才停到空闲；插话送到之前就再点，它也一并放弃（DESIGN.md 3.1）。被放弃的消息留在对话里，划线、半透明，带"已丢弃"，悬停说明模型没有看到它。
 
 ### 输入框下面的状态
 
@@ -386,8 +384,8 @@ renderer ──window.xsb──▶ preload.cjs ──ipc──▶ main.ts ──
 | `openPage(url, embedded?)` | 开一个网页，返回它；`embedded` 的不进标签栏（HTML 制品的预览）。没有 `<webview2>` 时返回 `null` | `Pages.open` |
 | `page(id, op, arg?)` | 对一个网页做一件事：`navigate` `back` `forward` `reload` `external` `close` `detach` `restore` `show` `pin` | `Pages.call` |
 | `pageWindow()` | 独立窗口问自己显示的是哪个网页 | `Pages.shownIn` |
-| `send(agentId, content, interject)` / `cancel(agentId)` / `permit(entryId, allow)` | 发消息（内容，可插话）、停止当前一轮、回答权限请求 |
-| `pathOf(file)` | 粘贴或拖入的文件在磁盘上的路径。不经过 main，由 preload 直接回答 | `webUtils.getPathForFile` | `session/prompt` 或 `_session/steering`、`session/cancel`、回复 `session/request_permission` |
+| `send(agentId, content)` / `cancel(agentId)` / `permit(entryId, allow)` | 发消息（智能体在工作时插进这一轮，永不排队）、停止当前一轮、回答权限请求 |
+| `pathOf(file)` | 粘贴或拖入的文件在磁盘上的路径。不经过 main，由 preload 直接回答 | `webUtils.getPathForFile` | `session/prompt`（v2：插入即应答）、`session/cancel`、回复 `session/request_permission` |
 | `putAgent(spec)` / `removeAgent(id)` | 新建或修改、删除 Agent | `agents/put { agent, instructions }`、`agents/remove` |
 | `applyRole(role, completed?)` / `syncRole(role)` | 对角色的每个 Agent：重启后端进程（"立即应用"）/ 把角色现在的描述和后端给它。逐个做，返回做成了哪些、停下的原因；再做一次只补剩下的 | `agents/restart`、`agents/put` |
 | `buildTeam(id, backend)` | 使用一支预设团队，并给还没有 Agent 的角色各建一个。返回建了哪些、停下的原因；角色和新建的 Agent 随事件到达 | `teams/use`、`agents/put` |
@@ -414,7 +412,7 @@ renderer ──window.xsb──▶ preload.cjs ──ipc──▶ main.ts ──
 | 角色的 `mcpServers` 是数组，`env` 是 `{ name, value }` 的数组 | `{ 名称: { command, args, env: {…} } }` | 数组与对象互转 |
 | skill 是 `{ name, description, produces, inputs, body }`，`inputs` 是逗号分隔的文字 | 读：`{ name, description, produces, inputs, content }`；写：`{ name, content }` | 写时把 `description`、`produces`、`inputs` 写成 `content` 开头的 front matter；读时从 `content` 里去掉它得到 `body` |
 
-**排队的消息。** 桌面端声明了 `dev.xsb/origin`（DESIGN.md 3.3），所以 Hub 在一条消息真正成为一轮的开始（或插进了进行中的那一轮）时，会把它带着发送时给的 `messageId` 送回来。发送时那条消息先显示出来，Agent 在忙就标"排队中"；回显到达时撤掉它（`removedEntry`），在这一轮开始的位置重新出现。桌面端因此不需要猜回合边界，排在其他 Agent 的邮件后面也是准的。
+**发出的消息。** 桌面端声明了 `dev.xsb/origin`（DESIGN.md 3.3），所以 Hub 在一条消息成为一轮的开始（或插进了进行中的那一轮）时，会把它带着发送时给的 `messageId` 送回来。发送时那条消息先显示出来；回显到达时撤掉它（`removedEntry`），在它进入会话的位置重新出现。用户的话不会排队（KERNEL.md 5），所以没有"排队中"的状态。
 
 需要 Electron 专门做的只有五件事，其余都是普通网页（对话框用的是原生 `<dialog>`）：
 
@@ -430,11 +428,11 @@ renderer ──window.xsb──▶ preload.cjs ──ipc──▶ main.ts ──
 
 应用不安装任何东西（[clis.ts](../packages/desktop/src/clis.ts)）。下面说的是各家 agent 的程序；角色要用的工具（`ffmpeg`）走的是同一套：在 PATH 上找，找不到请用户指定路径，指定后为它生成同名的启动脚本。
 
-1. **封装在应用里**。claude 和 codex 自己不说 ACP，它们的开源封装 `claude-agent-acp`、`codex-acp` 连同 JS 依赖打进了应用，由 Electron 自己的二进制运行。用户只需要有 `claude` / `codex` 程序本身，不需要另装 ACP 入口，也不需要 Node。gemini 和 grok 的程序自己说 ACP，没有封装。
-2. **检测 = 在 PATH 上找**。`claude` / `codex` / `gemini` / `grok` 在用户的 PATH 上，对应的后端就可用。
+1. **封装在应用里**。claude 和 codex 自己不说 ACP，它们的开源封装 `claude-agent-acp`、`codex-acp` 连同 JS 依赖打进了应用，由 Electron 自己的二进制运行。用户只需要有 `claude` / `codex` 程序本身，不需要另装 ACP 入口，也不需要 Node。两个封装都说 ACP v2。gemini 和 grok 的 ACP 入口只说 v1，不再支持。
+2. **检测 = 在 PATH 上找**。`claude` / `codex` 在用户的 PATH 上，对应的后端就可用。
 3. **找不到就请用户指出路径**。新建 Agent 的后端列表里，缺失的一项显示"PATH 中没有 claude"和"指定路径…"按钮，点开是系统的选择文件对话框。选中的路径记在 `userData/backends/paths.json`，之后一直有效；PATH 上有的优先于指定的。
 
-Hub 仍然"只启动、不安装"，一行没改：应用在 `userData/backends/bin/` 下为每个可用的后端生成一个启动脚本，并把这个目录放在启动 Hub 时的 PATH 最前面，Hub 的内置后端表（`claude-agent-acp`、`codex-acp`、`gemini`、`grok`）照常按命令名找到它们。脚本只在对应的程序存在时存在，所以"后端是否已安装"仍然只有一个含义：命令在 PATH 上。
+Hub 仍然"只启动、不安装"，一行没改：应用在 `userData/backends/bin/` 下为每个可用的后端生成一个启动脚本，并把这个目录放在启动 Hub 时的 PATH 最前面，Hub 的内置后端表（`claude-agent-acp`、`codex-acp`）照常按命令名找到它们。脚本只在对应的程序存在时存在，所以"后端是否已安装"仍然只有一个含义：命令在 PATH 上。
 
 已知的边界：
 
@@ -457,7 +455,7 @@ Hub 仍然"只启动、不安装"，一行没改：应用在 `userData/backends/
 
 在真实的 Electron 窗口里（通过调试端口驱动），接真实的 Hub、后端用 `packages/hub/test/mock-agent.ts`，手工跑过一遍：从命令行参数和"最近打开"打开工作区、未初始化的文件夹自动初始化、新建角色（含自动附上的 skill，核对了落盘的 `SKILL.md`）、新建 Agent、对话、排队、插话、停止、权限请求、重启应用后的历史回放、Agent 间派发任务与结果送回、资产作为制品出现并预览、系统说明预览、产出总览。这些没有自动化。
 
-真实后端（claude-agent-acp 0.107.0，走本机 claude 的登录状态）在桌面端里手工跑过一遍：对话；导演用 `dispatch_task` + `await_tasks` 把一场戏派给编剧，编剧收到自动附上的 skill、登记 `script` 资产，结果送回导演，资产作为制品预览；原生插话；停止；重启应用后的历史回放。这些各跑了一次，没有自动化。那次后端没有发来权限请求（取决于后端自己的设置），所以真实后端的权限请求没有在桌面端里出现过。
+真实后端（claude-agent-acp 0.107.0，走本机 claude 的登录状态）在桌面端里手工跑过一遍：对话；导演用 `dispatch_task` + 汇合等待把一场戏派给编剧，编剧收到自动附上的 skill、登记 `script` 资产，结果送回导演，资产作为制品预览；原生插话；停止；重启应用后的历史回放。这些各跑了一次，没有自动化。那次后端没有发来权限请求（取决于后端自己的设置），所以真实后端的权限请求没有在桌面端里出现过。
 
 右栏的网页和 browser use 在私有 Electron 43.8.1（macOS arm64）的真实窗口里跑过（2026-11-16）：打开 apple.com、google.com；切换标签、移到独立窗口再移回，页面里的加载时间戳不变；置顶；关独立窗口后标签消失；对话里的链接开成标签；HTML 制品里脚本运行且读不到 `window.xsb`；视频制品播放、范围请求回 206。browser use 经真实的 `xsb-browser-mcp` 管道调过每个工具：导航、快照、输入中文、点击、回车提交、跳转、后退，标签不在前台时同样可用，截图会把标签带回前台。
 
@@ -475,7 +473,7 @@ Hub 仍然"只启动、不安装"，一行没改：应用在 `userData/backends/
 - 网页没有下载、文件选择、`alert` 之类对话框的处理；browser use 没有多标签、拖拽、悬停、上传这些工具。
 - 独立窗口的置顶、红绿灯位置只在 macOS 上看过。
 
-- codex、gemini、grok 本机没有安装，没有在桌面端里跑过。
+- 改为 ACP v2 之后，桌面端没有接真实后端跑过；codex 没有在桌面端里跑过。
 - "打开文件夹…"弹出的系统对话框无法脚本驱动，没有点过；MCP 测试、删除 Agent、删除角色、同步到实例只在 mock 数据的原型里点过。
 - 打包成应用（`npm run package`：`release/` 下的 mac arm64 与 win x64 压缩包）之后，只验证过"模拟从访达启动时能找到 claude"（用只有系统默认 PATH 的环境启动开发版）；打包出的 `.app` 本身没有由我启动验证过。没有签名和公证，Windows 版没有运行过。
 - Windows 和 Linux 没有试过。
