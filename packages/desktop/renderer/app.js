@@ -36,12 +36,16 @@ export const TASK_TEXT = {
   blocked: t("task.status.blocked"), queued: t("task.status.queued"), running: t("task.status.running"),
   completed: t("task.status.completed"), failed: t("task.status.failed"), cancelled: t("task.status.cancelled"), interrupted: t("task.status.interrupted"),
 };
+/** 任务的状态怎么说：被派发方换成新任务的（改派），和被撤销的分开说。 */
+export const taskText = (task) => (task.ended?.reason === "superseded" ? t("task.status.superseded") : TASK_TEXT[task.status]);
 const TASK_GLYPH = { blocked: "idle", queued: "idle", running: "running", completed: "done", failed: "failed", cancelled: "failed", interrupted: "failed" };
 export const OVER = ["completed", "failed", "cancelled", "interrupted"];
 
 export const agentOf = (id) => state.agents.find((a) => a.id === id);
 export const roleOf = (name) => state.roles.find((r) => r.name === name);
 export const nameOf = (agentId) => agentOf(agentId)?.name ?? agentId;      // 已删除的 Agent 只剩 id
+/** 谁起的任务：用户起的没有 from，看 initiator。 */
+export const initiatorOf = (task) => task.initiator.kind === "agent" ? nameOf(task.initiator.agentId) : t(`task.initiator.${task.initiator.kind}`);
 /** 角色给人看的名字：预设团队给它起的显示名，没有就是目录名。 */
 export const roleTitle = (role) => role.preset?.title ?? role.name;
 /** 资产类型给人看的名字。 */
@@ -106,7 +110,7 @@ function renderRail() {
       h("i", { class: "state", "data-state": TASK_GLYPH[task.status] }),
       h("span", { class: "row-text" },
         h("strong", {}, task.title),
-        h("small", {}, t("rail.task.meta", { from: nameOf(task.from.agentId), to: nameOf(task.to.agentId), status: TASK_TEXT[task.status] }))))));
+        h("small", {}, t("rail.task.meta", { from: initiatorOf(task), to: nameOf(task.to.agentId), status: taskText(task) }))))));
   if (!visibleTasks.length) $("#tasks").append(h("div", { class: "empty" }, t(state.tasks.length ? "rail.tasks.finished" : "rail.tasks.empty")));
 
   // 没有打开任何对话栏时，中间显示的内容

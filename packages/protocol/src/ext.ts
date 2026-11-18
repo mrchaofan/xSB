@@ -285,12 +285,14 @@ export type Principal = { kind: "user" } | { kind: "agent"; agentId: string } | 
  * How a task ended. `completed` / `failed`: its assignee finished it (or a job's tool answered). `cancelled`: its
  * dispatcher or the user stopped it. `cascaded`: it went with a task it was started for (`cause`). `error`: xsb could
  * not run it. `interrupted`: xsb was quit while it was unfinished, and the user chose not to have it continued.
+ * `superseded`: its dispatcher gave the same agent a new task in its place (`dispatch_task` with `onBusy: "replace"`).
  */
-export type EndReason = "completed" | "failed" | "cancelled" | "cascaded" | "error" | "interrupted";
+export type EndReason = "completed" | "failed" | "cancelled" | "cascaded" | "error" | "interrupted" | "superseded";
 
 /**
  * How a message is to reach its recipient once it is in its inbox (where it counts as delivered). `sync`: as what a
- * tool call that waits for it returns. `wake`: at once, waking the recipient or going into its running work.
+ * tool call that waits for it returns. `wake`: a turn of its own, now if the recipient is idle, after its
+ * running turn if not (only the user's word goes into running work).
  * `lazy` (the default for a task's result): it waits, and comes with the recipient's next turn.
  */
 export type DeliveryPref = "sync" | "wake" | "lazy";

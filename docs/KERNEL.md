@@ -72,6 +72,7 @@ blocked ──前置都结束──► queued ──交给执行方──► run
                                                    ├ failed      执行方说做不了，或回合因模型上限、拒绝而结束
                                                    ├ cancelled   发起方或用户撤销
                                                    ├ cascaded    随它为之而起的任务一起撤（stopper = 根因）
+                                                   ├ superseded  派发方以 onBusy: replace 派来新任务取代它（status 为 cancelled）
                                                    ├ error       中枢跑不了它，或交付契约追问后仍未满足（stopper = SYSTEM）
                                                    └ interrupted 退出时用户选择不继续（stopper = USER）
 ```
@@ -128,7 +129,7 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 | - | - | - | - |
 | a | 收件方有一个工具调用在等它（`sync` 的派发、`ask`） | 作为那次调用的返回值 | 否：零额外轮次 |
 | b | 收件方已不存在 | 丢弃（台账 `discarded_unseen`） | 否 |
-| c | 收件方在工作，而这是用户的话（规则 0）、中枢对它手上工作的话、或来自给了它手上工作的那一方 | 插进正在进行的工作 | 是 |
+| c | 收件方在工作，而这是用户的话（规则 0），或中枢对它手上工作的话 | 插进正在进行的工作 | 是 |
 | d | `lazy` | 留在收件箱，收件方下一轮开始时作为摘要附在前面；或它用 `inbox` 读取 | 否：摊销到下一轮 |
 | e | 其余（`wake`） | 一轮：收件方空闲就现在，否则排在它这一轮之后（只在中枢里，模型不知情） | 是 |
 
@@ -139,8 +140,15 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 | 档位 | 语义 | 成本 |
 | - | - | - |
 | `sync` | 派发的工具调用挂起，结果作为返回值（`ask` 也是）；最多等 `limits.awaitSeconds`（默认 50 秒），超时返回回执，结果之后按 `wake` 送达 | 零额外轮次 |
-| `wake` | 立即投递：唤醒收件方或插进它的工作 | 一次投递 |
+| `wake` | 一轮：收件方空闲就唤醒它，在工作就排在这一轮之后 | 一次投递 |
 | `lazy` | 任务结果的默认档：随下一轮附上 | 零 |
+
+**只有用户能插话。** Agent 发来的任何东西（任务、聊天、结果）都不插进别人正在进行的工作，哪怕它正是这份工作的派发方：对方忙就排队，排队期间对方的模型看不到它。派发方要改变对方正在做的事，只能停止它：
+
+- **排队（默认）**：`dispatch_task` 的 `onBusy` 为 `queue`。对方正在做派发方的另一件事时，新任务排在后面，两件都会做完；回执里写明对方正在做哪件、新任务排在其后，以及要取代时该怎么做。
+- **显式改派**：`onBusy: "replace"`。这个会话里正在做的、由同一派发方发起的任务被停下（`Kernel.replace`），结束原因记为 `superseded`，停止方是派发方，所以照第 7 节不通知它；为它而起的活照常沿任务图传染（第 9 节）；对方停下后接着做新任务。派发方自己手上的工作若正是为那件任务而起的，那件不取代，否则会连自己一起停掉。
+
+改派由派发方声明，中枢不从"是不是同一个发起方"去推断：同一派发方连派两件事，可能是想换一件，也可能是想两件都做，猜错就会误杀。
 
 派发时声明；`subscribe` 把任务的档位升为 `wake`，订阅多个就是汇合（全部或任一结束后一起送来，唤醒）；`inbox` 是 `lazy` 的主动出口。用户的话、聊天消息、任务本身都是 `wake`。
 
@@ -175,7 +183,7 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 
 算法见 [TASK-GRAPH.md](TASK-GRAPH.md)：沿起因边求撤销集；多依赖的活默认不撤，只告知（`cascade.pre_propagate` 可改为强制）。
 
-- **谁能停**：发起方停自己的；用户可停任何任务（`_dev.xsb/tasks/cancel`、`xsb tasks cancel`）；中枢停跑不了的。
+- **谁能停**：发起方停自己的（`cancel_task`，或以 `onBusy: "replace"` 改派，第 6 节）；用户可停任何任务（`_dev.xsb/tasks/cancel`、`xsb tasks cancel`）；中枢停跑不了的。
 - **用户按停止（Esc）**：停下那个会话的工作，以及它正在做的任务，停止方是用户，沿任务图传染。之后用户说的话是一个新的用户任务。
 - **顺序与确认**：执行方会话如果只为被撤的工作而忙，就向它发 `session/cancel`，等它报 `idle`（一轮结束）后，整次撤销才在一个事务里落账；等不到（10 秒）也落账。还没交给执行方的任务邮件当即收回，被撤销集挡住的任务这期间不会被放行。工具调用 `cancel_task` 因此可能答"正在停"。
 - **在途消息**：中枢里还排着的全部丢弃，从未触达后端；已交给后端的，按插入回执结算（第 10 节）。
@@ -205,6 +213,7 @@ inboxed ──随下一轮──► inserted …
 | 等 `idle(cancelled)` 确认后落账 | 照做，另加 10 秒的兜底 | 后端一直不确认时，任务不该永远悬着 |
 | Gemini P1、Grok P2 | 不内置 | 两者都只说 v1，按决定不做 v1 桥 |
 | 任务状态 `requires_action` | 留在 Agent 状态上 | 权限请求属于会话，一轮可能同时服务几个任务 |
+| 同一发起方的 dispatch 隐式抢占（后经评审改为显式） | `onBusy: "replace"` 才取代，默认排队；结束原因 `superseded` | 同一派发方连派两件，中枢分不清是换一件还是两件都做；业界（LangGraph 的 double texting 默认 enqueue，interrupt 由调用方选）也由调用方声明 |
 | 状态 `pending`、`error`、`cascaded` | `status` 保留原值（`blocked` 即 pending），`ended.reason` 区分 | 客户端与 CLI 已按现有状态显示 |
 
 ## 12. 不变量与验证
@@ -216,6 +225,7 @@ inboxed ──随下一轮──► inserted …
 | initiator、stopper 可审计；统一收口；停止方即发起方时不通知 | `Task.initiator`、`Task.ended`、`finish`；`audit.jsonl` | kernel 1、e2e 14、34、35 |
 | 通知完成与调用后端解耦，只有一条投递管线 | 写进收件箱即 `notify.delivered`；去向由 `message.pre_deliver` 决定 | kernel 4、e2e 2、35 |
 | 用户的消息不会 `queued` | 规则 0；用户的输入进会话队列的最前 | kernel 5、e2e 20 |
+| 只有用户能插话；Agent 之间要么排队、要么由派发方显式改派 | `deliveryPolicy` 只让用户的话和中枢的话插话；`Kernel.replace` | kernel 5、5b、e2e 7、33 |
 | 停止只沿起因边传染，根因唯一；确认后落账 | `doom`；`ended.cause`；等 `acp.turn_ended` | kernel 3、e2e 14、32、34 |
 | Kernel 零 ACP/UI 依赖 | kernel.ts 只引用 protocol 与 store 的类型、hooks、ledger、state、task-graph、prompts（措辞）、util | kernel.test.ts |
 | 后端无感知 | 后端只收到标准的 v2 请求 | 全部 e2e（mock 后端说 v2） |

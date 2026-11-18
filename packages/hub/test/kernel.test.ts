@@ -129,14 +129,15 @@ const settle = () => hooks.settled();
   console.log("ok 4 notified is not woken");
 }
 
-// §7.1 on the same pipeline: the user's word never waits; a peer's goes into running work when it gave that work,
-// and waits otherwise.
+// §7.1 on the same pipeline: the user's word never waits; a peer's waits its turn, even from whoever gave that work.
 {
   const t = handed(give(A, B, "work"));
   busy.add("sb");
   const say = (from: MailItem["from"], content: string) => kernel.post({ to: B, from, kind: "message", content, pref: "wake" });
   assert.equal(say({ kind: "user" }, "from the user").route, "interject");
-  assert.equal(say({ kind: "agent", ...A }, "from the dispatcher").route, "interject");
+  const dispatcher = say({ kind: "agent", ...A }, "from the dispatcher");
+  assert.equal(dispatcher.route, "turn");
+  assert.equal(state.ledger.get(dispatcher.item.id)!.state, "queued");
   const other = say({ kind: "agent", ...C }, "from someone else");
   assert.equal(other.route, "turn");
   assert.equal(state.ledger.get(other.item.id)!.state, "queued");
@@ -144,6 +145,31 @@ const settle = () => hooks.settled();
   assert.equal(say({ kind: "user" }, "now idle").route, "turn");
   kernel.complete(state.tasks.get(t.id)!, "completed", "", []);
   console.log("ok 5 arbitration");
+}
+
+// Explicit replacement: a new task of the dispatcher takes the place of its work the session runs. That work ends as
+// superseded, what was started for it goes with it, and the dispatcher, who stopped it, is told nothing.
+{
+  const theirs = handed(give(C, B, "someone else's"));
+  const first = handed(give(A, B, "first"));
+  const child = handed(give(B, C, "child of first"));
+  busy.add("sb");
+  busy.add("sc");
+  const second = give(A, B, "second");
+  assert.equal(state.ledger.get([...state.mail.values()].find((m) => m.taskId === second.id)!.id)!.state, "queued", "an agent's task waits its turn");
+  const replaced = kernel.replace(second);
+  assert.deepEqual(replaced.map((t) => t.id), [first.id], "only the dispatcher's own work");
+  busy.clear();
+  hooks.emit("acp.turn_ended", { agentId: "c", sessionId: "sc", stopReason: "cancelled", failed: false });
+  await settle();
+  assert.deepEqual(state.tasks.get(first.id)!.ended, { reason: "superseded", stopper: agentPrincipal("a") });
+  assert.deepEqual(state.tasks.get(child.id)!.ended, { reason: "cascaded", stopper: agentPrincipal("a"), cause: first.id });
+  assert.equal(state.tasks.get(theirs.id)!.status, "running", "another's work in the session goes on");
+  assert.equal(results(A, first.id).length, 0, "its dispatcher stopped it, and is not told");
+  assert.equal(state.tasks.get(second.id)!.status, "queued");
+  kernel.complete(state.tasks.get(theirs.id)!, "completed", "", []);
+  kernel.complete(handed(state.tasks.get(second.id)!), "completed", "", []);
+  console.log("ok 5b explicit replacement");
 }
 
 // Implicit completion: a turn's end ends the session's tasks with its last words, unless something started for one is

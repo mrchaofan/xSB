@@ -99,9 +99,9 @@ export const USER: Principal = { kind: "user" };
 export const SYSTEM: Principal = { kind: "system" };
 export const agentPrincipal = (agentId: string): Principal => ({ kind: "agent", agentId });
 export const same = (a: Principal, b: Principal): boolean => a.kind === b.kind && (a.kind !== "agent" || a.agentId === (b as { agentId: string }).agentId);
-/** How an end is told: "a cancelled", "the user cancelled", "failed". */
+/** How an end is told: "a cancelled", "a replaced it", "the user cancelled", "failed". */
 const byWhom = (stopper: Principal, reason: EndReason): string =>
-  stopper.kind === "agent" ? `${stopper.agentId} cancelled` : stopper.kind === "user" ? (reason === "interrupted" ? "the user did not continue" : "the user cancelled") : "failed";
+  stopper.kind === "agent" ? (reason === "superseded" ? `${stopper.agentId} replaced it with a new task` : `${stopper.agentId} cancelled`) : stopper.kind === "user" ? (reason === "interrupted" ? "the user did not continue" : "the user cancelled") : "failed";
 
 /** How a task ends, as `finish` records it. */
 type End = { task: Task; status: TaskStatus; result: string; reason: EndReason; stopper: Principal; cause?: string };
@@ -179,7 +179,8 @@ export class Kernel {
    *   a. a tool call of the recipient waits for it (`sync`): it is what the call returns;
    *   b. the recipient is gone: it cannot be delivered;
    *   c. into the running work of a busy recipient, when it is the user's word, or xsb's word on work the session
-   *      has open (`steer`), or comes from whoever gave the session the work it has open;
+   *      has open (`steer`). Nothing an agent sends goes into another's running work: it waits its turn, or its
+   *      sender stops that work and gives it anew (`dispatch` with `replace`);
    *   d. `lazy`: it stays in the inbox and comes with the recipient's next turn;
    *   e. otherwise (`wake`) a turn of its own: now if the recipient is idle, after its running turn if not.
    */
@@ -188,10 +189,7 @@ export class Kernel {
     const results = item.results;
     if (results && !results.mode && r.awaits(results.taskIds[0])) return "return";
     if (!r.exists) return "drop";
-    if (r.busy) {
-      if (from.kind === "user" || item.steer) return "interject";
-      if (from.kind === "agent" && this.openTasks(to.sessionId).some((t) => same(t.initiator, agentPrincipal(from.agentId)))) return "interject";
-    }
+    if (r.busy && (from.kind === "user" || item.steer)) return "interject";
     return item.pref === "lazy" ? "inbox" : "turn";
   }
 
@@ -303,6 +301,23 @@ export class Kernel {
       },
       true,
     );
+  }
+
+  /**
+   * Explicit replacement: `by`, a task just dispatched, takes the place of the work its dispatcher gave the same
+   * session and that runs there. Each is stopped as `superseded`, like a cancel by its dispatcher: what was started
+   * for it goes with it (cascade), and the dispatcher, its stopper, is not told. `by` runs once the session stopped.
+   * Work the dispatcher's own open work was started for is left alone: replacing it would stop the dispatcher too.
+   */
+  replace(by: Task): Task[] {
+    const own = new Set(by.parents ?? []);
+    const replaced = this.openTasks(by.to.sessionId).filter(
+      (t) => t.id !== by.id && same(t.initiator, by.initiator) && !doom(this.state, t).doomed.some((d) => own.has(d.id)),
+    );
+    for (const task of replaced) {
+      this.stop(task, by.initiator, { status: "cancelled", reason: "superseded", result: `Replaced by ${by.id} "${by.title}".` });
+    }
+    return replaced;
   }
 
   /** The task reached its executor. */

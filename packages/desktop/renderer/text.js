@@ -83,6 +83,7 @@ export const TEXT = {
     "task.status.failed": "失败",
     "task.status.cancelled": "已取消",
     "task.status.interrupted": "已中断",
+    "task.status.superseded": "已改派",
 
     // 标题栏
     "titlebar.rail.toggle": "显示或隐藏智能体栏",
@@ -109,6 +110,8 @@ export const TEXT = {
     "rail.overview.hint": "哪个角色能产出什么",
     "rail.presets.hint": "软件开发、电影制作的现成团队",
     "rail.task.meta": "{from} → {to}　{status}",
+    "task.initiator.user": "你",
+    "task.initiator.system": "系统",
     "rail.tasks.empty": "智能体之间派发的任务会出现在这里。",
     "blank.pick": "在左侧选择一个智能体，打开它的对话。",
     "blank.none": "这个工作区还没有智能体。",
@@ -486,6 +489,7 @@ export const TEXT = {
     "task.status.failed": "Failed",
     "task.status.cancelled": "Canceled",
     "task.status.interrupted": "Interrupted",
+    "task.status.superseded": "Replaced",
 
     // Title bar
     "titlebar.rail.toggle": "Show or hide the sidebar",
@@ -512,6 +516,8 @@ export const TEXT = {
     "rail.overview.hint": "Which role produces what",
     "rail.presets.hint": "Ready-made teams for software and film",
     "rail.task.meta": "{from} → {to} · {status}",
+    "task.initiator.user": "You",
+    "task.initiator.system": "System",
     "rail.tasks.empty": "Tasks that agents assign to each other appear here.",
     "blank.pick": "Select an agent on the left to open its conversation.",
     "blank.none": "This workspace has no agents yet.",

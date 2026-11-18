@@ -213,6 +213,18 @@ const brief = (t: Task) => ({
   ...(t.result !== undefined ? { result: t.result } : {}),
 });
 
+/** What a dispatcher is told of a task that does not start at once: what it replaced, or what it waits behind. */
+function busyNote(ctx: Ctx, task: Task, replaced: Task[]): string | undefined {
+  const list = (ts: Task[]) => ts.map((t) => `${t.id} "${t.title}"`).join(", ");
+  if (replaced.length) return `dispatched; it replaces ${list(replaced)}, which ${task.to.agentId} is stopping (superseded). It starts once that work stopped.`;
+  const item = [...ctx.hub.state.mail.values()].find((m) => m.kind === "task" && m.taskId === task.id);
+  if (!item || ctx.hub.state.ledger.get(item.id)?.state !== "queued") return undefined;
+  const mine = ctx.hub.kernel.openTasks(task.to.sessionId).filter((t) => t.id !== task.id && t.initiator.kind === "agent" && t.initiator.agentId === ctx.session.agentId);
+  return mine.length
+    ? `queued: ${task.to.agentId} is at work on ${list(mine)} of yours, and starts on this one after it. If this one is meant to take the place of that one, cancel_task that one, or dispatch with onBusy "replace" next time.`
+    : `queued: ${task.to.agentId} is busy, and starts on this one after its current work.`;
+}
+
 /** A message to a peer, as send_message and broadcast send it. */
 function send(ctx: Ctx, to: string, content: string, topic: string | undefined) {
   reach(ctx, "message", to);
@@ -228,7 +240,7 @@ export const TOOLS: Tool[] = [
   {
     name: "dispatch_task",
     description:
-      "Give another agent a task. Its result is what the agent says last when it is done. Say with deliveryPref how you want the result: in this call (sync), waking you (wake), or with your next turn (lazy, the default). To go on only once several tasks are done, dispatch them, subscribe to them and end your turn.",
+      "Give another agent a task. Its result is what the agent says last when it is done. Say with deliveryPref how you want the result: in this call (sync), waking you (wake), or with your next turn (lazy, the default). To go on only once several tasks are done, dispatch them, subscribe to them and end your turn. A peer that is busy gets the task after its current work (onBusy \"queue\", the default); to change what you asked of it while it works on it, dispatch the new task with onBusy \"replace\".",
     inputSchema: schema(
       {
         to: str("Agent id."),
@@ -245,6 +257,12 @@ export const TOOLS: Tool[] = [
             "The task depends on no other work you gave the same peer (another scene, say), so the peer may work on it alongside that, a few at a time. Leave it out for work that builds on other work (a shot that continues from the last frame of another): that runs one at a time.",
         },
         grants: GRANTS,
+        onBusy: {
+          type: "string",
+          enum: ["queue", "replace"],
+          description:
+            'If the peer is at work on a task of yours on this topic. "queue" (default): this task waits until that work is done, and both are done. "replace": this task takes its place: that task is stopped (with what was started for it) and ends as superseded, and the peer starts on this one. Use it when you changed what you want, not to run work alongside.',
+        },
       },
       ["to", "title", "instructions"],
     ),
@@ -264,8 +282,9 @@ export const TOOLS: Tool[] = [
       // A peer's work goes to the agent's work session of its topic (Hub.workSession).
       const session = ctx.hub.workSession(to, topic ?? title);
       const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: to, sessionId: session.id }, { title, topic: topic ?? title, instructions, after, inputs, produces, parallel, deliveryPref, grants }));
+      const replaced = args.onBusy === "replace" ? ctx.hub.kernel.replace(task) : [];
       const held = task.status === "blocked";
-      const answer = { task_id: task.id, status: held ? "held until the tasks in `after` finish" : "dispatched", delivery: deliveryPref, ...(note ? { note } : {}) };
+      const answer = { task_id: task.id, status: held ? "held until the tasks in `after` finish" : busyNote(ctx, task, replaced) ?? "dispatched", delivery: deliveryPref, ...(note ? { note } : {}) };
       if (deliveryPref !== "sync") return json(answer);
       const late = json({ ...answer, status: `${answer.status}; not finished within ${awaitMs(ctx) / 1000} seconds. Its result wakes you when it is there: end your turn, or go on with other work.` });
       return ctx.hub.delivery.awaitResult(ctx.session, task.id, awaitMs(ctx), late);

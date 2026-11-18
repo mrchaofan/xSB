@@ -1,5 +1,6 @@
 ---
 description: Record a single architecture decision on its own
+produces: adr
 ---
 # Architecture decision record (ADR)
 
