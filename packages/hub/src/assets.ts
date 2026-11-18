@@ -52,7 +52,6 @@ export class Assets {
     } else {
       throw new Error(`give "path" (a file) or "content" (text)`);
     }
-    const item = by.current?.req.item;
     const asset: Asset = {
       id,
       type,
@@ -61,7 +60,6 @@ export class Assets {
       description: input.description,
       path: file,
       by: by.agentId,
-      taskId: item?.taskId,
       createdAt: now(),
     };
     this.hub.state.commit([ops.putAsset(asset)]);

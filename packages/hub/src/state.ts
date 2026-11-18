@@ -50,8 +50,6 @@ export type Gate = {
   taskIds: string[];
   mode: "all" | "any";
   note?: string;
-  /** The task the owner was working on when it asked for the join. That task stays open until the results are in. */
-  taskId?: string;
   createdAt: string;
 };
 
@@ -63,7 +61,7 @@ export type MailItem = {
   topic?: string;
   /** Of a message. */
   content?: string;
-  /** The task the recipient's turn works on: of a task, the task itself; of joined results, the task they were awaited for. */
+  /** Of a task: which. */
   taskId?: string;
   /** Of results: whose they are. With `mode`, they answer a join; without, it is one task's own result. */
   results?: Results;

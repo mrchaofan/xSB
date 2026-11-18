@@ -324,8 +324,6 @@ export type Task = {
    * the dispatcher's own MCP servers, run by the hub in the background.
    */
   tool?: { server: string; name: string; arguments: unknown };
-  /** Of a job: the task its dispatcher was working on when it started it. That task does not end before the job. */
-  partOf?: string;
   /**
    * The dispatcher said the task depends on no other work of the assignee's, so the assignee may work on it alongside
    * that, in a session of its own, up to the project's `limits.sessionsAtOnce`. Without it, the assignee's peer work
@@ -334,6 +332,8 @@ export type Task = {
   parallel?: boolean;
   status: TaskStatus;
   result?: string;
+  /** The assets the assignee named as what the task delivered (`id@version`), when it finished it. */
+  assets?: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -421,9 +421,8 @@ export type Asset = {
   description: string;
   /** Absolute path of this version's file. Never rewritten. */
   path: string;
-  /** Agent that registered it, and the task it did so for. */
+  /** Agent that registered it. */
   by: string;
-  taskId?: string;
   createdAt: string;
 };
 

@@ -116,7 +116,7 @@ You are "导演" (agent id: director1). 统筹全片：定创作方向，把工�
 | `<xsb-task-results>` | 我等的几个任务，结果一起回来 |
 | `<xsb-asset>`、`<xsb-skill>`、`<xsb-memory>` | 中枢顺带附上的资产、技能正文、我自己的笔记 |
 
-## 2. 协作原语：xsb 的十三个工具
+## 2. 协作原语：xsb 的十四个工具
 
 中枢给每个会话挂上一个名为 `xsb` 的工具服务。智能体之间的一切往来都经过它，没有别的通道：**一个智能体平常的回复文字只给自己会话里的人看，同事看不到。** 想让同事知道什么，就必须调工具。
 
@@ -127,6 +127,7 @@ You are "导演" (agent id: director1). 统筹全片：定创作方向，把工�
 | 认人 | `list_agents` | 团队里有谁、各自能产出什么、在不在忙、和我谈过哪些话题 |
 | 说话 | `send_message` | 告诉或问同事一件事 |
 | 派活 | `dispatch_task` | 交给同事一件要出结果的工作 |
+| 交差 | `complete_task` | 把派给我的任务做完，交出结果；只有它能结束任务 |
 | 等待 | `await_tasks` | 登记"这几个都回来再叫我"，然后结束本轮 |
 | 后台 | `start_job` | 把一次很慢的工具调用放到后台跑 |
 | 查看与撤回 | `get_task`、`cancel_task` | 看任务状态；取消自己派出的任务 |
@@ -258,7 +259,7 @@ This task works from the following assets. They are the reference: keep to them,
 （剧本全文）
 </xsb-asset>
 ……（其余输入资产）
-This task has to produce a "shot_list" asset. Register it with put_asset before you end your turn and name its id in your result.
+This task has to produce a "shot_list" asset. Register it with put_asset, and name it in complete_task's `assets`.
 Your skill for this (files it refers to are in /…/skills/shot_list):
 <xsb-skill name="shot_list">
 # 镜头表
@@ -291,6 +292,32 @@ dispatch_task(to: "board1", title: "镜头表", instructions: "按我们刚才�
 ```
 
 问题：没有话题；没有 `inputs`，分镜师拿不到剧本；没有 `produces`，中枢不会附上技能，也不会核对交付；"刚才讨论的"分镜师根本没看到。
+
+#### 对方怎么交差：`complete_task`
+
+**参数**：`task_id`、`result`（派发者读到的结果）、`assets`（为它登记的资产 id，不带版本即最新版）、`failed`（做不了，或已被后来的任务取代）。
+
+**一个任务只在承接者调 `complete_task` 时结束，结束一轮不算交差。** 哪一轮在做哪个任务，由模型自己判断，中枢不靠代码把轮次和任务绑在一起。所以：
+
+- **手上可以同时有几个任务。** 同一话题的任务进同一个工作会话。对方正在做事时又来一个任务，后端能原生插话的，就直接插进正在进行的这一轮；不能的，排到这一轮之后，以免打断正在执行的工具调用。新任务后面附一份"这里还开着的任务"，模型据此判断它是修正、补充、取代了哪一个，还是另一件事：
+
+  ```
+  You still have these tasks open here; see whether this one changes any of them:
+  - t_12 "全片镜头表" from director1, topic "渡口-镜头表"
+  ```
+
+- **做完一个交一个。** 结果直接送给那个任务的派发者，不用等手上的都做完。被后来的任务取代的，用 `failed` 交掉，结果里说明被哪个取代了。
+- **契约由中枢核对。** 任务有 `produces` 时，`assets` 里没有那种类型的资产就交不了差，报错 `task t_… has to produce a "shot_list" asset: register it with put_asset and name it in "assets". If it cannot be done, set failed and say why.` 只能交自己登记的资产；已被取消的任务交不了，报错 `task t_… was cancelled by director1; there is no result to give`。
+- **忘了交差，中枢兜底。** 一轮结束时，会话里还有开着的任务，而且没有任何东西会再叫醒它（没有排队的消息、没有自己的等待门、没有在跑的后台任务），中枢就提醒它一次：
+
+  ```
+  Your turn ended, and these tasks of yours are still open:
+  - t_12 "全片镜头表" from director1, topic "渡口-镜头表"
+  Nothing is on its way to you for them: no join, no job, no message. Finish each that is done with complete_task (as failed, with the reason, if it cannot be done). For one that is not done, go on with it now. If you wait for something xsb cannot see, say what; its sender is then told.
+  ```
+
+  提醒之后的那一轮还是这样结束，就告诉派发者 `board1 ended its turn without finishing your task "全片镜头表" (t_12), also after xsb reminded it.`，附上它最后说的话，由派发者决定等、问还是取消。中枢不替它结束任务：它可能在等中枢看不见的东西，比如用户的回答。
+- **用户按停不触发兜底。** 停的是这一轮，任务照样开着，派发者收到一条说明；用户接着说话，模型接着做。中枢重启后，插进一轮却没做完的任务没有邮件会再送来，中枢同样提醒一次。
 
 ### 2.4 `await_tasks`：等待
 
@@ -325,7 +352,7 @@ Your own note for this moment: 两场都回来后逐镜审。全部通过就派 
 
   note 不会被中枢理解，只会被原样送回。它要能让一个已经忘了前情的你，看完就知道该干什么。
 
-- **接了任务的人也可以用。** 在处理别人派来的任务时调用它，这个任务会保持开启，等结果回来那一轮结束才交付（详见 3.2 的例子）。返回里会多一句：`The task you are working on (t_21) stays open until then; you finish it in the turn that brings them.`
+- **接了任务的人也可以用。** 处理别人派来的任务时，等自己的后台任务或子任务回来再交差（详见 3.2 的例子）。任务本来就开着，直到 `complete_task`。
 
 ### 2.5 `start_job`：后台跑慢调用
 
@@ -378,9 +405,8 @@ start_job(
 | 任务当时的状态 | 发生什么 | 返回 |
 | - | - | - |
 | 还在对方队列里 | 从队列里拿掉，没开始就结束 | `Task t_… cancelled.` |
-| 对方正在做 | 停掉对方这一轮 | `Task t_… is being stopped.` |
+| 对方已经拿到 | 当即记为取消，结果马上送回；对方被告知"停下，撤掉只为它启动的任务和后台任务"，由它自己收手。中枢不停对方这一轮，因为这一轮可能还在做别的任务。能原生插话的后端插进正在进行的这一轮，不能的等这一轮结束 | `Task t_… cancelled.` |
 | 后台任务在跑 | 中止那次工具调用 | `Task t_… is being stopped.` |
-| 对方在等它自己派出的任务或后台任务（`await_tasks`） | 任务结束；它等的一并取消，结果不再送给任何人 | `Task t_… cancelled.` |
 
 **场景**：用户说阿宁的风衣要换成红色。导演立刻撤掉还没开始的第 4 场拍摄任务，止损（完整流程见 3.3）。
 
@@ -401,7 +427,7 @@ put_asset(type: "shot", name: "2-1",
 - 文件被**复制**进资产库，以后不再改写。同一个 id 再登记就是第 2 版，旧版保留（版本规则见 3.3）。
 - `type` 和 `name` 各是一个词，不能含 `/` 或空格，不能以 `.` 开头。`type` 用任务或分工表里的类型名，不要自造同义词：写 `shot_list` 就别写 `shotlist`，否则 `produces` 核对不上。
 - `path` 可以是相对自己工作目录的路径。
-- 中枢会记下它是在哪个任务里登记的，任务结果里据此列出交付物（见 3.2）。
+- 交差时在 `complete_task` 的 `assets` 里点名，任务结果里据此列出交付物（见 3.2）。
 
 **`find_assets(type?, query?)`** 只列每样东西的最新版。`query` 在 id 和描述里找子串。
 
@@ -551,7 +577,7 @@ await_tasks([t_21,t_22],
 回答（普通的一轮）
                                   t_41、t_42 生成完 → 第二轮
                                   检查，put_asset(shot/2-1)、(shot/2-2)
-                                  最后的话 → t_21 的结果
+                                  complete_task(t_21, assets:[…]) → 结果
                                                                        …… t_22 完成
 门满足 → 合并结果 + note → 下一轮
 逐镜审……
@@ -561,13 +587,7 @@ await_tasks([t_21,t_22],
 
 **① 导演结束本轮后是空闲的。** 用户可以随时找它；`t_21` 先回来时，结果被门扣住，不打扰它。
 
-**② `camera1` 第一轮结束时，`t_21` 没有被交付。** 按规则"处理任务那一轮最后说的话就是结果"，那导演岂不是会收到一句"我已提交生成"？不会：中枢看到这一轮带着一个没满足的门结束，就让 `t_21` 保持开启。等生成结果回来，`camera1` 收到的消息末尾多一段：
-
-```
-You awaited these for the task "第2场" (t_21) from director1, which is still open. Finish it now: the final message of this turn is returned as its result, and a "shot" asset has to be registered before the turn ends. If it needs more jobs or tasks first, await them again.
-```
-
-隔了几分钟、中间可能插进别的事，模型很可能已经忘了"我在替导演做一个任务，还得交一个 `shot`"。中枢在结果回来的那一刻把三件事（哪个任务、谁派的、要交什么）重说一遍。
+**② `camera1` 第一轮结束时，`t_21` 没有被交付。** 结束一轮不是交差，`t_21` 一直开着，直到 `camera1` 调 `complete_task`。这一轮结束时它登记了等待门，结果会来叫醒它，所以中枢也不提醒。生成结果回来后，它检查、登记、交差。要是它忘了，那一轮结束时中枢会把开着的任务（哪个任务、谁派的、要交什么）列给它（见 2.3 末尾"对方怎么交差"）。
 
 **③ 导演收到合并结果时，交付物是中枢核对过的。**
 
@@ -575,19 +595,18 @@ You awaited these for the task "第2场" (t_21) from director1, which is still o
 <xsb-task-results waited-for="all">
 <xsb-task-result task-id="t_21" by="camera1" topic="渡口-第2场" title="第2场" status="completed">
 第 2 场 4 个镜头全部完成小样……2-3 重拍了两次，原因是……
-Assets registered by this task:
+Assets it delivered:
 <xsb-asset id="shot/2-1" version="1" by="camera1" path="…">…</xsb-asset>
 ……
 </xsb-task-result>
-<xsb-task-result task-id="t_22" by="camera2" …>
-……
-No "shot" asset was registered, although the task had to produce one.
+<xsb-task-result task-id="t_22" by="camera2" … status="failed">
+3-2 的首帧有真人人脸，生成服务拒绝了……
 </xsb-task-result>
 </xsb-task-results>
 Your own note for this moment: 两场都回来后逐镜审。全部通过就派 editor1 粗剪；有重拍的先退回，不要派剪辑。
 ```
 
-`Assets registered by this task` 和 `No "shot" asset was registered` 都是中枢查资产库写的，不管 `camera2` 自己怎么说"拍完了"。最后一行是导演当初写给自己的 note。
+`Assets it delivered` 是中枢按 `camera1` 点名的 id 从资产库里取的，不是照抄它自己的说法。`camera2` 没登记 `shot`，就交不了 `completed`，只能以 `failed` 交差并说明原因。最后一行是导演当初写给自己的 note。
 
 #### 为什么 note 能替代待办清单
 
@@ -768,7 +787,7 @@ shot/1-1           v1                         ← 空镜，本来就不受影响
 ```
 3. 为每个镜头写提示词（见下），用 `start_job` 提交：`server: "media"`，`tool: "generate_video"`，小样分辨率。
 4. `await_tasks`，然后结束本轮：任务会保持开启，结果回来时接着做。回来后检查文件，不合格的调整后重拍（再提交、再 `await_tasks`）。
-5. 用 `put_asset` 把每个小样登记为 `shot/<镜号>`（`path` 指向视频文件），描述里写提示词与参数，并注明是小样。在结果里交导演审，这个任务到此结束。
+5. 用 `put_asset` 把每个小样登记为 `shot/<镜号>`（`path` 指向视频文件），描述里写提示词与参数，并注明是小样。用 `complete_task` 交导演审，`assets` 里写上这些小样，这个任务到此结束。
 6. 导演通过后会再派任务出正式版：……登记为同一个 `shot/<镜号>` 的新版本，描述里注明是正式版。
 ```
 
@@ -832,7 +851,7 @@ inputs: brief, cut
    然后 `await_tasks` 并结束本轮，任务会保持开启。
 4. 结果回来后自己听一遍。不合格就改描述重出，一次只改一处。
 5. 用 `put_asset` 登记为 `score/<片名>`，描述里注明是小样、时长、用的描述词。
-   在结果里交导演审，这个任务到此结束。
+   用 `complete_task` 交导演审，`assets` 里写上它，这个任务到此结束。
 6. 导演通过后会另派任务出全长：登记为同一个 `score/<片名>` 的新版本，描述里注明是全长。
 
 ## 结果里要写
