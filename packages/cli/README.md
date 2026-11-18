@@ -34,10 +34,11 @@ xsb team use <团队> | drop <团队>      使用或停用一支团队的角色�
 xsb backends                          本机的后端，以及是否已安装
 
 xsb chat <agent> [--new] [--history]  对话
-xsb send <agent> <消息> [--interject] [--new]
+xsb send <agent> <消息> [--new]
                                       发一条消息并打印回复
 xsb watch                             跟随所有 Agent 的输出、任务和权限请求
 xsb status | tasks | sessions
+xsb tasks cancel <任务标识>             停止一个任务（用户可停任何任务），以及只为它而起的工作
 xsb assets [--type <类型>]             共享资产库
 
 xsb acp [--agent <id>]                在 stdio 上提供 ACP，供编辑器等客户端接入
@@ -46,11 +47,11 @@ xsb hub start | stop | status | log   后台进程（平时按需自动启动）
 --project <目录>                       使用该目录下的 .xsb，而不是向上查找
 ```
 
-`chat` 里：直接输入是发消息（Agent 正忙时排队成为下一轮）；`/i <内容>` 插话进正在运行的那一轮；`/cancel` 停止当前一轮；`/quit` 退出（Agent 继续工作）。
+`chat` 里：直接输入是发消息。用户的话永不排队：Agent 空闲时开始一轮，正忙时插进正在运行的那一轮。`/cancel` 停止当前一轮；`/quit` 退出（Agent 继续工作）。
 
-`--new`、`--history`、`--interject` 是开关，不带值，可以放在任何位置。
+`--new`、`--history` 是开关，不带值，可以放在任何位置。
 
-脚本使用 `--interject` 时，消息进入的是已经运行的那一轮；该轮的权限请求仍交给原来的交互客户端批准，可能一直等待人工响应。脚本不会替那一轮自动拒绝权限。
+`send` 发给正在工作的 Agent 时，消息进入的是已经运行的那一轮，命令等那一轮结束；该轮的权限请求仍交给原来的交互客户端批准，可能一直等待人工响应。脚本不会替那一轮自动拒绝权限。
 
 ## 行为
 

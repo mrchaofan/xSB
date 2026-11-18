@@ -10,6 +10,8 @@ const bold = (s: string): string => (tty ? `\x1b[1m${s}\x1b[0m` : s);
 export class Printer {
   /** sessionId -> agent id, shown in front of output when several sessions are on screen. */
   readonly labels = new Map<string, string>();
+  /** Tool calls by id, and what each is called. */
+  private tools = new Map<string, string>();
   showLabels = false;
   /** The stream that owns the current, unfinished line. */
   private open: string | null = null;
@@ -42,11 +44,16 @@ export class Printer {
         return this.stream(`${sessionId}:message`, label, body);
       case "agent_thought_chunk":
         return this.stream(`${sessionId}:thought`, label + dim(t.thinking), body, dim);
-      case "tool_call":
-        return this.line(`${label}${dim(`  ⚙ ${update.title ?? update.name ?? t.tool}`)}`);
-      case "tool_call_update":
-        if (update.status === "failed") this.line(`${label}${dim(`  ✗ ${t.toolFailed(update.title ?? update.toolCallId)}`)}`);
+      case "tool_call_update": {
+        // ACP v2 reports a tool call as patches of one record: the first one that names it opens it.
+        const title = update.title ?? update.name;
+        if (title && !this.tools.has(update.toolCallId)) {
+          this.tools.set(update.toolCallId, title);
+          this.line(`${label}${dim(`  ⚙ ${title}`)}`);
+        }
+        if (update.status === "failed") this.line(`${label}${dim(`  ✗ ${t.toolFailed(this.tools.get(update.toolCallId) ?? update.toolCallId)}`)}`);
         return;
+      }
       case "user_message_chunk": {
         const origin = update._meta?.[OriginExt.key] as OriginMeta | undefined;
         return this.line(`${label}${dim(`← ${from(origin)}${origin?.steered ? t.interjected : ""}: ${body}`)}`);

@@ -1,24 +1,30 @@
 /**
  * The hub: the one long-running process of a project.
  *
- *   outside (editor, CLI) --ACP--> Client (acp-server.ts) --+
- *                                                           +--> LiveSession --ACP--> Backend (claude, codex, ...)
- *   agent's tool call --MCP--> mcp.ts -> tools.ts -> Mailroom +
+ *   outside (editor, CLI) --ACP--> Client (acp-server.ts) ---------------------+
+ *                                                                              +--> LiveSession --ACP--> Backend
+ *   agent's tool call --MCP--> mcp.ts -> tools.ts -> Kernel --hooks--> Delivery +
+ *                                                          \-hooks--> Jobs, Nudges, Audit, the clients
  *
  * This class is the composition root. It owns the registries (agents,
- * sessions, connected clients) and the two sockets, and hands the rest to the
- * part that knows it: `backends` runs the agent processes, `mail` moves
- * messages, tasks and jobs between sessions, `permissions` finds a human for
- * a backend's question, `assets` is the library they all work from. What an
- * agent is beyond its name comes from its role (roles.ts). All durable state is in `state`.
+ * sessions, connected clients) and the two sockets, and wires the rest:
+ * `kernel` decides everything about tasks and mail without knowing ACP, and
+ * says so on its hooks; the effectors registered there act on it (`delivery`
+ * into sessions, `jobs` the tool calls, `nudges` the reminders, the audit and
+ * the clients' feed). `backends` runs the agent processes, `permissions`
+ * finds a human for a backend's question, `assets` is the library they all
+ * work from. What an agent is beyond its name comes from its role (roles.ts).
+ * All durable state is in `state`.
  */
 import fs from "node:fs";
 import net from "node:net";
-import { AGENT_ID, Agents, Connection, RpcError, SpendExt, failure } from "@xsb/protocol";
+import { AGENT_ID, Agents, Connection, Ledger, RpcError, SpendExt, Tasks, failure } from "@xsb/protocol";
 import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Client } from "./acp-server.ts";
 import { Assets } from "./assets.ts";
+import { auditHook, auditReports } from "./audit.ts";
+import { capabilityHook } from "./capabilities.ts";
 import { BackendPool } from "./backends.ts";
 import { DEFAULT_BACKEND, loadProjectConfig, migrateProjectConfig, projectLanguage } from "./config.ts";
 
@@ -27,7 +33,12 @@ const SESSION_TOKENS = 150_000;
 const sessionTokens = (paths: Paths): number => loadProjectConfig(paths).limits?.sessionTokens ?? SESSION_TOKENS;
 /** How many work sessions of one agent run at a time for parallel work, unless the project says otherwise. */
 const SESSIONS_AT_ONCE = 2;
-import { Mailroom } from "./mailroom.ts";
+import { Delivery } from "./delivery.ts";
+import { Hooks } from "./hooks.ts";
+import { Jobs } from "./jobs.ts";
+import { Kernel } from "./kernel.ts";
+import type { KernelHooks } from "./kernel.ts";
+import { Nudges } from "./nudges.ts";
 import { commonServers, serveMcp } from "./mcp.ts";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
@@ -47,7 +58,10 @@ export class Hub {
   readonly live = new Map<string, LiveSession>();
   readonly clients = new Set<Client>();
   readonly backends: BackendPool;
-  readonly mail: Mailroom;
+  readonly kernel: Kernel;
+  readonly delivery: Delivery;
+  readonly jobs: Jobs;
+  readonly nudges: Nudges;
   readonly permissions: Permissions;
   readonly assets: Assets;
   readonly spending: Spending;
@@ -56,6 +70,8 @@ export class Hub {
 
   private servers: net.Server[] = [];
   private unwatchSpend?: () => void;
+  /** The bridges of the team's tools, and how to tell each that its session's tools may have changed (mcp.ts). */
+  readonly bridges = new Map<Connection, () => void>();
   /** Bridge token -> session: how a tool call is known to come from that session. */
   private bridgeTokens = new Map<string, LiveSession>();
 
@@ -64,7 +80,20 @@ export class Hub {
     this.state = new State(new Store(this.paths.dir));
     this.state.load();
     this.backends = new BackendPool((line) => this.log(line));
-    this.mail = new Mailroom(this);
+    const hooks: KernelHooks = new Hooks(auditReports(this.state.store, (line) => this.log(line)));
+    this.kernel = new Kernel(this.state, hooks, (to) => this.delivery.recipient(to));
+    this.delivery = new Delivery(this);
+    this.jobs = new Jobs(this);
+    this.nudges = new Nudges(this);
+    capabilityHook(this);
+    auditHook(hooks, this.state.store);
+    // UserFeedHook: what the clients are shown of tasks and of the ledger.
+    hooks.on("task.changed", (task) => this.broadcast(Tasks.update, { task }));
+    // What a session's work gives it changes with its tasks: its tools are listed anew.
+    hooks.on("task.changed", () => {
+      for (const changed of this.bridges.values()) changed();
+    });
+    hooks.on("message.ledger", (entry) => this.broadcast(Ledger.update, { entry }));
     this.permissions = new Permissions(this);
     this.assets = new Assets(this);
     this.spending = new Spending(this.paths);
@@ -93,13 +122,13 @@ export class Hub {
     if (migrated) this.log(migrated);
     // Whoever stopped the last hub may have said that its unfinished work is not to be taken up again.
     if (fs.existsSync(this.paths.abandonMark)) {
-      const { mail, tasks } = this.mail.abandon();
+      const { mail, tasks } = this.kernel.abandon();
       fs.rmSync(this.paths.abandonMark);
       this.log(`gave up what the last stop left unfinished, as asked: ${mail} mail items, ${tasks} tasks`);
     }
     this.unwatchSpend = this.spending.watch((spend) => this.broadcast(SpendExt.update, { spend }));
     const pending = this.state.mail.size;
-    this.mail.resume();
+    this.kernel.resume();
     this.log(`hub up: ${this.state.agents.size} agents, ${pending} mail items pending`);
   }
 
@@ -289,9 +318,10 @@ export class Hub {
    * a session with work dispatched as `parallel` (the task the turn brings, or one the session has open).
    */
   mayRun(session: LiveSession, item: MailItem | undefined): boolean {
-    if (!session.rec.topic) return true;
+    // The user's word does not wait for a place.
+    if (!session.rec.topic || !item || item.from.kind === "user") return true;
     const task = item?.taskId ? this.state.tasks.get(item.taskId) : undefined;
-    const parallel = task?.parallel || this.mail.openTasks(session.id).some((t) => t.parallel);
+    const parallel = task?.parallel || this.kernel.openTasks(session.id).some((t) => t.parallel);
     const allowed = parallel ? (loadProjectConfig(this.paths).limits?.sessionsAtOnce ?? SESSIONS_AT_ONCE) : 1;
     const running = [...this.live.values()].filter((s) => s !== session && s.agentId === session.agentId && s.rec.topic && s.current).length;
     return running < allowed;

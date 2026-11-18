@@ -10,8 +10,8 @@ inputs: shot_list, storyboard, style_guide, character
 1. Read the inputs: `shot_list`, `storyboard`, `style_guide`, and the `character` of everyone in the scene. Copy down the style suffix, the location suffix of this scene, each character's appearance description, and the user's hard requirements from the style guide (check against them before generating); use `get_asset` to get the file paths of the storyboard frames and reference images you need.
 2. Order by dependency: shots with no "continue from last frame" dependency can be submitted together, but submit one or two first and the rest once those come out right. The reason: a generation that has started cannot be called back, and the more you submit at once, the more is wasted when the director calls a halt.
 3. Write a prompt for each shot (see below) and submit it with `start_job` to the video tool chosen for this film (`server` and `tool` are its server and tool names), at draft resolution.
-4. `await_tasks`, then end your turn: the task stays open, and you carry on when the results come back. Check the files then, and adjust and reshoot any that fail (submit again, `await_tasks` again).
-5. Use `put_asset` to register each draft as `shot/<shot>` (with `path` pointing to the video file), with the prompt and parameters in the description, marked as a draft. Hand them to the director for review with `complete_task`, naming them in `assets`; this task ends here.
+4. `subscribe` to the jobs, then end your turn: the task stays open, and you carry on when the results come back. Check the files then, and adjust and reshoot any that fail (submit again, `subscribe` again).
+5. Use `put_asset` to register each draft as `shot/<shot>` (with `path` pointing to the video file), with the prompt and parameters in the description, marked as a draft. End your turn with what you hand the director for review, naming these drafts; this task ends there.
 6. Once the user has signed off, the director sends a new task for the finals: generate them with **exactly the same prompt and inputs** at the final resolution, and register each as a new version of the same `shot/<shot>`, marked as final.
 
 ## Prompts

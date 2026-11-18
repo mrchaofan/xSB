@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
-import { Agents, Assets, Backends, Boundaries, Connection, Discarded, SpendExt, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Steering, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Connection, Discarded, SpendExt, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
 import type { AgentInfo, Asset, BackendInfo, Boundary, Spend, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, PresetProblem, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
 import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
@@ -67,7 +67,7 @@ export class Workspace {
   /** Agent id -> the session its transcript last showed something of: a change of session gets a heading. */
   private shown = new Map<string, string>();
   /** The user's messages that were sent but are not yet part of a turn, by id: shown, to be replaced by the hub's echo. */
-  private pending = new Map<string, Content>();
+  private pending = new Set<string>();
   /** Agent id -> what it is doing, while it has a turn running, and the tool calls of it that have not ended. */
   private activities = new Map<string, Activity>();
   private tools = new Map<string, Set<string>>();
@@ -93,13 +93,9 @@ export class Workspace {
     const conn = new Connection(socket, socket, "hub");
     await conn.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
-      // An observer of all agents, and a transcript: sent its own input too, when it becomes part of a turn.
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-        _meta: { [Agents.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language },
-      },
-      clientInfo: { name: "xsb-desktop", version: "0.1.0" },
+      info: { name: "xsb-desktop", version: "0.1.0" },
+      // An observer of all agents, and a transcript: sent its own input too, when it gets into the conversation.
+      capabilities: { _meta: { [Agents.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
     });
     return new Workspace(paths, conn, say, emit, notify);
   }
@@ -178,7 +174,7 @@ export class Workspace {
   private atWork(): Set<string> {
     const busy = new Set([...this.agents.values()].filter((agent) => agent.state !== "idle").map((agent) => agent.id));
     for (const task of this.tasks.values()) {
-      if (!isTerminal(task.status)) busy.add(task.tool ? task.from.agentId : task.to.agentId);
+      if (!isTerminal(task.status)) busy.add(task.to.agentId);
     }
     return busy;
   }
@@ -257,7 +253,7 @@ export class Workspace {
       if (this.works.has(work.sessionId)) continue;
       this.works.add(work.sessionId);
       this.sessionAgent.set(work.sessionId, agent.id);
-      const load = Promise.resolve(this.mains.get(agent.id)).catch(() => undefined).then(() => this.conn.request("session/load", { cwd: agent.workspace, mcpServers: [], sessionId: work.sessionId }));
+      const load = Promise.resolve(this.mains.get(agent.id)).catch(() => undefined).then(() => this.conn.request("session/resume", { cwd: agent.workspace, mcpServers: [], sessionId: work.sessionId, replayFrom: { type: "start" } }));
       load.catch(failed);
     }
     if (agent.state === "idle") {
@@ -271,7 +267,7 @@ export class Workspace {
   }
 
   private onTask(task: Task): void {
-    const agentId = task.tool ? task.from.agentId : task.to.agentId;
+    const agentId = task.to.agentId;
     if (task.status === "failed" && this.tasks.get(task.id)?.status !== "failed") this.notify({ agentId, kind: "failed", detail: task.title });
     this.tasks.set(task.id, task);
     this.emit({ task });
@@ -292,7 +288,7 @@ export class Workspace {
       if (agent.mainSessionId) {
         // Loading replays the session's history as updates, before it answers.
         this.sessionAgent.set(agent.mainSessionId, agent.id);
-        session = this.conn.request("session/load", { ...setup, sessionId: agent.mainSessionId }).then(() => agent.mainSessionId!);
+        session = this.conn.request("session/resume", { ...setup, sessionId: agent.mainSessionId, replayFrom: { type: "start" } }).then(() => agent.mainSessionId!);
       } else {
         session = this.conn.request("session/new", { ...setup, _meta: { [Agents.sessionKey]: agent.id } }).then((created) => {
           this.sessionAgent.set(created.sessionId, agent.id);
@@ -404,7 +400,7 @@ export class Workspace {
       this.does(agentId, "waiting"); // the model has it now, and has not answered yet
       if (this.pending.delete(update.messageId)) this.drop(agentId, update.messageId);
       this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? { kind: "user" }, content: [update.content] });
-    } else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+    } else if (update.sessionUpdate === "tool_call_update") {
       this.settle(agentId);
       const id = `${sessionId}:${update.toolCallId}`;
       const prior = this.transcripts.get(agentId)!.find((e): e is Tool & { id: string } => e.id === id);
@@ -425,43 +421,30 @@ export class Workspace {
   // ---- talking to an agent ----------------------------------------------------
 
   /**
-   * Start a turn, queue behind the running one, or (interject) go into the
-   * running one. The message shows at once, as waiting if the agent is busy.
-   * The hub sends it back under the same id when it has become part of a
-   * turn; that entry takes the place of this one, where the turn begins.
-   * A message that waits can still be sent into the running turn (`sendNow`).
+   * Say something to the agent. The user's word never waits: the hub starts a
+   * turn with it, or puts it into the one that is running. The message shows
+   * at once; the hub sends it back under the same id when it has become part
+   * of a turn, and that entry takes the place of this one.
    */
-  async send(agentId: string, content: Content, interject: boolean): Promise<void> {
+  async send(agentId: string, content: Content): Promise<void> {
     const agent = this.agents.get(agentId)!;
-    const steer = interject && agent.state !== "idle";
     const id = `m_${randomUUID()}`;
     const entry = { id, kind: "input" as const, origin: { kind: "user" as const }, content };
-    this.pending.set(id, content);
-    this.put(agentId, { ...entry, queued: agent.state !== "idle" && !steer });
+    this.pending.add(id);
+    this.put(agentId, entry);
+    let sessionId: string;
     try {
-      const params = { sessionId: await this.session(agent), prompt: content, _meta: { [OriginExt.key]: { messageId: id } } };
-      await this.conn.request(steer ? Steering.method : "session/prompt", params);
+      sessionId = await this.session(agent);
     } catch (e) {
-      // It never became a turn: it stays as sent, no longer waiting.
-      if (this.pending.delete(id)) this.put(agentId, entry);
+      this.pending.delete(id);
       const text = this.why(e);
       this.put(agentId, { id: this.newId(), kind: "error", text });
       this.notify({ agentId, kind: "failed", detail: text });
+      return;
     }
-  }
-
-  /**
-   * Send a message that waits for its turn into the turn that is running instead. The hub takes it for the
-   * same message by its id, so it does not also run later; its echo, as ever, takes the place of the waiting entry.
-   */
-  async sendNow(agentId: string, entryId: string): Promise<void> {
-    const content = this.pending.get(entryId);
-    const sessionId = await this.mains.get(agentId);
-    if (!content || !sessionId) return; // it became a turn in the meantime
-    // It could not go in (the agent waits for an approval, say): it keeps its turn, and the reason is shown.
-    await this.conn
-      .request(Steering.method, { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: entryId } } })
-      .catch((e) => this.put(agentId, { id: this.newId(), kind: "error", text: this.why(e) }));
+    // Answered once it is in the conversation. If it never gets there, the transcript says why: it records the
+    // message as discarded, and a turn that failed as failed (`TurnFailure`).
+    await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: id } } }).catch(() => this.pending.delete(id));
   }
 
   /** The user's cap on what generation may cost in this workspace, in yuan. */
@@ -491,7 +474,7 @@ export class Workspace {
     const entry = {
       id: this.newId(),
       kind: "permission" as const,
-      detail: request.toolCall.title ?? request.toolCall.name ?? request.toolCall.toolCallId,
+      detail: request.title || request.subject?.toolCall?.title || request.subject?.toolCall?.toolCallId || "",
     };
     this.put(agentId, entry);
     this.notify({ agentId, kind: "permission", detail: entry.detail });

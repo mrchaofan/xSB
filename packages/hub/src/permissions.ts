@@ -72,7 +72,7 @@ export class Permissions {
           },
         );
       }
-      const waiting = pending.session.current?.req.from;
+      const waiting = pending.session.current?.first.from;
       if (!targets.length && waiting && !waiting.conn.isClosed) this.settle(pending, { outcome: { outcome: "cancelled" } });
     }
   }

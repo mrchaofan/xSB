@@ -44,7 +44,7 @@ export class BackendPool {
       }))();
     this.procs.set(agent.id, starting);
     starting.then(
-      (b) => this.log(`backend ${agent.id} up: ${b.info}, steering ${b.caps.steering ? "native" : "by interrupt"}`),
+      (b) => this.log(`backend ${agent.id} up: ${b.info}`),
       forget,
     );
     return starting;

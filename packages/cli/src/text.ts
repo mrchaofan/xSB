@@ -6,7 +6,7 @@
  * language (`explain` in @xsb/protocol); what agents say is theirs.
  */
 import { languageOf } from "@xsb/protocol";
-import type { AgentState, Language, SteeringOutcome, TaskStatus } from "@xsb/protocol";
+import type { AgentState, Language, TaskStatus } from "@xsb/protocol";
 
 export const language: Language = languageOf([process.env.LC_ALL, process.env.LC_MESSAGES, process.env.LANG]);
 
@@ -38,10 +38,11 @@ const en = {
   xsb backends                          the backends of this machine, and whether each is installed
 
   xsb chat <agent> [--new] [--history]  talk to an agent
-  xsb send <agent> <message> [--interject] [--new]
+  xsb send <agent> <message> [--new]
                                         one message, print the reply
   xsb watch                             follow every agent
   xsb status | tasks | sessions
+  xsb tasks cancel <task-id>            stop a task, and what was started only for it
   xsb assets [--type <type>]            the shared asset library
 
   xsb acp [--agent <id>]                serve ACP on stdio, for editors and other clients
@@ -89,10 +90,9 @@ const en = {
   asks: (who: string, what: string) => `[${who}] asks permission: ${what}`,
   useTool: "use a tool",
   choose: "choose> ",
-  talking: (agent: string) => `talking to ${agent}. /i <text> interjects into the running turn, /cancel stops it, /quit leaves.`,
-  steered: { injected: "(injected)", startedNewTurn: "(startedNewTurn)", promptRequired: "(promptRequired)" } satisfies Record<SteeringOutcome["outcome"], string>,
-  steerFailed: (why: string) => `(steer failed: ${why})`,
-  queued: "(queued behind the running turn)",
+  talking: (agent: string) => `talking to ${agent}. What you write while it works goes into the running turn. /cancel stops it, /quit leaves.`,
+  interjecting: "(into the running turn)",
+  taskCancelled: (id: string, also: string[]) => `task ${id} cancelled${also.length ? `, and with it: ${also.join(", ")}` : ""}`,
   stopped: (reason: string) => `(${reason})`,
   failed: (why: string) => `(error: ${why})`,
   agentRemoved: (id: string) => `[${id}] removed`,
@@ -141,10 +141,11 @@ const zh: typeof en = {
   xsb backends                          这台机器上的后端，以及各自是否已安装
 
   xsb chat <智能体> [--new] [--history] 与一个智能体对话
-  xsb send <智能体> <消息> [--interject] [--new]
+  xsb send <智能体> <消息> [--new]
                                         发一条消息并打印回复
   xsb watch                             跟随所有智能体
   xsb status | tasks | sessions         状态 | 任务 | 会话
+  xsb tasks cancel <任务标识>           停止一个任务，以及只为它而起的工作
   xsb assets [--type <类型>]            共享的资产库
 
   xsb acp [--agent <标识>]              在标准输入输出上提供 ACP，供编辑器等客户端使用
@@ -190,10 +191,9 @@ const zh: typeof en = {
   asks: (who, what) => `[${who}] 请求许可：${what}`,
   useTool: "使用一个工具",
   choose: "请选择> ",
-  talking: (agent) => `正在与 ${agent} 对话。/i <内容> 插话到正在进行的这一轮，/cancel 停止它，/quit 退出。`,
-  steered: { injected: "（已插入正在进行的这一轮）", startedNewTurn: "（智能体空闲，已另起一轮）", promptRequired: "（智能体空闲，没有可插入的一轮）" },
-  steerFailed: (why) => `（插话失败：${why}）`,
-  queued: "（已排在正在进行的这一轮之后）",
+  talking: (agent) => `正在与 ${agent} 对话。它工作时你说的话会插进正在进行的这一轮。/cancel 停止它，/quit 退出。`,
+  interjecting: "（已插进正在进行的这一轮）",
+  taskCancelled: (id, also) => `任务 ${id} 已取消${also.length ? `，一并取消：${also.join("、")}` : ""}`,
   stopped: (reason) => `（已停止：${reason === "cancelled" ? "已取消" : reason}）`,
   failed: (why) => `（出错：${why}）`,
   agentRemoved: (id) => `[${id}] 已删除`,

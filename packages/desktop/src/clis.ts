@@ -1,6 +1,6 @@
 /**
  * Programs of the user's machine that the app needs but does not ship: the
- * agents' own (claude, codex, gemini, grok) and tools that roles work with
+ * agents' own (claude, codex) and tools that roles work with
  * (ffmpeg, arkcli). The app installs none of them. A program is there when it is on
  * the user's PATH; when it is not, the user is asked where it is, and that
  * path is remembered (`paths.json`).
@@ -12,7 +12,7 @@
  *
  *   <dir>/bin/claude-agent-acp   the ACP wrapper shipped in the app, told where the claude program is
  *   <dir>/bin/codex-acp          the same for codex
- *   <dir>/bin/gemini, ffmpeg, …  a program the user pointed to
+ *   <dir>/bin/ffmpeg, …          a program the user pointed to
  *   <dir>/bin/xsb-media-mcp      an MCP server shipped in the app, for a role to name by its command
  *   <dir>/bin/xsb-browser-mcp    the same: the way to the browser in the app's side panel (browser.ts)
  *   <dir>/browser.sock           where that browser listens
@@ -36,7 +36,7 @@ import { COMMON_SERVERS_ENV, findCommand } from "@xsb/hub";
 import { SOCKET_ENV } from "./browser.ts";
 
 /** The hub's built-in backends: each is named after the program of the user's machine it is, or is built around. */
-export const AGENTS = new Set(["claude", "codex", "gemini", "grok"]);
+export const AGENTS = new Set(["claude", "codex"]);
 
 /** Programs that do not speak ACP themselves: the wrapper shipped in the app, and how it is told where the program is. */
 const WRAPPERS: Record<string, { command: string; env: string }> = {

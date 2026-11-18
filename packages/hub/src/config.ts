@@ -29,23 +29,18 @@ export type BackendSpec = {
 };
 
 /**
- * The official ACP entry point of each agent, as listed in the ACP registry
- * (https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json).
- * `backends` in the global config replaces entries by name or adds others.
+ * The official ACP entry point of each agent that serves ACP v2 (the hub speaks nothing older). Gemini CLI and Grok
+ * serve ACP v1 only. `backends` in the global config replaces entries by name or adds others, which must serve v2.
  */
 export const BUILTIN_BACKENDS: Record<string, BackendSpec> = {
   claude: { command: "claude-agent-acp" },
   codex: { command: "codex-acp" },
-  gemini: { command: "gemini", args: ["--acp"] },
-  grok: { command: "grok", args: ["agent", "stdio"] },
 };
 
 /** How to get a built-in backend, for the error message only. */
 export const INSTALL_HINT: Record<string, string> = {
   "claude-agent-acp": "npm i -g @agentclientprotocol/claude-agent-acp",
   "codex-acp": "npm i -g @agentclientprotocol/codex-acp",
-  gemini: "npm i -g @google/gemini-cli",
-  grok: "npm i -g @xai-official/grok",
 };
 
 export type GlobalConfig = { version: 1; backends?: Record<string, BackendSpec> };
@@ -59,8 +54,10 @@ export type GlobalConfig = { version: 1; backends?: Record<string, BackendSpec> 
  * session handed its conversation (default 150000).
  * `limits.sessionsAtOnce`: how many work sessions of one agent may run a turn at a time for tasks dispatched as
  * `parallel` (default 2); other peer work of an agent runs one turn at a time.
+ * `limits.awaitSeconds`: how long `dispatch_task` with `await_result` waits inside the call (default 50: agent
+ * programs end a tool call that takes longer, codex after 60 seconds).
  */
-export type ProjectConfig = { version: 1 | 2; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number; sessionsAtOnce?: number } };
+export type ProjectConfig = { version: 1 | 2; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number; sessionsAtOnce?: number; awaitSeconds?: number } };
 
 /**
  * The version of the project config this xsb writes. 2: the preset team "film" is the one that is bound to no

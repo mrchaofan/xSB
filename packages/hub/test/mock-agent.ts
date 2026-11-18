@@ -1,27 +1,33 @@
 /**
- * A scriptable ACP agent for tests. It has no model: the prompt is its program.
+ * A scriptable ACP v2 agent for tests. It has no model: the prompt is its program.
  *
- *   !say <text>           emit text
- *   !sleep <ms>           wait (a cancel ends the turn here)
+ *   !say <text>           emit text (one agent message, until the next tool call)
+ *   !sleep <ms>           wait (a cancel ends the work here)
  *   !busy <ms>            wait, and finish waiting even if cancelled (a tool call that has to run out)
- *   !call <tool> <json>   call a tool of the "xsb" MCP server and emit its result;
+ *   !call <tool> <json>   call a tool of the "team" MCP server and emit its result;
  *                         "$last" in the JSON is the id of the task or job started last,
  *                         "$task" the id of the <xsb-task> it stands in, or else of the one
  *                         the session was given last (left as it is without one: it may be
  *                         meant for the instructions of a task this session dispatches)
- *   !done <result>        complete_task on that task
+ *   !done <result>        report_result on that task
  *   !echo                 emit the whole prompt, as a prompt without directives is
- *   !await <json>         await_tasks on every task dispatched since the last !await
+ *   !await <json>         subscribe to every task dispatched since the last !await
  *   !perm                 ask the client for permission and emit the outcome
  *   !servers              emit the names of the MCP servers the session was given
+ *   !tools                emit the names of the team's tools the session has now
  *   !usage <n>            report that the conversation uses n tokens of context
  *
- * A prompt without directives is echoed. Flags: --steering serves
- * `_session/steering` (without it the hub has to steer by interrupting) and
- * reads images, --no-system-prompt, --no-resume (cannot restore a session), --auth-required, --protocol <n>.
+ * A prompt without directives is echoed. As ACP v2 has it, a prompt is answered with its message id once it is
+ * inserted; work is reported with `state_update`. A prompt that comes while the agent works is held until the work
+ * is done, and then run (as codex does); with --steering it is inserted at once and its directives run next, in the
+ * same work (as claude does). A cancel answers what is held with -32800.
+ * Flags: --steering (and reads images), --no-system-prompt, --no-resume (cannot restore a session),
+ * --auth-required, --protocol <n>.
  */
 import { spawn } from "node:child_process";
 import { Connection, RpcError } from "@xsb/protocol";
+
+type Held = { prompt: any[]; resolve: (r: { messageId: string }) => void; reject: (e: unknown) => void };
 
 type Session = {
   id: string;
@@ -33,10 +39,14 @@ type Session = {
   taskIds: string[];
   /** The <xsb-task> the session was given last. */
   task?: string;
-  /** The prompt of the running turn, as text. */
+  /** The prompt of the running work, as text. */
   prompt: string;
   /** Names of the MCP servers the session was opened with. */
   servers: string[];
+  /** Prompts held while it works. */
+  held: Held[];
+  /** The agent message being written, until a tool call. */
+  message?: string;
 };
 
 const conn = new Connection(process.stdin, process.stdout, "mock");
@@ -46,8 +56,8 @@ const steering = flags.includes("--steering");
 let counter = 0;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
-  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name) };
-  const server = mcpServers.find((s) => s.name === "xsb");
+  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [] };
+  const server = mcpServers.find((s) => s.name === "team");
   if (server) {
     const env = Object.fromEntries(server.env.map((e: any) => [e.name, e.value]));
     const proc = spawn(server.command, server.args, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "inherit"] });
@@ -59,23 +69,19 @@ async function open(id: string, mcpServers: any[]): Promise<Session> {
   return session;
 }
 
-const say = (session: Session, text: string): void =>
-  conn.notify("session/update", {
-    sessionId: session.id,
-    update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
-  });
+const update = (session: Session, u: unknown): void => conn.notify("session/update", { sessionId: session.id, update: u });
+
+const say = (session: Session, text: string): void => {
+  session.message ??= `msg_${++counter}`;
+  update(session, { sessionUpdate: "agent_message_chunk", messageId: session.message, content: { type: "text", text } });
+};
 
 async function tool(session: Session, name: string, args: unknown): Promise<string> {
   const toolCallId = `call_${++counter}`;
-  conn.notify("session/update", {
-    sessionId: session.id,
-    update: { sessionUpdate: "tool_call", toolCallId, title: name, name: `mcp__xsb__${name}`, status: "in_progress" },
-  });
+  session.message = undefined;
+  update(session, { sessionUpdate: "tool_call_update", toolCallId, title: name, name: `mcp__team__${name}`, status: "in_progress" });
   const result = await session.mcp!.request("tools/call", { name, arguments: args });
-  conn.notify("session/update", {
-    sessionId: session.id,
-    update: { sessionUpdate: "tool_call_update", toolCallId, status: result.isError ? "failed" : "completed" },
-  });
+  update(session, { sessionUpdate: "tool_call_update", toolCallId, status: result.isError ? "failed" : "completed" });
   return result.content[0].text;
 }
 
@@ -105,24 +111,29 @@ async function step(session: Session, line: string): Promise<void> {
       return say(session, `result(${name}): ${out}\n`);
     }
     case "done": {
-      const out = await tool(session, "complete_task", { task_id: task, result: rest });
-      return say(session, `result(complete_task): ${out}\n`);
+      const out = await tool(session, "report_result", { task_id: task, result: rest });
+      return say(session, `result(report_result): ${out}\n`);
     }
     case "echo":
       return say(session, `echo: ${session.prompt.replaceAll("\n", " | ")}\n`);
     case "usage":
-      conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "usage_update", used: Number(rest), size: 1_000_000 } });
-      return;
+      return update(session, { sessionUpdate: "usage_update", used: Number(rest), size: 1_000_000 });
     case "servers":
       return say(session, `servers: ${session.servers.join(", ")}\n`);
+    case "tools": {
+      const { tools } = await session.mcp!.request("tools/list", {});
+      return say(session, `tools: ${tools.map((t: any) => t.name).join(", ")}\n`);
+    }
     case "await": {
-      const out = await tool(session, "await_tasks", { ...JSON.parse(rest || "{}"), task_ids: session.taskIds.splice(0) });
-      return say(session, `result(await_tasks): ${out}\n`);
+      const out = await tool(session, "subscribe", { ...JSON.parse(rest || "{}"), task_ids: session.taskIds.splice(0) });
+      return say(session, `result(subscribe): ${out}\n`);
     }
     case "perm": {
+      const toolCallId = `call_${++counter}`;
       const answer = await conn.request("session/request_permission", {
         sessionId: session.id,
-        toolCall: { toolCallId: `call_${++counter}`, title: "Write a file" },
+        title: "Write a file",
+        subject: { type: "tool_call", toolCall: { toolCallId, title: "Write a file" } },
         options: [
           { optionId: "yes", name: "Allow", kind: "allow_once" },
           { optionId: "no", name: "Reject", kind: "reject_once" },
@@ -134,54 +145,95 @@ async function step(session: Session, line: string): Promise<void> {
 }
 
 const textOf = (prompt: any[]): string => prompt.map((b) => b.text ?? `<${b.type} ${b.mimeType ?? b.uri}>`).join("\n");
-/** Take note of the tasks a prompt gives; the directives in a task's instructions are that task's. */
+/**
+ * Take note of the tasks a prompt gives; the directives in a task's instructions are that task's. What a result
+ * quotes (a peer may repeat the task it was given) is not given to this session.
+ */
 const given = (session: Session, text: string): string =>
-  text.replace(/(<xsb-task [^>]*task-id="(t_\w+)"[^>]*>)([\s\S]*?)(<\/xsb-task>)/g, (_, head, id, body, tail) => {
-    session.task = id;
-    return head + body.replace(/^!(\w+)/gm, `!$1@${id}`) + tail;
-  });
+  text
+    .split(/(<xsb-task-results?[\s\S]*?<\/xsb-task-results?>)/)
+    .map((part) =>
+      part.startsWith("<xsb-task-result")
+        ? part
+        : part.replace(/(<xsb-task [^>]*task-id="(t_\w+)"[^>]*>)([\s\S]*?)(<\/xsb-task>)/g, (_, head, id, body, tail) => {
+            session.task = id;
+            return head + body.replace(/^!(\w+)/gm, `!$1@${id}`) + tail;
+          }),
+    )
+    .join("");
 const program = (source: string): string[] => {
   const lines = source.split("\n").filter((l) => l.startsWith("!"));
   return lines.length ? lines : [`!say echo: ${source.replaceAll("\n", " | ")}`];
 };
 
-conn.onRequest("initialize", () => ({
-  protocolVersion: flags.includes("--protocol") ? Number(flags[flags.indexOf("--protocol") + 1]) : 1,
-  agentInfo: { name: "mock", version: "0" },
-  authMethods: [{ id: "login", name: "Log in with the mock CLI" }],
-  agentCapabilities: { promptCapabilities: { image: steering }, sessionCapabilities: { ...(flags.includes("--no-resume") ? {} : { resume: {} }), ...(flags.includes("--no-system-prompt") ? {} : { systemPrompt: {} }) } },
-  ...(steering ? { _meta: { steering: { supported: true } } } : {}),
+/** Insert a prompt into the conversation: it is answered, echoed, and its program is what the work does next. */
+function insert(session: Session, prompt: any[], answer: (r: { messageId: string }) => void): void {
+  const messageId = `user_${++counter}`;
+  update(session, { sessionUpdate: "user_message", messageId, content: prompt });
+  answer({ messageId });
+  const text = textOf(prompt);
+  session.prompt = session.running ? `${session.prompt}\n${text}` : text;
+  session.lines.unshift(...program(given(session, text)));
+}
+
+/** Work until there is nothing left, then take what was held: each held prompt is the next work. */
+async function work(session: Session): Promise<void> {
+  session.running = true;
+  session.cancelled = false;
+  session.taskIds = [];
+  update(session, { sessionUpdate: "state_update", state: "running" });
+  while (session.lines.length && !session.cancelled) await step(session, session.lines.shift()!);
+  session.lines = [];
+  session.running = false;
+  session.message = undefined;
+  update(session, { sessionUpdate: "state_update", state: "idle", stopReason: session.cancelled ? "cancelled" : "end_turn" });
+  const next = session.held.shift();
+  if (next) {
+    insert(session, next.prompt, next.resolve);
+    void work(session);
+  }
+}
+
+conn.onRequest("initialize", (p) => ({
+  protocolVersion: flags.includes("--protocol") ? Number(flags[flags.indexOf("--protocol") + 1]) : Math.min(2, p.protocolVersion),
+  info: { name: "mock", version: "0" },
+  authMethods: [{ methodId: "login", name: "Log in with the mock CLI", type: "agent" }],
+  capabilities: {
+    session: {
+      prompt: steering ? { image: {} } : {},
+      ...(flags.includes("--no-system-prompt") ? {} : { systemPrompt: {} }),
+    },
+  },
 }));
 conn.onRequest("session/new", async (p) => ({ sessionId: (await open(`mock_${process.pid}_${++counter}`, p.mcpServers)).id }));
 conn.onRequest("session/resume", async (p) => {
+  if (flags.includes("--no-resume")) throw new RpcError(-32002, "no such session");
   await open(p.sessionId, p.mcpServers);
+  update(sessions.get(p.sessionId)!, { sessionUpdate: "state_update", state: "idle" });
   return {};
 });
-conn.onRequest("session/prompt", async (p) => {
+conn.onRequest("session/prompt", (p) => {
   const session = sessions.get(p.sessionId);
   if (!session) throw new RpcError(-32002, "no such session");
   if (flags.includes("--auth-required")) throw new RpcError(-32000, "Authentication required");
-  session.running = true;
-  session.cancelled = false;
-  session.prompt = textOf(p.prompt);
-  session.lines = program(given(session, session.prompt));
-  session.taskIds = [];
-  while (session.lines.length && !session.cancelled) await step(session, session.lines.shift()!);
-  session.running = false;
-  return { stopReason: session.cancelled ? "cancelled" : "end_turn" };
+  return new Promise((resolve, reject) => {
+    if (!session.running) {
+      insert(session, p.prompt, resolve);
+      void work(session);
+    } else if (steering) {
+      // Like claude: in at once, handled next, and the work goes on.
+      insert(session, p.prompt, resolve);
+    } else {
+      // Like codex: held until the work is done.
+      session.held.push({ prompt: p.prompt, resolve, reject });
+    }
+  });
 });
 conn.onNotification("session/cancel", (p) => {
   const session = sessions.get(p.sessionId);
-  if (!session?.running) return;
+  if (!session) return;
+  for (const held of session.held.splice(0)) held.reject(RpcError.cancelled());
+  if (!session.running) return;
   session.cancelled = true;
   session.wake?.();
 });
-if (steering) {
-  conn.onRequest("_session/steering", (p) => {
-    const session = sessions.get(p.sessionId);
-    if (!session?.running) return { outcome: "promptRequired", reason: "noRunningTurn" };
-    // Like a real agent: the steered message is handled next, then the turn goes on.
-    session.lines.unshift(...program(given(session, textOf(p.prompt))));
-    return { outcome: "injected" };
-  });
-}

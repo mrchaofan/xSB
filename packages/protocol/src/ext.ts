@@ -4,8 +4,8 @@
  * Rule: one feature, one extension, the same on every ACP edge. The hub is an
  * ACP agent towards the outside (editor, CLI) and an ACP client towards each
  * backend; both edges import these definitions, so an extension cannot mean
- * two things. Where the ecosystem already has an extension for the feature it
- * is adopted as is instead of minted again (steering).
+ * two things. What ACP v2 has itself (putting a message into running work,
+ * receipts of insertion, the state of the work) is used as it is.
  *
  * Wire conventions follow ACP extensibility: custom methods start with `_`,
  * custom data lives under `_meta`, support is advertised in `_meta` during
@@ -18,42 +18,10 @@ import type { ContentBlock } from "./acp.ts";
 export const NS = "dev.xsb";
 
 /**
- * Steering: put a message into the turn that is running ("interject").
- *
- * Adopted from the existing ACP steering wire protocol (served by
- * claude-agent-acp), not invented here.
- *
- *   request   _session/steering { sessionId, prompt: ContentBlock[],
- *                                 _meta?: { steering?: { idleBehavior?: "promptRequired" } } }
- *   response  { outcome: "injected" }          the running turn received it
- *             { outcome: "startedNewTurn" }    session was idle, a detached turn started
- *             { outcome: "promptRequired", reason: "noRunningTurn" }
- *                                              idle and the caller opted to send the prompt itself
- *   advertise InitializeResponse._meta.steering.supported = true
- *
- * The steered message's output arrives through `session/update` of the running
- * turn; the turn's `session/prompt` settles once the steered work is done.
- *
- * The hub adds one thing for a message that is waiting for its turn: steered
- * under the `messageId` it was prompted with (`_meta["dev.xsb/origin"]`), it is
- * that message, sent now. It leaves the queue, and the `session/prompt` that
- * queued it answers `{ stopReason: "cancelled" }`.
- */
-export const Steering = {
-  method: "_session/steering",
-  metaKey: "steering",
-} as const;
-
-export type SteeringOutcome =
-  | { outcome: "injected" }
-  | { outcome: "startedNewTurn" }
-  | { outcome: "promptRequired"; reason: "noRunningTurn" };
-
-/**
  * Agents: one ACP connection reaches many agents.
  *
- *   advertise  agentCapabilities._meta["dev.xsb/agents"] = { version: 1 }
- *   opt in     clientCapabilities._meta["dev.xsb/agents"] = {}   (receive `update`, see below)
+ *   advertise  capabilities._meta["dev.xsb/agents"] = { version: 1 }
+ *   opt in     capabilities._meta["dev.xsb/agents"] = {}   (receive `update`, see below)
  *   address    session/new   params._meta["dev.xsb/agent"] = "<agentId>"
  *              SessionInfo   _meta["dev.xsb/agent"], _meta["dev.xsb/main"]
  *   request    _dev.xsb/agents/list   {}            -> { agents: AgentInfo[] }
@@ -120,7 +88,7 @@ export const Agents = {
  * Roles: what agents are instances of (see `AgentSpec.role`). A role gives its
  * agents instructions, MCP servers and skills.
  *
- *   advertise  agentCapabilities._meta["dev.xsb/roles"] = { version: 1 }
+ *   advertise  capabilities._meta["dev.xsb/roles"] = { version: 1 }
  *   request    _dev.xsb/roles/list   {}       -> { roles: RoleDetail[] }
  *              _dev.xsb/roles/get    { name } -> { role: RoleDetail }
  *              _dev.xsb/roles/put    { role: RoleInput } -> { role: RoleDetail }
@@ -183,6 +151,7 @@ export type RoleDetail = {
   preset?: { team: string; teamTitle: string; own: boolean; title: string };
   description?: string;
   backend?: string;
+  grants?: Grant["cap"][];
   instructions: string;
   mcpServers: Record<string, McpServerSpec>;
   /** `dir`: where the skill's files are, on the hub's machine. */
@@ -197,6 +166,8 @@ export type RoleInput = {
   name: string;
   description?: string;
   backend?: string;
+  /** Team policy: what the role's agents may do in every task, beyond reaching its initiator. */
+  grants?: Grant["cap"][];
   instructions?: string;
   mcpServers?: Record<string, McpServerSpec>;
   skills?: { name: string; content: string }[];
@@ -209,7 +180,7 @@ export type McpServerCheck = { server: string; tools?: { name: string; descripti
  * Using a team copies nothing: its roles are among the project's from then on
  * (`RoleDetail.preset`), as they ship with the hub that runs.
  *
- *   advertise  agentCapabilities._meta["dev.xsb/teams"] = { version: 1 }
+ *   advertise  capabilities._meta["dev.xsb/teams"] = { version: 1 }
  *   request    _dev.xsb/teams/list {}     -> { teams: TeamInfo[] }
  *              _dev.xsb/teams/use  { id } -> {}
  *              _dev.xsb/teams/drop { id } -> {}    refused while an agent has a role only that team gives
@@ -263,7 +234,7 @@ export type TeamInfo = {
 /**
  * Backends: what an agent can run on, on the machine the hub runs on.
  *
- *   advertise  agentCapabilities._meta["dev.xsb/backends"] = { version: 1 }
+ *   advertise  capabilities._meta["dev.xsb/backends"] = { version: 1 }
  *   request    _dev.xsb/backends/list {} -> { backends: BackendInfo[] }
  *
  * Whether a backend is installed is the hub's answer because the hub is the
@@ -287,8 +258,9 @@ export type BackendInfo = {
 /**
  * Tasks: observe work one agent dispatched to another.
  *
- *   advertise  agentCapabilities._meta["dev.xsb/tasks"] = { version: 1 }
+ *   advertise  capabilities._meta["dev.xsb/tasks"] = { version: 1 }
  *   request    _dev.xsb/tasks/list { agentId?, status? } -> { tasks: Task[] }
+ *              _dev.xsb/tasks/cancel { taskId }           -> { task: Task, with: Task[] }   (the user stops any task)
  *   notify     _dev.xsb/tasks/update { task: Task }      (hub -> observers)
  */
 /** One session of one agent: where mail comes from and goes to. */
@@ -306,12 +278,38 @@ export const NAME = /^[\w-]+$/;
 export type TaskStatus = "blocked" | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export const isTerminal = (s: TaskStatus): boolean => s === "completed" || s === "failed" || s === "cancelled" || s === "interrupted";
 
+/** Whom something is attributed to: who started a task, who stopped it, who sent a message. */
+export type Principal = { kind: "user" } | { kind: "agent"; agentId: string } | { kind: "system" };
+
+/**
+ * How a task ended. `completed` / `failed`: its assignee finished it (or a job's tool answered). `cancelled`: its
+ * dispatcher or the user stopped it. `cascaded`: it went with a task it was started for (`cause`). `error`: xsb could
+ * not run it. `interrupted`: xsb was quit while it was unfinished, and the user chose not to have it continued.
+ */
+export type EndReason = "completed" | "failed" | "cancelled" | "cascaded" | "error" | "interrupted";
+
+/**
+ * How a message is to reach its recipient once it is in its inbox (where it counts as delivered). `sync`: as what a
+ * tool call that waits for it returns. `wake`: at once, waking the recipient or going into its running work.
+ * `lazy` (the default for a task's result): it waits, and comes with the recipient's next turn.
+ */
+export type DeliveryPref = "sync" | "wake" | "lazy";
+
+/**
+ * A capability a task gives its executor beyond reaching its own initiator, which every task gives: to dispatch
+ * tasks (`dispatch`), or to message agents (`message`), to any agent or to those in `to`.
+ */
+export type Grant = { cap: "dispatch" | "message"; to?: string[] };
+
 export type Task = {
   id: string;
   title: string;
   topic: string;
   instructions: string;
-  from: Addr;
+  /** Who started it: the user, or an agent. */
+  initiator: Principal;
+  /** The session of the agent that dispatched it, where its result goes. None for the user's: the user is told by its own session. */
+  from?: Addr;
   to: Addr;
   /** Tasks that must be finished before this one starts. */
   after: string[];
@@ -336,7 +334,13 @@ export type Task = {
    * runs one turn at a time.
    */
   parallel?: boolean;
+  /** How its result reaches its initiator. Absent: `lazy`. */
+  deliveryPref?: DeliveryPref;
+  /** What its executor may do beyond reaching its initiator (docs/KERNEL.md, capabilities). */
+  grants?: Grant[];
   status: TaskStatus;
+  /** Once it has ended: why, and who ended it (for `cascaded`, who stopped the task it went with, `cause`). */
+  ended?: { reason: EndReason; stopper: Principal; cause?: string };
   result?: string;
   /** The assets the assignee named as what the task delivered (`id@version`), when it finished it. */
   assets?: string[];
@@ -347,8 +351,33 @@ export type Task = {
 export const Tasks = {
   capability: `${NS}/tasks`,
   list: `_${NS}/tasks/list`,
+  /** `{ taskId }` -> `{ task, with: Task[] }`: the user stops a task, and what went with it. */
+  cancel: `_${NS}/tasks/cancel`,
   update: `_${NS}/tasks/update`,
 } as const;
+
+/**
+ * The ledger: what became of every message given to an agent's session (the user's, a peer's, xsb's), so that
+ * whether its model saw it can be answered.
+ *
+ *   notify     _dev.xsb/messages/update { entry: LedgerEntry }   (hub -> observers)
+ *
+ *   inboxed               kept for the agent; comes with its next turn            (a notification that wakes nobody)
+ *   queued                waits in xsb behind the running turn; the model knows nothing of it
+ *   submitted             given to the session, not yet to the model               (held until the backend can take it)
+ *   inserted              in the model's conversation, not yet acted upon
+ *   seen                  the model went on after it
+ *   inserted_unprocessed  in the conversation, but the turn was stopped before the model went on; it is seen
+ *                         when the session goes on, and discarded if it never does
+ *   discarded_unseen      never reached the model, and never will
+ *
+ * The signals are ACP v2's: "inserted" is the answer to `session/prompt` (its insertion), "discarded_unseen" the
+ * -32800 of a prompt cancelled before it; "seen" is anything the backend reports after an insertion, or its idle that
+ * ended the work normally.
+ */
+export type LedgerState = "inboxed" | "queued" | "submitted" | "inserted" | "seen" | "inserted_unprocessed" | "discarded_unseen";
+export type LedgerEntry = { messageId: string; agentId: string; sessionId: string; from: Origin; taskId?: string; state: LedgerState; ts: string };
+export const Ledger = { update: `_${NS}/messages/update` } as const;
 
 /**
  * Context boundaries: where what the model of a session sees starts anew. The transcript keeps everything that was
@@ -389,11 +418,8 @@ export const TurnFailure = { key: `${NS}/turn_failed` } as const;
  * A message that was already shown (`user_message_chunk` with the same `messageId`) is that message, now discarded;
  * one that was not (it waited for its turn) is shown for the first time, as discarded.
  *
- * A stop discards what the hub still holds: messages of the user's that wait for a turn, and a turn that had not
- * reached its backend yet (for mail, only what the user steered into it: the mail is not theirs). Interjections are
- * not discarded: those a backend without steering of its own had not been given yet are given to it right away and
- * the turn goes on (as Esc does in Claude Code and Codex), unless it is stopped again before they got there; one
- * that a backend with steering accepted ("injected") counts as seen, for ACP v1 has no way to tell more.
+ * A stop discards what was not inserted yet: what the hub still held, and what the backend answered with -32800. The
+ * ledger (`Ledger`) says what became of every message; this record is what a transcript shows of the user's.
  */
 export const Discarded = { key: `${NS}/discarded` } as const;
 export type Discarded = { messageId: string; origin: OriginMeta; content: ContentBlock[] };
@@ -408,7 +434,7 @@ export const Boundaries = {
  * shots, ...). An asset is a file with an id; registering the same id again
  * adds a version, and earlier versions stay.
  *
- *   advertise  agentCapabilities._meta["dev.xsb/assets"] = { version: 1 }
+ *   advertise  capabilities._meta["dev.xsb/assets"] = { version: 1 }
  *   request    _dev.xsb/assets/list { type? } -> { assets: Asset[] }   (latest versions)
  *   notify     _dev.xsb/assets/update { asset: Asset }                 (hub -> observers, each new version)
  */
@@ -435,7 +461,7 @@ export type Asset = {
 /**
  * Language: which language the person at a client reads.
  *
- *   declare    clientCapabilities._meta["dev.xsb/language"] = "zh-CN"
+ *   declare    capabilities._meta["dev.xsb/language"] = "zh-CN"
  *
  * A client words everything it shows in that language itself, errors
  * included (errors.ts). What it declares matters for the one thing a client
@@ -466,22 +492,20 @@ export function languageOf(tags: (string | undefined)[]): Language {
  * Origin: who a message in a session came from.
  *
  * A session receives input from its user, from peer agents and from the hub
- * itself. ACP v1 has one input kind (`user_message_chunk`), so the source is
- * carried as `_meta["dev.xsb/origin"]` on
- *   - `session/prompt` and `_session/steering` params   (towards an agent)
- *   - `user_message_chunk` updates                      (towards a client)
+ * itself. ACP has one input kind (the user message), so the source is carried
+ * as `_meta["dev.xsb/origin"]` on
+ *   - `session/prompt` params                (towards an agent)
+ *   - `user_message_chunk` updates           (towards a client)
  * A party that ignores it sees an ordinary user message.
  *
- *   opt in     clientCapabilities._meta["dev.xsb/origin"] = {}
+ *   opt in     capabilities._meta["dev.xsb/origin"] = {}   (of `initialize`)
  *
- * A client that shows a transcript needs to know when its own message became
- * a turn, not only that it was accepted: a prompt to a busy session waits. A
- * client that opted in is sent its own input like everyone else's, when the
- * turn it starts begins (or, steered, when it reached the running turn). It
- * tells its own from others' by the `messageId` it chose: given in
- * `_meta["dev.xsb/origin"].messageId` of `session/prompt` or
- * `_session/steering`, it is the `messageId` of the `user_message_chunk`.
- * A client that did not opt in is not sent its own input, as in plain ACP.
+ * A client that opted in is sent its own input like everyone else's, when it
+ * is inserted into the conversation (a turn of its own, or into running
+ * work). It tells its own by the `messageId` it chose in
+ * `_meta["dev.xsb/origin"].messageId` of `session/prompt`, which is also the
+ * `messageId` the prompt is answered with. A client that did not opt in is not
+ * sent its own input.
  */
 export const OriginExt = {
   capability: `${NS}/origin`,
@@ -498,6 +522,6 @@ export type OriginMeta = Origin & {
   taskId?: string;
   /** What the message is: free text, a task, or a task's result. */
   role?: "message" | "task" | "task_result";
-  /** True when it was steered into a running turn. */
+  /** True when it went into running work. */
   steered?: boolean;
 };

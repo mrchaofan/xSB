@@ -6,15 +6,15 @@ xsb 是一个多主 Agent 协作系统。每个 Agent 是一个长期存在、�
 
 ```
  编辑器 / 其他 ACP 客户端 ──stdio──▶ xsb acp ─┐
- xsb chat / send / watch ───────────────────┤  ACP v1 + 扩展
+ xsb chat / send / watch ───────────────────┤  ACP v2 + 扩展
                                             ▼
                                    ┌─────────────────┐
                                    │    Hub 守护进程   │  .xsb/ 下的 jsonl + wal
                                    │  会话 · 邮箱 · 任务 │
                                    └──┬───────────▲──┘
-                         ACP v1 + 扩展 │           │ MCP（协作工具）
+                         ACP v2 + 扩展 │           │ MCP（协作工具 team）
                                       ▼           │
-                              后端 Agent 进程（claude / codex / gemini / grok …）
+                              后端 Agent 进程（claude / codex / 封装的三方 agent …）
 ```
 
 - **Hub** 是唯一的常驻进程，持有所有后端进程和全部状态，按需自动启动。
@@ -56,9 +56,10 @@ Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src
 | - | - |
 | `hub.ts` | 组合根：Agent、会话、已连接客户端的登记，两个 socket 的生命周期 |
 | `acp-server.ts` | 对外的 ACP agent：一个已连接客户端的全部请求处理 |
-| `session.ts` | 一个会话的回合引擎：排队、运行、插话、取消，与后端会话的绑定。不区分后端 |
+| `session.ts` | 一个会话的回合引擎：排队、运行、插话、取消，与后端会话的绑定；向台账报告输入的去向。不区分后端 |
 | `backend.ts` / `backends.ts` | 一个后端进程：链路末端，握手、能力、补齐缺的能力，对上提供统一的 `prompt` / `steer` / `cancel` / 每个 Agent 至多一个进程的进程池 |
-| `mailroom.ts` | Agent 间的一切：消息、任务、后台任务（job）、结果的投递、确认与事务 |
+| `kernel.ts` / `hooks.ts` / `task-graph.ts` / `ledger.ts` | 任务调度框架，与后端无关：任务、撤销与传染、汇合、收件箱、通知、台账，以及挂载一切横切行为的 Hooks（[KERNEL.md](KERNEL.md)） |
+| `delivery.ts` / `jobs.ts` / `nudges.ts` / `audit.ts` | 挂在 Hooks 上的 Effector：投进会话、跑后台任务、提醒、审计 |
 | `roles.ts` | 角色：按名字查找（项目自己的优先，再找所用的预设团队），读取说明、MCP 配置和 skills |
 | `presets.ts` | 预设团队：应用自带的（`presets/<语言>/<团队>/`）和用户自己的（`~/.xsb/presets/`），组织相同；继承（`extends`）与叠加、冲突与问题、检查。写法见 [PRESETS.md](PRESETS.md) |
 | `assets.ts` | 资产库：登记、版本、查找 |
@@ -84,26 +85,25 @@ Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src
 
 两个文件各有一个 `version`，只表示该文件自身的格式。后端只在全局定义，项目不能覆盖；Agent 用后端的**名称**引用它（`agents.jsonl` 的 `backend`）。两个文件都是每次使用时读取，修改后不必重启 Hub。
 
-### 2.2 优先用官方 ACP 封装
+### 2.2 优先用官方 ACP 封装，只说 ACP v2
 
-内置四个后端，都是各家自己的 ACP 入口（见 ACP 官方 Registry）：
+Hub 对后端和对客户端都只说 ACP v2（草案，claude-agent-acp 0.107、codex-acp 2.6 都已实现，见 [KERNEL.md](KERNEL.md) 2）。内置两个后端，都是各家自己的 ACP 入口：
 
 | 名称 | 命令 | 来自 |
 | - | - | - |
 | claude | `claude-agent-acp` | `@agentclientprotocol/claude-agent-acp` |
 | codex | `codex-acp` | `@agentclientprotocol/codex-acp` |
-| gemini | `gemini --acp` | `@google/gemini-cli` 自带 |
-| grok | `grok agent stdio` | `@xai-official/grok` 自带 |
 
-代码里没有按厂商分支。Hub 只看后端在 `initialize` 里报告的能力，缺什么补什么。**差异只存在于链路末端**：补齐发生在 `backend.ts` 和会话绑定处，再往上（回合引擎、邮件、工具、对外的 ACP）对所有后端是同一条路径：
+Gemini CLI（0.68）和 Grok（1.0.88）的 ACP 入口只说 v1，不内置；全局配置里可以登记任何说 v2 的 agent。说 v1 的会在握手时被拒绝（`backend_incompatible`）。
+
+代码里没有按厂商分支。插话、扣住、插入回执、工作状态是 v2 本身的，各后端由自己实现；Hub 只看后端在 `initialize` 里报告的能力，缺什么补什么，补齐发生在 `backend.ts` 和会话绑定处：
 
 | 能力 | 有 | 没有 |
 | - | - | - |
-| `_meta.steering.supported` | 插话直接转发 | Hub 取消当前 prompt 再续接 |
-| `sessionCapabilities.systemPrompt` | 说明文字作为系统提示词追加 | 拼在该会话第一条 prompt 前面 |
-| `sessionCapabilities.resume` / `loadSession` | 进程重启后恢复原会话 | 新开会话，并告知模型上下文已丢失、去查记忆 |
-| `sessionCapabilities.additionalDirectories` | 把共享目录挂进去 | 只在说明文字里给出绝对路径 |
-| `promptCapabilities.image` | 图片原样送达 | 换成一句"这里附了一张图片，你看不到"，其余内容照常；对话记录里保留原图 |
+| `session.systemPrompt` | 说明文字作为系统提示词追加 | 拼在该会话第一条 prompt 前面 |
+| `session/resume`（v2 的基本能力） | 进程重启后恢复原会话 | 恢复失败时新开会话，并交接对话（见 6） |
+| `session.additionalDirectories` | 把共享目录挂进去 | 只在说明文字里给出绝对路径 |
+| `session.prompt.image` | 图片原样送达 | 换成一句"这里附了一张图片，你看不到"，其余内容照常；对话记录里保留原图 |
 
 ### 2.3 没有 ACP 入口的三方 agent：同一条链路，只有末端不同
 
@@ -112,7 +112,7 @@ Hub ── Backend ──ACP──▶ claude-agent-acp / codex-acp / …        
                 └─ACP──▶ serveAdapter(AgentAdapter 的实现) ──▶ 三方 agent
 ```
 
-- **一个**通用封装，不按 agent 各写一个：[@xsb/adapter](../packages/adapter) 的 `serveAdapter` 在 stdio 上提供 ACP v1，把请求映射到 `AgentAdapter`（`newSession`、`prompt`、`cancel`，可选的 `resume`、`steer`，和一组能力声明）。agent 之间的差别放在这个接口的实现和它的配置里。
+- **一个**通用封装，不按 agent 各写一个：[@xsb/adapter](../packages/adapter) 的 `serveAdapter` 在 stdio 上提供 ACP v2（插入回执、工作状态、工作中来的 prompt 扣住或插入、取消时以 -32800 回应未插入的），把请求映射到 `AgentAdapter`（`newSession`、`prompt`、`cancel`，可选的 `resume`、`steer`，和一组能力声明）。agent 之间的差别放在这个接口的实现和它的配置里。
 - 封装出来的程序在 `~/.xsb/config.json` 里登记为一个普通后端（`command`、`args`）。
 - Hub 不知道它是封装。对 Hub 来说后端只有一个契约："一条在 stdio 上说 ACP 的命令"。官方入口和封装由同一份代码启动、调度、报错（[backend.ts](../packages/hub/src/backend.ts)），配置里也没有区分两者的字段。
 - 封装不补能力：适配器没声明的能力不通告，Hub 按 2.2 的表同样补齐。所以"补能力"的代码只有一份，对官方 agent 和三方 agent 都生效。
@@ -133,7 +133,7 @@ xsb 只负责启动后端，**不安装、不登录、不决定权限**：
 | -33101 | `backend_not_installed` | 11 | 启动命令不存在 |
 | -33102 | `backend_start_failed` | 12 | 进程在握手完成前退出；附退出码和 stderr 末尾几行 |
 | -33103 | `backend_unknown` | 13 | Agent 引用的后端名在全局配置里没有 |
-| -33104 | `backend_incompatible` | 14 | 后端的 ACP 协议版本不是 v1 |
+| -33104 | `backend_incompatible` | 14 | 后端的 ACP 协议版本不是 v2 |
 
 判断请用 `data.reason`：`-331xx` 这一段在 ACP 里没有保留给扩展的约定，将来可能与别的扩展重号。
 
@@ -145,40 +145,28 @@ Hub 不知道读报错的人用什么语言，所以它不负责措辞。凡是�
 
 ## 3. ACP 扩展
 
-规则：**一种功能一个扩展，所有 ACP 链路共用同一份定义**（[ext.ts](../packages/protocol/src/ext.ts)）。已有业界约定的直接采用，不重复发明。线上约定遵循 ACP Extensibility：自定义方法以 `_` 开头，自定义数据放 `_meta`，能力在 `initialize` 的 `_meta` 里通告。
+规则：**一种功能一个扩展，所有 ACP 链路共用同一份定义**（[ext.ts](../packages/protocol/src/ext.ts)）。ACP v2 本身有的（工作中再发消息、插入回执、工作状态）直接用，不再自定义。线上约定遵循 ACP Extensibility：自定义方法以 `_` 开头，自定义数据放 `_meta`，能力在 `initialize` 的 `_meta` 里通告。
 
 | 功能 | 扩展 | 对外（客户端 → Hub） | 对内（Hub → 后端） |
 | - | - | - | - |
-| 插话 | `_session/steering` | 用户插话 | 转发给支持它的后端 |
 | 多 Agent 寻址与目录 | `dev.xsb/agents` | 选 Agent、增删查、状态通知 | 不适用（后端是单个 agent） |
 | 角色编辑 | `dev.xsb/roles` | 读写、检查 MCP server、变更通知 | 不适用 |
 | 预设团队 | `dev.xsb/teams` | 有哪些团队、项目用了哪些、使用与停用 | 不适用 |
 | 后端清单 | `dev.xsb/backends` | 这台机器有哪些后端、是否已安装 | 不适用 |
-| 任务观察 | `dev.xsb/tasks` | 列表、状态通知 | 不适用 |
+| 任务观察与停止 | `dev.xsb/tasks` | 列表、状态通知、用户撤任务 | 不适用 |
+| 台账 | `dev.xsb/messages` | 每条消息的去向（模型看没看到） | 不适用 |
 | 资产库 | `dev.xsb/assets` | 列表、新版本通知 | 不适用 |
-| 消息来源 | `_meta["dev.xsb/origin"]` | 标在 `user_message_chunk` 上 | 标在 `session/prompt` 和插话上 |
+| 消息来源 | `_meta["dev.xsb/origin"]` | 标在 `user_message_chunk` 上 | 标在 `session/prompt` 上 |
 | 语言 | `_meta["dev.xsb/language"]` | 客户端声明用户读哪种语言 | 不适用（写进系统说明，见 3.4） |
 
-### 3.1 插话：`_session/steering`
+### 3.1 插话、停止与回执：ACP v2 本身
 
-这个扩展不是 xsb 定义的，是 claude-agent-acp 已经在用的 steering 线协议，xsb 原样采用并在对外一侧同样提供：
+ACP v2 里，对一个正在工作的会话再发 `session/prompt` 就是插话：后端立即插入（claude），或扣住到当前工作结束再插入（codex）；应答在插入时到达（`{ messageId }`），工作由 `state_update` 报告，结束是 `idle`。对外，Hub 对客户端完全照此行事：
 
-```
-请求  _session/steering { sessionId, prompt: ContentBlock[],
-                          _meta?: { steering?: { idleBehavior?: "promptRequired" } } }
-响应  { outcome: "injected" }                               已进入正在运行的那一轮
-      { outcome: "startedNewTurn" }                         会话空闲，另起了一轮
-      { outcome: "promptRequired", reason: "noRunningTurn" } 空闲，且调用方要求自己发 prompt
-通告  InitializeResponse._meta.steering.supported = true
-```
-
-后端不支持时，兜底在链路末端（`Backend.steer`），回合引擎不知道走的是哪条路：`session/cancel` 当前 prompt → 等它返回 → 立刻发一条"你被这条消息打断了，处理完继续原来的工作"加上插话内容的续接 prompt。对调用方来说这仍然是**同一轮**：原来那次 `session/prompt` 不会以 `cancelled` 返回，而是等续接结束后正常返回；如果这一轮是在做某个任务，任务结果也取续接之后的最终输出。
-
-**排队的消息可以改成插话。** 一条还在排队的消息，用它自己的 `messageId`（`dev.xsb/origin`）再经 `_session/steering` 发一次，Hub 认它是同一条：把它从队列里拿出来、插进当前这一轮，原来那次 `session/prompt` 以 `cancelled` 返回，因为它要的那一轮不会再有。插话没送到时它留在队列里。
-
-**默认不是插话。** 对一个正在工作的会话再发 `session/prompt`，是排队成为下一轮。只有显式调用 `_session/steering`（CLI 的 `/i`、`--interject`，或工具参数 `interject: true`）才会进入运行中的那一轮。
-
-**停止就是 Esc，记录和模型看到的一致。** 用户停止（`session/cancel`）与 Claude Code、Codex 里按 Esc 一样：后端停在当前这一步，Hub 里还压着的输入全部放弃——这个会话里用户自己还在排队的消息（它们的 `session/prompt` 以 `cancelled` 返回），以及还没交给后端的那一轮（连同插进它的插话）。别人发来的邮件不是用户的，照常留着，就像 Claude Code 里 Esc 之后后台任务的通知照常到达：还在排队的照常排队，已轮到却还没交给后端的那一轮照常进行，只去掉用户插进它的话。插话不放弃：兜底插话里还没随续接发出去的，立刻随续接发出，这一轮带着它继续（Claude Code 的 Esc 立即发送排队消息、Codex 的 Esc "interrupt and send immediately" 都是如此）；想停到空闲，再停一次——在插话送到之前再停，插话也一并放弃。派发者取消任务（`cancel_task`）不停这一轮：任务当即记为 `cancelled`，承接者被告知，由它自己停下（见 6）。被放弃的输入不删，而是在会话记录里追加一条 `session_info_update`，`_meta["dev.xsb/discarded"] = { messageId, origin, content }`（[ext.ts](../packages/protocol/src/ext.ts) 的 `Discarded`）：已经显示过的那条（同一个 `messageId`）改标为已丢弃，排队中从未显示过的，以已丢弃的样子第一次显示。原生支持插话的后端答了 `injected` 的插话已在后端手里，停止后怎么处理是后端的事：claude-agent-acp 0.107、codex-acp 2.6 都把模型还没看到的插话静默丢掉（它们的 TUI 是在客户端补发的），而 ACP v1 没有回执，Hub 不知道是哪些，只能算作模型已看到。要确认它是否真的进了模型，得在各后端的 ACP 实现里加回执；claude-agent-acp、codex-acp 是从 npm 装的，gemini、grok 的 ACP 在它们自己的 CLI 里，都不在本仓库维护，所以没有做。
+- **用户的话永不排队。** 会话空闲就开始一轮；在工作就插进去，应答在它插入时到达。别人的消息是否插话由中枢裁决（[KERNEL.md](KERNEL.md) 6）：来自给了这个会话手上工作的那一方就插，否则排在这一轮之后，只在中枢里，模型不知情。
+- **一轮。** 从中枢交给后端的第一条 prompt 起，到后端报 `idle` 且中枢给的都已插入为止。每个会话同时只有一条 prompt 处于"已交给后端、未插入"，之后来的在中枢里排，用户的排在最前。
+- **停止是用户的。** 用户停止（`session/cancel`）停下这个会话的工作，以及它正在做的任务，停止方是用户，沿任务图传染（[KERNEL.md](KERNEL.md) 9）；之后用户说的话是一个新任务。没插入的不再插入：后端扣着的以 -32800 回应，中枢里还排着的不再交出；用户的记为丢弃，邮件不是用户的，退回队列成为下一轮。还没交给后端的邮件那一轮照常进行，只去掉用户插进它的话。
+- **看到没有。** 被丢弃的用户输入在会话记录里追加一条 `session_info_update`，`_meta["dev.xsb/discarded"] = { messageId, origin, content }`（[ext.ts](../packages/protocol/src/ext.ts) 的 `Discarded`）。每条输入（用户的、同事的、中枢的）的去向记在台账里（`Ledger`，[KERNEL.md](KERNEL.md) 10）：插入回执、-32800、之后有没有输出，都是 v2 的信号。
 
 ### 3.2 多 Agent：`dev.xsb/agents`
 
@@ -221,9 +209,9 @@ Hub 不知道读报错的人用什么语言，所以它不负责措辞。凡是�
 
 ### 3.3 来源标注：`dev.xsb/origin`
 
-一个会话的输入可能来自用户、别的 Agent 或 Hub 自己，而 ACP v1 只有一种输入（`user_message_chunk`）。来源写在 `_meta["dev.xsb/origin"]` 里：`{ kind: "user" | "agent" | "system", agentId?, sessionId?, messageId?, taskId?, role?, steered? }`。不认识它的一方看到的就是一条普通用户消息。
+一个会话的输入可能来自用户、别的 Agent 或 Hub 自己，而 ACP 只有一种输入（用户消息）。来源写在 `_meta["dev.xsb/origin"]` 里：`{ kind: "user" | "agent" | "system", agentId?, sessionId?, messageId?, taskId?, role?, steered? }`。不认识它的一方看到的就是一条普通用户消息。
 
-**自己的输入何时成为一轮。** 按 ACP 的惯例，客户端不会收到自己发出的输入。但显示对话记录的客户端需要知道另一件事：对一个正在忙的会话发的 `session/prompt` 是排队，它什么时候真正开始？在 `clientCapabilities._meta["dev.xsb/origin"]` 声明后，客户端自己的输入也会像别人的一样送给它，时机是这条输入开始一轮（或经插话进入了进行中的一轮）的那一刻。客户端在 `session/prompt` / `_session/steering` 的 `_meta["dev.xsb/origin"].messageId` 里给消息起名，回来的 `user_message_chunk` 带同一个 `messageId`，据此认出是自己的哪一条。没有声明的客户端行为不变。
+**自己的输入何时进入会话。** 按 ACP 的惯例，客户端不会收到自己发出的输入。在 `capabilities._meta["dev.xsb/origin"]` 声明后，客户端自己的输入也会像别人的一样送给它，时机是它插入会话的那一刻。客户端在 `session/prompt` 的 `_meta["dev.xsb/origin"].messageId` 里给消息起名，回来的 `user_message_chunk` 和 `session/prompt` 的应答都带同一个 `messageId`。没有声明的客户端不收到自己的输入。
 
 （ACP 的 Subagent Sessions RFD 里有 `session_message` 更新，语义相近，但仍是 Preview 且面向父子会话。等它稳定后，这个扩展可以换成它，改动集中在一处。）
 
@@ -247,28 +235,32 @@ Hub 不知道读报错的人用什么语言，所以它不负责措辞。凡是�
 
 ## 4. Agent 之间：工具调用
 
-Hub 给每个后端会话注入名为 `xsb` 的 MCP server（工具定义在 [tools.ts](../packages/hub/src/tools.ts)，行为在 [mailroom.ts](../packages/hub/src/mailroom.ts)）：
+Hub 给每个后端会话注入名为 `team` 的 MCP server（工具定义在 [tools.ts](../packages/hub/src/tools.ts)，行为在 Kernel，见 [KERNEL.md](KERNEL.md)）。工具名不能带点，所以方案里的 `team.dispatch_task` 在后端里是 `team/dispatch_task`、`mcp__team__dispatch_task`。
 
-| 工具 | 作用 |
-| - | - |
-| `list_agents` | 团队里有谁、各自能产出哪些资产类型、是否在忙、和自己已经对接过哪些话题 |
-| `send_message` | 给另一个 Agent 发消息；`interject: true` 时插话 |
-| `dispatch_task` | 派发任务，立即返回；`after` 指定前置任务。与团队的契约不符时在返回里提示（见 5.6） |
-| `complete_task` | 承接者交差：结束一个派给自己的任务，结果送回派发者。任务只以此结束（见 6） |
-| `await_tasks` | 登记"这几个任务的结果要一起拿到"，然后结束本轮 |
-| `start_job` | 把一次慢的工具调用放到后台执行（见 5.4） |
-| `put_asset` / `find_assets` / `get_asset` | 读写共享资产库（见 5.5） |
-| `load_skill` | 读取本角色的一个 skill（见 5.6） |
-| `get_task` / `cancel_task` | 查看 / 取消自己派发的任务。取消的任务和其他任务一样结束：结果照常送回，状态为 `cancelled`；承接者被告知，自己收手 |
-| `remember` / `recall` | 按话题读写长期记忆 |
+**协作是隐式的**：一个任务在执行方的一轮结束时结束，最后一条消息就是结果，通常不用调用任何工具（见 6）。**工具按任务上下文授予**，没有静态角色（[KERNEL.md](KERNEL.md) 8）：每个任务都让执行方能触达发起方；派发和给别人发消息要有授予（角色的团队策略 `grants`、用户在话里点名、派发方转授）。
+
+| 工具 | 何时有 | 作用 |
+| - | - | - |
+| `dispatch_task` | 派发授予 | 派发任务。`deliveryPref`：`sync`（在调用里等结果，最多 `limits.awaitSeconds`）、`wake`（结果到了唤醒自己）、`lazy`（默认，随下一轮附上）。`after` 指定前置任务；`grants` 转授能力。与团队的契约不符时在返回里提示（见 5.6） |
+| `report_result` | 执行 Agent 派来的任务时 | 提前、或以别的结果、或以失败交出任务。平常不需要 |
+| `ask` | 执行 Agent 派来的任务时（问别人要消息授予） | 问发起方一个问题，在调用里等答复 |
+| `subscribe` | 始终（只对自己发起的） | 让这些任务的结果唤醒自己；多个就是汇合，全部（或任一）结束后一起送来 |
+| `task_status` / `cancel_task` / `inbox` | 始终（只对自己发起的、自己的收件箱） | 查看（含结束原因、谁结束的、承接者是否已看到）/ 撤销（只为它而起的活一并撤掉，见 [TASK-GRAPH.md](TASK-GRAPH.md)）/ 读取等下一轮的通知 |
+| `send_message` / `broadcast` / `message_status` | 消息授予；或回复正在读的消息的发送方 | 给一个或几个 Agent 发消息，是否插话由中枢裁决；查对方的模型看到没有（台账） |
+| `list_agents` | 有任何协作能力时 | 团队里有谁、各自能产出哪些资产类型、是否在忙、对接过哪些话题、自己能对它做什么 |
+| `escalate_to_user` | 始终 | 告诉用户自己在等他决定 |
+| `start_job` | 始终 | 把一次慢的工具调用放到后台执行（见 5.4） |
+| `put_asset` / `find_assets` / `get_asset` | 始终 | 读写共享资产库（见 5.5） |
+| `load_skill` | 始终 | 读取本角色的一个 skill（见 5.6） |
+| `remember` / `recall` | 始终 | 按话题读写长期记忆 |
 
 身份不靠参数：每个会话有一个 Hub 发的 token（Hub 运行期间不变，重启后重发），它的桥接进程 `xsb-mcp-bridge` 带着这个 token 连回 Hub，工具调用天然知道是谁在调，也无法冒充别人。
 
 ### MCP 表达不了的部分
 
-MCP 只能"应答一次调用"，不能事后再对模型说话。任务结果、别人发来的消息、凑齐的一批结果，都发生在调用返回之后。这部分不走 MCP，而是回到 ACP：Hub 把它们作为一条带来源标注的 prompt（或插话）送进会话。也就是说，"工具调用返回一个句柄，结果稍后以消息形式到达"是通用机制，由邮箱 + `origin` + `steering` 组成，没有为它再造一个专用扩展。
+MCP 只能"应答一次调用"，不能事后再对模型说话。任务结果、别人发来的消息、凑齐的一批结果，都发生在调用返回之后。这部分不走 MCP，而是回到 ACP：它们都是写进收件方收件箱的消息，经唯一的投递管线（[KERNEL.md](KERNEL.md) 6）作为一条带来源标注的 prompt 送进会话（插进正在进行的工作，或成为一轮），或留在收件箱随下一轮附上。
 
-因此 **`dispatch_task` 从不阻塞**。没有"同步等待结果"的工具：一个卡在工具调用里的 Agent 无法响应用户，还会带来互相等待的死锁。
+例外是 `sync` 的派发和 `ask`：调用在一个时间窗内等结果，结果就是返回值，不花额外的一轮。窗口有上限（`limits.awaitSeconds`，默认 50 秒），因为后端会掐断长的工具调用，卡在调用里的 Agent 也回应不了用户；超时就返回回执，结果之后按 `wake` 送达。
 
 ## 5. 约束、汇合与记忆
 
@@ -277,7 +269,7 @@ MCP 只能"应答一次调用"，不能事后再对模型说话。任务结果�
 ```
 导演这一轮： dispatch_task → 编剧
             dispatch_task → 灯光师1
-            await_tasks([t1, t2], mode: "all", note: "两份都到了再定分镜；若剧本没定稿先退回")
+            subscribe([t1, t2], mode: "all", note: "两份都到了再定分镜；若剧本没定稿先退回")
             结束本轮                           ← 导演此时是空闲的
 用户 → 导演： "进度怎么样？"                    ← 普通的一轮，不是插话
 t1 完成                                        ← 结果被门扣住，不打扰导演
@@ -286,7 +278,7 @@ t2 完成                                        ← 门满足：两份结果 + 
 
 - **确定性的部分由 Hub 做**：`all` / `any` 的判定、结果的扣留与合并、崩溃后不丢不重。
 - **需要判断的部分交给模型**：`note` 是 Agent 写给自己的提醒和条件，随结果一起回来，由它推理"条件是否满足、要不要再派发"。
-- 没有登记门的任务，结果完成一个送达一个。两者是同一种邮件：单个结果就是"只含一个任务、没有汇合条件"的结果集。
+- 没有订阅的任务，结果按派发时的档位一个一个送达（`lazy` 的随下一轮附上）。两者是同一种消息：单个结果就是"只含一个任务、没有汇合条件"的结果集。
 
 ### 5.2 任务的启动约束
 
@@ -310,20 +302,20 @@ t2 完成                                        ← 门满足：两份结果 + 
 
 生成一段视频要几分钟，而 MCP 调用只能阻塞等待。`start_job { server, tool, arguments, title }` 让 Hub 代 Agent 去调它**所属角色的 MCP server** 里的那个工具，调用立即返回任务号。
 
-job 不是新机制，它就是"执行者是工具而不是 Agent 的任务"（`Task.tool`）：结果以普通的 `<xsb-task-result>` 送回，可以 `await_tasks` 汇合、`cancel_task` 取消、在 `xsb tasks` / `watch` 里看到。MCP server 不需要做任何配合。
+job 不是新机制，它就是"执行者是工具而不是 Agent 的任务"（`Task.tool`）：结果以普通的 `<xsb-task-result>` 送回，可以 `subscribe` 汇合、`cancel_task` 取消、在 `xsb tasks` / `watch` 里看到。MCP server 不需要做任何配合。
 
 - Hub 为每个 job 单独启动一次该 MCP server，调用完即关闭，所以只适合无状态的工具（提交生成、渲染、转码）。只支持 stdio 的 server。
 - **job 不重跑**。Hub 停止或崩溃时还在跑的 job，重启后标为 `failed` 并告知"结果未知、没有重跑"，由派发它的模型决定是否再提交。这与 Agent 任务的"至少一次"相反，因为一次生成可能已经花了钱。
 - job 没有 `after`；需要先后顺序时由模型在拿到前一个结果后再提交。
 - 取消 job（`cancel_task`）是对那次调用发 MCP 的 `notifications/cancelled`，再等工具应答（最多 15 秒）后才停掉 server：工具借此把它在外面发起的东西叫停，它的应答（例如"已在提供方取消，不计费"或"已经开始，仍会计费"）就是任务结果。取消晚了、调用照常完成的，任务按完成算。
-- 一个任务被取消时，它下游的后台任务和子任务由承接者自己撤：中枢不知道哪个后台任务是为哪个任务启动的（这是模型的判断），只告诉承接者"撤掉只为它启动的任务和后台任务"。
+- 一个任务被取消时，中枢按任务图把只为它启动的后台任务和子任务一并撤掉（[TASK-GRAPH.md](TASK-GRAPH.md)），并告诉承接者撤了哪些、哪些因还服务于别的任务而没撤。
 - **花费**：项目有一本账（`.xsb/spend.jsonl`，格式见 `@xsb/protocol` 的 `spend.ts`）。用户在设置里写入预算；生成工具每次调用前对照预算检查、调用后记一笔估算。预算是硬上限，执行在工具里，所以直接调用和后台任务都受约束。Hub 把账本路径告诉角色的工具服务，在花费变化后的下一轮开头告诉每个智能体"已花约 X / 预算 Y"，并通知客户端。
 - **同一个工具的后台任务同时最多跑 `limits.jobsAtOnce` 个**（默认 2），其余以 `queued` 在 Hub 里排队；排队中的被取消时不调用工具，一定不花钱。Hub 重启时，排队中的作业记为失败，并注明"未开始、未计费"。
-- 用户停掉做任务的那一轮，不等于取消任务：停的是这一轮，任务是派发者的。任务保持开启，它启动的后台任务照常进行，中枢不提醒；派发者收到一条说明。只有派发者 `cancel_task` 才把任务记为 `cancelled`。
+- 用户停掉一个智能体的工作，就停掉它正在做的任务（停止方是用户），连同为它启动的后台任务和子任务；派发者收到 `cancelled` 的结果（[KERNEL.md](KERNEL.md) 9）。
 - 用户直接给某个智能体发消息，而它手上有别人派来的任务时，Hub 在一小段时间（默认 20 秒）里把说的话攒起来，作为一条消息告诉派发者。只看任务关系，不认角色。
-- 由邮件开始的一轮失败了（比如后端没装），没有谁在等它，于是失败写进会话记录（`dev.xsb/turn_failed`），用户在这个智能体的对话里看得到。
+- 一轮失败了（比如后端没装、后端出错），失败写进会话记录（`dev.xsb/turn_failed`），用户在这个智能体的对话里看得到：开始它的那条消息的 `session/prompt` 可能早已应答。
 - job 由 Hub 发起，不经过后端的权限询问。后端只看得到 `start_job` 这一次调用。
-- 在任务里用 job：承接者 `start_job` 之后 `await_tasks` 再结束本轮，job 的结果回来后检查、交差（见 6）。摄影师生成镜头就是这样做的。
+- 在任务里用 job：承接者 `start_job` 之后结束本轮；job 的结果会唤醒它，任务在那之前不会随回合结束（见 6），结果回来的那一轮检查后结束即交差。摄影师生成镜头就是这样做的。
 
 ### 5.5 资产库与产物契约：一致性的唯一事实来源
 
@@ -417,14 +409,14 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
 
 - 每个 Agent 有一个**主会话**，用户和它对话在这里。同事派来的任务进它的**工作会话**：每个话题一个（`SessionRec.topic`，同一话题的返工仍回到原来的工作会话），这样一个会话不会背着整个项目的所有事项越来越长。同事的消息有对应话题的工作会话就进那里，否则进主会话。用户也可以另开会话（`--new`）。
 - 工作会话的上下文超过 `limits.sessionTokens`（默认 15 万，按后端报告的 `usage_update.used`）后不再接新活：同一话题的下一个任务进一个新的工作会话（`continues` 指向旧的），旧的做完手上的事。新会话第一轮拿到旧会话的交接（与换后端时同一套，边界记为 `renewed`）。不在任务进行中换。
-- 一个会话的模型已经完整拿到过的东西不再重复给：同一版本的输入资产只给引用，换了版本给全文并附上与它见过那版的逐行差异；同一版本的记忆笔记不再附。这只在后端会话还有它们时成立：任何边界和 Hub 重启都清空这份记录，之后照常全量给。前置任务的结果作为后续任务的输入时只附前 1500 字，其余用 `get_task` 取。
+- 一个会话的模型已经完整拿到过的东西不再重复给：同一版本的输入资产只给引用，换了版本给全文并附上与它见过那版的逐行差异；同一版本的记忆笔记不再附。这只在后端会话还有它们时成立：任何边界和 Hub 重启都清空这份记录，之后照常全量给。前置任务的结果作为后续任务的输入时只附前 1500 字，其余用 `task_status` 取。
 - 同一个智能体的同伴工作一次只跑一轮（不同话题的工作会话也排队）；派发时标了 `parallel` 的任务（`Task.parallel`）最多 `limits.sessionsAtOnce` 个工作会话同时跑（默认 2）。用户在主会话里说话不占名额，随时能得到回应。会话里排着的一轮等名额时，任务状态是 `queued`；别的工作会话一轮结束，等着的就被叫醒。
 - 桌面端把一个智能体的工作会话也接进它的对话栏，换会话处标一行"工作会话 · 话题"或"主对话"。
 - 一个会话一次只做一件事。用户输入、同事消息、任务、结果都进同一个队列，依次成为一轮。
-- **任务不绑在轮次上。** 承接者调 `complete_task(task_id, result, assets, failed)` 才结束一个任务，结果就是 `result`，交付物就是 `assets` 里点名的资产。哪一轮在做哪个任务、几个任务怎么合并，是模型的判断，代码不做关联。理由：派发者常常连派几次（第二次是修正第一次），一轮一任务时承接者会把旧的完整做一遍；把归属交给模型，修正、取代、取消都能在推理里处理，不必靠硬停。
-  - 中枢只管三件事。**核对**：有 `produces` 的任务，`assets` 里没有那种类型就不能以完成交差，只能 `failed`；只能交自己登记的资产；已结束的任务不能再交。**投递**：会话正在跑一轮时，新任务能插进去而不打断（这一轮还没交给后端，或后端原生支持插话）就插进去，否则排队；任务后面附上这个会话还开着的任务清单。**兜底**：一轮结束时，会话还有开着的任务（`running`），而没有任何东西会再叫醒它（没有排队的邮件或用户输入、没有自己的等待门、没有在跑的后台任务），就以一条消息提醒一次；提醒之后的那一轮仍是这样，就告诉派发者，附上它最后说的话。两次之间只要有别的东西叫醒过它，重新计数。中枢不替它结束任务：它可能在等中枢看不见的东西。用户按停的一轮不计。
-  - 任务状态：`queued`（在会话队列里）→ `running`（模型已拿到：轮次开始或插进了一轮）→ 结束。Hub 重启后，插进一轮却没做完的任务没有邮件会重送，启动时对这样的会话同样提醒一次。
-  - 后端出错、处理一个任务邮件的那一轮失败时，那个任务记为 `failed`。
+- **任务随回合结束（隐式完结）。** 执行方的一轮以 `end_turn` 结束时，它在这个会话里开着的任务就结束，最后一条 agent 消息就是结果；有 `produces` 的，交付物是它在任务创建后登记的那种类型的资产。例外是为任务启动、结果要唤醒它的工作（`wake`/`sync` 的子任务、后台任务）、或它的订阅还有没完的：那就等带回结果的那一轮结束。执行方也可以用 `report_result` 提前交、换一个结果交、或说做不了；显式的为准。（这取代了原来"只有 `complete_task` 能结束任务"的设计：任务完结不再依赖模型记得调用工具，漏调不会让任务悬挂。代价是同一轮里的几个任务以同一句话结束，几件事要分开交时用 `report_result`。）
+  - 中枢只管三件事。**核对**：有 `produces` 的任务，回合结束时没有那种类型的资产，就追问执行方（插进下一轮），最多两次，仍没有就以 `error` 结束（QualityGateHook）；`report_result` 时 `assets` 里没有那种类型就不能以完成交出，只能 `failed`；只能交自己登记的资产；已结束的任务不能再交。**投递**：会话正在工作、新任务又来自给了它手上工作的那一方时，插进去（v2：后端立即插入，或扣住到当前工作结束再插入，都不打断），否则排队；任务后面附上这个会话还开着的任务清单。**结束**：回合结束时按上面的规则结束任务。
+  - 任务状态：`queued`（在会话队列里）→ `running`（模型已拿到：轮次开始或插进了一轮）→ 结束。Hub 重启后，插进一轮却没做完的任务，其邮件会重新投递（至少一次）。
+  - 后端出错、一轮失败时，那一轮带来的任务和这个会话开着的任务记为 `failed`（`error`）；回合因模型上限或拒绝而结束时记为 `failed`，结果是它最后说的话。
 - 后端请求权限时，Hub 不做任何决定，一律转给人：先给正挂在该会话上的客户端，没有就给任意观察者，都没有就挂起等下一个客户端连上，期间该 Agent 状态显示为 `requires_action`。答不了的客户端（没有终端的脚本、重定向的 `watch`：它们不处理这个请求）被跳过，接着问其余的。只有一种情况 Hub 会代为拒绝：这一轮是某个客户端发起并且还在等它结束（脚本里的 `xsb send`），而此刻连着的客户端没有一个答得了，否则那个脚本会一直挂着。这包括对 xsb 自己协作工具的请求。想无人值守，在后端自己的设置里放开。
 
 ## 7. 存储
@@ -437,11 +429,13 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
   agents.jsonl                      Agent 及其 workspace
   sessions.jsonl                    会话 ↔ 后端会话
   tasks.jsonl  gates.jsonl          任务、汇合门
-  mailbox.jsonl                     Agent 间消息：enqueue / ack
+  mailbox.jsonl                     收件箱：Agent 间的消息与通知，enqueue / ack
+  ledger.jsonl                      台账：每条输入的去向（模型看没看到）
+  audit.jsonl                       审计：Kernel 的事件、否决、死信；只写不读
   wal.jsonl                         预写日志
   agents/<id>/instructions.md       这个 Agent 是谁、怎么工作（可手改）
   agents/<id>/memory.jsonl          它的笔记
-  agents/<id>/sessions/<sid>.jsonl  会话记录（用于 session/load 回放）
+  agents/<id>/sessions/<sid>.jsonl  会话记录（`session/resume` 带 `replayFrom` 时回放）
   agents/<id>/scratch/              它的草稿和中间文件
   shared/                           Agent 之间交接的零散文件
   assets.jsonl  assets/             资产库：索引与文件
@@ -452,7 +446,7 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
 - 单文件的修改就是追加一行；崩溃留下的半行在下次打开时丢弃。
 - 跨文件的修改走 WAL（[store.ts](../packages/store/src/store.ts)）：先把整组记录写进 `wal.jsonl` 并落盘，再逐个追加（每条带事务标记），最后写 commit。重启时对没有 commit 的事务补写缺失的记录。例如"任务完成"是一个事务：任务状态、确认原邮件、关门、投递合并结果、释放被它挡住的任务，要么全有要么全无。
 - 邮件是**至少一次**投递：一轮结束才 ack。Hub 停止或崩溃时没跑完的任务，重启后会重新执行。插话投递失败时退回为排队的下一轮，不会丢。
-- **也可以让它不接着做。** 停止 Hub 的一方可以留下一个标记（`run/abandon`，`stopHub(paths, true)`）：下一次启动的 Hub 看到它，就把没做完的一切放弃再开始（[mailroom.ts](../packages/hub/src/mailroom.ts) 的 `abandon`），标记随即删除。放弃是一个事务：未确认的邮件全部确认掉，没结束的任务记为 `interrupted`，还开着的汇合门关掉。不给派发者送结果，因为那本身就是一轮，会把用户不想继续的事又做起来；派发者和没送达的邮件的发件人，在它们下一轮的开头被告知（只在内存里，下一轮之前 Hub 再重启就不再提，状态仍在）。标记是留给下一个 Hub 的，不是对当前这个的请求，所以不管当前这个怎么结束（包括被直接杀掉）都算数。桌面应用在用户确认"仍然退出"时用它（GUI.md）；`xsb hub stop` 不用，仍是下次接着做。
+- **也可以让它不接着做。** 停止 Hub 的一方可以留下一个标记（`run/abandon`，`stopHub(paths, true)`）：下一次启动的 Hub 看到它，就把没做完的一切放弃再开始（[kernel.ts](../packages/hub/src/kernel.ts) 的 `abandon`），标记随即删除。放弃是一个事务：未确认的邮件全部确认掉，没结束的任务记为 `interrupted`（停止方是用户），还开着的汇合门关掉。不唤醒任何人，因为那本身就是一轮，会把用户不想继续的事又做起来；派发者、承接者和没送达的邮件的发件人各收到一条通知，留在收件箱，随它们下一轮附上。标记是留给下一个 Hub 的，不是对当前这个的请求，所以不管当前这个怎么结束（包括被直接杀掉）都算数。桌面应用在用户确认"仍然退出"时用它（GUI.md）；`xsb hub stop` 不用，仍是下次接着做。
 - 一个项目只有一个 Hub，因为 Hub 是这个项目日志的唯一写入者、Agent 进程的持有者、两个 socket 的监听者：两个 Hub 会各写各的日志、把同一封邮件跑两遍、互相抢走 socket。单例由内核保证，不靠文件内容：Hub 在运行期间持有 `run/hub.lock` 上的文件锁（[lock.ts](../packages/hub/src/lock.ts)），进程不管怎么结束（包括被强杀、断电）锁都随之释放，所以没有"残留的锁"要判断，也没有接管的竞争。同时启动的第二个 Hub 拿不到锁，在碰到 socket 和日志之前就退出。`run/hub.json` 只说明持锁的是谁（pid、启动时间），只在锁被持有时才作数：Hub 被强杀后它会留下，里面的 pid 可能已经是别的程序，`xsb hub status` / `stop` 不会把它当成 Hub。Node 没有自己的 `flock`，标准库里够得着的文件锁只有 SQLite 的：对一个空数据库开独占事务（`node:sqlite`），POSIX 上是 fcntl 锁，Windows 上是 LockFileEx。
 
 ## 8. 已验证与未验证
@@ -460,14 +454,15 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
 `npm test`（三个库各有自己的测试）：
 
 - `@xsb/store`：在事务的每一步模拟崩溃，恢复后全有或全无，恢复可重复执行。
-- `@xsb/hub`，端到端（真实 Hub、真实 socket、真实 MCP 桥，后端用脚本化的 mock ACP agent）：派发与结果回传、汇合门及等待期间的用户对话、`after` 依赖、两种插话路径、Agent 间插话、话题对口提示与记忆、权限转给人、无系统提示词能力的后端、重启后状态重建 / 历史回放 / 未完成任务重跑；五种后端错误码；取消任务；经 `@xsb/adapter` 封装的三方 agent（对话、被兜底插话、接任务：它不用工具，交不了差，被提醒一次后派发者收到说明）；角色（说明、MCP server、skill 目录与 `load_skill`）；后台任务（成功、失败、取消、重启后不重跑）；资产库（版本、文件复制、`inputs` 注入、`produces` 的 skill 注入与未交付提示）；任务里等待自己的后台任务（结果回来那一轮交差）；交差（`complete_task` 核对交付物、拒绝已结束的任务与别人的任务）；任务插进正在进行的一轮并附上开着的任务清单；角色的读写、删除保护、MCP 检查、系统说明预览、重启后新配置生效、删除 Agent 的通知、角色变更的通知、后端清单、资产新版本的通知；语言（项目取第一个声明的语言且之后不变、系统说明里的语言一节、预设团队按语言读取且各语言结构一致、报错带原因与事实并能按语言措辞）；声明了 `dev.xsb/origin` 的客户端在自己的输入成为一轮时收到回显（排队的、插话的），未声明的不收到；排队的消息按自己的标识改成插话后只执行一次；带放弃标记的启动不重跑任何东西、没结束的任务记为已中断、派发者在下一轮被告知；任务生命周期（有后台任务在跑时不提醒、没有东西会叫醒时提醒一次再告诉派发者、之后仍能交差、用户停掉一轮不取消任务、用户越过派发者时抄送、邮件开始的一轮失败写入会话记录、同样的等待只开一个门）；上下文边界与交接。
-- `@xsb/cli`：真实的后台 Hub。按需启动、经桥调用工具、开关参数解析、退出码、同一项目拒绝第二个 Hub、停止后状态保留。
+- `@xsb/hub`，Kernel 单测（不起任何进程）：统一收口与通知规则、裁决链否决与 fail-closed、级联与 `cascade.pre_propagate`、唯一投递管线的去向（工具返回、轮次、收件箱）、投递裁决（用户永不排队）、隐式完结与质检追问、台账的推进、观察者的隔离与死信、放弃。
+- `@xsb/hub`，端到端（真实 Hub、真实 socket、真实 MCP 桥，后端用脚本化的 mock ACP v2 agent，分立即插入与扣住两种）：派发与结果回传（`wake` 与默认的 `lazy`）、隐式完结、汇合（订阅）及等待期间的用户对话、`after` 依赖、用户的话进入扣住的与立即插入的两种后端、Agent 间插话、话题对口提示与记忆、权限转给人、无系统提示词能力的后端、重启后状态重建 / 历史回放 / 未完成任务重跑；五种后端错误码（含只说 v1 的后端）；取消任务；经 `@xsb/adapter` 封装的三方 agent（对话、工作中来的话被扣住后在同一轮送进、不用工具也能完成任务、被撤销时它的工作被停下并在确认后落账）；能力授予（没有授予时看不到协作工具、用户点名后才有）；角色（说明、MCP server、skill 目录与 `load_skill`）；后台任务（成功、失败、取消、重启后不重跑）；资产库（版本、文件复制、`inputs` 注入、`produces` 的 skill 注入与未交付提示）；任务里等待自己的后台任务（结果回来那一轮结束）；交出（`report_result` 核对交付物、拒绝已结束的任务；没有任务时不可用）；任务插进正在进行的一轮并附上开着的任务清单；角色的读写、删除保护、MCP 检查、系统说明预览、重启后新配置生效、删除 Agent 的通知、角色变更的通知、后端清单、资产新版本的通知；语言（项目取第一个声明的语言且之后不变、系统说明里的语言一节、预设团队按语言读取且各语言结构一致、报错带原因与事实并能按语言措辞）；声明了 `dev.xsb/origin` 的客户端在自己的输入成为一轮时收到回显（开始一轮的、插话的），未声明的不收到；用户在智能体工作时说的话插进这一轮、台账里从不排队；带放弃标记的启动不重跑任何东西、没结束的任务记为已中断、派发者在下一轮被告知；任务生命周期（等后台任务时回合结束不算完结、契约不满足时追问两次后失败、用户越过派发者时抄送、一轮失败写入会话记录、同样的订阅只开一个门）；用户停止即停掉该会话的任务、后端扣着的消息以 -32800 丢弃、已插入未处理的记为待处理；上下文边界与交接；`sync` 在调用里拿到结果与超时转为唤醒、`ask`、`inbox`、`broadcast`、用户撤任务、`message_status`、审计记录与否决。
+- `@xsb/cli`：真实的后台 Hub，经 ACP v2。按需启动、经桥调用工具（含能力授予）、开关参数解析、退出码、同一项目拒绝第二个 Hub、停止后状态保留。
 
-真实后端（claude-agent-acp 0.107.0，经 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` 环境变量接入）手工跑过一遍：四个 Agent，派发两个任务并 `await_tasks`、等待期间与派发者对话、结果合并送达、Hub 重启后 `session/resume` 恢复上下文、同话题的后续工作仍派给原来的同事、原生插话、`remember` 覆盖写笔记。这些只各跑了一次，没有自动化。那次是在后来的改动（配置拆分、去掉 `npx`、去掉权限策略、拆分为五个库、插话兜底下沉到 `Backend`）之前，改动后没有再用真实后端跑过。
+真实后端（claude-agent-acp 0.107.0，经 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` 环境变量接入）手工跑过一遍：四个 Agent，派发两个任务并汇合等待、等待期间与派发者对话、结果合并送达、Hub 重启后 `session/resume` 恢复上下文、同话题的后续工作仍派给原来的同事、原生插话、`remember` 覆盖写笔记。这些只各跑了一次，没有自动化，而且是在 ACP v1 时代：改为 ACP v2、隐式完结、能力授予之后，没有再用真实后端跑过。本机的 claude-agent-acp 0.107、codex-acp 2.6 只核对了 `initialize` 协商到 v2。
 
 未验证：
 
-- codex、gemini、grok 本机未安装，没有实际启动过。
+- 真实的 claude、codex 后端在 ACP v2 下的完整流程（插入回执、扣住、-32800、`tools/list_changed` 后是否重新拉取工具列表）没有跑过；codex 是否响应工具列表变化尤其未知（调用时仍会校验，越权调用会被拒绝）。
 - 话题与另一位同事不符时的提示：真实模型一直选对了人，提示只在 mock 测试里触发过。
 - 角色、后台任务、资产库只用 mock 后端和 mock 生成服务验证过。真实模型是否会按说明使用 `start_job`、`inputs`、`produces`，是否会在该用时调用 `load_skill`，是否会照系统说明里 "The team" 一节派发，没有验证。
 - 没有接过真实的生成服务（图像、视频）。
@@ -482,7 +477,8 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
 - CLI 的语言取自终端的环境变量，可能与系统语言不同（不少终端固定为 `en_US.UTF-8`）。
 - Agent 默认都在项目目录（`.xsb/` 的父目录）里工作，能直接用用户放在项目里的材料，也互相看得见对方的改动；同一目录里还有谁，写在各自的系统说明里。草稿和中间文件放在自己的 `agents/<id>/scratch/`，记忆、会话记录和资产由 Hub 经工具写进 `.xsb/`，与工作目录无关。对外 `session/new` 的 `cwd` 不改变 Agent 的工作目录。
 - Hub 面向本机单用户：能连上 socket 的客户端可以操作任何会话。
-- 在不支持原生 steering 的后端上插话，会中断它正在执行的工具调用。
+- 后端扣住的消息（codex）要等它当前的工作结束才进入；用户的话也一样，只是排在扣着的其余消息之前。
+- 用户意图的授予只认点名（id 或名字），不理解"找个人评审一下"这样的说法；统筹角色靠团队策略 `grants`。
 - 工具隔离只到 xsb 这一层：角色决定给哪些 MCP server，但后端自带的 shell / 文件工具和用户级配置（如 `~/.claude` 里登记的 MCP）对同后端的所有 Agent 都生效。要真正隔离，生成能力必须只能经角色的 MCP server 到达。
 - Agent 之间只传文本。图像、视频以资产路径传递，能不能"看"取决于后端模型和它自己的读文件工具。
 - 资产库没有删除和垃圾回收，每个版本都保留；视频会占空间。

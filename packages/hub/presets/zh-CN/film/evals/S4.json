@@ -12,7 +12,7 @@
   ],
   "expect": [
     {
-      "calls": "ask_user"
+      "calls": "escalate_to_user"
     },
     {
       "says": "过期"

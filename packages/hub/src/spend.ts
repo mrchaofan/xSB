@@ -32,6 +32,7 @@ export class Spending {
 
   /** A role's server, told where the ledger is and whom it works for. */
   withLedger(server: McpServer, agentId: string): McpServer {
+    if (server.type !== "stdio") return server;
     const env = (server.env ?? []).filter((e) => e.name !== SPEND_ENV && e.name !== AGENT_ENV);
     return { ...server, env: [...env, { name: SPEND_ENV, value: this.file }, { name: AGENT_ENV, value: agentId }] };
   }

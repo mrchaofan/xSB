@@ -41,10 +41,10 @@ export function readHubInfo(paths: Paths): HubInfo | null {
 
 /**
  * Tell the project's hub to stop; whether one was running. It stops in its own time: what it was in the middle
- * of is not acknowledged, so an agent's turn runs again on the next start, and a job does not (see mailroom.ts).
+ * of is not acknowledged, so an agent's turn runs again on the next start, and a job does not (see kernel.ts, `resume`).
  *
  * With `abandon`, the next start does not pick that up either: everything unfinished is given up
- * (`Mailroom.abandon`). That is a mark left for the next hub, not something asked of this one, so it holds
+ * (`Kernel.abandon`). That is a mark left for the next hub, not something asked of this one, so it holds
  * however this one ends.
  */
 export function stopHub(paths: Paths, abandon = false): boolean {

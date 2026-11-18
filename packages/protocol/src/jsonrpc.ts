@@ -27,6 +27,11 @@ export class RpcError extends Error {
   static notFound(what: string): RpcError {
     return new RpcError(-32002, `Resource not found: ${what}`);
   }
+  /** ACP v2: a prompt that was cancelled before it was inserted into the conversation. */
+  static cancelled(): RpcError {
+    return new RpcError(RpcError.CANCELLED, "Request cancelled");
+  }
+  static readonly CANCELLED = -32800;
 }
 
 export function errorMessage(e: unknown): string {

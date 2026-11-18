@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
-import { Agents, Connection, Roles, Teams } from "@xsb/protocol";
+import { Agents, Connection, PROTOCOL_VERSION, Roles, Teams } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 
 const backend = process.env.XSB_LIVE_BACKEND;
@@ -34,13 +34,14 @@ try {
   conn.onRequest("session/request_permission", () => ({ outcome: { outcome: "cancelled" } }));
   conn.onNotification("session/update", ({ update }) => {
     if (update.sessionUpdate === "agent_message_chunk") output += update.content.text ?? "";
-    if (update.sessionUpdate === "tool_call") {
-      calls.push(update.title ?? "");
+    // ACP v2: a tool call is a run of patches; the first that names it opens it.
+    if (update.sessionUpdate === "tool_call_update" && update.title && !calls.includes(`${update.toolCallId} ${update.title}`)) {
+      calls.push(`${update.toolCallId} ${update.title}`);
       console.log("tool:", update.title);
     }
     if (update.sessionUpdate === "user_message_chunk" && update.content.text?.includes("rendered: cross-turn probe")) reentered = true;
   });
-  await conn.request("initialize", { protocolVersion: 1, clientCapabilities: { _meta: { [Agents.capability]: {} } } });
+  await conn.request("initialize", { protocolVersion: PROTOCOL_VERSION, info: { name: "live-smoke", version: "0" }, capabilities: { _meta: { [Agents.capability]: {} } } });
   await conn.request(Teams.use, { id: "software" });
   const { role } = await conn.request(Roles.get, { name: "developer" });
   await conn.request(Roles.put, {
@@ -66,13 +67,13 @@ try {
       prompt: [
         {
           type: "text",
-          text: 'Run only this collaboration probe. Start exactly one background job with start_job: server="test-delay", tool="render", arguments={"prompt":"cross-turn probe","ms":30000}, title="cross-turn probe". Then await_tasks for that task_id and end your turn while waiting. When the result arrives in the later turn, respond with CROSS-TURN-DONE and the render result. Do not run shell commands, edit files, or dispatch other tasks.',
+          text: 'Run only this collaboration probe. Start exactly one background job with start_job: server="test-delay", tool="render", arguments={"prompt":"cross-turn probe","ms":30000}, title="cross-turn probe". Then subscribe to that task_id and end your turn while waiting. When the result arrives in the later turn, respond with CROSS-TURN-DONE and the render result. Do not run shell commands, edit files, or dispatch other tasks.',
         },
       ],
     });
     const until = Date.now() + 90000;
     while (!output.includes("CROSS-TURN-DONE") && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.ok(joined, "model opened an await_tasks gate");
+    assert.ok(joined, "model subscribed (a join was opened)");
     assert.ok(reentered, "the result entered a later turn");
     assert.match(output, /CROSS-TURN-DONE/);
     console.log("live smoke: passed");
