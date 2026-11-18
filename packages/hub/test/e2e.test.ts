@@ -305,7 +305,7 @@ const a = await newSession("a");
 // 7. Only the user's word goes into a peer's running work. An agent's waits, unseen, for the turn to end, even from
 // whoever gave the peer that work; to change that work, its dispatcher replaces it with a new task (onBusy "replace").
 {
-  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "c", title: "long take", instructions: "!sleep 1500\n!done LONG", topic: "interject" }));
+  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "c", title: "long take", instructions: "!sleep 750\n!done LONG", topic: "interject" }));
   await until("c at work", () => (hub.mainSession("c").current?.started ? hub.mainSession("c") : undefined));
   said.set(a, "");
   await prompt(a, call("send_message", { to: "c", content: "plan changed", topic: "interject" }));
@@ -318,7 +318,7 @@ const a = await newSession("a");
   await idle("c");
 
   // A second task of the same dispatcher waits behind the first, and both are done.
-  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "take 1", instructions: "!sleep 800\n!done TAKE-1", topic: "interject" }));
+  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "take 1", instructions: "!sleep 400\n!done TAKE-1", topic: "interject" }));
   await until("b at work", () => (hub.mainSession("b").current?.started ? hub.mainSession("b") : undefined));
   said.set(a, "");
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "take 2", instructions: "!done TAKE-2", topic: "interject" }));
@@ -327,7 +327,7 @@ const a = await newSession("a");
   await idle("b");
 
   // Replaced: the work is stopped and ends as superseded; the new task runs; the dispatcher is told of nothing.
-  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "old cut", instructions: "!sleep 5000\n!done OLD", topic: "interject" }));
+  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "old cut", instructions: "!sleep 2500\n!done OLD", topic: "interject" }));
   await until("b at work again", () => (hub.mainSession("b").current?.started ? hub.mainSession("b") : undefined));
   said.set(a, "");
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "new cut", instructions: "!done NEW", topic: "interject", onBusy: "replace" }));
@@ -1044,7 +1044,7 @@ const p = await newSession("p1");
   await conn.request(Agents.put, { agent: { id: "h1", backend: "mock" } });
   const s = await newSession("h1");
   await prompt(s, "!say ALPHA-REPLY");
-  await prompt(s, `!call dispatch_task {"deliveryPref":"wake","to":"b","title":"open work","instructions":"!sleep 2000","topic":"handoff"}`);
+  await prompt(s, `!call dispatch_task {"deliveryPref":"wake","to":"b","title":"open work","instructions":"!sleep 1000","topic":"handoff"}`);
 
   // Another backend: nothing to restore there, so the new one is told what was said and what is open.
   await conn.request(Agents.put, { agent: { id: "h1", backend: "steerable" } });
@@ -1443,7 +1443,7 @@ const p = await newSession("p1");
   const task = (id: string) => hub.state.tasks.get(id)!;
   const running = (id: string) => until(`${id} running`, () => task(id).status === "running");
   const give = (from: any, to: string, title: string, extra: any = {}) =>
-    dispatch(from, to, { title, topic: `graph ${title}`, instructions: "!sleep 3000", after: [], ...extra });
+    dispatch(from, to, { title, topic: `graph ${title}`, instructions: "!sleep 1500", after: [], ...extra });
   const work = (t: Task) => hub.live.get(t.to.sessionId)!;
   const ended = (id: string) => until(`${id} recorded`, () => isTerminalStatus(task(id).status));
   // Told: given in a turn, or notified to its inbox when its turn was stopped with the work.
@@ -1479,9 +1479,9 @@ const p = await newSession("p1");
 
   // Work started while a session had two tasks goes on while one of them does.
   // (g2 steers, and only the user's word goes into work under way: the user's task joins a's there.)
-  const P2 = give(mine, "g2", "both", { topic: "graph shared", instructions: "!sleep 8000" });
+  const P2 = give(mine, "g2", "both", { topic: "graph shared", instructions: "!sleep 4000" });
   await running(P2.id);
-  await conn.request("session/prompt", { sessionId: P2.to.sessionId, prompt: [{ type: "text", text: "!sleep 8000" }] });
+  await conn.request("session/prompt", { sessionId: P2.to.sessionId, prompt: [{ type: "text", text: "!sleep 4000" }] });
   const Q = await until("the user's task there", () => hub.kernel.userTask(P2.to.sessionId));
   await running(Q.id);
   const c = give(work(P2), "g4", "for both");
@@ -1532,10 +1532,10 @@ const p = await newSession("p1");
 
   // Longer than the call may wait: it returns a receipt, and the result wakes the dispatcher later.
   const config = loadProjectConfig(paths);
-  saveProjectConfig(paths, { ...config, limits: { ...config.limits, awaitSeconds: 1 } });
+  saveProjectConfig(paths, { ...config, limits: { ...config.limits, awaitSeconds: 0.2 } });
   said.set(s, "");
-  await prompt(s, call("dispatch_task", { deliveryPref: "sync", to: "b", title: "slow", instructions: "!sleep 1800\n!say SLOW", topic: "modes" }));
-  assert.match(said.get(s)!, /not finished within 1 seconds/);
+  await prompt(s, call("dispatch_task", { deliveryPref: "sync", to: "b", title: "slow", instructions: "!sleep 900\n!say SLOW", topic: "modes" }));
+  assert.match(said.get(s)!, /not finished within 0.2 seconds/);
   await until("slow result as a turn", () => (inputs.get(s) ?? []).some((i) => i.text.includes('title="slow"') && i.text.includes("SLOW")));
   saveProjectConfig(paths, config);
   await idle("w1");
@@ -1554,7 +1554,7 @@ const p = await newSession("p1");
 
   // lazy (the default): the result waits, also while the dispatcher works; the next turn brings it, or inbox now.
   said.set(s, "");
-  await prompt(s, [call("dispatch_task", { to: "b", title: "later", instructions: "!say LATER", topic: "modes" }), "!sleep 1200", call("inbox", { action: "ack" })].join("\n"));
+  await prompt(s, [call("dispatch_task", { to: "b", title: "later", instructions: "!say LATER", topic: "modes" }), "!sleep 600", call("inbox", { action: "ack" })].join("\n"));
   assert.match(said.get(s)!, /result\(inbox\): <xsb-task-result [^>]*title="later"[^]*LATER/);
   const later = (await tasks()).find((t) => t.title === "later")!;
   assert.ok(![...hub.state.mail.values()].some((m) => m.results?.taskIds[0] === later.id), "acknowledged");
@@ -1569,7 +1569,7 @@ const p = await newSession("p1");
   await until("both read it", () => received("b").some((i) => i.text.includes("wrap up by noon")) && received("c").some((i) => i.text.includes("wrap up by noon")));
 
   // The user stops any task: its dispatcher is notified, its executor's turn that ran for it is stopped.
-  await prompt(s, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "long", instructions: "!sleep 5000\n!say NEVER", topic: "modes" }));
+  await prompt(s, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "long", instructions: "!sleep 2500\n!say NEVER", topic: "modes" }));
   const long = await until("long running", async () => (await tasks()).find((t) => t.title === "long" && t.status === "running"));
   await conn.request(Tasks.cancel, { taskId: long.id });
   const stopped = await until("recorded", async () => (await tasks()).find((t) => t.id === long.id && t.status === "cancelled"));

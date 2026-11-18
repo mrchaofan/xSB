@@ -467,8 +467,9 @@ export class LiveSession {
         turn.inserted = true;
         for (const input of inputs) this.receipt(input, true);
         if (turn.waiting.length) this.submit(turn.waiting.splice(0));
-        // The work for it was reported before the answer, and is done.
-        else if (this.backendIdle && this.ranSince) this.idle();
+        // The work for it was reported before the answer, and is done; or the turn is being stopped, and the idle that
+        // came before the answer (in the same read, notifications are handled before answers) was the stop's.
+        else if (this.idleSince(turn)) this.idle();
       },
       (e) => {
         if (this.current !== turn) return;
@@ -501,7 +502,15 @@ export class LiveSession {
     if (!turn || turn.submitting) return;
     if (turn.waiting.length) return this.submit(turn.waiting.splice(0));
     if (!turn.inserted) this.end({ stopReason: "cancelled" });
-    else if (this.backendIdle && this.ranSince) this.idle();
+    else if (this.idleSince(turn)) this.idle();
+  }
+
+  /**
+   * The backend is idle, and that ends what the hub gave it: it went running after the last prompt, or the turn is
+   * being stopped (then nothing will run, and no running will come to say so).
+   */
+  private idleSince(turn: Turn): boolean {
+    return this.backendIdle && (this.ranSince || !!turn.cancelledBy);
   }
 
   /**
