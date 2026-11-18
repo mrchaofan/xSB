@@ -9,7 +9,7 @@
  * computed when it is asked for, and a call is checked again.
  *
  * Collaboration is implicit first: a task ends when its executor's turn does,
- * and its last words are the result, so most work needs no tool call at all.
+ * and the record of its work is the result, so most work needs no tool call at all.
  * The tools are for what a model has to decide.
  *
  * MCP can only answer a call; it cannot speak to the model later. What happens
@@ -293,7 +293,7 @@ export const TOOLS: Tool[] = [
   {
     name: "report_result",
     description:
-      "Report a task you were given: before your turn ends, or with a result other than your last words, or that it failed. Usually not needed: when your turn ends, the task ends with what you said last.",
+      "Report a task you were given: before your turn ends, or with a result other than the record of your work, or that it failed. Usually not needed: when your turn ends, the task ends with the record of your work on it.",
     inputSchema: schema(
       {
         task_id: str("Id of the task, from its <xsb-task>. May be left out when you have one task."),

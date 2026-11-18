@@ -122,6 +122,13 @@ const QUALITY_RETRIES = 2;
 /** How long a stop waits for a session to confirm that it stopped. */
 const STOP_CONFIRM_MS = 10_000;
 
+/** A task the user initiates with what they said. */
+function userTask(to: Addr, prompt: ContentBlock[], topic: string): Task {
+  const said = textOf(prompt).trim();
+  const title = said.split("\n")[0].slice(0, 80) || "(attachment)";
+  return { id: newId("t"), title, topic, instructions: said, initiator: USER, to, after: [], status: "queued", createdAt: now(), updatedAt: now() };
+}
+
 function taskMail(task: Task, prompt?: ContentBlock[], id = newId("m")): MailItem {
   const from: Origin = task.from ? { kind: "agent", ...task.from } : { kind: "user" };
   return { id, to: task.to, from, kind: "task", topic: task.topic, taskId: task.id, pref: "wake", ...(prompt ? { prompt } : {}), ts: now() };
@@ -267,9 +274,18 @@ export class Kernel {
    * (`messageId`). It is the root of whatever is done for it.
    */
   dispatchUser(to: Addr, prompt: ContentBlock[], messageId: string, topic: string): Task | Veto {
-    const said = textOf(prompt).trim();
-    const title = said.split("\n")[0].slice(0, 80) || "(attachment)";
-    return this.create({ id: newId("t"), title, topic, instructions: said, initiator: USER, to, after: [], status: "queued", createdAt: now(), updatedAt: now() }, false, { prompt, id: messageId });
+    return this.create(userTask(to, prompt, topic), false, { prompt, id: messageId });
+  }
+
+  /**
+   * What the user said that is a turn of its own without having been a task: it went into work that ended before
+   * the model took it, or a stop kept it from the model (docs/DESIGN.md 3.1, 5 and 8). It is the user's task now,
+   * given already.
+   */
+  adoptUser(to: Addr, prompt: ContentBlock[], topic: string): Task | Veto {
+    const task = this.create(userTask(to, prompt, topic), true);
+    if (!isVeto(task)) this.started(task.id);
+    return task;
   }
 
   /** Record a task; unless it is held back (or a job, which has nobody to be given to), give it to its executor. */
@@ -372,17 +388,18 @@ export class Kernel {
 
   /**
    * A turn of a session ended: what it means for the tasks the session has open (implicit completion). Ended
-   * normally, each task that nothing will bring it back to ends with the turn's last message as its result, as
-   * `task.pre_complete` judges it. Ended by the model's limits or refusal, they fail with what it said. Failed, they
-   * are errors. Stopped, they were stopped already, by whoever stopped the turn.
+   * normally, each task that nothing will bring it back to ends with the record of the work on it (`record`) as its
+   * result, as `task.pre_complete` judges it. Ended by the model's limits or refusal, they fail with it. Failed,
+   * they are errors. Stopped, they were stopped already, by whoever stopped the turn.
    */
-  turnEnded(sessionId: string, stopReason: StopReason, said: string, failure?: string): void {
+  turnEnded(sessionId: string, stopReason: StopReason, record: (task: Task) => string, failure?: string): void {
     for (const task of this.openTasks(sessionId)) {
       if (failure) {
         this.fail(task, failure);
         continue;
       }
       if (stopReason === "cancelled" || task.stopping) continue;
+      const said = record(task);
       if (stopReason !== "end_turn") {
         this.finish([{ task, status: "failed", result: `${said}\n(The turn ended: ${stopReason}.)`.trim(), reason: "failed", stopper: agentPrincipal(task.to.agentId) }]);
         continue;

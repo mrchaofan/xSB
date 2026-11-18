@@ -18,10 +18,15 @@
  *   !usage <n>            report that the conversation uses n tokens of context
  *
  * A prompt without directives is echoed. As ACP v2 has it, a prompt is answered with its message id once it is
- * inserted; work is reported with `state_update`. A prompt that comes while the agent works is held until the work
- * is done, and then run (as codex does); with --steering it is inserted at once and its directives run next, in the
- * same work (as claude does). A cancel answers what is held with -32800.
- * Flags: --steering (and reads images), --no-system-prompt, --no-resume (cannot restore a session),
+ * inserted; work is reported with `state_update`. Each directive is a step, as a tool call is for a model.
+ *
+ * A prompt that comes while the agent works is held until the work is done, and then run (as codex-acp does). With
+ * --steering it is inserted before the work's next step and its directives run next, in the same work; when the work
+ * has no step left, it is the next work (as claude-agent-acp does). With --steer-ext the agent also takes
+ * `_session/steering` (as codex-acp does): into running work, it answers "injected" and inserts the input before the
+ * next step, showing it with a message id of its own; input the work ends without is dropped, silently; with no work
+ * running, it answers "promptRequired". A cancel answers what is held with -32800 and drops what was steered.
+ * Flags: --steering (and reads images), --steer-ext, --no-system-prompt, --no-resume (cannot restore a session),
  * --auth-required, --protocol <n>.
  */
 import { spawn } from "node:child_process";
@@ -45,6 +50,8 @@ type Session = {
   servers: string[];
   /** Prompts held while it works. */
   held: Held[];
+  /** Input given with `_session/steering`, to insert before the next step. */
+  steered: any[][];
   /** The agent message being written, until a tool call. */
   message?: string;
 };
@@ -53,10 +60,11 @@ const conn = new Connection(process.stdin, process.stdout, "mock");
 const sessions = new Map<string, Session>();
 const flags = process.argv.slice(2);
 const steering = flags.includes("--steering");
+const steerExt = flags.includes("--steer-ext");
 let counter = 0;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
-  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [] };
+  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], steered: [] };
   const server = mcpServers.find((s) => s.name === "team");
   if (server) {
     const env = Object.fromEntries(server.env.map((e: any) => [e.name, e.value]));
@@ -166,11 +174,11 @@ const program = (source: string): string[] => {
   return lines.length ? lines : [`!say echo: ${source.replaceAll("\n", " | ")}`];
 };
 
-/** Insert a prompt into the conversation: it is answered, echoed, and its program is what the work does next. */
-function insert(session: Session, prompt: any[], answer: (r: { messageId: string }) => void): void {
+/** Insert input into the conversation: it is echoed, answered (a prompt), and its program is what the work does next. */
+function insert(session: Session, prompt: any[], answer?: (r: { messageId: string }) => void): void {
   const messageId = `user_${++counter}`;
   update(session, { sessionUpdate: "user_message", messageId, content: prompt });
-  answer({ messageId });
+  answer?.({ messageId });
   const text = textOf(prompt);
   session.prompt = session.running ? `${session.prompt}\n${text}` : text;
   session.lines.unshift(...program(given(session, text)));
@@ -182,8 +190,16 @@ async function work(session: Session): Promise<void> {
   session.cancelled = false;
   session.taskIds = [];
   update(session, { sessionUpdate: "state_update", state: "running" });
-  while (session.lines.length && !session.cancelled) await step(session, session.lines.shift()!);
+  while (session.lines.length && !session.cancelled) {
+    await step(session, session.lines.shift()!);
+    // Between two steps, what came meanwhile goes in, and runs next.
+    if (!session.lines.length || session.cancelled) break;
+    for (const prompt of session.steered.splice(0)) insert(session, prompt);
+    if (steering) for (const held of session.held.splice(0)) insert(session, held.prompt, held.resolve);
+  }
   session.lines = [];
+  // What was steered and did not get in before the work ended is dropped.
+  session.steered = [];
   session.running = false;
   session.message = undefined;
   update(session, { sessionUpdate: "state_update", state: "idle", stopReason: session.cancelled ? "cancelled" : "end_turn" });
@@ -204,7 +220,15 @@ conn.onRequest("initialize", (p) => ({
       ...(flags.includes("--no-system-prompt") ? {} : { systemPrompt: {} }),
     },
   },
+  ...(steerExt ? { _meta: { steering: { supported: true } } } : {}),
 }));
+conn.onRequest("_session/steering", (p) => {
+  const session = sessions.get(p.sessionId);
+  if (!steerExt || !session) throw new RpcError(-32601, "Method not found");
+  if (!session.running) return { outcome: "promptRequired", reason: "noRunningTurn" };
+  session.steered.push(p.prompt);
+  return { outcome: "injected" };
+});
 conn.onRequest("session/new", async (p) => ({ sessionId: (await open(`mock_${process.pid}_${++counter}`, p.mcpServers)).id }));
 conn.onRequest("session/resume", async (p) => {
   if (flags.includes("--no-resume")) throw new RpcError(-32002, "no such session");
@@ -220,11 +244,8 @@ conn.onRequest("session/prompt", (p) => {
     if (!session.running) {
       insert(session, p.prompt, resolve);
       void work(session);
-    } else if (steering) {
-      // Like claude: in at once, handled next, and the work goes on.
-      insert(session, p.prompt, resolve);
     } else {
-      // Like codex: held until the work is done.
+      // Held: like claude (--steering), until the work's next step; like codex, until the work is done.
       session.held.push({ prompt: p.prompt, resolve, reject });
     }
   });
@@ -233,6 +254,7 @@ conn.onNotification("session/cancel", (p) => {
   const session = sessions.get(p.sessionId);
   if (!session) return;
   for (const held of session.held.splice(0)) held.reject(RpcError.cancelled());
+  session.steered = [];
   if (!session.running) return;
   session.cancelled = true;
   session.wake?.();

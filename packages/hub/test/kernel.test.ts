@@ -179,23 +179,23 @@ const settle = () => hooks.settled();
   const child = give(B, C, "child", { deliveryPref: "wake" });
   assert.ok(child.parents!.includes(waiting.id));
   const plain = handed(give(A, B, "implicit"));
-  kernel.turnEnded("sb", "end_turn", "THE ANSWER");
+  kernel.turnEnded("sb", "end_turn", () => "THE ANSWER");
   assert.deepEqual([state.tasks.get(plain.id)!.status, state.tasks.get(plain.id)!.result], ["completed", "THE ANSWER"]);
   assert.equal(state.tasks.get(waiting.id)!.status, "running", "its child is to wake it");
   kernel.complete(handed(state.tasks.get(child.id)!), "completed", "", []);
-  kernel.turnEnded("sb", "end_turn", "still waiting");
+  kernel.turnEnded("sb", "end_turn", () => "still waiting");
   assert.equal(state.tasks.get(waiting.id)!.status, "running", "the child's result is on its way");
   // The turn that brings it reads it (the effectors acknowledge it), and ends.
   kernel.ack(results(B, child.id).map((m) => m.id));
-  kernel.turnEnded("sb", "end_turn", "NOW DONE");
+  kernel.turnEnded("sb", "end_turn", () => "NOW DONE");
   assert.equal(state.tasks.get(waiting.id)!.result, "NOW DONE");
 
   const contract = handed(give(A, B, "must make a frame", { produces: "frame" }));
-  kernel.turnEnded("sb", "end_turn", "nothing");
-  kernel.turnEnded("sb", "end_turn", "nothing");
+  kernel.turnEnded("sb", "end_turn", () => "nothing");
+  kernel.turnEnded("sb", "end_turn", () => "nothing");
   assert.equal(state.tasks.get(contract.id)!.status, "running", "asked again, twice");
   assert.equal([...state.mail.values()].filter((m) => m.to.sessionId === "sb" && m.content?.includes("is not done")).length, 2);
-  kernel.turnEnded("sb", "end_turn", "nothing");
+  kernel.turnEnded("sb", "end_turn", () => "nothing");
   assert.deepEqual([state.tasks.get(contract.id)!.status, state.tasks.get(contract.id)!.ended!.reason], ["failed", "error"]);
   console.log("ok 6 implicit completion and its quality gate");
 }
@@ -250,7 +250,7 @@ const settle = () => hooks.settled();
   const twice = kernel.stop(state.tasks.get(t.id)!, USER, { status: "cancelled", reason: "cancelled", result: "" });
   assert.ok(!isVeto(twice) && twice.stopping && !twice.with.length, "stopped once");
   assert.equal(state.ledger.get(mail.id)!.state, "inserted", "the ledger keeps what happened");
-  kernel.turnEnded("sb", "end_turn", "unrelated words");
+  kernel.turnEnded("sb", "end_turn", () => "unrelated words");
   assert.equal(state.tasks.get(t.id)!.status, "running", "a turn's end does not complete a task being stopped");
   // Another hub, from what is on disk.
   const again = new State(new Store(dir));
