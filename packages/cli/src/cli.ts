@@ -11,6 +11,7 @@ import type { HubConnection } from "./client.ts";
 import { evaluate, scenariosOf } from "./eval.ts";
 import { Printer } from "./printer.ts";
 import { language, t } from "./text.ts";
+import type { Shown } from "./text.ts";
 
 /** What went wrong, in the terminal's language. */
 const why = (e: unknown): string => explain(e, language);
@@ -351,6 +352,7 @@ async function send(args: Args, agentId: string | undefined, message: string): P
 }
 
 /** Who started a task: an agent, or the user. */
+const shownStatus = (task: Task): Shown => (task.ended?.reason === "superseded" ? "superseded" : task.status);
 const initiatorOf = (task: Task): string => (task.initiator.kind === "agent" ? task.initiator.agentId : t.user);
 
 /** Who does a task: an agent, or for a job the tool that runs. */
@@ -375,7 +377,7 @@ async function watch(args: Args): Promise<void> {
   conn.onNotification(Agents.update, (p) => void follow(p.agent));
   conn.onNotification(Agents.removed, (p) => printer.line(t.agentRemoved(p.id)));
   conn.onNotification(Tasks.update, ({ task }: { task: Task }) =>
-    printer.line(t.taskLine(task.id, initiatorOf(task), doer(task), task.title, task.status)),
+    printer.line(t.taskLine(task.id, initiatorOf(task), doer(task), task.title, shownStatus(task))),
   );
   const rl = process.stdin.isTTY ? readline.createInterface({ input: process.stdin, output: process.stdout }) : undefined;
   if (rl) servePermissions(conn, printer, (q) => new Promise((resolve) => rl.question(q, resolve)));
@@ -397,7 +399,7 @@ async function report(args: Args, what: string): Promise<void> {
       const { tasks } = await conn.request<{ tasks: Task[] }>(Tasks.list, { agentId: flag(args, "agent") });
       const shown = what === "tasks" ? tasks : tasks.filter((task) => !isTerminal(task.status));
       if (what === "status" && shown.length) console.log(t.openTasks);
-      for (const task of shown) console.log(`${task.id}  ${t.taskStatus[task.status].padEnd(10)} ${initiatorOf(task)} -> ${doer(task)}  [${task.topic}] ${task.title}`);
+      for (const task of shown) console.log(`${task.id}  ${t.taskStatus[shownStatus(task)].padEnd(10)} ${initiatorOf(task)} -> ${doer(task)}  [${task.topic}] ${task.title}`);
     }
     if (what === "assets") {
       const { assets } = await conn.request<{ assets: Asset[] }>(Assets.list, { type: flag(args, "type") });

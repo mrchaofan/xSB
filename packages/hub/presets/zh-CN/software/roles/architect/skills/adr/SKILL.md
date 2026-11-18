@@ -1,5 +1,6 @@
 ---
 description: 单独记录一个架构决策
+produces: adr
 ---
 # 架构决策记录（ADR）
 

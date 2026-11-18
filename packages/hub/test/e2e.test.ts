@@ -14,7 +14,7 @@ import type { Language, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { isVeto } from "../src/hooks.ts";
 import { isTerminal as isTerminalStatus } from "@xsb/protocol";
-import { agentPrincipal } from "../src/kernel.ts";
+import { USER, agentPrincipal } from "../src/kernel.ts";
 import type { LiveSession } from "../src/session.ts";
 import { bridgeServer } from "../src/mcp.ts";
 import { Paths } from "../src/paths.ts";
@@ -302,38 +302,43 @@ const a = await newSession("a");
   console.log("ok 6 the user's word steered in");
 }
 
-// 7. Whether a message goes into a peer's running work is the hub's call: it does when it comes from whoever gave the
-// peer the work it has open. Anyone else's waits, unseen, for the turn to end.
+// 7. Only the user's word goes into a peer's running work. An agent's waits, unseen, for the turn to end, even from
+// whoever gave the peer that work; to change that work, its dispatcher replaces it with a new task (onBusy "replace").
 {
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "c", title: "long take", instructions: "!sleep 1500\n!done LONG", topic: "interject" }));
   await until("c at work", () => [...hub.live.values()].find((l) => l.agentId === "c" && l.rec.topic === "interject" && l.current?.started));
   said.set(a, "");
   await prompt(a, call("send_message", { to: "c", content: "plan changed", topic: "interject" }));
-  assert.match(said.get(a)!, /"delivery": "interjected"/);
-  const got = await until("put into the turn", () => received("c").find((i) => i.text.includes("plan changed")));
-  assert.equal(got.origin.steered, true);
-  assert.equal(got.origin.agentId, "a");
-  // b gave c nothing: what it says waits, unseen, and is read as a turn of its own.
-  const by = hub.kernel.post({ to: addr(hub.findWorkSession("c", "interject")!), from: { kind: "agent", ...addr(hub.mainSession("b")) }, kind: "message", topic: "interject", content: "by the way", pref: "wake" });
-  assert.equal(by.route, "turn");
-  assert.equal(hub.state.ledger.get(by.item.id)!.state, "queued");
-  assert.ok(!received("c").some((i) => i.text.includes("by the way")));
-  const later = await until("read after the turn", () => received("c").find((i) => i.text.includes("by the way")));
+  assert.match(said.get(a)!, /"delivery": "queued behind the peer's current work"/);
+  assert.ok(!received("c").some((i) => i.text.includes("plan changed")));
+  const later = await until("read after the turn", () => received("c").find((i) => i.text.includes("plan changed")));
   assert.notEqual(later.origin.steered, true);
-  // b has no steering of its own: the dispatcher's word is held, not interrupting it, and given in the same turn
-  // once its prompt returns.
-  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "slow b", instructions: "!sleep 800\n!done SLOW-B", topic: "interject" }));
+  await until("the work done, not interrupted", async () => (await tasks()).find((t) => t.title === "long take" && t.status === "completed" && t.result === "LONG"));
+  await idle("c");
+
+  // A second task of the same dispatcher waits behind the first, and both are done.
+  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "take 1", instructions: "!sleep 800\n!done TAKE-1", topic: "interject" }));
   await until("b at work", () => [...hub.live.values()].find((l) => l.agentId === "b" && l.rec.topic === "interject" && l.current?.started));
   said.set(a, "");
-  await prompt(a, call("send_message", { to: "b", content: "hold on", topic: "interject" }));
-  assert.match(said.get(a)!, /"delivery": "interjected"/);
-  const held = await until("given after the prompt", () => received("b").find((i) => i.text.includes("hold on")));
-  assert.equal(held.origin.steered, true);
-  await until("the work done, not interrupted", async () => (await tasks()).find((t) => t.title === "slow b" && t.status === "completed" && t.result === "SLOW-B"));
+  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "take 2", instructions: "!done TAKE-2", topic: "interject" }));
+  assert.match(said.get(a)!, /queued: b is at work on t_\w+ \\"take 1\\" of yours/);
+  await until("both done", async () => (await tasks()).filter((t) => ["take 1", "take 2"].includes(t.title) && t.status === "completed").length === 2);
   await idle("b");
-  await idle("c");
+
+  // Replaced: the work is stopped and ends as superseded; the new task runs; the dispatcher is told of nothing.
+  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "old cut", instructions: "!sleep 5000\n!done OLD", topic: "interject" }));
+  await until("b at work again", () => [...hub.live.values()].find((l) => l.agentId === "b" && l.rec.topic === "interject" && l.current?.started));
+  said.set(a, "");
+  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "new cut", instructions: "!done NEW", topic: "interject", onBusy: "replace" }));
+  assert.match(said.get(a)!, /it replaces t_\w+ \\"old cut\\"/);
+  const old = await until("old cut superseded", async () => (await tasks()).find((t) => t.title === "old cut" && t.status === "cancelled"));
+  assert.deepEqual(old.ended, { reason: "superseded", stopper: { kind: "agent", agentId: "a" } });
+  await until("new cut done", async () => (await tasks()).find((t) => t.title === "new cut" && t.status === "completed" && t.result === "NEW"));
+  await idle("b");
   await idle("a");
-  console.log("ok 7 the hub decides who interjects");
+  assert.ok(!received("a").some((i) => i.text.includes(old.id)), "its dispatcher replaced it, and is not told");
+  await idle("c");
+  console.log("ok 7 only the user interjects; agents queue or replace");
 }
 
 // 8. Memory: the hub knows who handled a topic, the agent keeps notes, both survive.
@@ -931,7 +936,7 @@ const p = await newSession("p1");
   await chinese.request(Teams.use, { id: "film" });
   assert.equal((await chinese.request(Roles.get, { name: "director" })).role.preset.title, "导演");
   await chinese.request(Agents.put, { agent: { id: "ad", role: "art-director", backend: "mock" } });
-  assert.match((await chinese.request(Agents.get, { id: "ad" })).systemPrompt, /- casting: you, from brief, script, style_guide\n- character: you, from brief, script, casting/);
+  assert.match((await chinese.request(Agents.get, { id: "ad" })).systemPrompt, /- casting: you, from brief, script, style_guide\n- character: you, from brief, script, style_guide, casting/);
 
   // An error says why in a way a client can word for its reader.
   const refused = await chinese.request(Teams.drop, { id: "film" }).then(() => undefined, (e) => e);
@@ -1415,16 +1420,16 @@ const p = await newSession("p1");
   console.log("ok 32 a stop is the user's: the work and its tasks stop, what was not in never gets in");
 }
 
-// 33. Tasks are the assignee's to schedule. One that arrives while it works is put into its running turn, where the
-// backend takes that without being interrupted, with the tasks it has open there; each is finished on its own.
+// 33. A task that arrives while its assignee works, even from whoever gave it that work, waits for the work under way
+// and is a turn of its own after it; each is finished on its own.
 {
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "c", title: "cut 1", instructions: "!sleep 800\n!done CUT-1", topic: "edit" }));
   await until("c at work", () => [...hub.live.values()].find((l) => l.agentId === "c" && l.rec.topic === "edit" && l.current?.started));
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "c", title: "cut 2", instructions: "!done CUT-2", topic: "edit" }));
-  const given = await until("cut 2 given", () => received("c").find((i) => i.text.includes('title="cut 2"')));
-  assert.equal(given.origin.steered, true, "put into the running turn");
-  assert.match(given.text, /You still have these tasks open here; see whether this one changes any of them:\n- t_\w+ "cut 1" from a, topic "edit"/);
   const result = (title: string) => until(`result of ${title}`, () => inputs.get(a)!.find((i) => i.text.includes(`title="${title}"`) && i.text.includes("<xsb-task-result")));
+  const given = await until("cut 2 given", () => received("c").find((i) => i.text.includes('title="cut 2"')));
+  assert.notEqual(given.origin.steered, true, "not put into the running turn");
+  assert.equal([...hub.state.tasks.values()].find((t) => t.title === "cut 1")!.status, "completed", "given once cut 1 was done");
   assert.match((await result("cut 2")).text, /status="completed">\nCUT-2/);
   assert.match((await result("cut 1")).text, /status="completed">\nCUT-1/);
   // A task is reported by whom it was given to, and once: report_result is there only while the work is a task from
@@ -1436,7 +1441,7 @@ const p = await newSession("p1");
   await until("refused", () => answered("c").includes(`task ${cut.id} is completed already`));
   await idle("c");
   await idle("a");
-  console.log("ok 33 tasks join the work under way");
+  console.log("ok 33 a task waits for the work under way");
 }
 
 // 34. The task graph (docs/TASK-GRAPH.md): what a task is started for is what the session it comes from had open;
@@ -1485,17 +1490,18 @@ const p = await newSession("p1");
   assert.ok(!inputs.get(a)!.some((i) => i.text.includes(`task-id="${P.id}"`)), "a stopped P itself and is not told");
 
   // Work started while a session had two tasks goes on while one of them does.
-  // (g2 steers: the second task goes into the work under way, so that it has both open at once.)
+  // (g2 steers, and only the user's word goes into work under way: the user's task joins a's there.)
   const P2 = give(mine, "g2", "both", { topic: "graph shared", instructions: "!sleep 8000" });
   await running(P2.id);
-  const Q = give(mine, "g2", "other", { topic: "graph shared", instructions: "!sleep 8000" });
+  await conn.request("session/prompt", { sessionId: P2.to.sessionId, prompt: [{ type: "text", text: "!sleep 8000" }] });
+  const Q = await until("the user's task there", () => hub.kernel.userTask(P2.to.sessionId));
   await running(Q.id);
   const c = give(work(P2), "g4", "for both");
   assert.deepEqual([...c.parents!].sort(), [P2.id, Q.id].sort());
   assert.deepEqual(cancel(task(P2.id)).with, []);
   assert.ok(["queued", "running"].includes(task(c.id).status), "it goes on");
   await until("g2 told what goes on", () => has("g2", `Not cancelled, for it is also for other work of yours that goes on:\n- "for both" to g4 (${c.id})`));
-  cancel(task(Q.id));
+  assert.ok(!isVeto(hub.kernel.stop(task(Q.id), USER, { status: "cancelled", reason: "cancelled", result: "The user stopped it." })));
   await ended(c.id);
   assert.equal(task(c.id).status, "cancelled");
 

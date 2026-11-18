@@ -8,7 +8,7 @@ inputs: prd
 Register as `test_plan/<feature>`.
 
 ## 1. Scope
-What is tested and what is not (and why). The corresponding `prd` and `change`.
+What is tested and what is not (and why). The corresponding `prd`.
 
 ## 2. Risks and priorities
 List where problems are most likely, and decide the depth of testing accordingly.

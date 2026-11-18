@@ -1,7 +1,7 @@
 ---
 description: 执行测试并出具测试报告
 produces: test_report
-inputs: prd, change
+inputs: prd, test_plan, change
 ---
 # 测试报告
 

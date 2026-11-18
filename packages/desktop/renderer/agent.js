@@ -1,5 +1,5 @@
 // Agent 的创建、编辑、删除，以及它与角色页共用的两个对话框：重启确认、系统说明预览。
-import { OVER, STATE_TEXT, TASK_TEXT, agentOf, focusLane, nameOf, onAgent, roleOf, roleTitle, state } from "./app.js";
+import { OVER, STATE_TEXT, TASK_TEXT, agentOf, focusLane, initiatorOf, onAgent, roleOf, roleTitle, state } from "./app.js";
 import { avatarPicker } from "./avatars.js";
 import { fill, h } from "./dom.js";
 import { confirmDialog, field, input, openDialog, select } from "./form.js";
@@ -111,7 +111,7 @@ export async function editAgent(agent) {
     const sure = await confirmDialog(t("agent.delete.title", { name: agent.name }), [
       agent.state !== "idle" && h("p", {}, t("agent.delete.busy", { name: agent.name, state: agent.state })),
       pending.length > 0 && h("p", {}, t("agent.delete.pending", { count: pending.length })),
-      pending.length > 0 && h("ul", {}, ...pending.map((task) => h("li", {}, t("agent.delete.task", { title: task.title, from: nameOf(task.from.agentId), status: TASK_TEXT[task.status] })))),
+      pending.length > 0 && h("ul", {}, ...pending.map((task) => h("li", {}, t("agent.delete.task", { title: task.title, from: initiatorOf(task), status: TASK_TEXT[task.status] })))),
       h("p", {}, t("agent.delete.kept", { agent: agent.id })),
     ], t("agent.delete"));
     if (!sure) return false;

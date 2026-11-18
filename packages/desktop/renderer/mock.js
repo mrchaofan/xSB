@@ -91,8 +91,9 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
   const spec = (agentId, name, role, backend, description, state, instructions = "") =>
     ({ id: agentId, name, role, backend, description, state, instructions, workspace: "~/Films/dukou", createdAt: at(600) });
   const addr = (agentId) => ({ agentId, sessionId: `${agentId}-main` });
+  // from 为空：用户起的任务，没有派发方的会话
   const task = (taskId, title, from, to, status, produces, after = []) =>
-    ({ id: taskId, title, topic: "第三场", instructions: title, from: addr(from), to: addr(to), after, produces, status, createdAt: at(12), updatedAt: at(3) });
+    ({ id: taskId, title, topic: "第三场", instructions: title, initiator: from ? { kind: "agent", agentId: from } : { kind: "user" }, ...(from ? { from: addr(from) } : {}), to: addr(to), after, produces, status, createdAt: at(12), updatedAt: at(3) });
   const artifact = (artifactId, name, kind, agentId, mime, text, minutesAgo = 0) =>
     ({ id: artifactId, name, kind, agentId, path: `.xsb/shared/${name}`, url: dataUrl(mime, text), updatedAt: at(minutesAgo) });
   const md = (text) => [{ type: "text", text }];      // 内容：一组 ACP 内容块，见 ../src/content.ts
@@ -149,6 +150,7 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
       spec("gaffer2", "灯光师2", "gaffer", "claude", "核对器材与预算", "requires_action", "你主要负责器材和预算，布光图交给灯光师1。"),
     ],
     tasks: [
+      task("t0", "拍好第三场", null, "director", "running"),
       task("t1", "第三场改写为夜戏", "director", "writer", "completed", "script"),
       task("t2", "第三场夜景布光方案", "director", "gaffer1", "running", "lighting_plan", ["t1"]),
     ],

@@ -1,7 +1,7 @@
 ---
 description: 为一个人物制作设定表和定妆图
 produces: character
-inputs: brief, script, casting
+inputs: brief, script, style_guide, casting
 ---
 # 人物设定
 
@@ -29,7 +29,7 @@ inputs: brief, script, casting
 
 ## 4. 定妆图（必做）
 
-定妆是把选中的那张脸穿上戏里的造型。按技能 `reference-image` 出图，每张都把选中的候选作为参考图传入，并写明"保持图一的脸完全一致"。每张登记为 `reference/<人物名>-<视角>`：
+定妆是把选中的那张脸穿上戏里的造型。按技能 `reference-image` 出图，每张都把选中的候选作为参考图传入，并写明"保持图一的脸完全一致"。画风（写实、动画、质感）按 `style_guide` 第 1 节和第 5 节，背景和光线仍用干净平光。每张登记为 `reference/<人物名>-<视角>`：
 
 | 图 | 用途 |
 | - | - |

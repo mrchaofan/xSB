@@ -8,6 +8,9 @@
 import { languageOf } from "@xsb/protocol";
 import type { AgentState, Language, TaskStatus } from "@xsb/protocol";
 
+/** How a task's state is shown: its status, except that one replaced by a new task of its dispatcher says so. */
+export type Shown = TaskStatus | "superseded";
+
 export const language: Language = languageOf([process.env.LC_ALL, process.env.LC_MESSAGES, process.env.LANG]);
 
 const en = {
@@ -96,8 +99,8 @@ const en = {
   stopped: (reason: string) => `(${reason})`,
   failed: (why: string) => `(error: ${why})`,
   agentRemoved: (id: string) => `[${id}] removed`,
-  taskLine: (id: string, from: string, to: string, title: string, status: TaskStatus) => `[task ${id}] ${from} -> ${to} "${title}": ${status}`,
-  taskStatus: { blocked: "blocked", queued: "queued", running: "running", completed: "completed", failed: "failed", cancelled: "cancelled", interrupted: "interrupted" } satisfies Record<TaskStatus, string>,
+  taskLine: (id: string, from: string, to: string, title: string, status: Shown) => `[task ${id}] ${from} -> ${to} "${title}": ${status}`,
+  taskStatus: { blocked: "blocked", queued: "queued", running: "running", completed: "completed", failed: "failed", cancelled: "cancelled", interrupted: "interrupted", superseded: "replaced" } satisfies Record<Shown, string>,
   watching: (count: number) => `watching ${count} agents; ctrl-c to stop`,
   project: (dir: string, pid: number | undefined) => `project ${dir}, hub pid ${pid}`,
   openTasks: "open tasks:",
@@ -198,7 +201,7 @@ const zh: typeof en = {
   failed: (why) => `（出错：${why}）`,
   agentRemoved: (id) => `[${id}] 已删除`,
   taskLine: (id, from, to, title, status) => `[任务 ${id}] ${from} -> ${to}“${title}”：${zh.taskStatus[status]}`,
-  taskStatus: { blocked: "等待前置任务", queued: "排队中", running: "进行中", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断" },
+  taskStatus: { blocked: "等待前置任务", queued: "排队中", running: "进行中", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断", superseded: "已改派" },
   watching: (count) => `正在跟随 ${count} 个智能体；按 ctrl-c 停止`,
   project: (dir, pid) => `项目 ${dir}，中枢进程号 ${pid}`,
   openTasks: "未完成的任务：",

@@ -1,7 +1,7 @@
 ---
 description: Run the tests and produce a test report
 produces: test_report
-inputs: prd, change
+inputs: prd, test_plan, change
 ---
 # Test report
 
