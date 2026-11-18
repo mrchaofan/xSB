@@ -57,9 +57,8 @@ try {
 
   // 2. A turn, with a tool call through the MCP bridge of the background hub.
   assert.match(ok("send", "a", "hello"), /echo: hello/);
-  // Working with a peer is what the user's naming it gives (an agent's tools follow its work, @xsb/hub capabilities.ts).
-  assert.match(ok("send", "a", "!call list_agents {}"), /list_agents is not available/);
-  assert.match(ok("send", "a", "!call list_agents {}\ncheck with b"), /"id": "b"/);
+  // Every tool is there; what a's role may do with b is up to its role (none here: the user would be asked, @xsb/hub capabilities.ts).
+  assert.match(ok("send", "a", "!call list_agents {}"), /"id": "b"[^]*"you_may": \[\]/);
   ok("send", "a", `!call put_asset {"type":"style","name":"noir","description":"the look","content":"high contrast"}`);
   assert.match(ok("assets", "--type", "style"), /style\/noir\s+v1\s+a\s+the look/);
   console.log("ok 2 send, tools through the bridge");

@@ -61,6 +61,8 @@ fs.writeFileSync(
 const said = new Map<string, string>();
 const inputs = new Map<string, { text: string; origin: any }[]>();
 let permissionAsked = 0;
+/** What the test's client answers to a permission request; the first option when unset. */
+let permissionChoice: string | undefined;
 const removed: string[] = [];
 /** Role changes the hub announced: the role's name and description, or its name alone once removed. */
 const roleEvents: string[] = [];
@@ -115,7 +117,7 @@ async function connect(): Promise<Client> {
   conn.onNotification(Agents.asks, ({ agentId, question }) => asks.push(`${agentId}: ${question}`));
   conn.onRequest("session/request_permission", (p) => {
     permissionAsked++;
-    return { outcome: { outcome: "selected", optionId: p.options[0].optionId } };
+    return { outcome: { outcome: "selected", optionId: permissionChoice ?? p.options[0].optionId } };
   });
   return conn;
 }
@@ -353,24 +355,34 @@ const a = await newSession("a");
   await prompt(a, `!call list_agents {}`);
   assert.match(said.get(a)!, /"topics_with_you": \[\s*"scene 3 lighting"/);
   await idle("c");
-  // b has no role that lets it work with others: what the user asks of it gives it only what the user's words name.
+  // b has no role that lets it work with others (docs/KERNEL.md 8). It is listed every tool all the same; what its role
+  // is not allowed is put to the user: rejected, the call says so; allowed always, the project's config keeps it, and
+  // the user is not asked again.
   const bs = await newSession("b");
   await prompt(bs, "!tools");
-  assert.doesNotMatch(said.get(bs)!, /dispatch_task|list_agents|send_message/);
-  assert.match(said.get(bs)!, /escalate_to_user/);
-  await prompt(bs, `!call list_agents {}`);
-  assert.match(said.get(bs)!, /list_agents is not available in the work you are doing now/);
+  assert.match(said.get(bs)!, /tools: [^\n]*dispatch_task[^\n]*list_agents[^\n]*send_message[^\n]*escalate_to_user/);
+  const asked = permissionAsked;
+  permissionChoice = "no";
+  await prompt(bs, call("send_message", { to: "c", content: "hello" }));
+  assert.equal(permissionAsked, asked + 1);
+  assert.match(said.get(bs)!, /the user did not allow you to send a message to c\./);
+  permissionChoice = "always";
   said.set(bs, "");
-  await prompt(bs, `!tools\nwork this out with c`);
-  assert.match(said.get(bs)!, /tools: [^\n]*dispatch_task[^\n]*send_message/);
-  console.log("ok 8 memory and continuity, and what the work gives");
+  await prompt(bs, call("send_message", { to: "c", content: "hello" }));
+  assert.match(said.get(bs)!, /"delivery": /);
+  assert.deepEqual(loadProjectConfig(paths).permissions, { b: { message: ["c"] } });
+  permissionChoice = undefined;
+  await prompt(bs, call("send_message", { to: "c", content: "hello again" }));
+  assert.equal(permissionAsked, asked + 2, "allowed always: not asked again");
+  await idle("c");
+  console.log("ok 8 memory and continuity, and what a role may");
 }
 
 // 9. Permission: the hub decides nothing; a backend that asks is answered by a human.
 {
-  assert.equal(permissionAsked, 0);
+  const before = permissionAsked;
   await prompt(a, "!perm");
-  assert.equal(permissionAsked, 1);
+  assert.equal(permissionAsked, before + 1);
   assert.match(said.get(a)!, /perm: selected yes/);
 
   // A client that cannot answer (a script: it serves no such request) is passed over for one that can.
@@ -381,7 +393,7 @@ const a = await newSession("a");
   });
   const own = (await script.request("session/new", { cwd: project, mcpServers: [], _meta: { [Agents.sessionKey]: "b" } })).sessionId;
   await script.turn(own, "!perm");
-  assert.equal(permissionAsked, 2);
+  assert.equal(permissionAsked, before + 2);
   assert.match(heard, /perm: selected yes/);
   // With nobody connected who can, the turn the script waits for is not left hanging: its request is declined.
   conn.close();
