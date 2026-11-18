@@ -102,7 +102,6 @@ xsb team new film-mine --extends film
   "role": "director",
   "messages": ["让摄影师重出 1-1 和 1-2 的首帧，出好告诉我。"],
   "peers": ["cinematographer"],
-  "budget": 100,
   "spent": 0,
   "expect": [{ "calls": "dispatch_task" }, { "noCalls": "send_message" }]
 }

@@ -115,7 +115,7 @@ export type Snapshot = {
   transcripts: Record<string, Entry[]>;
   /** Agent id -> what it is doing, for those with a turn running. */
   activities: Record<string, Activity>;
-  /** What generation has cost so far, and the user's budget for it. */
+  /** What generation has cost so far. */
   spend: Spend;
   /** The page tabs. `null` on an Electron that cannot show web pages (no `<webview2>`). */
   pages: PageView[] | null;

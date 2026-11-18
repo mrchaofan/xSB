@@ -89,7 +89,8 @@ export class Hub {
     this.permissions = new Permissions(this);
     this.assets = new Assets(this);
     this.spending = new Spending(this.paths);
-    for (const rec of this.state.sessions.values()) this.track(new LiveSession(this, rec));
+    // One conversation per agent (docs/DESIGN.md): sessions a client once opened besides it are history, not live.
+    for (const rec of this.state.sessions.values()) if (rec.main) this.track(new LiveSession(this, rec));
   }
 
   log(line: string): void {
@@ -271,26 +272,21 @@ export class Hub {
     return session;
   }
 
-  createSession(agentId: string, clientMcp: McpServer[] = []): LiveSession {
+  /**
+   * The agent's one conversation: where the user, its peers and xsb reach it, and where it does all its work, one
+   * turn at a time. The hub is its only registry: it is made here, once, and never by a delivery or a backend.
+   * `clientMcp`: the MCP servers of the client that made it, passed on next to the hub's own.
+   */
+  mainSession(agentId: string, clientMcp: McpServer[] = []): LiveSession {
+    const rec = this.state.mainSession(agentId);
+    if (rec) return this.live.get(rec.id)!;
     this.agent(agentId);
-    const rec: SessionRec = {
-      id: newId("ses"),
-      agentId,
-      main: !this.state.mainSession(agentId),
-      createdAt: now(),
-      updatedAt: now(),
-    };
-    this.state.commit([ops.putSession(rec)]);
-    const session = this.track(new LiveSession(this, rec));
+    const made: SessionRec = { id: newId("ses"), agentId, main: true, createdAt: now(), updatedAt: now() };
+    this.state.commit([ops.putSession(made)]);
+    const session = this.track(new LiveSession(this, made));
     session.clientMcp = clientMcp;
     this.agentChanged(agentId);
     return session;
-  }
-
-  /** The agent's conversation (SessionRec.main): where the user, its peers and xsb reach it. */
-  mainSession(agentId: string): LiveSession {
-    const rec = this.state.mainSession(agentId);
-    return rec ? this.live.get(rec.id)! : this.createSession(agentId);
   }
 
   private track(session: LiveSession): LiveSession {

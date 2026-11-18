@@ -821,10 +821,12 @@ const p = await newSession("p1");
   for (const id of ["mine-1", "mine-2", "mine-3"]) await until(`${id} seen`, () => hub.state.ledger.get(id)?.state === "seen");
   const ledger = hub.state.store.read("ledger.jsonl").map((r: any) => r.entry).filter((e: any) => e.messageId.startsWith("mine-"));
   assert.ok(!ledger.some((e: any) => e.state === "queued"), "the user's word is never queued");
-  // A client that did not opt in is not sent its own input, as in plain ACP.
+  // An agent has one conversation: another client's new session of it is that one. A client that did not opt in is not
+  // sent its own input, as in plain ACP.
   const quiet = await newSession("c");
+  assert.equal(quiet, sessionId);
   await prompt(quiet, "!say THREE");
-  assert.equal(inputs.get(quiet), undefined);
+  assert.ok(!inputs.get(quiet)?.some((i) => i.text.includes("THREE")));
   echoing.close();
   console.log("ok 20 own input, echoed when it becomes a turn");
 }
@@ -839,7 +841,8 @@ const p = await newSession("p1");
   await conn.request("session/prompt", { sessionId: blind, prompt: picture });
   assert.match(said.get(blind)!, /echo: look \| \[An image \(image\/png\) was attached here; you cannot see images\.\] \| <resource_link/);
   // What was sent is what the transcript keeps, whatever the backend could read.
-  const kept = hub.state.store.read(Paths.transcript("b", blind)).map((r: any) => r.update).filter((u: any) => u.sessionUpdate === "user_message_chunk");
+  // b's one conversation has more before: the last input is this one.
+  const kept = hub.state.store.read(Paths.transcript("b", blind)).map((r: any) => r.update).filter((u: any) => u.sessionUpdate === "user_message_chunk").slice(-3);
   assert.deepEqual(kept.map((u: any) => u.content.type), ["text", "image", "resource_link"]);
   assert.equal(new Set(kept.map((u: any) => u.messageId)).size, 1);
   console.log("ok 21 images and files in input");
@@ -1094,31 +1097,29 @@ const p = await newSession("p1");
   console.log("ok 26 context boundaries and handoffs");
 }
 
-// 27. Spending: the user's budget goes into the project's ledger, which the generation tools are told of; agents hear
-// where the spending stands when it changed; jobs of one tool run a few at a time, and one that waits is cancelled for free.
+// 27. Spending: the generation tools are told where the project's ledger is; agents and clients hear what was spent
+// when it changed; jobs of one tool run a few at a time, and one that waits is cancelled for free.
 {
   const updates: any[] = [];
   conn.onNotification(SpendExt.update, ({ spend }) => updates.push(spend));
   assert.deepEqual((await conn.request(SpendExt.get)).spend, { spent: 0, unpriced: 0, dearest: {} });
-  await assert.rejects(conn.request(SpendExt.budget, { amount: -1 }), /amount must be a number/);
-  assert.equal((await conn.request(SpendExt.budget, { amount: 30 })).spend.budget, 30);
-  await until("the change announced", () => updates.some((u) => u.budget === 30), 5000);
 
   // A role's servers know where the ledger is and whom they work for; the hub's own and the app's need not.
   const served = hub.toolServers(hub.agent("r9")).find((t) => t.server.name === "gen")!.server;
   assert.ok(served.type === "stdio");
   assert.deepEqual(served.env!.filter((e) => e.name.startsWith("XSB_")), [{ name: "XSB_SPEND", value: paths.spend }, { name: "XSB_AGENT", value: "r9" }]);
 
-  // Told once, and again when it changed.
+  // Nothing to tell before anything was spent; told once it was, and not again until it changes.
   const s9 = await newSession("r9");
   await prompt(s9, "hello");
-  assert.match(said.get(s9)!, /Spent on generation in this project so far: about 0\.00 yuan of the budget of 30\.00 yuan/);
+  assert.doesNotMatch(said.get(s9)!, /Spent on generation/);
+  fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: "t", tool: "generate_video", output: "a.mp4", usage: "48437 tokens", amount: 2.23, basis: "test" }) + "\n");
+  await until("the change announced", () => updates.some((u) => u.spent === 2.23), 5000);
+  await prompt(s9, "and now");
+  assert.match(said.get(s9)!, /Spent on generation in this project so far: about 2\.23 yuan \(estimates\)\. So far generate_video up to about 2\.23 yuan a call\./);
   said.set(s9, "");
   await prompt(s9, "again");
   assert.doesNotMatch(said.get(s9)!, /Spent on generation/);
-  fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: "t", tool: "generate_video", output: "a.mp4", usage: "48437 tokens", amount: 2.23, basis: "test" }) + "\n");
-  await prompt(s9, "and now");
-  assert.match(said.get(s9)!, /about 2\.23 yuan of the budget of 30\.00 yuan \(estimates\)\. So far generate_video up to about 2\.23 yuan a call\./);
 
   // Three jobs of one tool: two run, one waits; the one that waits is cancelled without the tool being asked.
   const job = (title: string) => call("start_job", { server: "gen", tool: "render", arguments: { prompt: title, ms: 500 }, title });
@@ -1316,6 +1317,11 @@ const p = await newSession("p1");
   await until("one 1 running", async () => (await statusOf("one 1")) === "running");
   assert.equal(await statusOf("one 2"), "queued", "waits, though the topic differs");
   const bMain = hub.mainSession("b").id;
+  // Whoever opens a session of b gets that one; there is no other to talk to it in.
+  assert.equal(await newSession("b"), bMain);
+  const listed = (await conn.request("session/list", { _meta: { [Agents.sessionKey]: "b" } })).sessions;
+  assert.deepEqual(listed.map((x: any) => x.sessionId), [bMain]);
+  assert.equal([...hub.live.values()].filter((x) => x.agentId === "b").length, 1);
   await prompt(bMain, "are you there");
   assert.ok(received("b").find((i) => i.text === "are you there")!.origin.steered, "the user's word goes into the work under way");
   await until("both done", async () => (await statusOf("one 2")) === "completed");

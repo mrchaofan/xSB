@@ -96,12 +96,9 @@ function renderRail() {
   $("#agent-count").textContent = state.agents.length;
   $("#settings").setAttribute("aria-pressed", String(!!state.settings));
   $("#overview").setAttribute("aria-pressed", String(state.page === "overview"));
-  // 生成花费：没设预算时提醒去设置；设了就显示已花和预算，超出或有未计价的生成时标出来。
+  // 生成花费：已花的估算，有没能计价的生成时一并说出来。只是记账，不限制生成。
   const spend = state.spend ?? { spent: 0, unpriced: 0 };
-  $("#spend span").textContent = spend.budget === undefined
-    ? t("rail.spend.none")
-    : t(spend.unpriced ? "rail.spend.unpriced" : "rail.spend", { spent: spend.spent.toFixed(2), budget: spend.budget.toFixed(2), n: spend.unpriced });
-  $("#spend").dataset.alert = String(spend.budget === undefined || !!spend.unpriced || spend.spent >= spend.budget);
+  $("#spend span").textContent = t(spend.unpriced ? "rail.spend.unpriced" : "rail.spend", { spent: spend.spent.toFixed(2), n: spend.unpriced });
   const showCompleted = workspacePreferences(state.workspace?.path).showCompleted;
   const visibleTasks = state.tasks.filter((task) => showCompleted || !["completed", "cancelled"].includes(task.status));
 
@@ -426,7 +423,6 @@ async function renderArtifact() {
 $("#ws").onclick = () => showSettings(state.workspace ? "workspace" : "general");
 $("#settings").onclick = $("#title-settings").onclick = () => showSettings();
 $("#overview").onclick = showOverview;
-$("#spend").onclick = () => showSettings("workspace");
 /** 与中枢的连接是否还在，画成工作区名字旁的圆点。 */
 function showHub(up, why) {
   const dot = $("#hub");

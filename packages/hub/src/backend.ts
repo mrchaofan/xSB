@@ -116,7 +116,12 @@ export class Backend {
       }
     });
 
-    conn.onNotification("session/update", (p) => backend.sessions.get(p.sessionId)?.onBackendUpdate(p.update));
+    conn.onNotification("session/update", (p) => {
+      const session = backend.sessions.get(p.sessionId);
+      // Every session of a backend is one the hub opened (LiveSession.bind): anything else is not taken into account.
+      if (!session) return events.log(`update of session ${p.sessionId}, which the hub did not open: ignored`);
+      session.onBackendUpdate(p.update);
+    });
     conn.onRequest("session/request_permission", (p: PermissionRequest) => {
       const session = backend.sessions.get(p.sessionId);
       if (!session) throw RpcError.notFound(`session ${p.sessionId}`);

@@ -4,7 +4,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Paths, describeBackends, findProject, globalConfigPath, hubSocket, initProject, readHubInfo, stopHub } from "@xsb/hub";
-import { Agents, Assets, Backends, Roles, Tasks, Teams, exitCode, explain, isTerminal, text } from "@xsb/protocol";
+import { Agents, Assets, Backends, Boundaries, Roles, Tasks, Teams, exitCode, explain, isTerminal, text } from "@xsb/protocol";
 import type { AgentInfo, Asset, BackendInfo, McpServerCheck, RoleDetail, Connection, PermissionRequest, PermissionResponse, Task, TeamInfo, PresetProblem, Language } from "@xsb/protocol";
 import { connectHub } from "./client.ts";
 import type { HubConnection } from "./client.ts";
@@ -249,19 +249,16 @@ function printAgents(agents: AgentInfo[]): void {
 
 // ---- talking ----------------------------------------------------------------
 
-/** Open the agent's main session, or a new one. */
+/** Open the agent's conversation (it has one). `fresh`: its context is cleared first, so the model starts anew. */
 async function openSession(conn: HubConnection, agentId: string, fresh: boolean, history: boolean): Promise<string> {
   const meta = { [Agents.sessionKey]: agentId };
-  if (!fresh) {
-    const { sessions } = await conn.request("session/list", { _meta: meta });
-    const main = sessions.find((s: any) => s._meta?.[Agents.mainKey]);
-    if (main) {
-      await conn.request("session/resume", { sessionId: main.sessionId, cwd: main.cwd, mcpServers: [], ...(history ? { replayFrom: { type: "start" } } : {}) });
-      return main.sessionId;
-    }
-  }
-  const created = await conn.request("session/new", { cwd: process.cwd(), mcpServers: [], _meta: meta });
-  return created.sessionId;
+  const { sessions } = await conn.request("session/list", { _meta: meta });
+  const main = sessions.find((s: any) => s._meta?.[Agents.mainKey]);
+  const sessionId: string = main
+    ? (await conn.request("session/resume", { sessionId: main.sessionId, cwd: main.cwd, mcpServers: [], ...(history ? { replayFrom: { type: "start" } } : {}) }), main.sessionId)
+    : (await conn.request("session/new", { cwd: process.cwd(), mcpServers: [], _meta: meta })).sessionId;
+  if (fresh) await conn.request(Boundaries.clear, { sessionId });
+  return sessionId;
 }
 
 /**

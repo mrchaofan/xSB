@@ -106,11 +106,16 @@ const byWhom = (stopper: Principal, reason: EndReason): string =>
 /** How a task ends, as `finish` records it. */
 type End = { task: Task; status: TaskStatus; result: string; reason: EndReason; stopper: Principal; cause?: string };
 
-/** A stop that waits for sessions to confirm they stopped (`idle(cancelled)`) before it is recorded. */
-type PendingStop = { ends: End[]; quiet: Set<string>; notices: MailItem[]; sessions: Set<string>; timer: NodeJS.Timeout };
+/** A stop that waits for sessions to confirm they stopped (`idle(cancelled)`) before its tasks end. */
+type PendingStop = { taskIds: string[]; sessions: Set<string>; timer: NodeJS.Timeout };
 
-/** How a running job that is called off is to be recorded once its tool answers. */
-type Stopping = { stopper: Principal; reason: EndReason; cause?: string; quiet: boolean; why: string };
+/** The end a task that is being stopped comes to (`Task.stopping`). `said`: what its executor added. */
+const endOf = (task: Task, said = ""): End => {
+  const { status, reason, stopper, cause, result } = task.stopping!;
+  return { task, status, reason, stopper, ...(cause ? { cause } : {}), result: `${result} ${said}`.trim() };
+};
+/** Of tasks being stopped, those whose initiators are not to be told. */
+const quietOf = (tasks: Task[]): Set<string> => new Set(tasks.filter((t) => t.stopping?.quiet).map((t) => t.id));
 
 /** How often a turn that ended without what its task has to deliver is asked again, before the task fails. */
 const QUALITY_RETRIES = 2;
@@ -126,10 +131,7 @@ export class Kernel {
   readonly state: State;
   readonly hooks: KernelHooks;
   private recipient: (to: Addr) => Recipient;
-  private stopping = new Map<string, Stopping>();
   private pendingStops: PendingStop[] = [];
-  /** Tasks a pending stop takes: nothing releases them meanwhile. */
-  private doomed = new Set<string>();
   /** Task id -> how often its turn ended without what it has to deliver. */
   private qualityTries = new Map<string, number>();
 
@@ -380,7 +382,7 @@ export class Kernel {
         this.fail(task, failure);
         continue;
       }
-      if (stopReason === "cancelled" || this.doomed.has(task.id)) continue;
+      if (stopReason === "cancelled" || task.stopping) continue;
       if (stopReason !== "end_turn") {
         this.finish([{ task, status: "failed", result: `${said}\n(The turn ended: ${stopReason}.)`.trim(), reason: "failed", stopper: agentPrincipal(task.to.agentId) }]);
         continue;
@@ -404,10 +406,8 @@ export class Kernel {
   jobEnded(taskId: string, status: TaskStatus, result: string): void {
     const task = this.state.tasks.get(taskId);
     if (!task || isTerminal(task.status)) return;
-    const stop = this.stopping.get(taskId);
-    this.stopping.delete(taskId);
-    if (stop && status === "cancelled") {
-      this.finish([{ task, status, result: `${stop.why} ${result}`, reason: stop.reason, stopper: stop.stopper, cause: stop.cause }], [], [], stop.quiet ? new Set([task.id]) : undefined);
+    if (task.stopping && status === "cancelled") {
+      this.finish([endOf(task, result)], [], [], quietOf([task]));
     } else {
       this.finish([{ task, status, result, reason: status === "completed" ? "completed" : "failed", stopper: SYSTEM }]);
     }
@@ -424,6 +424,8 @@ export class Kernel {
    * work, of what of its own went, so that it stops working on that.
    */
   stop(root: Task, stopper: Principal, end: { status: "cancelled" | "failed"; reason: EndReason; result: string }): Veto | { stopping: boolean; with: Task[] } {
+    // A task ends once: a stop decided already is the one it ends by.
+    if (root.stopping) return { stopping: true, with: [] };
     const asked = this.hooks.decide("task.pre_stop", { task: root, stopper });
     if (isVeto(asked)) return asked;
     const propagate = this.hooks.decide("cascade.pre_propagate", { root, stopper, cascade: "spare" });
@@ -453,36 +455,36 @@ export class Kernel {
     // A session told just now of what went is not told of each of them again; one whose work all went, of none.
     const told = new Set([...notices.map((n) => n.to.sessionId), ...halted]);
     const quiet = new Set(doomed.filter((t) => same(stopper, t.initiator) || (t.from && told.has(t.from.sessionId))).map((t) => t.id));
-    const ends: End[] = [];
-    const acks: Op[] = [];
+    // The freeze: every task that goes is marked with the end it comes to, in one transaction with taking back its mail.
+    const frozen: Task[] = [];
+    const freeze: Op[] = [];
     const withdrawn: MailItem[] = [];
     const calledOff: Task[] = [];
     for (const task of doomed) {
       const isRoot = task === root;
       const why = isRoot ? end.result : `Cancelled with "${root.title}" (${root.id}), which ${cause}.`;
-      const reason: EndReason = isRoot ? end.reason : "cascaded";
       const status = isRoot ? end.status : "cancelled";
-      const base = { task, status, reason, stopper, ...(isRoot ? {} : { cause: root.id }) };
-      if (task.tool && task.status === "running") {
-        this.stopping.set(task.id, { stopper, reason, cause: base.cause, quiet: quiet.has(task.id), why });
-        calledOff.push(task);
-      } else if (task.tool) {
-        ends.push({ ...base, result: `${why} It had not started: it waited for its turn in xsb, nothing was submitted, nothing is billed.` });
-      } else {
-        const unread = [...this.state.mail.values()].filter((m) => m.kind === "task" && m.taskId === task.id);
-        acks.push(...unread.map((m) => ops.ack(m.id)));
-        withdrawn.push(...unread);
-        const more = status === "failed" ? "" : handed(task) ? ` ${task.to.agentId} had it, and was stopped.` : " It had not been handed over.";
-        ends.push({ ...base, result: `${why}${more}` });
+      let result = why;
+      if (task.tool && task.status === "running") calledOff.push(task);
+      else if (task.tool) result = `${why} It had not started: it waited for its turn in xsb, nothing was submitted, nothing is billed.`;
+      else {
+        // Its mail leaves the inbox, so that nothing gives it again; what is not in a conversation yet never will be.
+        const mail = [...this.state.mail.values()].filter((m) => m.kind === "task" && m.taskId === task.id);
+        freeze.push(...mail.map((m) => ops.ack(m.id)));
+        withdrawn.push(...mail.filter((m) => this.withdrawable(m)));
+        if (status !== "failed") result += handed(task) ? ` ${task.to.agentId} had it, and was stopped.` : " It had not been handed over.";
       }
+      const stopping: Task["stopping"] = { status, reason: isRoot ? end.reason : "cascaded", stopper, ...(isRoot ? {} : { cause: root.id }), result, ...(quiet.has(task.id) ? { quiet: true } : {}) };
+      frozen.push({ ...task, stopping, updatedAt: now() });
     }
+    freeze.push(...frozen.map(ops.putTask));
+    const ends = frozen.filter((t) => !calledOff.some((c) => c.id === t.id)).map((t) => endOf(t));
     if (!halted.size) {
-      this.finish(ends, acks, notices, quiet, withdrawn);
+      this.finish(ends, freeze, notices, quiet, withdrawn);
     } else {
-      // What has not reached anyone is taken back now; the rest is recorded once the sessions stopped.
-      if (acks.length) this.write(acks, { withdrawn });
-      for (const t of doomed) this.doomed.add(t.id);
-      const pending: PendingStop = { ends, quiet, notices, sessions: halted, timer: setTimeout(() => this.settleStop(pending), STOP_CONFIRM_MS) };
+      // The stop is recorded now; the tasks end once the sessions confirmed it (or on the next start of xsb).
+      this.write(freeze, { changed: frozen, mail: notices, withdrawn });
+      const pending: PendingStop = { taskIds: ends.map((e) => e.task.id), sessions: halted, timer: setTimeout(() => this.settleStop(pending), STOP_CONFIRM_MS) };
       this.pendingStops.push(pending);
       for (const task of doomed.filter((t) => handed(t) && halted.has(t.to.sessionId))) this.hooks.emit("task.stopping", task);
     }
@@ -503,8 +505,13 @@ export class Kernel {
     if (at < 0) return;
     this.pendingStops.splice(at, 1);
     clearTimeout(pending.timer);
-    for (const { task } of pending.ends) this.doomed.delete(task.id);
-    this.finish(pending.ends.map((e) => ({ ...e, task: this.state.tasks.get(e.task.id) ?? e.task })).filter((e) => !isTerminal(e.task.status)), [], pending.notices, pending.quiet);
+    this.endStopped(pending.taskIds);
+  }
+
+  /** Tasks being stopped end as their stop said. */
+  private endStopped(taskIds: string[]): void {
+    const tasks = taskIds.map((id) => this.state.tasks.get(id)).filter((t): t is Task => !!t?.stopping && !isTerminal(t.status));
+    if (tasks.length) this.finish(tasks.map((t) => endOf(t)), [], [], quietOf(tasks));
   }
 
   /**
@@ -514,17 +521,18 @@ export class Kernel {
    * mail to send: the user sees their end in the session and the task list. A `quiet` task's initiator is notified of
    * nothing: the join that waits for it waits for the rest only.
    */
-  private finish(ends: End[], acks: Op[] = [], notices: MailItem[] = [], quiet = new Set<string>(), withdrawn: MailItem[] = []): void {
+  private finish(ends: End[], first: Op[] = [], notices: MailItem[] = [], quiet = new Set<string>(), withdrawn: MailItem[] = []): void {
     const { state } = this;
     const ended = new Set(ends.map((e) => e.task.id));
     const done = (id: string): boolean => ended.has(id) || this.finished(id);
-    const list: Op[] = [...acks];
+    const list: Op[] = [...first];
     const mail: MailItem[] = [];
     const changed: Task[] = [];
     const gates = new Map(state.gates);
     const joined = new Set<string>();
     for (const { task, status, result, reason, stopper, cause } of ends) {
-      const finished: Task = { ...task, status, result, ended: { reason, stopper, ...(cause ? { cause } : {}) }, updatedAt: now() };
+      const { stopping: _, ...rest } = task;
+      const finished: Task = { ...rest, status, result, ended: { reason, stopper, ...(cause ? { cause } : {}) }, updatedAt: now() };
       list.push(ops.putTask(finished));
       changed.push(finished);
       if (!task.from || joined.has(task.id)) continue;
@@ -551,7 +559,7 @@ export class Kernel {
         list.push(ops.openGate(waits));
       }
     }
-    for (const held of releasable(state, ended).filter((t) => !this.doomed.has(t.id))) {
+    for (const held of releasable(state, ended).filter((t) => !t.stopping)) {
       const released: Task = { ...held, status: "queued", updatedAt: now() };
       list.push(ops.putTask(released));
       mail.push(taskMail(released));
@@ -597,6 +605,8 @@ export class Kernel {
   mark(messageId: string, state: LedgerState, about?: Receipt["about"]): void {
     const prior = this.state.ledger.get(messageId);
     if (prior && RANK[state] <= RANK[prior.state]) return;
+    // What got into the conversation is not said afterwards never to have: only a renewed session drops it unprocessed.
+    if (state === "discarded_unseen" && prior?.state === "inserted") return;
     if (!prior && !about) return;
     const entry: LedgerEntry = { ...(prior ?? about!), messageId, state, ts: now() };
     this.state.commit([ops.mark(entry)]);
@@ -690,8 +700,12 @@ export class Kernel {
     return { mail: mail.length, tasks: open.length };
   }
 
-  /** Pick up what the last stop left unfinished: mail is routed again; jobs are not run again (they may have cost money). */
+  /**
+   * Pick up what the last stop left unfinished: a stop that was decided ends its tasks (the turns it waited for died
+   * with xsb); mail is routed again; jobs are not run again (they may have cost money).
+   */
   resume(): void {
+    this.endStopped([...this.state.tasks.values()].filter((t) => t.stopping).map((t) => t.id));
     for (const task of [...this.state.tasks.values()]) {
       if (!task.tool || isTerminal(task.status)) continue;
       const result =
