@@ -1204,8 +1204,8 @@ const p = await newSession("p1");
 }
 
 // 32. A stop is Esc: what the hub still holds is discarded and recorded so (the user's messages that wait for a
-// turn); an interjection the backend was not given yet is given now and the turn goes on, until stopped again; an
-// interjection a backend with steering of its own took counts as seen.
+// turn); an interjection the backend was not given yet is given now and the turn goes on, unless stopped again first; an
+// interjection a backend with steering of its own took counts as seen; a turn for mail is not the user's to discard.
 {
   const socket = net.connect(paths.socket("acp"));
   await new Promise((resolve) => socket.once("connect", resolve));
@@ -1237,6 +1237,32 @@ const p = await newSession("p1");
   assert.deepEqual(seen, ["in stop-1", "in stop-3", "discarded stop-2: !say QUEUED", "out MID"]);
   const record = hub.state.store.read(Paths.transcript("a", s)).map((r: any) => r.update._meta?.[Discarded.key]?.messageId).filter(Boolean);
   assert.deepEqual(record, ["stop-2"], "the transcript keeps what was discarded");
+
+  // Stopped again before the interjection got there: it is dropped too, and the turn ends.
+  seen.length = 0;
+  const twice = watching.request("session/prompt", mine(s, "stop-8", "!busy 600\n!say LATE"));
+  await until("the turn running", () => hub.session(s).current?.started);
+  assert.equal((await watching.request(Steering.method, mine(s, "stop-9", "!say MID"))).outcome, "injected");
+  watching.notify("session/cancel", { sessionId: s });
+  watching.notify("session/cancel", { sessionId: s });
+  assert.deepEqual(await twice, { stopReason: "cancelled" });
+  await idle("a");
+  assert.deepEqual(seen, ["in stop-8", "in stop-9", "discarded stop-9: !say MID"]);
+
+  // Mail whose turn has not reached the backend yet is not the user's: it runs, without what the user steered in.
+  seen.length = 0;
+  const m = await open("b");
+  hub.mail.tell({ agentId: "b", sessionId: m }, undefined, "!say MAIL");
+  const mail = hub.session(m);
+  const mailId = mail.current!.req.item!.id;
+  assert.equal(mail.current!.started, false);
+  const steered = mail.steer([{ type: "text", text: "!say USER" }], { kind: "user", messageId: "stop-10" }, "start");
+  mail.cancel();
+  assert.equal((await steered).outcome, "injected");
+  await until("the mail answered", () => seen.includes("out MAIL"));
+  await idle("b");
+  assert.deepEqual(seen, [`in ${mailId}`, "in stop-10", "discarded stop-10: !say USER", "out MAIL"]);
+  assert.ok(!hub.state.mail.has(mailId), "the mail is acknowledged once its turn ran");
 
   // The dispatcher's cancel is not Esc: the turn goes on with what the user steered in, the task ends as cancelled.
   await watching.request("session/prompt", mine(s, "stop-6", `!call dispatch_task {"to":"b","title":"esc","instructions":"!busy 600\\n!say WORK","topic":"esc"}`));

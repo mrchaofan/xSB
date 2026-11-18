@@ -384,9 +384,10 @@ export const TurnFailure = { key: `${NS}/turn_failed` } as const;
  * one that was not (it waited for its turn) is shown for the first time, as discarded.
  *
  * A stop discards what the hub still holds: messages of the user's that wait for a turn, and a turn that had not
- * reached its backend yet. Interjections are not discarded: those a backend without steering of its own had not been
- * given yet are given to it right away and the turn goes on (as Esc does in Claude Code and Codex); one that a
- * backend with steering accepted ("injected") counts as seen, for ACP v1 has no way to tell more.
+ * reached its backend yet (for mail, only what the user steered into it: the mail is not theirs). Interjections are
+ * not discarded: those a backend without steering of its own had not been given yet are given to it right away and
+ * the turn goes on (as Esc does in Claude Code and Codex), unless it is stopped again before they got there; one
+ * that a backend with steering accepted ("injected") counts as seen, for ACP v1 has no way to tell more.
  */
 export const Discarded = { key: `${NS}/discarded` } as const;
 export type Discarded = { messageId: string; origin: OriginMeta; content: ContentBlock[] };

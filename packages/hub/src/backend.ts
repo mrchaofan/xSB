@@ -29,10 +29,15 @@ export type BackendCaps = {
   image: boolean;
 };
 
+/** A message steered into a turn, as it was given. */
+export type Steer = { prompt: ContentBlock[]; origin: OriginMeta };
+
 /** A `session/prompt` in flight, as the hub sees it: one turn, however often the backend is re-prompted. */
 type Run = {
   /** Messages to hand over once the interrupted prompt has returned. Until then the model has not seen them. */
-  steers: ContentBlock[][];
+  steers: Steer[];
+  /** A stop let the waiting `steers` through: a second one before they are handed over drops them. */
+  spared: boolean;
   cancelled: boolean;
 };
 
@@ -76,7 +81,7 @@ export class Backend {
    */
   async prompt(sessionId: string, prompt: ContentBlock[], origin: OriginMeta): Promise<StopReason> {
     prompt = this.readable(prompt);
-    const run: Run = { steers: [], cancelled: false };
+    const run: Run = { steers: [], spared: false, cancelled: false };
     this.runs.set(sessionId, run);
     try {
       for (;;) {
@@ -89,7 +94,8 @@ export class Backend {
           });
         if (run.cancelled) return "cancelled";
         if (run.steers.length === 0) return stopReason;
-        prompt = [text(STEER_CONTINUATION), ...run.steers.splice(0).flat()];
+        prompt = [text(STEER_CONTINUATION), ...run.steers.splice(0).flatMap((steer) => this.readable(steer.prompt))];
+        run.spared = false;
       }
     } finally {
       this.runs.delete(sessionId);
@@ -104,33 +110,38 @@ export class Backend {
   async steer(sessionId: string, prompt: ContentBlock[], origin: OriginMeta): Promise<"injected" | "interrupted" | "idle"> {
     const run = this.runs.get(sessionId);
     if (!run || run.cancelled) return "idle";
-    prompt = this.readable(prompt);
     if (this.caps.steering) {
       const answer = await this.conn
         .request<SteeringOutcome>(Steering.method, {
           sessionId,
-          prompt,
+          prompt: this.readable(prompt),
           _meta: { [Steering.metaKey]: { idleBehavior: "promptRequired" }, [OriginExt.key]: origin },
         })
         .catch(() => undefined);
       if (answer?.outcome === "injected") return "injected";
       if (this.runs.get(sessionId) !== run || run.cancelled) return "idle";
     }
-    run.steers.push(prompt);
+    run.steers.push({ prompt, origin });
     if (run.steers.length === 1) this.conn.notify("session/cancel", { sessionId });
     return "interrupted";
   }
 
   /**
    * Stop where the backend is, as Esc does in Claude Code and Codex. Messages steered in that it has not been given
-   * yet are not dropped: its prompt is being interrupted already to hand them over, and the turn goes on with them.
-   * Otherwise `prompt` answers "cancelled".
+   * yet are not dropped by the first stop: its prompt is being interrupted already to hand them over, and the turn
+   * goes on with them. A stop again before that drops them, and answers what it dropped; `prompt` answers "cancelled".
    */
-  cancel(sessionId: string): void {
+  cancel(sessionId: string): Steer[] {
     const run = this.runs.get(sessionId);
-    if (!run || run.steers.length) return;
+    if (!run || run.cancelled) return [];
+    if (run.steers.length && !run.spared) {
+      run.spared = true;
+      return [];
+    }
     run.cancelled = true;
-    this.conn.notify("session/cancel", { sessionId });
+    // With steers waiting, the prompt is being interrupted already.
+    if (!run.steers.length) this.conn.notify("session/cancel", { sessionId });
+    return run.steers.splice(0);
   }
 
   /** Start the backend `backendName` for the agent `name` and shake hands. */

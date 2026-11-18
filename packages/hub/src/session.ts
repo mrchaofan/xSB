@@ -48,10 +48,17 @@ const HANDOFF_ASSETS = 30;
 
 type Queued = TurnRequest & { done: Deferred<{ stopReason: StopReason }> };
 
+/** One message of input, as it is shown and, if the model never sees it, discarded (`Discarded` in @xsb/protocol). */
+type Input = Discarded;
+const inputOf = (origin: OriginMeta, content: ContentBlock[]): Input => {
+  const messageId = origin.messageId ?? newId("m");
+  return { messageId, origin: { ...origin, messageId }, content };
+};
+
 export type Turn = {
   req: Queued;
-  /** What the backend is prompted with. Messages steered in before that happens are added to it. */
-  prompt: ContentBlock[];
+  /** What the backend is prompted with: its own input, then what was steered in before it started. */
+  inputs: Input[];
   /** The backend has been prompted. */
   started: boolean;
   /**
@@ -63,8 +70,6 @@ export type Turn = {
   resumes?: string;
   /** Agent text since the last tool call: what the turn ends up saying. */
   lastText: string;
-  /** The input shown as part of this turn, by message id: its own prompt and what was steered in. */
-  shown: Map<string, { origin: OriginMeta; content: ContentBlock[] }>;
 };
 
 export class LiveSession {
@@ -294,19 +299,15 @@ export class LiveSession {
     }
   }
 
-  /** Show input as part of `turn`. `origin.messageId` names it; one is made up if it has none. */
-  private emitInput(turn: Turn, prompt: ContentBlock[], origin: OriginMeta, from?: Client): void {
-    const messageId = origin.messageId ?? newId("m");
-    turn.shown.set(messageId, { origin, content: prompt });
-    for (const content of prompt) {
-      this.emit({ sessionUpdate: "user_message_chunk", content, messageId, _meta: { [OriginExt.key]: origin } }, from?.echo ? undefined : from);
+  private emitInput({ messageId, origin, content }: Input, from?: Client): void {
+    for (const block of content) {
+      this.emit({ sessionUpdate: "user_message_chunk", content: block, messageId, _meta: { [OriginExt.key]: origin } }, from?.echo ? undefined : from);
     }
   }
 
   /** Record, and show, that the model never saw this input (see `Discarded` in @xsb/protocol). */
-  private discard(messageId: string, origin: OriginMeta, content: ContentBlock[]): void {
-    const discarded: Discarded = { messageId, origin, content };
-    this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: discarded } } as SessionUpdate);
+  private discard(input: Input): void {
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: input } } as SessionUpdate);
   }
 
   // ---- turns --------------------------------------------------------------
@@ -344,7 +345,8 @@ export class LiveSession {
   }
 
   private async run(req: Queued): Promise<void> {
-    const turn: Turn = { req, prompt: [...req.prompt], started: false, lastText: "", shown: new Map() };
+    const own = inputOf(req.origin, req.prompt);
+    const turn: Turn = { req, inputs: [own], started: false, lastText: "" };
     // Another task's turn leaves the stopped one for later; any other turn takes it up.
     if (this.resumes && !req.item?.taskId) {
       const resumed = this.hub.state.tasks.get(this.resumes);
@@ -357,7 +359,7 @@ export class LiveSession {
     this.current = turn;
     this.hub.mail.turnStarted(turn);
     this.hub.agentChanged(this.agentId);
-    this.emitInput(turn, req.prompt, req.origin, req.from);
+    this.emitInput(own, req.from);
 
     let stopReason: StopReason = "cancelled";
     let failure: unknown;
@@ -371,7 +373,7 @@ export class LiveSession {
         if (spend && spend !== this.toldSpend) this.prefaces.push(spend);
         this.toldSpend = spend;
         const preface = this.prefaces.splice(0).map((p) => text(p));
-        stopReason = await backend.prompt(this.rec.backendSessionId!, [...preface, ...turn.prompt], req.origin);
+        stopReason = await backend.prompt(this.rec.backendSessionId!, [...preface, ...turn.inputs.flatMap((input) => input.content)], req.origin);
       }
     } catch (e) {
       failure = this.explain(e, backend);
@@ -427,13 +429,13 @@ export class LiveSession {
   private async steerNow(prompt: ContentBlock[], origin: OriginMeta, whenIdle: "start" | "promptRequired", from?: Client): Promise<SteeringOutcome> {
     const turn = this.current;
     // Named before it goes anywhere: if the turn is stopped before the backend is given it, that is what is discarded.
-    const steered = { ...origin, messageId: origin.messageId ?? newId("m"), steered: true };
+    const steered = inputOf({ ...origin, steered: true }, prompt);
     let how: "injected" | "interrupted" | "idle" = "idle";
     if (turn && !turn.started && !turn.cancelledBy) {
-      turn.prompt.push(...prompt);
+      turn.inputs.push(steered);
       how = "injected";
     } else if (turn && this.backend) {
-      how = await this.backend.steer(this.rec.backendSessionId!, prompt, steered);
+      how = await this.backend.steer(this.rec.backendSessionId!, prompt, steered.origin);
     }
     if (how === "idle") {
       if (whenIdle === "promptRequired") return { outcome: "promptRequired", reason: "noRunningTurn" };
@@ -441,7 +443,7 @@ export class LiveSession {
       return { outcome: "startedNewTurn" };
     }
     if (how === "interrupted") this.hub.permissions.cancel(this);
-    this.emitInput(turn!, prompt, steered, from);
+    this.emitInput(steered, from);
     return { outcome: "injected" };
   }
 
@@ -449,20 +451,23 @@ export class LiveSession {
    * Stop, as Esc does in Claude Code and Codex. `by`: the user, or the dispatcher of the task the turn works on.
    *
    * What the hub still holds is discarded, and shown so: a turn that has not reached the backend yet, with what was
-   * steered into it, and, when the user stops, their own messages that wait for a turn (mail that waits stays, it is
-   * not theirs). A turn the backend runs is the backend's to stop (Backend.cancel): messages steered into it that
-   * it has not been given yet are handed over now, and the turn goes on with them.
+   * steered into it, and, when the user stops, their own messages that wait for a turn. Mail is not theirs: mail that
+   * waits stays, and so does a turn for mail that has not started; only what the user steered into it goes. A turn
+   * the backend runs is the backend's to stop (Backend.cancel): messages steered into it that it has not been given
+   * yet are handed over now and the turn goes on with them, unless it is stopped again before they got there.
    */
   cancel(by: "user" | "dispatcher" = "user"): void {
     if (by === "user") this.dropQueued();
     const turn = this.current;
     if (!turn) return;
     this.hub.permissions.cancel(this);
-    const again = !!turn.cancelledBy;
+    const mail = !turn.started && by === "user" && !!turn.req.item;
     // The dispatcher's cancel stands: a stop of the user's after it does not leave the task open (mailroom.ts).
-    if (turn.cancelledBy !== "dispatcher") turn.cancelledBy = by;
-    if (turn.started) return this.backend?.cancel(this.rec.backendSessionId!);
-    if (!again) for (const [id, input] of turn.shown) this.discard(id, input.origin, input.content);
+    if (!mail && turn.cancelledBy !== "dispatcher") turn.cancelledBy = by;
+    const dropped = turn.started
+      ? (this.backend?.cancel(this.rec.backendSessionId!) ?? []).map((steer) => inputOf(steer.origin, steer.prompt))
+      : turn.inputs.splice(mail ? 1 : 0);
+    for (const input of dropped) this.discard(input);
   }
 
   /** Drop the user's messages that wait for a turn: their `session/prompt` ends as cancelled. */
@@ -471,7 +476,7 @@ export class LiveSession {
     if (!dropped.length) return;
     this.queue = this.queue.filter((q) => q.item);
     for (const q of dropped) {
-      this.discard(q.origin.messageId ?? newId("m"), q.origin, q.prompt);
+      this.discard(inputOf(q.origin, q.prompt));
       q.done.resolve({ stopReason: "cancelled" });
     }
     if (!this.current) this.hub.agentChanged(this.agentId);
