@@ -108,7 +108,7 @@ export type Turn = {
 export class LiveSession {
   rec: SessionRec;
   /** What this session's tool bridge presents to the hub. Valid as long as the hub runs. */
-  readonly bridgeToken = newId("tok");
+  bridgeToken = newId("tok");
   readonly clients = new Set<Client>();
   current?: Turn;
   /** What `session/new` or `session/resume` of the backend answered: config options, commands. */
@@ -121,6 +121,9 @@ export class LiveSession {
   private queue: Input[] = [];
   /** What the user said that a stop kept from the model: it goes first when the next turn starts. */
   private carried: Input[] = [];
+  /** A user stop freezes dispatch until the old turn is confirmed idle. */
+  private userStopping = false;
+  private stopTimer?: NodeJS.Timeout;
   /** The id of the input the backend showed last. */
   private echoed?: string;
   private backend?: Backend;
@@ -157,6 +160,10 @@ export class LiveSession {
   }
   get busy(): boolean {
     return !!this.current || this.queue.length > 0;
+  }
+
+  get acceptsTools(): boolean {
+    return !this.userStopping && !this.current?.cancelledBy;
   }
 
   /** The agents whose chat this session is reading in its running turn: it may answer them (capabilities.ts). */
@@ -434,7 +441,7 @@ export class LiveSession {
    * model goes first, as a turn of its own, once something else is to run (docs/DESIGN.md 3.1, 8).
    */
   pump(): void {
-    if (this.current || !this.queue.length) return;
+    if (this.userStopping || this.current || !this.queue.length) return;
     if (this.carried.length) {
       const [first, ...more] = this.carried.splice(0);
       return void this.run(this.users(again(first)), more);
@@ -472,11 +479,13 @@ export class LiveSession {
    */
   private send(batch: Input[]): void {
     const turn = this.current!;
+    if (turn.cancelledBy) return;
     const backend = this.backend;
     if (!backend) return this.end({ stopReason: "error", failure: new Error("the agent program is gone") });
     const sessionId = this.rec.backendSessionId!;
     const content = [...this.prefaces.splice(0).map((p) => text(p)), ...batch.flatMap((i) => i.content)];
     const prompt = (): Promise<boolean> => {
+      if (this.current !== turn || turn.cancelledBy) return Promise.reject(RpcError.cancelled());
       for (const input of batch) input.sent = "prompt";
       return backend.prompt(sessionId, content, batch[0].origin).then(() => true);
     };
@@ -547,6 +556,8 @@ export class LiveSession {
     if (!turn || !this.idleSince(turn)) return;
     // The work that ended was not this turn's: the backend has not taken its first input yet.
     if (!turn.inserted && !turn.cancelledBy) return;
+    // A prompt receipt can follow idle. Settle its real insertion outcome before discarding it for user stop.
+    if (this.userStopping && turn.inputs.some((i) => i.sent === "prompt" && !i.in)) return;
     const { stopReason, error } = this.lastStop;
     if (stopReason === "error") return this.end({ stopReason, failure: new RpcError(error?.code ?? -32603, error?.message ?? "the agent failed", error?.data) });
     this.end({ stopReason });
@@ -585,6 +596,7 @@ export class LiveSession {
   private leave(input: Input): void {
     this.drop(input);
     input.sent = undefined;
+    if (this.userStopping) return this.discard(input);
     if (users(input)) return void this.carried.push(input);
     if (!input.item || !this.hub.state.mail.has(input.item.id)) return this.discard(input);
     this.queue.unshift(again(input));
@@ -619,6 +631,7 @@ export class LiveSession {
     }
     this.state("idle", end);
     turn.done.resolve(end);
+    this.releaseUserStop(false);
     if (next.length) return this.resume(next);
     this.renewIfLong();
     this.pump();
@@ -667,6 +680,51 @@ export class LiveSession {
     if (turn.started && turn.inserted) this.send([input]);
     else turn.held.push(input);
     return input;
+  }
+
+  /** Snapshot before committing cancellation; incoming work after this point is a new request. */
+  beginUserStop(): { pending: string[]; sent: string[]; inserted: string[] } | undefined {
+    if (this.userStopping) return undefined;
+    this.userStopping = true;
+    const inputs = [...this.queue, ...this.carried, ...(this.current?.inputs ?? [])];
+    return {
+      pending: inputs.filter((i) => !i.in).map((i) => i.messageId),
+      sent: inputs.filter((i) => !i.in && i.sent).map((i) => i.messageId),
+      inserted: inputs.filter((i) => i.in).map((i) => i.messageId),
+    };
+  }
+
+  releaseUserStop(pump = true): void {
+    this.userStopping = false;
+    if (this.stopTimer) clearTimeout(this.stopTimer);
+    this.stopTimer = undefined;
+    if (pump) this.pump();
+  }
+
+  /** Persistent mail/tasks were withdrawn already. Retire local copies and stop the backend last. */
+  cancelUserWork(): void {
+    for (const input of [...this.queue.splice(0), ...this.carried.splice(0)]) this.discard(input);
+    const turn = this.current;
+    if (!turn) return this.releaseUserStop();
+    turn.cancelledBy = "user";
+    for (const input of turn.inputs.filter((i) => !i.in && !i.sent)) {
+      this.drop(input);
+      this.discard(input);
+    }
+    this.hub.permissions.cancel(this);
+    if (!turn.started) return this.end({ stopReason: "cancelled" });
+    this.stopTimer = setTimeout(() => {
+      if (this.current !== turn) return;
+      this.hub.log(`${this.agentId}/${this.id}: user stop timed out; closing the old backend`);
+      // Close the transport before a new turn can bind: old replies and tools must not reach new work.
+      this.hub.rotateBridge(this);
+      this.hub.backends.stop(this.agentId);
+      this.backend?.stop();
+      this.backend = undefined;
+      this.end({ stopReason: "cancelled" });
+    }, 10_000);
+    this.backend?.cancel(this.rec.backendSessionId!);
+    this.settle();
   }
 
   /**

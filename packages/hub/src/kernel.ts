@@ -30,7 +30,7 @@ import { ledgerHook } from "./ledger.ts";
 import { abandonNotice, contractReminder, endNotice } from "./prompts.ts";
 import type { Gate, MailItem, State } from "./state.ts";
 import { ops } from "./state.ts";
-import { doom, releasable } from "./task-graph.ts";
+import { doom, doomMany, releasable } from "./task-graph.ts";
 import { newId, now } from "./util.ts";
 
 /**
@@ -196,8 +196,9 @@ export class Kernel {
   private deliveryPolicy({ to, from, item }: Delivery): Route {
     const r = this.recipient(to);
     const results = item.results;
-    if (results && !results.mode && r.awaits(results.taskIds[0])) return "return";
     if (!r.exists) return "drop";
+    if (results && (item.workGeneration ?? 0) < this.generation(to.sessionId)) return "inbox";
+    if (results && !results.mode && r.awaits(results.taskIds[0])) return "return";
     if (r.busy && (from.kind === "user" || item.steer)) return "interject";
     return item.pref === "lazy" ? "inbox" : "turn";
   }
@@ -209,9 +210,13 @@ export class Kernel {
     return [...this.state.tasks.values()].filter((t) => !t.tool && t.to.sessionId === sessionId && t.status === "running");
   }
 
+  generation(sessionId: string): number {
+    return this.state.sessions.get(sessionId)?.workGeneration ?? 0;
+  }
+
   /** The user's task of a session that has not ended: what the user says there belongs to it. */
   userTask(sessionId: string): Task | undefined {
-    return [...this.state.tasks.values()].find((t) => t.initiator.kind === "user" && t.to.sessionId === sessionId && !isTerminal(t.status));
+    return [...this.state.tasks.values()].find((t) => t.initiator.kind === "user" && t.to.sessionId === sessionId && !isTerminal(t.status) && !t.stopping);
   }
 
   /** Mail of a session that waits in its inbox for its next turn. */
@@ -249,7 +254,7 @@ export class Kernel {
     input: { title: string; topic: string; instructions: string; after: string[]; produces?: string; inputs?: string[]; deliveryPref?: DeliveryPref },
   ): Task | Veto {
     const held = input.after.some((id) => !this.finished(id));
-    const parents = this.openTasks(from.sessionId).map((t) => t.id);
+    const parents = this.openTasks(from.sessionId).filter((t) => !t.stopping).map((t) => t.id);
     const { deliveryPref, ...rest } = input;
     return this.create(
       {
@@ -259,6 +264,7 @@ export class Kernel {
         ...(deliveryPref && deliveryPref !== "lazy" ? { deliveryPref } : {}),
         ...(parents.length ? { parents } : {}),
         from,
+        workGeneration: this.generation(from.sessionId),
         to,
         status: held ? "blocked" : "queued",
         createdAt: now(),
@@ -298,7 +304,7 @@ export class Kernel {
 
   /** A job: one call of a tool of the dispatcher's, run in the background (jobs.ts). Its result wakes the dispatcher. */
   createJob(from: Addr, input: { title: string; topic: string; tool: NonNullable<Task["tool"]> }): Task | Veto {
-    const parents = this.openTasks(from.sessionId).map((t) => t.id);
+    const parents = this.openTasks(from.sessionId).filter((t) => !t.stopping).map((t) => t.id);
     return this.create(
       {
         id: newId("t"),
@@ -307,6 +313,7 @@ export class Kernel {
         instructions: "",
         initiator: agentPrincipal(from.agentId),
         from,
+        workGeneration: this.generation(from.sessionId),
         to: from,
         after: [],
         ...(parents.length ? { parents } : {}),
@@ -340,7 +347,7 @@ export class Kernel {
   /** The task reached its executor. */
   started(taskId: string): void {
     const task = this.state.tasks.get(taskId);
-    if (task?.status !== "queued") return;
+    if (task?.status !== "queued" || task.stopping) return;
     const running = { ...task, status: "running" as const, updatedAt: now() };
     this.write([ops.putTask(running)], { changed: [running] });
     this.hooks.emit("task.started", running);
@@ -366,7 +373,7 @@ export class Kernel {
     const satisfied = mode === "any" ? finished > 0 : finished === tasks.length;
     // The same wait asked for again is the one already registered: a second gate would deliver the results twice.
     const same = [...this.state.gates.values()].find((g) => g.owner.sessionId === owner.sessionId && g.mode === mode && g.taskIds.length === ids.length && ids.every((id) => g.taskIds.includes(id)));
-    const gate: Gate = { id: newId("g"), owner, taskIds: ids, mode, note, createdAt: now() };
+    const gate: Gate = { id: newId("g"), owner, taskIds: ids, mode, note, createdAt: now(), workGeneration: this.generation(owner.sessionId) };
     const raised = tasks.filter((t) => !isTerminal(t.status) && t.deliveryPref !== "wake" && t.deliveryPref !== "sync").map((t) => ({ ...t, deliveryPref: "wake" as const, updatedAt: now() }));
     this.write([...unread.map((m) => ops.ack(m.id)), ...raised.map(ops.putTask), ...(satisfied || same ? [] : [ops.openGate(gate)])], { withdrawn: unread, changed: raised });
     return { satisfied, finished };
@@ -440,18 +447,68 @@ export class Kernel {
    * work, of what of its own went, so that it stops working on that.
    */
   stop(root: Task, stopper: Principal, end: { status: "cancelled" | "failed"; reason: EndReason; result: string }): Veto | { stopping: boolean; with: Task[] } {
-    // A task ends once: a stop decided already is the one it ends by.
-    if (root.stopping) return { stopping: true, with: [] };
-    const asked = this.hooks.decide("task.pre_stop", { task: root, stopper });
-    if (isVeto(asked)) return asked;
-    const propagate = this.hooks.decide("cascade.pre_propagate", { root, stopper, cascade: "spare" });
-    const { doomed, spared } = doom(this.state, root, !isVeto(propagate) && propagate.cascade === "force");
+    const current = this.state.tasks.get(root.id) ?? root;
+    if (isTerminal(current.status) || current.stopping) {
+      const asked = this.hooks.decide("task.pre_stop", { task: current, stopper });
+      if (isVeto(asked)) return asked;
+      return { stopping: !!current.stopping, with: [] };
+    }
+    return this.stopMany([current], stopper, end);
+  }
+
+  /** User stop is a snapshot of all this session's accepted work, committed before the backend is cancelled. */
+  stopSession(to: Addr, inputIds: string[], sentIds: string[] = [], insertedIds: string[] = []): Veto | { stopping: boolean; with: Task[] } {
+    const session = this.state.sessions.get(to.sessionId);
+    const accepted = [...this.state.tasks.values()].filter((t) => t.to.sessionId === to.sessionId && !isTerminal(t.status) && !t.stopping);
+    const agentRoots = accepted.filter((t) => !t.tool);
+    const covered = new Set(doomMany(this.state, agentRoots).doomed.map((t) => t.id));
+    const roots = [...agentRoots, ...accepted.filter((t) => t.tool && !covered.has(t.id))];
+    const ids = new Set(inputIds);
+    const sent = new Set(sentIds), inserted = new Set(insertedIds);
+    const mail = [...this.state.mail.values()].filter((m) => m.to.sessionId === to.sessionId && !inserted.has(m.id) && (this.withdrawable(m) || this.state.ledger.get(m.id)?.state === "submitted" || ids.has(m.id)));
+    // Keep facts, but give them a fresh, passive delivery. Withdrawn instructions are never digested again.
+    const kept = mail.filter((m) => !sent.has(m.id) && (m.kind === "results" || (m.kind === "message" && m.from.kind === "system" && !m.steer)))
+      .map((m) => ({ ...m, id: newId("m"), pref: "lazy" as const, steer: false }));
+    const gates = [...this.state.gates.values()].filter((g) => g.owner.sessionId === to.sessionId);
+    // Retire waits belonging to the stopped work. Shared children still return their facts individually, passively.
+    const keptIds = new Set(kept.flatMap((m) => m.results?.taskIds ?? []));
+    for (const gate of gates) for (const id of gate.taskIds) {
+      const task = this.state.tasks.get(id);
+      if (!task || !isTerminal(task.status) || keptIds.has(id)) continue;
+      keptIds.add(id);
+      kept.push({ id: newId("m"), to, from: { kind: "system" }, kind: "results", results: { taskIds: [id] }, pref: "lazy", steer: false, ts: now() });
+    }
+    const first = [...(session ? [ops.putSession({ ...session, workGeneration: this.generation(to.sessionId) + 1, updatedAt: now() })] : []), ...mail.map((m) => ops.ack(m.id)), ...gates.map((g) => ops.closeGate(g.id))];
+    const end = { status: "cancelled" as const, reason: "cancelled" as const, result: `The user stopped ${to.agentId}'s current and queued work.` };
+    return this.stopMany(roots, USER, end, first, mail.filter((m) => !sent.has(m.id)), kept, to.sessionId);
+  }
+
+  private stopMany(roots: Task[], stopper: Principal, end: { status: "cancelled" | "failed"; reason: EndReason; result: string }, first: Op[] = [], taken: MailItem[] = [], kept: MailItem[] = [], stoppedSession?: string): Veto | { stopping: boolean; with: Task[] } {
+    const forced = new Set<string>();
+    for (const task of roots) {
+      const asked = this.hooks.decide("task.pre_stop", { task, stopper });
+      if (isVeto(asked)) return asked;
+      const propagate = this.hooks.decide("cascade.pre_propagate", { root: task, stopper, cascade: "spare" });
+      if (!isVeto(propagate) && propagate.cascade === "force") forced.add(task.id);
+    }
+    const { doomed, spared } = doomMany(this.state, roots, forced);
+    const causes = new Map(roots.map((r) => [r.id, r]));
+    for (const r of roots) {
+      const queue = [r.id];
+      const visited = new Set<string>();
+      while (queue.length) for (const id of this.state.graph.children.get(queue.pop()!) ?? []) {
+        if (visited.has(id)) continue;
+        visited.add(id);
+        if (!causes.has(id)) causes.set(id, r);
+        queue.push(id);
+      }
+    }
     const going = new Set(doomed.map((t) => t.id));
     const cause = byWhom(stopper, end.reason);
     const handed = (t: Task): boolean => !t.tool && t.status === "running";
     // Sessions whose open work all goes: their running work is stopped, and the stop waits for them.
     const halted = new Set<string>();
-    const notices: MailItem[] = [];
+    const notices: MailItem[] = [...kept];
     for (const sessionId of new Set(doomed.filter(handed).map((t) => t.to.sessionId))) {
       const own = doomed.filter((t) => handed(t) && t.to.sessionId === sessionId);
       // A session working only for what goes is stopped; it needs no word of it then.
@@ -460,6 +517,7 @@ export class Kernel {
         continue;
       }
       if (same(stopper, agentPrincipal(own[0].to.agentId))) continue;
+      const root = causes.get(own[0].id)!;
       const text = endNotice(
         own.map((t) => ({ task: t, root: t === root })),
         { root, cause, status: end.status, result: end.result },
@@ -469,15 +527,17 @@ export class Kernel {
       notices.push({ id: newId("m"), to: { agentId: own[0].to.agentId, sessionId }, from: { kind: "system" }, kind: "message", topic: own[0].topic, content: text, steer: true, pref: "lazy", ts: now() });
     }
     // A session told just now of what went is not told of each of them again; one whose work all went, of none.
-    const told = new Set([...notices.map((n) => n.to.sessionId), ...halted]);
+    const told = new Set([...notices.map((n) => n.to.sessionId), ...halted, ...(stoppedSession ? [stoppedSession] : [])]);
     const quiet = new Set(doomed.filter((t) => same(stopper, t.initiator) || (t.from && told.has(t.from.sessionId))).map((t) => t.id));
     // The freeze: every task that goes is marked with the end it comes to, in one transaction with taking back its mail.
     const frozen: Task[] = [];
-    const freeze: Op[] = [];
-    const withdrawn: MailItem[] = [];
+    const freeze: Op[] = [...first];
+    const withdrawn: MailItem[] = [...taken];
     const calledOff: Task[] = [];
     for (const task of doomed) {
-      const isRoot = task === root;
+      if (task.stopping) continue;
+      const root = causes.get(task.id)!;
+      const isRoot = roots.some((r) => r.id === task.id);
       const why = isRoot ? end.result : `Cancelled with "${root.title}" (${root.id}), which ${cause}.`;
       const status = isRoot ? end.status : "cancelled";
       let result = why;
@@ -505,7 +565,7 @@ export class Kernel {
       for (const task of doomed.filter((t) => handed(t) && halted.has(t.to.sessionId))) this.hooks.emit("task.stopping", task);
     }
     for (const task of calledOff) this.hooks.emit("task.stopping", task);
-    return { stopping: calledOff.includes(root) || halted.size > 0, with: doomed.slice(1) };
+    return { stopping: calledOff.some((t) => roots.some((r) => r.id === t.id)) || halted.size > 0, with: doomed.filter((t) => !roots.some((r) => r.id === t.id)) };
   }
 
   /** A session's turn ended: the stops that waited for it to stop may be recorded. */
@@ -557,7 +617,7 @@ export class Kernel {
       const gate = [...gates.values()].find((g) => g.owner.sessionId === task.from!.sessionId && g.taskIds.includes(task.id));
       if (!gate) {
         const from: MailItem["from"] = task.tool ? { kind: "system" } : { kind: "agent", ...task.to };
-        if (!silent) mail.push({ id: newId("m"), to: task.from, from, kind: "results", topic: task.topic, results: { taskIds: [task.id] }, pref: task.deliveryPref ?? "lazy", ts: now() });
+        if (!silent) mail.push({ id: newId("m"), to: task.from, from, kind: "results", topic: task.topic, results: { taskIds: [task.id] }, workGeneration: task.workGeneration ?? 0, pref: task.deliveryPref ?? "lazy", ts: now() });
         continue;
       }
       const waits = silent ? { ...gate, taskIds: gate.taskIds.filter((id) => id !== task.id) } : gate;
@@ -569,7 +629,7 @@ export class Kernel {
         list.push(ops.closeGate(gate.id));
         for (const id of waits.taskIds) joined.add(id);
         const { taskIds, mode, note } = waits;
-        mail.push({ id: newId("m"), to: gate.owner, from: { kind: "system" }, kind: "results", results: { taskIds, mode, note }, pref: "wake", ts: now() });
+        mail.push({ id: newId("m"), to: gate.owner, from: { kind: "system" }, kind: "results", results: { taskIds, mode, note }, workGeneration: gate.workGeneration ?? 0, pref: "wake", ts: now() });
       } else if (silent) {
         gates.set(gate.id, waits);
         list.push(ops.openGate(waits));

@@ -38,7 +38,7 @@ import { ops, topicKey } from "./state.ts";
 import { startedFor } from "./task-graph.ts";
 import { newId, now } from "./util.ts";
 
-type Ctx = { hub: Hub; session: LiveSession; caps: Capabilities };
+type Ctx = { hub: Hub; session: LiveSession; caps: Capabilities; assertActive(): void };
 type Tool = {
   name: string;
   description: string;
@@ -155,6 +155,7 @@ const ALLOW: PermissionOption[] = [
  * and the call waits for the answer, however long; allowed always, it is written to the project's config.
  */
 async function authorize(ctx: Ctx, cap: Grant["cap"], to: string[]): Promise<void> {
+  ctx.assertActive();
   const asked = to.filter((id) => !reaches(ctx.caps[cap], id));
   if (!asked.length) return;
   const what = cap === "dispatch" ? "give a task to" : "send a message to";
@@ -164,6 +165,7 @@ async function authorize(ctx: Ctx, cap: Grant["cap"], to: string[]): Promise<voi
     subject: { type: "tool_call", toolCall: { toolCallId: newId("perm"), title: `team/${cap === "dispatch" ? "dispatch_task" : "send_message"}` } },
     options: ALLOW,
   });
+  ctx.assertActive();
   const chosen = answer.outcome.outcome === "selected" ? answer.outcome.optionId : undefined;
   if (chosen === "always") allowAlways(ctx.hub, ctx.session.agentId, cap, asked);
   if (chosen !== "once" && chosen !== "always") throw new Error(`the user did not allow you to ${what} ${asked.join(", ")}.`);
@@ -281,6 +283,7 @@ export const TOOLS: Tool[] = [
     async run(ctx, args) {
       const to = peer(ctx, need(args, "to"));
       await authorize(ctx, "dispatch", [to]);
+      ctx.assertActive();
       const after: string[] = Array.isArray(args.after) ? args.after : [];
       const deliveryPref: DeliveryPref = ["sync", "wake"].includes(args.deliveryPref) ? args.deliveryPref : "lazy";
       const title = need(args, "title");
@@ -320,7 +323,7 @@ export const TOOLS: Tool[] = [
       if (!id) throw new Error(`"task_id" is required: you have ${open.length ? `several tasks (${open.map((t) => t.id).join(", ")})` : "no task"}`);
       const task = ctx.hub.state.tasks.get(id);
       if (!task || task.tool || task.to.agentId !== me) throw new Error(`no task "${id}" given to you`);
-      if (task.status === "cancelled") throw new Error(`task ${id} was stopped; there is no result to give`);
+      if (task.status === "cancelled" || task.stopping) throw new Error(`task ${id} was stopped; there is no result to give`);
       if (isTerminal(task.status)) throw new Error(`task ${id} is ${task.status} already`);
       if (task.status !== "running") throw new Error(`task ${id} has not been given to you yet; it arrives as an <xsb-task>`);
       const result = need(args, "result");
@@ -354,6 +357,7 @@ export const TOOLS: Tool[] = [
       // Upward, it goes to the session of the initiator that gave the task, which has the matter in mind.
       const upward = ctx.hub.kernel.openTasks(ctx.session.id).find((t) => t.initiator.kind === "agent" && t.initiator.agentId === asked && t.from);
       if (!upward) await authorize(ctx, "message", [asked]);
+      ctx.assertActive();
       const topic: string = args.topic?.trim() || upward?.topic || "question";
       const session = upward?.from ? ctx.hub.live.get(upward.from.sessionId)! : ctx.hub.mainSession(asked);
       const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: asked, sessionId: session.id }, { title: `Question from ${ctx.session.agentId}`, topic, instructions: `${ctx.session.agentId} asks you, and waits for your answer (what you say back is the answer):\n${question}`, after: [], deliveryPref: "sync" }));
@@ -457,6 +461,7 @@ export const TOOLS: Tool[] = [
     async run(ctx, args) {
       const to = peer(ctx, need(args, "to"));
       await authorize(ctx, "message", [to]);
+      ctx.assertActive();
       return json(send(ctx, to, need(args, "content"), args.topic?.trim() || undefined));
     },
   },
@@ -469,6 +474,7 @@ export const TOOLS: Tool[] = [
       if (!to.length) throw new Error(`"to" is required`);
       const content = need(args, "content");
       await authorize(ctx, "message", to);
+      ctx.assertActive();
       return json(to.map((id) => ({ to: id, ...send(ctx, id, content, args.topic?.trim() || undefined) })));
     },
   },
@@ -629,7 +635,13 @@ export async function callTool(hub: Hub, session: LiveSession, name: string, arg
   const caps = capabilities(hub, session.agentId, session.id, session.senders());
   if (name === "report_result" && !caps.upward.size) return { text: "report_result is not available in the work you are doing now: no agent gave you a task you have open.", isError: true };
   try {
-    return { text: await tool.run({ hub, session, caps }, args ?? {}), isError: false };
+    const generation = hub.kernel.generation(session.id);
+    const turn = session.current;
+    const assertActive = (): void => {
+      if (!session.acceptsTools || hub.kernel.generation(session.id) !== generation || session.current !== turn) throw new Error("This work was stopped; no new work was submitted.");
+    };
+    assertActive();
+    return { text: await tool.run({ hub, session, caps, assertActive }, args ?? {}), isError: false };
   } catch (e) {
     return { text: e instanceof Error ? e.message : String(e), isError: true };
   }

@@ -298,6 +298,8 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
   /** 停止当前这一轮。重启后端进程在原型里也是它：正在进行的那一轮就此结束。 */
   function stop(agentId) {
     turns[agentId].cancelled = true;
+    turns[agentId].queue = [];
+    data.tasks.filter((task) => task.to.agentId === agentId && ["blocked", "queued", "running"].includes(task.status)).forEach((task) => setTask(task.id, "cancelled"));
     if (agent(agentId).state !== "requires_action") return;
     const pending = data.transcripts[agentId].find((e) => e.kind === "permission" && !e.outcome);
     put(agentId, { ...pending, outcome: "cancelled" });
