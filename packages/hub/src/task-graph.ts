@@ -51,9 +51,14 @@ function holders(g: Tasks, id: string, memo: Map<string, Set<string>>): Set<stri
  * the stopped ones held up together with something that goes on, which therefore go on. `force`: those go too.
  */
 export function doom(g: Tasks, root: Task, force = false): { doomed: Task[]; spared: Task[] } {
+  return doomMany(g, [root], force ? new Set([root.id]) : new Set());
+}
+
+/** Compute one cancellation set for all roots before any of them releases dependencies. */
+export function doomMany(g: Tasks, roots: Task[], force = new Set<string>()): { doomed: Task[]; spared: Task[] } {
   // Nothing holding a task up any more (every parent of it was stopped) is no reason to keep it: it goes too.
   const below = new Set<string>();
-  const queue = [root.id];
+  const queue = roots.map((t) => t.id);
   while (queue.length) {
     for (const child of g.graph.children.get(queue.pop()!) ?? []) {
       if (below.has(child)) continue;
@@ -61,14 +66,19 @@ export function doom(g: Tasks, root: Task, force = false): { doomed: Task[]; spa
       queue.push(child);
     }
   }
-  const stopped = new Set([root.id]);
-  const doomed = [root];
+  const forcedBelow = new Set<string>();
+  const forcedQueue = [...force];
+  while (forcedQueue.length) for (const child of g.graph.children.get(forcedQueue.pop()!) ?? []) {
+    if (!forcedBelow.has(child)) { forcedBelow.add(child); forcedQueue.push(child); }
+  }
+  const stopped = new Set(roots.map((t) => t.id));
+  const doomed = [...roots];
   const spared: Task[] = [];
   const memo = new Map<string, Set<string>>();
   for (const task of g.tasks.values()) {
-    if (!below.has(task.id) || isTerminal(task.status)) continue;
+    if (!below.has(task.id) || stopped.has(task.id) || isTerminal(task.status)) continue;
     const held = [...holders(g, task.id, memo)];
-    if (held.every((h) => stopped.has(h)) || (force && held.some((h) => stopped.has(h)))) {
+    if (held.every((h) => stopped.has(h)) || (forcedBelow.has(task.id) && held.some((h) => stopped.has(h)))) {
       stopped.add(task.id);
       doomed.push(task);
     } else if (held.some((h) => stopped.has(h))) {

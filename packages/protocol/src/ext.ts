@@ -330,6 +330,8 @@ export type Task = {
   tool?: { server: string; name: string; arguments: unknown };
   /** How its result reaches its initiator. Absent: `lazy`. */
   deliveryPref?: DeliveryPref;
+  /** The initiating session's work generation; old results must not wake work the user stopped. */
+  workGeneration?: number;
   status: TaskStatus;
   /** Once it has ended: why, and who ended it (for `cascaded`, who stopped the task it went with, `cause`). */
   ended?: { reason: EndReason; stopper: Principal; cause?: string };

@@ -43,6 +43,8 @@ export class Jobs {
   }
 
   private start(task: Task): void {
+    task = this.hub.state.tasks.get(task.id)!;
+    if (!task || task.status !== "queued" || task.stopping) return;
     const kind = kindOf(task);
     const running = [...this.hub.state.tasks.values()].filter((t) => t.tool && kindOf(t) === kind && t.status === "running").length;
     const allowed = loadProjectConfig(this.hub.paths).limits?.jobsAtOnce ?? JOBS_AT_ONCE;
@@ -51,6 +53,8 @@ export class Jobs {
   }
 
   private run(task: Task): void {
+    task = this.hub.state.tasks.get(task.id)!;
+    if (!task || task.status !== "queued" || task.stopping) return;
     const kind = kindOf(task);
     const agent = this.hub.agent(task.to.agentId);
     const server = this.hub.toolServers(agent).find((t) => t.from === "role" && t.server.name === task.tool!.server)?.server;
@@ -73,9 +77,13 @@ export class Jobs {
         this.calls.delete(task.id);
         if (this.hub.stopping) return;
         this.hub.kernel.jobEnded(task.id, status, result);
-        const next = this.waiting.get(kind)?.shift();
-        const waiter = next ? this.hub.state.tasks.get(next) : undefined;
-        if (waiter) this.run(waiter);
+        let next: string | undefined;
+        while ((next = this.waiting.get(kind)?.shift())) {
+          const waiter = this.hub.state.tasks.get(next);
+          if (!waiter || waiter.status !== "queued" || waiter.stopping) continue;
+          this.run(waiter);
+          break;
+        }
       });
   }
 }

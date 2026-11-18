@@ -67,14 +67,16 @@ export function commonServers(): { server: McpServer; about?: string }[] {
  */
 export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => LiveSession | undefined): void {
   let session: LiveSession | undefined;
+  let token: string | undefined;
   const attached = (): LiveSession => {
-    if (!session) throw new RpcError(-32600, "not attached");
+    if (!session || !token || lookup(token) !== session) throw new RpcError(-32600, "not attached or bridge revoked");
     return session;
   };
 
   conn.onRequest(BRIDGE_ATTACH, (p) => {
     session = lookup(p.token);
     if (!session) throw RpcError.invalidParams("unknown bridge token");
+    token = p.token;
     return {};
   });
   conn.onRequest("initialize", (p) => ({

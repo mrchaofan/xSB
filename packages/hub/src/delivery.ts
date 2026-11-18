@@ -11,13 +11,12 @@
  * the kernel's questions about sessions (`recipient`), takes back what the kernel withdrew, stops the turns that
  * only served work that was stopped, and tells the kernel how turns ended.
  */
-import { errorMessage, text } from "@xsb/protocol";
+import { errorMessage, text, RpcError } from "@xsb/protocol";
 import type { Addr, ContentBlock, OriginMeta } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Hub } from "./hub.ts";
 import { isVeto } from "./hooks.ts";
 import type { Recipient, Route } from "./kernel.ts";
-import { USER } from "./kernel.ts";
 import { inboxDigest, renderMail } from "./prompts.ts";
 import type { Gives, TaskContext } from "./prompts.ts";
 import { skillBody } from "./roles.ts";
@@ -49,7 +48,13 @@ export class Delivery {
       for (const item of items) this.hub.live.get(item.to.sessionId)?.withdraw((m) => m.id === item.id);
     });
     hooks.on("task.stopping", (task) => {
-      if (!task.tool) this.hub.live.get(task.to.sessionId)?.halt();
+      if (task.tool || !this.hub.state.tasks.get(task.id)?.stopping) return;
+      const session = this.hub.live.get(task.to.sessionId);
+      // Stop observations may outlive their turn. Never cancel a newly accepted task with an old event.
+      const first = session?.current?.first.item;
+      if (first?.kind === "task" && !this.hub.state.tasks.get(first.taskId!)?.stopping) return;
+      if (this.hub.kernel.openTasks(task.to.sessionId).some((t) => !t.stopping)) return;
+      session?.halt();
     });
   }
 
@@ -73,7 +78,13 @@ export class Delivery {
     const user = this.inserted.get(item.id);
     const waiting = user?.done;
     if (route === "drop") return waiting?.reject(new Error(`agent "${item.to.agentId}" no longer exists`));
-    if (route === "inbox" || !this.hub.state.mail.has(item.id)) return waiting?.resolve();
+    if (!this.hub.state.mail.has(item.id)) return waiting?.reject(RpcError.cancelled());
+    if (route === "inbox") return waiting?.resolve();
+    // A route observation can arrive after a user stop changed the result's receiving generation.
+    if (item.results && (item.workGeneration ?? 0) < this.hub.kernel.generation(item.to.sessionId)) {
+      this.hub.kernel.reroute(item, "lazy");
+      return;
+    }
     const session = this.hub.live.get(item.to.sessionId);
     if (!session) return waiting?.reject(new Error(`session ${item.to.sessionId} is not registered`));
     const rendered = this.render(item, session);
@@ -89,7 +100,10 @@ export class Delivery {
     const { state, kernel } = this.hub;
     const rendered = item.prompt ? { prompt: item.prompt, gives: undefined } : (() => {
       const { text: said, gives } = renderMail(state, item, this.taskContext(item, session), session.given);
-      return { prompt: [text(said)], gives };
+      const history = item.results && (item.workGeneration ?? 0) < kernel.generation(session.id)
+        ? "These results belong to work accepted before the user's stop. They are historical context; do not resume that work unless the user asks.\n"
+        : "";
+      return { prompt: [text(history + said)], gives };
     })();
     const decided = kernel.hooks.decide("message.pre_submit", { to: item.to, from: item.from, item, prompt: rendered.prompt });
     if (isVeto(decided)) {
@@ -168,7 +182,7 @@ export class Delivery {
       const open = kernel.userTask(session.id);
       if (open) {
         kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", taskId: open.id, prompt, pref: "wake" });
-      } else if (session.busy && kernel.openTasks(session.id).length) {
+      } else if (session.busy && kernel.openTasks(session.id).some((t) => !t.stopping)) {
         kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", prompt, pref: "wake" });
       } else {
         const task = kernel.dispatchUser(to, prompt, messageId, topicKey(session.rec.title ?? "conversation"));
@@ -186,10 +200,16 @@ export class Delivery {
    * what they took along goes too. What the user says next is a task of its own: the user taking over.
    */
   userStop(session: LiveSession): void {
-    session.cancel();
-    for (const task of this.hub.kernel.openTasks(session.id)) {
-      this.hub.kernel.stop(task, USER, { status: "cancelled", reason: "cancelled", result: `The user stopped ${session.agentId}'s work on it.` });
+    const inputs = session.beginUserStop();
+    if (!inputs) return;
+    const stopped = this.hub.kernel.stopSession({ agentId: session.agentId, sessionId: session.id }, inputs.pending, inputs.sent, inputs.inserted);
+    if (isVeto(stopped)) {
+      session.releaseUserStop();
+      this.hub.log(`user stop refused: ${stopped.veto}`);
+      return;
     }
+    session.rec = this.hub.state.sessions.get(session.id) ?? session.rec;
+    session.cancelUserWork();
   }
 
   // ---- turns ----------------------------------------------------------------------

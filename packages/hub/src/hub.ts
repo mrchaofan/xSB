@@ -279,4 +279,11 @@ export class Hub {
     this.bridgeTokens.set(session.bridgeToken, session);
     return session;
   }
+
+  /** Revoke an unresponsive backend's existing tool bridges before accepting a new run. */
+  rotateBridge(session: LiveSession): void {
+    this.bridgeTokens.delete(session.bridgeToken);
+    session.bridgeToken = newId("tok");
+    this.bridgeTokens.set(session.bridgeToken, session);
+  }
 }

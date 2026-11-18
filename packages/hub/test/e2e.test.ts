@@ -17,6 +17,7 @@ import { isTerminal as isTerminalStatus } from "@xsb/protocol";
 import { USER, agentPrincipal } from "../src/kernel.ts";
 import type { LiveSession } from "../src/session.ts";
 import { bridgeServer } from "../src/mcp.ts";
+import { callTool } from "../src/tools.ts";
 import { Paths } from "../src/paths.ts";
 import { loadProjectConfig, saveProjectConfig } from "../src/config.ts";
 import { readRole } from "../src/roles.ts";
@@ -1328,8 +1329,7 @@ const p = await newSession("p1");
 }
 
 // 32. A stop is the user's (Esc): the work of the session stops, and so do the tasks it works on, the user being the
-// stopper. What was not inserted does not get into that turn: the user's is kept, unanswered, and goes first when the
-// next turn starts (docs/DESIGN.md 3.1, 7-8); mail waits for a turn of its own. What was inserted stays in the
+// stopper. User stop also withdraws pending input; hub task cancellation retains its narrower semantics. What was inserted stays in the
 // conversation: if nothing followed, it is "inserted, not processed".
 {
   const watching = await client("watching", { _meta: { [OriginExt.capability]: {} } });
@@ -1344,29 +1344,28 @@ const p = await newSession("p1");
   const mine = (messageId: string) => ({ [OriginExt.key]: { messageId } });
 
   // A backend that holds what comes while it works: the user's second message is held, and the stop answers it
-  // with -32800; the hub keeps it, unanswered. The user's task in the session is stopped by the user.
+  // with -32800; the hub withdraws it rather than carrying it into new work. The user's task in the session is stopped by the user.
   const s = await open("a");
   const running = watching.turn(s, "!busy 600\n!say LATE", mine("stop-1"));
   await until("the turn running", () => seen.includes("in stop-1"));
   let heldAnswer: any;
-  const held = watching.request("session/prompt", { sessionId: s, prompt: [{ type: "text", text: "!say HELD" }], _meta: mine("stop-2") }).then((r) => (heldAnswer = r));
+  const held = watching.request("session/prompt", { sessionId: s, prompt: [{ type: "text", text: "!say HELD" }], _meta: mine("stop-2") }).then((r) => (heldAnswer = r), (e) => (heldAnswer = e.code));
   await until("given to the backend", () => hub.session(s).current?.inputs.some((i) => i.messageId === "stop-2" && i.sent));
   const userTask = hub.kernel.userTask(s)!;
   watching.notify("session/cancel", { sessionId: s });
   assert.equal((await running).stopReason, "cancelled");
   await idle("a");
   await sleep(100);
-  assert.deepEqual(seen, ["in stop-1"]);
-  assert.equal(heldAnswer, undefined, "kept, not answered");
-  assert.equal(hub.state.ledger.get("stop-2")!.state, "submitted");
+  assert.deepEqual(seen, ["in stop-1", "discarded stop-2: !say HELD"]);
+  assert.equal(await held, -32800, "withdrawn input is answered as cancelled");
+  assert.equal(heldAnswer, -32800);
+  assert.equal(hub.state.ledger.get("stop-2")!.state, "discarded_unseen");
   assert.deepEqual(hub.state.tasks.get(userTask.id)!.ended, { reason: "cancelled", stopper: { kind: "user" } });
-  // When the user says something next, what the model never saw goes first, as a turn of its own; then what the user
-  // says now, a task of its own: the user taking over.
+  // The next user request is new work; withdrawn instructions are never replayed.
   seen.length = 0;
   await watching.turn(s, "!say AGAIN", mine("stop-3"));
-  assert.deepEqual(await held, { messageId: "stop-2" });
   await until("both answered", () => seen.includes("out AGAIN"));
-  assert.deepEqual(seen, ["in stop-2", "out HELD", "in stop-3", "out AGAIN"]);
+  assert.deepEqual(seen, ["in stop-3", "out AGAIN"]);
   assert.notEqual(hub.kernel.userTask(s)?.id ?? (await tasks()).find((t) => t.instructions === "!say AGAIN")!.id, userTask.id);
   await idle("a");
 
@@ -1414,21 +1413,21 @@ const p = await newSession("p1");
   await idle("a");
 
   // Steering as claude does: what it took is in the conversation, and stopped before it acted, it is not processed yet;
-  // what it had not taken yet (it waited for the work's next step) is kept, and goes first when the next turn starts.
+  // what it had not taken yet (it waited for the work's next step) is withdrawn.
   seen.length = 0;
   const c = await open("c");
   const turn = watching.turn(c, "!sleep 3000\n!say AFTER", mine("stop-4"));
   await until("c running", () => hub.session(c).current?.inserted);
-  const five = watching.request("session/prompt", { sessionId: c, prompt: [{ type: "text", text: "!say FIVE" }], _meta: mine("stop-5") });
+  const five = watching.request("session/prompt", { sessionId: c, prompt: [{ type: "text", text: "!say FIVE" }], _meta: mine("stop-5") }).then(() => 0, (e) => e.code);
   await until("given to the backend", () => hub.session(c).current?.inputs.some((i) => i.messageId === "stop-5" && i.sent));
   watching.notify("session/cancel", { sessionId: c });
   assert.equal((await turn).stopReason, "cancelled");
-  assert.deepEqual(seen, ["in stop-4"]);
+  assert.deepEqual(seen, ["in stop-4", "discarded stop-5: !say FIVE"]);
   await until("not processed", () => hub.state.ledger.get("stop-4")?.state === "inserted_unprocessed");
   await watching.turn(c, "!say SIX", mine("stop-6"));
-  assert.deepEqual(await five, { messageId: "stop-5" });
+  assert.equal(await five, -32800);
   await until("six said", () => seen.includes("out SIX"));
-  assert.deepEqual(seen, ["in stop-4", "in stop-5", "out FIVE", "in stop-6", "out SIX"]);
+  assert.deepEqual(seen, ["in stop-4", "discarded stop-5: !say FIVE", "in stop-6", "out SIX"]);
   await idle("c");
   watching.close();
   console.log("ok 32 a stop is the user's: the work and its tasks stop, what was not in never gets in");
@@ -1666,6 +1665,54 @@ const p = await newSession("p1");
   assert.equal(await interject("k3", "!sleep 400\n!say DONE", "LATE-k3", true), "DONE");
   await idle("a");
   console.log("ok 36 the user's word into a peer's task");
+}
+
+// 37. User stop withdraws the accepted backlog on every backend; new work is a separate turn.
+{
+  for (const backend of ["mock", "steerable", "codexlike"]) {
+    const agentId = `stop-queue-${backend}`;
+    await conn.request(Agents.put, { agent: { id: agentId, backend } });
+    const sessionId = await newSession(agentId);
+    const session = hub.session(sessionId);
+    const work = dispatch(hub.session(a), agentId, { title: `stop running ${backend}`, topic: "stop queue", instructions: "!sleep 3000\n!say OLD-RUN", after: [] });
+    await until("old work inserted", () => session.current?.inserted);
+    const queued = dispatch(hub.session(a), agentId, { title: `stop queued ${backend}`, topic: "stop queue", instructions: "!say OLD-QUEUE", after: [] });
+    const blocked = dispatch(hub.session(a), agentId, { title: `stop blocked ${backend}`, topic: "stop queue", instructions: "!say OLD-BLOCKED", after: [work.id] });
+    const ordinary = hub.kernel.post({ to: addr(session), from: { kind: "agent", ...addr(hub.session(a)) }, kind: "message", content: "OLD-MESSAGE", pref: "wake" }).item;
+    const fact = dispatch(session, "b", { title: `stop fact ${backend}`, topic: "stop queue", instructions: "!say SAVED-FACT", after: [] });
+    await until("fact queued", () => hub.state.tasks.get(fact.id)?.status === "completed" && [...hub.state.mail.values()].some((m) => m.to.sessionId === sessionId && m.results?.taskIds.includes(fact.id)));
+    conn.notify("session/cancel", { sessionId });
+    // Same connection preserves the boundary: this prompt arrives after stop, while confirmation can still be pending.
+    await conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "!say FRESH-WORK" }] });
+    await until("fresh work completed", () => answered(agentId).includes("FRESH-WORK") && !session.busy);
+    await until("all old tasks cancelled", () => [work, queued, blocked].every((t) => hub.state.tasks.get(t.id)?.status === "cancelled"));
+    assert.ok(!received(agentId).some((i) => i.origin?.messageId === ordinary.id));
+    assert.ok(!received(agentId).some((i) => i.text.includes(`task-id="${queued.id}"`) || i.text.includes(`task-id="${blocked.id}"`)));
+    assert.doesNotMatch(answered(agentId), /OLD-RUN|OLD-QUEUE|OLD-BLOCKED|OLD-MESSAGE/);
+    assert.ok(received(agentId).some((i) => i.text.includes("SAVED-FACT")), "completed facts survive for the new turn");
+    assert.equal(hub.state.ledger.get(ordinary.id)?.state, "discarded_unseen");
+    const generation = hub.kernel.generation(sessionId);
+    const late = hub.kernel.post({ to: addr(session), from: { kind: "system" }, kind: "results", results: { taskIds: [fact.id] }, pref: "wake", workGeneration: generation - 1 }).item;
+    await hub.kernel.hooks.settled();
+    assert.equal(hub.state.ledger.get(late.id)?.state, "inboxed");
+    assert.equal(session.busy, false, "late old results cannot wake the stopped agent");
+    await idle("a");
+    await idle("b");
+  }
+  console.log("ok 37 user stop withdraws backlog, preserves facts, and accepts new work");
+}
+
+// 38. Even an already-granted authorization yields: recheck before dispatching after a user stop.
+{
+  const source = hub.session(a);
+  await idle("a");
+  const pending = callTool(hub, source, "dispatch_task", { to: "b", title: "MUST-NOT-DISPATCH-AFTER-STOP", instructions: "!say NEVER", topic: "stop race" });
+  hub.delivery.userStop(source);
+  const result = await pending;
+  assert.equal(result.isError, true);
+  assert.match(result.text, /work was stopped/);
+  assert.ok(![...hub.state.tasks.values()].some((t) => t.title === "MUST-NOT-DISPATCH-AFTER-STOP"));
+  console.log("ok 38 in-flight authorization cannot create new work after stop");
 }
 
 await hub.shutdown();

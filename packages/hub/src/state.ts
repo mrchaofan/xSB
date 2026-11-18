@@ -32,6 +32,8 @@ export type SessionRec = {
   /** How much of the backend's context window the conversation used at the end of its last turn, in tokens. */
   used?: number;
   title?: string;
+  /** Incremented by a user stop: results of earlier work are retained without waking this session. */
+  workGeneration?: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -52,6 +54,7 @@ export type Gate = {
   mode: "all" | "any";
   note?: string;
   createdAt: string;
+  workGeneration?: number;
 };
 
 export type MailItem = {
@@ -73,6 +76,8 @@ export type MailItem = {
   steer?: boolean;
   /** How it is to reach its recipient (kernel.ts, `deliveryPolicy`). Absent: `wake`. */
   pref?: DeliveryPref;
+  /** The recipient's generation when this result was requested. */
+  workGeneration?: number;
   ts: string;
 };
 
