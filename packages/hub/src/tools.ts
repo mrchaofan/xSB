@@ -19,6 +19,7 @@ import { renderAsset, renderResults } from "./prompts.ts";
 import { skillBody } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { ops, topicKey } from "./state.ts";
+import { startedFor } from "./task-graph.ts";
 import { now } from "./util.ts";
 
 type Ctx = { hub: Hub; session: LiveSession };
@@ -139,6 +140,7 @@ const brief = (t: Task) => ({
   to: t.tool ? `${t.tool.server}/${t.tool.name}` : t.to.agentId,
   status: t.status,
   ...(t.after.length ? { after: t.after } : {}),
+  ...(t.parents?.length ? { started_for: t.parents } : {}),
   ...(t.result !== undefined ? { result: t.result } : {}),
 });
 
@@ -166,13 +168,12 @@ export const TOOLS: Tool[] = [
   {
     name: "send_message",
     description:
-      "Send a message to another agent. It is queued and read as that agent's next turn. Set interject only when the peer must see it before finishing what it is doing now.",
+      "Send a message to another agent. If the peer is working on a task you gave it, the message is put into its running turn where its backend allows that; otherwise it is read as its next turn. The result says which.",
     inputSchema: schema(
       {
         to: str("Agent id."),
         content: str("The message."),
         topic: TOPIC,
-        interject: { type: "boolean", description: "Put it into the peer's running turn instead of waiting for it to end." },
       },
       ["to", "content"],
     ),
@@ -180,11 +181,9 @@ export const TOOLS: Tool[] = [
       const to = peer(ctx, need(args, "to"));
       const content = need(args, "content");
       const topic: string | undefined = args.topic?.trim() || undefined;
-      const steer = args.interject === true;
       const note = continuityNote(ctx, topic, to);
-      const delivery = !(ctx.hub.findWorkSession(to, topic) ?? ctx.hub.mainSession(to)).busy ? "delivered" : steer ? "interjected" : "queued behind the peer's current work";
-      const item = ctx.hub.mail.send(ctx.session, to, content, topic, steer);
-      return json({ message_id: item.id, delivery, ...(note ? { note } : {}) });
+      const { item, delivery } = ctx.hub.mail.send(ctx.session, to, content, topic);
+      return json({ message_id: item.id, delivery: delivery === "queued" ? "queued behind the peer's current work" : delivery, ...(note ? { note } : {}) });
     },
   },
   {
@@ -296,7 +295,13 @@ export const TOOLS: Tool[] = [
       }
       ctx.hub.mail.complete(task, failed ? "failed" : "completed", result, assets);
       const open = ctx.hub.mail.openTasks(task.to.sessionId).map((t) => t.id);
-      return `Task ${id} ${failed ? "finished as failed" : "completed"}; the result goes to ${task.from.agentId}.${open.length ? ` Still open: ${open.join(", ")}.` : ""}`;
+      // Finishing is the assignee's call, and takes nothing along: what it started meanwhile goes on unless it says so.
+      const going = startedFor(ctx.hub.state, id).map((t) => `${t.id} "${t.title}"`);
+      return [
+        `Task ${id} ${failed ? "finished as failed" : "completed"}; the result goes to ${task.from.agentId}.`,
+        ...(open.length ? [`Still open: ${open.join(", ")}.`] : []),
+        ...(going.length ? [`Still running, started while you had it: ${going.join(", ")}. Cancel what is no longer needed.`] : []),
+      ].join(" ");
     },
   },
   {
@@ -318,12 +323,15 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "cancel_task",
-    description: "Cancel a task you dispatched or a job you started. A task ends at once and its assignee is told to stop; a job is stopped. You still receive the result, with status cancelled.",
+    description:
+      "Cancel a task you dispatched or a job you started. What its assignee started for it alone is cancelled with it. A task ends at once and its assignee is told to stop; a job is stopped. No result comes back, and await_tasks no longer waits for it.",
     inputSchema: schema({ task_id: str("Task id.") }, ["task_id"]),
     run(ctx, args) {
       const task = ownTask(ctx, need(args, "task_id"), true);
       if (isTerminal(task.status)) return `Task ${task.id} already ${task.status}.`;
-      return ctx.hub.mail.cancel(task) === "stopping" ? `Task ${task.id} is being stopped.` : `Task ${task.id} cancelled.`;
+      const { stopping, with: went } = ctx.hub.mail.cancel(task, { agentId: ctx.session.agentId, sessionId: ctx.session.id });
+      const also = went.length ? ` Cancelled with it, as started for it: ${went.map((t) => `${t.id} "${t.title}"`).join(", ")}.` : "";
+      return `Task ${task.id} ${stopping ? "is being stopped" : "cancelled"}.${also}`;
     },
   },
   {
