@@ -141,12 +141,6 @@ export class Client {
     // ---- spending ---------------------------------------------------------
 
     conn.onRequest(SpendExt.get, () => ({ spend: hub.spending.read() }));
-    // Only a client reaches this, on the user's word: agents have no tool for it.
-    conn.onRequest(SpendExt.budget, (p) => {
-      const amount = Number(p?.amount);
-      if (!Number.isFinite(amount) || amount < 0) throw RpcError.invalidParams("amount must be a number of yuan, 0 or more");
-      return { spend: hub.spending.setBudget(amount) };
-    });
 
     conn.onRequest(Boundaries.clear, (p) => {
       hub.session(p.sessionId).clear();

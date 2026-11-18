@@ -14,7 +14,7 @@
  *     agents/<id>/scratch/             the agent's own drafts and intermediate files
  *     shared/                          files agents hand to each other
  *     assets.jsonl  assets/            the asset library: its index and its files
- *     spend.jsonl                      what generation cost, and the user's budget for it (spend.ts)
+ *     spend.jsonl                      what generation cost (spend.ts)
  *     roles/<role>/                    role.json, instructions.md, skills/<name>/SKILL.md (user-edited); the roles of
  *                                      the preset teams the project uses are not here (presets.ts)
  *     run/                             lock, pid, sockets, log of the running hub
@@ -65,7 +65,7 @@ export class Paths {
   get assets(): string {
     return path.join(this.dir, "assets");
   }
-  /** What generation costs, and the user's budget for it (`Spend` in @xsb/protocol). */
+  /** What generation costs (`Spend` in @xsb/protocol). */
   get spend(): string {
     return path.join(this.dir, "spend.jsonl");
   }

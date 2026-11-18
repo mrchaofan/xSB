@@ -1097,31 +1097,29 @@ const p = await newSession("p1");
   console.log("ok 26 context boundaries and handoffs");
 }
 
-// 27. Spending: the user's budget goes into the project's ledger, which the generation tools are told of; agents hear
-// where the spending stands when it changed; jobs of one tool run a few at a time, and one that waits is cancelled for free.
+// 27. Spending: the generation tools are told where the project's ledger is; agents and clients hear what was spent
+// when it changed; jobs of one tool run a few at a time, and one that waits is cancelled for free.
 {
   const updates: any[] = [];
   conn.onNotification(SpendExt.update, ({ spend }) => updates.push(spend));
   assert.deepEqual((await conn.request(SpendExt.get)).spend, { spent: 0, unpriced: 0, dearest: {} });
-  await assert.rejects(conn.request(SpendExt.budget, { amount: -1 }), /amount must be a number/);
-  assert.equal((await conn.request(SpendExt.budget, { amount: 30 })).spend.budget, 30);
-  await until("the change announced", () => updates.some((u) => u.budget === 30), 5000);
 
   // A role's servers know where the ledger is and whom they work for; the hub's own and the app's need not.
   const served = hub.toolServers(hub.agent("r9")).find((t) => t.server.name === "gen")!.server;
   assert.ok(served.type === "stdio");
   assert.deepEqual(served.env!.filter((e) => e.name.startsWith("XSB_")), [{ name: "XSB_SPEND", value: paths.spend }, { name: "XSB_AGENT", value: "r9" }]);
 
-  // Told once, and again when it changed.
+  // Nothing to tell before anything was spent; told once it was, and not again until it changes.
   const s9 = await newSession("r9");
   await prompt(s9, "hello");
-  assert.match(said.get(s9)!, /Spent on generation in this project so far: about 0\.00 yuan of the budget of 30\.00 yuan/);
+  assert.doesNotMatch(said.get(s9)!, /Spent on generation/);
+  fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: "t", tool: "generate_video", output: "a.mp4", usage: "48437 tokens", amount: 2.23, basis: "test" }) + "\n");
+  await until("the change announced", () => updates.some((u) => u.spent === 2.23), 5000);
+  await prompt(s9, "and now");
+  assert.match(said.get(s9)!, /Spent on generation in this project so far: about 2\.23 yuan \(estimates\)\. So far generate_video up to about 2\.23 yuan a call\./);
   said.set(s9, "");
   await prompt(s9, "again");
   assert.doesNotMatch(said.get(s9)!, /Spent on generation/);
-  fs.appendFileSync(paths.spend, JSON.stringify({ op: "spend", at: "t", tool: "generate_video", output: "a.mp4", usage: "48437 tokens", amount: 2.23, basis: "test" }) + "\n");
-  await prompt(s9, "and now");
-  assert.match(said.get(s9)!, /about 2\.23 yuan of the budget of 30\.00 yuan \(estimates\)\. So far generate_video up to about 2\.23 yuan a call\./);
 
   // Three jobs of one tool: two run, one waits; the one that waits is cancelled without the tool being asked.
   const job = (title: string) => call("start_job", { server: "gen", tool: "render", arguments: { prompt: title, ms: 500 }, title });

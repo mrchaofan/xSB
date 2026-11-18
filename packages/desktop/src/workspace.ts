@@ -420,11 +420,6 @@ export class Workspace {
     await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: id } } }).catch(() => this.pending.delete(id));
   }
 
-  /** The user's cap on what generation may cost in this workspace, in yuan. */
-  async setBudget(amount: number): Promise<void> {
-    await this.conn.request(SpendExt.budget, { amount });
-  }
-
   /** Clear the agent's context: its model starts anew and sees nothing of what was said. The transcript keeps it. */
   async clear(agentId: string): Promise<void> {
     const sessionId = await this.mains.get(agentId);

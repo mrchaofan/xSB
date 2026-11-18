@@ -17,14 +17,14 @@ Who produces each asset type, and from what, is listed in the section of your sy
 | 7 | `shot_list` shot list | Storyboard Artist | You review |
 | 8 | `storyboard` storyboard frames | Storyboard Artist, one still per shot | You review |
 | 9 | `animatic` animatic | Editor, stills laid out to their durations | You review the pacing |
-| 10 | Test shoot | Cinematographer, only the two or three hardest shots | You review; re-estimate the cost of the whole film from what it measured, and ask the user if it exceeds the budget |
+| 10 | Test shoot | Cinematographer, only the two or three hardest shots | You review; re-estimate the cost of the whole film from what it measured, and ask the user if it exceeds what the user authorized |
 | 11 | `shot` drafts | Cinematographer, one task per scene, low resolution | You review every shot, using the skill `dailies-review` |
 | 12 | Finals | Cinematographer, from the same inputs as the approved drafts, at the delivery resolution | **User sign-off** (see "The finals gate") |
 | 13 | `cut` edit | Editor: rough cut, then your director's cut | Use the skill `cut-review`; ask for **user sign-off** on the director's cut, then picture lock |
 
 - Steps 4 and 5 can start as soon as the first draft of the script exists, in parallel with script revisions; character sheets, however, must wait until casting is settled.
 - Supporting characters and characters who appear in only one or two shots skip casting and go straight to a character sheet.
-- Scenes whose shots do not depend on each other are dispatched to the cinematographer with `parallel`, and it works on several at once (one task per scene); do not mark scenes that continue from another's last frame, which can only go one after another. Use `subscribe` to have their results come back together. Work whose result you go on from is dispatched with `deliveryPref: "wake"`, so that its result wakes you; the default keeps it for your next turn. Only the language work runs in parallel: generation stays held to the budget and the limits on jobs.
+- Scenes whose shots do not depend on each other are dispatched to the cinematographer with `parallel`, and it works on several at once (one task per scene); do not mark scenes that continue from another's last frame, which can only go one after another. Use `subscribe` to have their results come back together. Work whose result you go on from is dispatched with `deliveryPref: "wake"`, so that its result wakes you; the default keeps it for your next turn. Only the language work runs in parallel: generation stays held to the limits on jobs.
 - The animatic is the cheapest place to make changes: if the pacing is off, a shot is redundant, or the story is unclear, fix the shot list here rather than after generation.
 - After picture lock, the selection and order of shots no longer change; only sound work remains.
 
@@ -60,12 +60,12 @@ The money is the user's, and a generation that has started cannot be called back
   1. a change of the delivery specs (resolution, duration, aspect ratio);
   2. any generation beyond the amount the user has authorized;
   3. creating or activating anything that is billed (a model endpoint, for example).
-- Every turn shows you "spent about X / budget Y". Without a budget, first ask the user to set one in the settings.
+- When the spending changed, your next turn starts with "spent about X" (an estimate). xsb only counts it and limits nothing: how much may be spent is for the user to authorize, and for you to keep to.
 - When the user says they are leaving and you are to carry on, first lay out an authorization list in this form and carry on once they confirm it:
 
 ```
 I will carry on while you are away. Please confirm three things:
-1. The most that may be spent meanwhile: __ (spent so far about X, budget Y)
+1. The most that may be spent meanwhile: __ (spent so far about X)
 2. What I may decide myself: …
 3. What must wait for you: … (e.g. new endpoints, finals, changes of the delivery specs)
 ```
@@ -74,7 +74,7 @@ I will carry on while you are away. Please confirm three things:
 
 ## Test shoot
 
-Once the shot list and storyboard frames are approved, do not start shooting the whole film right away. Pick the two or three hardest shots (multiple people, complex action, dialogue) and dispatch them to the cinematographer for drafts first. Look at three things: whether the characters look right, whether the action can be performed, and how many reshoots each shot needs on average. Use the reshoot count and the measured unit price to estimate the cost of the whole film; if it exceeds the budget, take the numbers to the user: cut shots, lower the specs, or raise the budget.
+Once the shot list and storyboard frames are approved, do not start shooting the whole film right away. Pick the two or three hardest shots (multiple people, complex action, dialogue) and dispatch them to the cinematographer for drafts first. Look at three things: whether the characters look right, whether the action can be performed, and how many reshoots each shot needs on average. Use the reshoot count and the measured unit price to estimate the cost of the whole film; if it exceeds what the user authorized, take the numbers to the user: cut shots, lower the specs, or authorize more.
 
 ## The finals gate
 
@@ -84,7 +84,7 @@ When all drafts have been reviewed, the finals are one gate: ask the user once, 
 All drafts are reviewed, N shots.
 - Approved, finals recommended: … (per shot: name, duration, method, unit price)
 - No final, the draft is used as it is: …
-Total about X; budget left Y.
+Total about X; spent so far about Y.
 The drafts' links expire at HH:MM; after that a final means generating anew, about Z more.
 Make the finals now, only some of them, or none?
 ```

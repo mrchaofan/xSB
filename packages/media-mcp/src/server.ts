@@ -70,7 +70,6 @@ async function account(accounts: Accounts, provider: { cost(usage: Usage, cache:
 
 async function generateImage(provider: ImageProvider, args: any, signal: AbortSignal, accounts: Accounts): Promise<string> {
   need(args, "prompt", "output");
-  accounts?.ledger.check("generate_image");
   const usage = await provider.generate({ prompt: args.prompt, references: imagesOf(args), size: args.size, output: args.output }, signal);
   return `Saved ${path.resolve(args.output)}${await account(accounts, provider, "generate_image", args.output, usage)}`;
 }
@@ -80,7 +79,6 @@ async function generateVideo(provider: VideoProvider, args: any, signal: AbortSi
   const references = imagesOf(args);
   if (args.last_frame && !args.first_frame) throw new Error(`"last_frame" needs "first_frame"`);
   if (references?.length && args.first_frame) throw new Error(`"reference_images" cannot be combined with "first_frame": use one or the other`);
-  accounts?.ledger.check("generate_video");
   const id = await provider.submit({
     prompt: args.prompt,
     firstFrame: args.first_frame,
@@ -96,7 +94,7 @@ async function generateVideo(provider: VideoProvider, args: any, signal: AbortSi
   /** Give the generation up, and say whether that saved its cost. */
   const callOff = async (why: string): Promise<never> => {
     const stopped = await provider.cancel(id);
-    // Billed, and what it cost is not known: written down as such, so that the budget is not taken for more than it is.
+    // Billed, and what it cost is not known: written down as such, so that what was spent is not taken for less than it is.
     if (!stopped) accounts?.ledger.record("generate_video", args.output, { amount: null, usage: "unknown", basis: `generation ${id} was given up after the provider had started it; it is billed, its usage was not read` });
     throw new Error(`generation ${id} ${why}. ${stopped ? "It was cancelled at the provider and is not billed." : "The provider had already started it: it will finish and be billed, but its result is not fetched."} Nothing was saved to ${args.output}.`);
   };
