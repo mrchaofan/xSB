@@ -315,7 +315,7 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
     why === "backend_changed"
       ? "This session now runs on another agent program, which has none of the earlier conversation."
       : why === "renewed"
-        ? "This session takes over the work of this topic from an earlier session of yours, which had grown long. You have none of that conversation but this handoff."
+        ? "This conversation had grown long, and goes on in a new session of the agent program. You have none of the earlier conversation but this handoff."
         : "The earlier conversation of this session could not be restored in the agent program.";
   const told: string[] = [];
   let left = HANDOFF_CHARS;

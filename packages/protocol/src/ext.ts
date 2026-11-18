@@ -64,10 +64,8 @@ export type AgentState = "idle" | "running" | "requires_action";
 
 export type AgentInfo = AgentSpec & {
   state: AgentState;
-  /** The session the agent receives its peers' messages in, once it has one. */
+  /** The agent's conversation, once it has one: the one session the user, its peers and xsb talk to it in. */
   mainSessionId?: string;
-  /** The sessions the agent works on its peers' tasks in, one per topic (the latest of a topic last). */
-  workSessions?: { sessionId: string; topic: string; retired: boolean }[];
 };
 
 export const Agents = {
@@ -330,12 +328,6 @@ export type Task = {
    * the dispatcher's own MCP servers, run by the hub in the background.
    */
   tool?: { server: string; name: string; arguments: unknown };
-  /**
-   * The dispatcher said the task depends on no other work of the assignee's, so the assignee may work on it alongside
-   * that, in a session of its own, up to the project's `limits.sessionsAtOnce`. Without it, the assignee's peer work
-   * runs one turn at a time.
-   */
-  parallel?: boolean;
   /** How its result reaches its initiator. Absent: `lazy`. */
   deliveryPref?: DeliveryPref;
   /** What its executor may do beyond reaching its initiator (docs/KERNEL.md, capabilities). */
@@ -394,7 +386,8 @@ export const Ledger = { update: `_${NS}/messages/update` } as const;
  * decides what a model sees reads a transcript from its end and stops at the first `cleared`. The other kinds
  * mark where the backend session was replaced without the user asking for it (another backend, or one that could
  * not be restored): the model is given a handoff instead, made from what precedes them up to the last `cleared`.
- * `renewed` starts a work session that takes over from one that grew too long; its handoff is made from that one.
+ * `renewed`: the conversation grew past the project's limit, and goes on in a new backend session, handed what came
+ * before.
  */
 export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed";
 export type Boundary = {

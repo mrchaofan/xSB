@@ -4,14 +4,14 @@
  *   outside (editor, CLI) --ACP--> Client (acp-server.ts) ---------------------+
  *                                                                              +--> LiveSession --ACP--> Backend
  *   agent's tool call --MCP--> mcp.ts -> tools.ts -> Kernel --hooks--> Delivery +
- *                                                          \-hooks--> Jobs, Nudges, Audit, the clients
+ *                                                          \-hooks--> Jobs, Audit, the clients
  *
  * This class is the composition root. It owns the registries (agents,
  * sessions, connected clients) and the two sockets, and wires the rest:
  * `kernel` decides everything about tasks and mail without knowing ACP, and
  * says so on its hooks; the effectors registered there act on it (`delivery`
- * into sessions, `jobs` the tool calls, `nudges` the reminders, the audit and
- * the clients' feed). `backends` runs the agent processes, `permissions`
+ * into sessions, `jobs` the tool calls, the audit and the
+ * clients' feed). `backends` runs the agent processes, `permissions`
  * finds a human for a backend's question, `assets` is the library they all
  * work from. What an agent is beyond its name comes from its role (roles.ts).
  * All durable state is in `state`.
@@ -28,17 +28,11 @@ import { capabilityHook } from "./capabilities.ts";
 import { BackendPool } from "./backends.ts";
 import { DEFAULT_BACKEND, loadProjectConfig, migrateProjectConfig, projectLanguage } from "./config.ts";
 
-/** Past this much context a work session takes no new work, unless the project says otherwise (`limits.sessionTokens`). */
-const SESSION_TOKENS = 150_000;
-const sessionTokens = (paths: Paths): number => loadProjectConfig(paths).limits?.sessionTokens ?? SESSION_TOKENS;
-/** How many work sessions of one agent run at a time for parallel work, unless the project says otherwise. */
-const SESSIONS_AT_ONCE = 2;
 import { Delivery } from "./delivery.ts";
 import { Hooks } from "./hooks.ts";
 import { Jobs } from "./jobs.ts";
 import { Kernel } from "./kernel.ts";
 import type { KernelHooks } from "./kernel.ts";
-import { Nudges } from "./nudges.ts";
 import { commonServers, serveMcp } from "./mcp.ts";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
@@ -61,7 +55,6 @@ export class Hub {
   readonly kernel: Kernel;
   readonly delivery: Delivery;
   readonly jobs: Jobs;
-  readonly nudges: Nudges;
   readonly permissions: Permissions;
   readonly assets: Assets;
   readonly spending: Spending;
@@ -84,7 +77,6 @@ export class Hub {
     this.kernel = new Kernel(this.state, hooks, (to) => this.delivery.recipient(to));
     this.delivery = new Delivery(this);
     this.jobs = new Jobs(this);
-    this.nudges = new Nudges(this);
     capabilityHook(this);
     auditHook(hooks, this.state.store);
     // UserFeedHook: what the clients are shown of tasks and of the ledger.
@@ -166,10 +158,7 @@ export class Hub {
   agentInfo(agent: AgentSpec): AgentInfo {
     const busy = [...this.live.values()].some((s) => s.agentId === agent.id && s.busy);
     const state = this.permissions.waitingOn(agent.id) ? "requires_action" : busy ? "running" : "idle";
-    const workSessions = [...this.state.sessions.values()]
-      .filter((s) => s.agentId === agent.id && s.topic)
-      .map((s) => ({ sessionId: s.id, topic: s.topic!, retired: !!s.retired }));
-    return { ...agent, state, mainSessionId: this.state.mainSession(agent.id)?.id, workSessions };
+    return { ...agent, state, mainSessionId: this.state.mainSession(agent.id)?.id };
   }
 
   /** The agent a client reaches when it names none. Read on every use, like the backend table. */
@@ -282,13 +271,12 @@ export class Hub {
     return session;
   }
 
-  createSession(agentId: string, clientMcp: McpServer[] = [], work?: { topic: string; continues?: string }): LiveSession {
+  createSession(agentId: string, clientMcp: McpServer[] = []): LiveSession {
     this.agent(agentId);
     const rec: SessionRec = {
       id: newId("ses"),
       agentId,
       main: !this.state.mainSession(agentId),
-      ...work,
       createdAt: now(),
       updatedAt: now(),
     };
@@ -299,47 +287,7 @@ export class Hub {
     return session;
   }
 
-  /**
-   * The session an agent does a peer's work of a topic in: its work session of that topic, made when there is none.
-   * One that has grown past `limits.sessionTokens` takes no new work: a new one continues it, handed its conversation
-   * (session.ts), and the old one finishes what it has.
-   */
-  workSession(agentId: string, topic: string): LiveSession {
-    this.mainSession(agentId); // the main session is the first an agent has
-    const current = this.findWorkSession(agentId, topic);
-    if (current && (current.rec.used ?? 0) < sessionTokens(this.paths)) return current;
-    if (current) current.save({ retired: true });
-    return this.createSession(agentId, [], { topic: topicKey(topic), continues: current?.id });
-  }
-
-  /**
-   * Whether a session may run the turn it has next. The user's sessions always may; a work session may while the
-   * agent has fewer other work sessions running a turn than the work allows: one, or `limits.sessionsAtOnce` for
-   * a session with work dispatched as `parallel` (the task the turn brings, or one the session has open).
-   */
-  mayRun(session: LiveSession, item: MailItem | undefined): boolean {
-    // The user's word does not wait for a place.
-    if (!session.rec.topic || !item || item.from.kind === "user") return true;
-    const task = item?.taskId ? this.state.tasks.get(item.taskId) : undefined;
-    const parallel = task?.parallel || this.kernel.openTasks(session.id).some((t) => t.parallel);
-    const allowed = parallel ? (loadProjectConfig(this.paths).limits?.sessionsAtOnce ?? SESSIONS_AT_ONCE) : 1;
-    const running = [...this.live.values()].filter((s) => s !== session && s.agentId === session.agentId && s.rec.topic && s.current).length;
-    return running < allowed;
-  }
-
-  /** Let the agent's other sessions that wait for a place try again. */
-  wake(agentId: string, except: LiveSession): void {
-    for (const s of this.live.values()) if (s !== except && s.agentId === agentId && s.rec.topic) s.pump();
-  }
-
-  /** The agent's current work session of a topic, if it has one. */
-  findWorkSession(agentId: string, topic: string | undefined): LiveSession | undefined {
-    if (!topic) return undefined;
-    const key = topicKey(topic);
-    return [...this.live.values()].find((s) => s.agentId === agentId && s.rec.topic === key && !s.rec.retired);
-  }
-
-  /** The session an agent receives its peers' mail in. */
+  /** The agent's conversation (SessionRec.main): where the user, its peers and xsb reach it. */
   mainSession(agentId: string): LiveSession {
     const rec = this.state.mainSession(agentId);
     return rec ? this.live.get(rec.id)! : this.createSession(agentId);

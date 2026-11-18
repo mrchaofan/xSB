@@ -17,19 +17,18 @@ export type SessionRec = {
   agentId: string;
   /** The backend's own session id, once one exists. */
   backendSessionId?: string;
-  /** The session peers' messages go to. One per agent. */
+  /**
+   * The agent's conversation: the one session the user, its peers and xsb all talk to it in, and the one it does all
+   * its work in, one turn at a time. One per agent. Other sessions are a client's own (`session/new`).
+   */
   main: boolean;
   /** The backend the backend session belongs to: one of another backend cannot be restored in this one. */
   backend?: string;
   /**
-   * Of a work session: the topic (its key) whose tasks it takes. Work from peers goes to the agent's work session of
-   * its topic, not to its main session, so that one session does not carry every matter of the project.
+   * The conversation grew past `limits.sessionTokens`: its next turn starts a new backend session, handed the
+   * conversation so far (session.ts, `renewed`). The session stays the same.
    */
-  topic?: string;
-  /** A work session that grew past the limit: the next work of its topic goes to a new one that continues it. */
-  retired?: boolean;
-  /** The work session this one took over from: its first turn is handed that one's conversation. */
-  continues?: string;
+  renew?: boolean;
   /** How much of the backend's context window the conversation used at the end of its last turn, in tokens. */
   used?: number;
   title?: string;

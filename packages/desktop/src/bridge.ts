@@ -26,8 +26,6 @@ export type Entry = { id: string } & (
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
   | { kind: "error"; text: string }
-  /** From here on the transcript shows another session of the agent: a work session of `topic`, or without one the main session. */
-  | { kind: "thread"; topic?: string }
   /** Where what the model sees starts anew: before it, the model sees nothing (`cleared`) or only a handoff. */
   | { kind: "boundary"; boundary: Boundary }
 );

@@ -917,7 +917,7 @@ inputs: brief, cut
 | 系统说明、标签的包装、记忆摘要、结果块 | [prompts.ts](../packages/hub/src/prompts.ts) |
 | 原语的参数、说明、返回、三种提示 | [tools.ts](../packages/hub/src/tools.ts) |
 | 派发、汇合、`after`、撤回与传染、通知、台账 | [kernel.ts](../packages/hub/src/kernel.ts)（[KERNEL.md](KERNEL.md)） |
-| 投进会话、后台任务、提醒 | [delivery.ts](../packages/hub/src/delivery.ts)、[jobs.ts](../packages/hub/src/jobs.ts)、[nudges.ts](../packages/hub/src/nudges.ts) |
+| 投进会话、后台任务 | [delivery.ts](../packages/hub/src/delivery.ts)、[jobs.ts](../packages/hub/src/jobs.ts) |
 | 话题账本、笔记、门的数据 | [state.ts](../packages/hub/src/state.ts) |
 | 资产库 | [assets.ts](../packages/hub/src/assets.ts) |
 | 角色与技能声明的读取 | [roles.ts](../packages/hub/src/roles.ts) |

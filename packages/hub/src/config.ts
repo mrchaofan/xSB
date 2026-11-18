@@ -50,14 +50,12 @@ export type GlobalConfig = { version: 1; backends?: Record<string, BackendSpec> 
  */
 /**
  * `limits.jobsAtOnce`: how many calls of one tool run as jobs at a time; the others wait in the hub (default 2).
- * `limits.sessionTokens`: past how many tokens of context a work session takes no new work, which goes to a new
- * session handed its conversation (default 150000).
- * `limits.sessionsAtOnce`: how many work sessions of one agent may run a turn at a time for tasks dispatched as
- * `parallel` (default 2); other peer work of an agent runs one turn at a time.
+ * `limits.sessionTokens`: past how many tokens of context an agent's conversation goes on in a new backend session,
+ * handed what came before (default 150000).
  * `limits.awaitSeconds`: how long `dispatch_task` with `await_result` waits inside the call (default 50: agent
  * programs end a tool call that takes longer, codex after 60 seconds).
  */
-export type ProjectConfig = { version: 1 | 2; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number; sessionsAtOnce?: number; awaitSeconds?: number } };
+export type ProjectConfig = { version: 1 | 2; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number; awaitSeconds?: number } };
 
 /**
  * The version of the project config this xsb writes. 2: the preset team "film" is the one that is bound to no
@@ -65,6 +63,9 @@ export type ProjectConfig = { version: 1 | 2; defaultAgent?: string; teams?: str
  * that one, so a config of version 1 that uses "film" is moved to "film-ark" (`migrateProjectConfig`).
  */
 export const CONFIG_VERSION = 2;
+
+/** Past how many tokens of context a conversation goes on in a new backend session (`limits.sessionTokens`). */
+export const sessionTokens = (paths: Paths): number => loadProjectConfig(paths).limits?.sessionTokens ?? 150_000;
 
 /** Agents whose spec names no backend get this one. */
 export const DEFAULT_BACKEND = "claude";
