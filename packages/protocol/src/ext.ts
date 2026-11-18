@@ -315,6 +315,12 @@ export type Task = {
   to: Addr;
   /** Tasks that must be finished before this one starts. */
   after: string[];
+  /**
+   * The tasks this one was started for: those the session it was dispatched from had been handed and had not finished
+   * then (none: the session's own work, such as what the user asked there). Set by the hub, never changed. A task that
+   * is cancelled takes along what it alone was holding up (docs/TASK-GRAPH.md).
+   */
+  parents?: string[];
   /** Type of the asset the task has to register before it ends. */
   produces?: string;
   /** Ids of the assets the task works from. */

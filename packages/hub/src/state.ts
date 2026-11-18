@@ -9,6 +9,8 @@
 import type { Addr, AgentSpec, Asset, Origin, Task } from "@xsb/protocol";
 import type { Op, Record_, Store } from "@xsb/store";
 import { Paths } from "./paths.ts";
+import { addEdges } from "./task-graph.ts";
+import type { Graph } from "./task-graph.ts";
 
 export type SessionRec = {
   id: string;
@@ -65,7 +67,7 @@ export type MailItem = {
   taskId?: string;
   /** Of results: whose they are. With `mode`, they answer a join; without, it is one task's own result. */
   results?: Results;
-  /** Put it into the recipient's running turn instead of queueing behind it. */
+  /** Of xsb's word on work the recipient has open: it goes into the running turn like its dispatcher's (Mailroom.interjects). */
   steer?: boolean;
   ts: string;
 };
@@ -117,6 +119,8 @@ export class State {
    * notes. This is what keeps a topic with the peer who already handled it.
    */
   ledger = new Map<string, Map<string, { topic: string; peers: Map<string, TopicPeer> }>>();
+  /** The edges between tasks, reversed (task-graph.ts): task -> the tasks started for it, and those that wait for it (`after`). */
+  graph: Graph = { children: new Map(), waiters: new Map() };
 
   constructor(store: Store) {
     this.store = store;
@@ -154,6 +158,8 @@ export class State {
         this.sessions.set(rec.session.id, rec.session);
         return;
       case F.tasks:
+        // A task's edges are set when it is made and never change: they are indexed when it is first seen.
+        if (!this.tasks.has(rec.task.id)) addEdges(this.graph, rec.task);
         this.tasks.set(rec.task.id, rec.task);
         return;
       case F.gates:

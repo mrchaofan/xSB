@@ -128,6 +128,7 @@ const prompt = (sessionId: string, text: string) =>
   conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
 const newSession = async (agentId: string): Promise<string> =>
   (await conn.request("session/new", { cwd: project, mcpServers: [], _meta: { [Agents.sessionKey]: agentId } })).sessionId;
+const call = (tool: string, args: unknown): string => `!call ${tool} ${JSON.stringify(args)}`;
 const tasks = async (): Promise<Task[]> => (await conn.request(Tasks.list, {})).tasks;
 const idle = (agentId: string) =>
   until(`${agentId} idle`, async () =>
@@ -242,21 +243,33 @@ const a = await newSession("a");
   console.log("ok 6 native steering");
 }
 
-// 7. An agent interjects into a peer's running turn.
+// 7. Whether a message goes into a peer's running turn is the hub's call: it does when it comes from whoever gave the
+// peer the work it has open and the backend takes it without being interrupted. Anyone else's waits for the turn to
+// end, and so does every message to a backend that would have to be interrupted.
 {
-  const bMain = (await conn.request(Agents.list)).agents.find((x: any) => x.id === "b").mainSessionId;
-  await conn.request("session/resume", { sessionId: bMain, cwd: project, mcpServers: [] });
-  const busy = prompt(bMain, "!sleep 5000\n!say B-SLOW");
-  await until("b running", () => hub.session(bMain).current?.started);
-  // A topic b has no work session of: the message goes to its main session, where the user keeps it busy.
-  await prompt(a, `!call send_message {"to":"b","content":"stop, plan changed","topic":"plans","interject":true}`);
+  await prompt(a, call("dispatch_task", { to: "c", title: "long take", instructions: "!sleep 1500\n!done LONG", topic: "interject" }));
+  await until("c at work", () => [...hub.live.values()].find((l) => l.agentId === "c" && l.rec.topic === "interject" && l.current?.started));
+  said.set(a, "");
+  await prompt(a, call("send_message", { to: "c", content: "plan changed", topic: "interject" }));
   assert.match(said.get(a)!, /"delivery": "interjected"/);
-  assert.equal((await busy).stopReason, "end_turn");
-  const got = inputs.get(bMain)!.find((i) => i.text.includes("plan changed"))!;
+  const got = await until("put into the turn", () => received("c").find((i) => i.text.includes("plan changed")));
   assert.equal(got.origin.steered, true);
   assert.equal(got.origin.agentId, "a");
-  assert.doesNotMatch(said.get(bMain)!, /B-SLOW/);
-  console.log("ok 7 agent interjects");
+  // b gave c nothing: what it says waits, unseen, and is read as a turn of its own.
+  assert.equal(hub.mail.send(hub.mainSession("b"), "c", "by the way", "interject").delivery, "queued");
+  assert.ok(!received("c").some((i) => i.text.includes("by the way")));
+  const later = await until("read after the turn", () => received("c").find((i) => i.text.includes("by the way")));
+  assert.notEqual(later.origin.steered, true);
+  // b steers only by being interrupted: even the dispatcher's word waits for its turn to end.
+  await prompt(a, call("dispatch_task", { to: "b", title: "slow b", instructions: "!sleep 800\n!done SLOW-B", topic: "interject" }));
+  await until("b at work", () => [...hub.live.values()].find((l) => l.agentId === "b" && l.rec.topic === "interject" && l.current?.started));
+  said.set(a, "");
+  await prompt(a, call("send_message", { to: "b", content: "hold on", topic: "interject" }));
+  assert.match(said.get(a)!, /"delivery": "queued behind the peer's current work"/);
+  await idle("b");
+  await idle("c");
+  await idle("a");
+  console.log("ok 7 the hub decides who interjects");
 }
 
 // 8. Memory: the hub knows who handled a topic, the agent keeps notes, both survive.
@@ -361,7 +374,7 @@ const a = await newSession("a");
   console.log("ok 12 error codes");
 }
 
-// 13. A dispatcher can cancel a task. It ends like any other: the result comes back, as "cancelled".
+// 13. A dispatcher can cancel a task. It ends at once, as "cancelled", and no result comes back: the dispatcher knows.
 {
   await idle("a");
   await prompt(
@@ -375,9 +388,10 @@ const a = await newSession("a");
   assert.match(said.get(a)!, /Task t_\w+ cancelled\./);
   const result = (title: string) =>
     until(`result of ${title}`, () => inputs.get(a)!.find((i) => i.text.includes(`title="${title}"`) && i.text.includes("<xsb-task-result")));
-  assert.match((await result("second")).text, /status="cancelled"/);
   assert.match((await result("first")).text, /status="completed">\nFIRST/);
   await idle("a");
+  assert.equal((await tasks()).find((t) => t.title === "second")!.status, "cancelled");
+  assert.ok(!inputs.get(a)!.some((i) => i.text.includes('title="second"') && i.text.includes("<xsb-task-result")));
   console.log("ok 13 cancel a task");
 }
 
@@ -412,7 +426,6 @@ const a = await newSession("a");
 }
 
 // 15. A role gives its agents their instructions, their MCP servers and their skills.
-const call = (tool: string, args: unknown): string => `!call ${tool} ${JSON.stringify(args)}`;
 const roleDir = paths.roleDir("painter");
 fs.mkdirSync(path.join(roleDir, "skills", "shots"), { recursive: true });
 fs.mkdirSync(path.join(roleDir, "skills", "grading"));
@@ -485,8 +498,10 @@ const p = await newSession("p1");
   await prompt(p, job("shot 2", "fail", 0));
   assert.match((await resultOf("shot 2")).text, /status="failed">\nthe renderer refused/);
   await prompt(p, [job("shot 3", "never", 5000), call("cancel_task", { task_id: "$last" })].join("\n"));
-  // Cancelling is asked of the tool itself, and what it says became of the call is the result.
-  assert.match((await resultOf("shot 3")).text, /status="cancelled">\nCancelled by the dispatcher\. render of never was called off and is not billed/);
+  // Cancelling is asked of the tool itself, and what it says became of the call is the result, kept for get_task.
+  const shot3 = await until("shot 3 called off", async () => (await tasks()).find((t) => t.title === "shot 3" && t.status === "cancelled"));
+  assert.match(shot3.result!, /^Cancelled by the dispatcher\. render of never was called off and is not billed/);
+  assert.ok(!inputs.get(p)!.some((i) => i.text.includes('title="shot 3"')), "no result comes back for it");
   await prompt(p, call("start_job", { server: "nope", tool: "render", title: "x" }));
   assert.match(said.get(p)!, /your role has no MCP server "nope"/);
   await idle("p1");
@@ -560,19 +575,26 @@ const p = await newSession("p1");
   const rendered = await until("render result", () => inputs.get(a)!.find((i) => i.text.includes('title="render"')));
   assert.match(rendered.text, /status="completed">\nTAKE-DONE\nAssets it delivered:\n<xsb-asset id="shot\/s1" version="1" by="p1"/);
 
-  // Cancelling a task ends it at once. Its assignee is told, and decides itself what becomes of what it started.
+  // Cancelling a task ends it at once, and with it what its assignee started while it had it (the hub knows that
+  // without being told). The assignee is told once, with all of it; the dispatcher is told nothing.
   const slow = [call("start_job", { server: "gen", tool: "render", arguments: { prompt: "dusk", ms: 1500 }, title: "take 2" }), "!await {}"];
   await prompt(a, call("dispatch_task", { to: "p1", title: "render again", instructions: slow.join("\n"), topic: "scene 1" }));
   const waiting = await until("p1 waiting again", async () => (await tasks()).find((t) => t.title === "take 2" && t.status === "running"));
   await idle("p1");
   const again = (await tasks()).find((t) => t.title === "render again")!;
+  assert.deepEqual(waiting.parents, [again.id]);
   await prompt(a, call("cancel_task", { task_id: again.id }));
-  assert.match(said.get(a)!, new RegExp(`Task ${again.id} cancelled\\.`));
+  assert.match(said.get(a)!, new RegExp(`Task ${again.id} cancelled\\. Cancelled with it, as started for it: ${waiting.id} "take 2"\\.`));
   assert.equal(hub.state.tasks.get(again.id)!.status, "cancelled");
-  await until("p1 told", () => received("p1").some((i) => i.text.includes(`a cancelled the task "render again" (${again.id}). Stop working on it`)));
-  await until("a told", () => inputs.get(a)!.some((i) => i.text.includes('title="render again"') && i.text.includes('status="cancelled"')));
-  await until("take 2 ran out", async () => (await tasks()).find((t) => t.id === waiting.id)?.status === "completed");
+  const told = await until("p1 told", () => received("p1").find((i) => i.text.includes(`a cancelled the task "render again" (${again.id}). Stop working on it`)));
+  assert.match(told.text, new RegExp(`xsb cancelled with it what you started for it:\\n- the job "take 2" \\(${waiting.id}\\)`));
+  const take2 = await until("take 2 called off", async () => (await tasks()).find((t) => t.id === waiting.id && t.status === "cancelled"));
+  assert.match(take2.result!, /^Cancelled with "render again" \(t_\w+\), which a cancelled\./);
+  // p1 knows: its join no longer waits, and the job's end is not sent to it.
+  assert.ok(![...hub.state.gates.values()].some((g) => g.taskIds.includes(waiting.id)));
   await idle("p1");
+  assert.ok(!received("p1").some((i) => i.text.includes('title="take 2"') && i.text.includes("<xsb-task-result")));
+  assert.ok(!inputs.get(a)!.some((i) => i.text.includes('title="render again"') && i.text.includes('status="cancelled"')), "a is not told of its own cancel");
 
   // When the user stops the turn, that is not cancelling the work: the task stays open, what it awaits goes on,
   // and the turn that brings the results finishes it. Its dispatcher is told.
@@ -956,7 +978,7 @@ const p = await newSession("p1");
   assert.deepEqual(boundaries(s), [{ kind: "backend_changed", backend: "steerable", handoff: true }]);
   const open = (await tasks()).find((t) => t.title === "open work")!;
   // Cancelled, it ends at once; b, which cannot be steered without being interrupted, is told once its turn is over.
-  hub.mail.cancel(hub.state.tasks.get(open.id)!);
+  hub.mail.cancel(hub.state.tasks.get(open.id)!, open.from);
   await until("its result taken in", async () => (await tasks()).find((t) => t.id === open.id)?.status === "cancelled" && !hub.live.get(s)!.busy && hub.state.mail.size === 0);
 
   // Cleared: refused while it works; afterwards the model starts with nothing, and the transcript still has it all.
@@ -1019,7 +1041,7 @@ const p = await newSession("p1");
   const byTitle = async (title: string) => (await tasks()).find((t) => t.title === title)!;
   assert.deepEqual([(await byTitle("q1")).status, (await byTitle("q2")).status, (await byTitle("q3")).status], ["running", "running", "queued"]);
   await prompt(s9, call("cancel_task", { task_id: (await byTitle("q3")).id }));
-  assert.match((await byTitle("q3")).result!, /before it started: it waited for its turn in xsb, nothing was submitted, nothing is billed/);
+  assert.match((await byTitle("q3")).result!, /It had not started: it waited for its turn in xsb, nothing was submitted, nothing is billed/);
   // One that waits starts when a place is free.
   await prompt(s9, job("q4"));
   assert.equal((await byTitle("q4")).status, "queued");
@@ -1297,7 +1319,7 @@ const p = await newSession("p1");
   const work = await until("b at work", () => [...hub.live.values()].find((l) => l.agentId === "b" && l.current?.started));
   const task = [...hub.state.tasks.values()].find((t) => t.title === "esc")!;
   assert.equal((await work.steer([{ type: "text", text: "!say STEERED" }], { kind: "user" }, "start")).outcome, "injected");
-  assert.equal(hub.mail.cancel(task), "cancelled");
+  assert.equal(hub.mail.cancel(task, task.from).stopping, false);
   assert.equal(hub.state.tasks.get(task.id)!.status, "cancelled");
   await until("b told", () => received("b").some((i) => i.text.includes(`cancelled the task "esc" (${task.id})`)));
   await until("what the user steered in done", () => answered("b").includes("STEERED"));
@@ -1338,6 +1360,80 @@ const p = await newSession("p1");
   await idle("c");
   await idle("a");
   console.log("ok 33 tasks join the work under way");
+}
+
+// 34. The task graph (docs/TASK-GRAPH.md): what a task is started for is what the session it comes from had open;
+// stopping a task takes along what nothing else holds up, in one go, and each who has to know is told once.
+{
+  for (const [id, backend] of [["g1", "mock"], ["g2", "steerable"], ["g3", "mock"], ["g4", "mock"], ["g5", "mock"]]) {
+    await conn.request(Agents.put, { agent: { id, backend, description: `agent ${id}` } });
+  }
+  const mine = hub.session(a);
+  const task = (id: string) => hub.state.tasks.get(id)!;
+  const running = (id: string) => until(`${id} running`, () => task(id).status === "running");
+  const give = (from: any, to: string, title: string, extra: any = {}) =>
+    hub.mail.dispatch(from, to, { title, topic: `graph ${title}`, instructions: "!sleep 3000", after: [], ...extra });
+  const work = (t: Task) => hub.live.get(t.to.sessionId)!;
+  const has = (agentId: string, text: string) => received(agentId).some((i) => i.text.includes(text));
+
+  // A chain, with a middle task that already finished: a -> g1 (P) -> g3 (X, finished) -> g4 (Z); and Y, held back
+  // after Z, for an idle g5. Stopping P stops Z through X, and Y is not handed over on the way.
+  const P = give(mine, "g1", "P");
+  await running(P.id);
+  const X = give(work(P), "g3", "X");
+  await running(X.id);
+  assert.deepEqual(X.parents, [P.id]);
+  const Z = give(work(X), "g4", "Z");
+  await running(Z.id);
+  hub.mail.complete(task(X.id), "completed", "X done, Z still renders", []);
+  const Y = give(work(P), "g5", "Y", { after: [Z.id], instructions: "!say Y-RAN" });
+  assert.equal(Y.status, "blocked");
+  const { with: went } = hub.mail.cancel(task(P.id), P.from);
+  assert.deepEqual(went.map((t) => t.title).sort(), ["Y", "Z"]);
+  assert.deepEqual([task(P.id).status, task(Y.id).status, task(Z.id).status], ["cancelled", "cancelled", "cancelled"]);
+  assert.match(task(Z.id).result!, /^Cancelled with "P" \(t_\w+\), which a cancelled\. g4 had it/);
+  await until("g1 told once, with Y", () => has("g1", `a cancelled the task "P" (${P.id})`) && has("g1", `"Y" to g5 (${Y.id})`));
+  await until("g4 told", () => has("g4", `The task "Z" (${Z.id}) that g3 gave you is cancelled with "P"`));
+  // g3 finished X, so it is not told in a notice: Z's result reaches it as any result would.
+  await until("g3 has Z's result", () => received("g3").some((i) => i.text.includes(`title="Z"`) && i.text.includes('status="cancelled"')));
+  await sleep(300);
+  assert.ok(!has("g5", 'title="Y"'), "Y was never handed over");
+  assert.ok(!answered("g5").includes("Y-RAN"));
+  assert.ok(!inputs.get(a)!.some((i) => i.text.includes(`task-id="${P.id}"`)), "a stopped P itself and is not told");
+
+  // Work started while a session had two tasks goes on while one of them does.
+  const P2 = give(mine, "g2", "both", { topic: "graph shared" });
+  await running(P2.id);
+  const Q = give(hub.session(await newSession("g3")), "g2", "other", { topic: "graph shared" });
+  await running(Q.id);
+  const c = give(work(P2), "g4", "for both");
+  assert.deepEqual([...c.parents!].sort(), [P2.id, Q.id].sort());
+  assert.deepEqual(hub.mail.cancel(task(P2.id), P2.from).with, []);
+  assert.ok(["queued", "running"].includes(task(c.id).status), "it goes on");
+  await until("g2 told what goes on", () => has("g2", `Not cancelled, for it is also for other work of yours that goes on:\n- "for both" to g4 (${c.id})`));
+  hub.mail.cancel(task(Q.id), Q.from);
+  assert.equal(task(c.id).status, "cancelled");
+
+  // Cancelled from another session of the dispatcher: the session that dispatched it and waits for it is not left waiting.
+  const T = give(mine, "g1", "T");
+  hub.mail.join(mine, [T], "all", "after T");
+  const elsewhere = await newSession("a");
+  hub.mail.cancel(task(T.id), { agentId: "a", sessionId: elsewhere });
+  await until("the waiting session has T's result", () => inputs.get(a)!.some((i) => i.text.includes(`task-id="${T.id}"`) && i.text.includes('status="cancelled"')));
+
+  // The hub fails a task: what it held up goes too, its assignee is told, its dispatcher has the failure.
+  const F = give(mine, "g1", "F");
+  await running(F.id);
+  const under = give(work(F), "g3", "under F");
+  await running(under.id);
+  hub.mail.turnEnded(work(F), { req: { item: { id: "m_gone", kind: "task", taskId: F.id } } } as any, "end_turn", new Error("backend crashed"));
+  assert.equal(task(F.id).status, "failed");
+  assert.match(task(under.id).result!, /^Cancelled with "F" \(t_\w+\), which failed\./);
+  await until("g1 told", () => has("g1", `Your task "F" (${F.id}) ended as failed: The agent could not run the task: backend crashed`));
+  await until("a has the failure", () => inputs.get(a)!.some((i) => i.text.includes(`task-id="${F.id}"`) && i.text.includes('status="failed"')));
+
+  for (const id of ["a", "g1", "g2", "g3", "g4", "g5"]) await idle(id);
+  console.log("ok 34 the task graph: what goes with a stopped task");
 }
 
 await hub.shutdown();
