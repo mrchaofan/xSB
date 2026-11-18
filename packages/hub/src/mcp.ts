@@ -14,7 +14,7 @@ import type { Hub } from "./hub.ts";
 import { shipped } from "./paths.ts";
 import { mcpServers } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
-import { callTool, toolsFor } from "./tools.ts";
+import { TOOLS, callTool } from "./tools.ts";
 import { VERSION } from "./util.ts";
 
 const MCP_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -61,8 +61,9 @@ export function commonServers(): { server: McpServer; about?: string }[] {
 }
 
 /**
- * Serve the team's tools to one bridge. The tools listed are those the session's work gives it now (capabilities.ts);
- * when that changes, the bridge is told (`notifications/tools/list_changed`), so that the agent program asks again.
+ * Serve the team's tools to one bridge. Every session is listed every tool, always: an agent program may take the list
+ * once and keep it (codex does, whatever `notifications/tools/list_changed` says). Whether a call is allowed is
+ * decided when it is made (capabilities.ts).
  */
 export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => LiveSession | undefined): void {
   let session: LiveSession | undefined;
@@ -70,28 +71,21 @@ export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => 
     if (!session) throw new RpcError(-32600, "not attached");
     return session;
   };
-  let listed = "";
-  const names = (): string => toolsFor(hub, attached()).map((t) => t.name).join(",");
 
   conn.onRequest(BRIDGE_ATTACH, (p) => {
     session = lookup(p.token);
     if (!session) throw RpcError.invalidParams("unknown bridge token");
-    hub.bridges.set(conn, () => {
-      if (listed && names() !== listed) conn.notify("notifications/tools/list_changed");
-    });
-    void conn.closed.then(() => hub.bridges.delete(conn));
     return {};
   });
   conn.onRequest("initialize", (p) => ({
     protocolVersion: MCP_VERSIONS.includes(p.protocolVersion) ? p.protocolVersion : MCP_VERSIONS[0],
-    capabilities: { tools: { listChanged: true } },
+    capabilities: { tools: {} },
     serverInfo: { name: TEAM_SERVER, version: VERSION },
   }));
   conn.onRequest("ping", () => ({}));
   conn.onRequest("tools/list", () => {
-    const tools = toolsFor(hub, attached());
-    listed = tools.map((t) => t.name).join(",");
-    return { tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
+    attached();
+    return { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
   });
   conn.onRequest("tools/call", async (p) => {
     const result = await callTool(hub, attached(), p.name, p.arguments);

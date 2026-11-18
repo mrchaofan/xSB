@@ -14,7 +14,6 @@
 import { errorMessage, text } from "@xsb/protocol";
 import type { Addr, ContentBlock, OriginMeta } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
-import { userSaid } from "./capabilities.ts";
 import type { Hub } from "./hub.ts";
 import { isVeto } from "./hooks.ts";
 import type { Recipient, Route } from "./kernel.ts";
@@ -155,8 +154,7 @@ export class Delivery {
 
   /**
    * What the user says in a session (docs/DESIGN.md 3.1, 1-2). Said while a task of the user's is open there, it is
-   * more of it. Said while the session works on tasks, it goes into that work: no task of its own, and what the
-   * user's words give (capabilities.ts) goes to those tasks. Otherwise it is a new task the user initiates (into the
+   * more of it. Said while the session works on tasks, it goes into that work: no task of its own. Otherwise it is a new task the user initiates (into the
    * work under way, if there is any). Either way it is a message in the session's inbox like any other, from the user, which never waits
    * behind work (kernel.ts, `deliveryPolicy`). Resolves when it is inserted into the conversation.
    */
@@ -169,10 +167,8 @@ export class Delivery {
     try {
       const open = kernel.userTask(session.id);
       if (open) {
-        userSaid(this.hub, open, prompt);
         kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", taskId: open.id, prompt, pref: "wake" });
       } else if (session.busy && kernel.openTasks(session.id).length) {
-        for (const task of kernel.openTasks(session.id)) userSaid(this.hub, task, prompt);
         kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", prompt, pref: "wake" });
       } else {
         const task = kernel.dispatchUser(to, prompt, messageId, topicKey(session.rec.title ?? "conversation"));

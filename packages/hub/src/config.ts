@@ -55,7 +55,15 @@ export type GlobalConfig = { version: 1; backends?: Record<string, BackendSpec> 
  * `limits.awaitSeconds`: how long `dispatch_task` with `await_result` waits inside the call (default 50: agent
  * programs end a tool call that takes longer, codex after 60 seconds).
  */
-export type ProjectConfig = { version: 1 | 2; defaultAgent?: string; teams?: string[]; language?: Language; limits?: { jobsAtOnce?: number; sessionTokens?: number; awaitSeconds?: number } };
+export type ProjectConfig = {
+  version: 1 | 2;
+  defaultAgent?: string;
+  teams?: string[];
+  language?: Language;
+  limits?: { jobsAtOnce?: number; sessionTokens?: number; awaitSeconds?: number };
+  /** Role -> whom (roles, or "*") it may dispatch tasks to and message, as the user allowed it always (capabilities.ts). */
+  permissions?: Record<string, { dispatch?: string[]; message?: string[] }>;
+};
 
 /**
  * The version of the project config this xsb writes. 2: the preset team "film" is the one that is bound to no

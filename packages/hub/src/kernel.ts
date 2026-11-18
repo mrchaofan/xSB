@@ -22,7 +22,7 @@
  * settles, the tasks it releases. Done and stopped differ only in what the end says.
  */
 import { isTerminal, textOf } from "@xsb/protocol";
-import type { Addr, Asset, ContentBlock, DeliveryPref, EndReason, Grant, LedgerEntry, LedgerState, Origin, Principal, SessionUpdate, StopReason, Task, TaskStatus } from "@xsb/protocol";
+import type { Addr, Asset, ContentBlock, DeliveryPref, EndReason, LedgerEntry, LedgerState, Origin, Principal, SessionUpdate, StopReason, Task, TaskStatus } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import type { Hooks, Veto } from "./hooks.ts";
 import { isVeto } from "./hooks.ts";
@@ -246,18 +246,17 @@ export class Kernel {
   dispatch(
     from: Addr,
     to: Addr,
-    input: { title: string; topic: string; instructions: string; after: string[]; produces?: string; inputs?: string[]; deliveryPref?: DeliveryPref; grants?: Grant[] },
+    input: { title: string; topic: string; instructions: string; after: string[]; produces?: string; inputs?: string[]; deliveryPref?: DeliveryPref },
   ): Task | Veto {
     const held = input.after.some((id) => !this.finished(id));
     const parents = this.openTasks(from.sessionId).map((t) => t.id);
-    const { deliveryPref, grants, ...rest } = input;
+    const { deliveryPref, ...rest } = input;
     return this.create(
       {
         id: newId("t"),
         ...rest,
         initiator: agentPrincipal(from.agentId),
         ...(deliveryPref && deliveryPref !== "lazy" ? { deliveryPref } : {}),
-        ...(grants?.length ? { grants } : {}),
         ...(parents.length ? { parents } : {}),
         from,
         to,
@@ -347,7 +346,7 @@ export class Kernel {
     this.hooks.emit("task.started", running);
   }
 
-  /** The user says more on a task of theirs that is open, or the executor gets more of its own grants: the task is as `task` now. */
+  /** The task is as `task` now. */
   update(task: Task): void {
     const saved = { ...task, updatedAt: now() };
     this.write([ops.putTask(saved)], { changed: [saved] });
