@@ -286,12 +286,13 @@ export class Hub {
   /**
    * Whether a session may run the turn it has next. The user's sessions always may; a work session may while the
    * agent has fewer other work sessions running a turn than the work allows: one, or `limits.sessionsAtOnce` for
-   * a task dispatched as `parallel` (and for the results that come back to it).
+   * a session with work dispatched as `parallel` (the task the turn brings, or one the session has open).
    */
   mayRun(session: LiveSession, item: MailItem | undefined): boolean {
     if (!session.rec.topic) return true;
     const task = item?.taskId ? this.state.tasks.get(item.taskId) : undefined;
-    const allowed = task?.parallel ? (loadProjectConfig(this.paths).limits?.sessionsAtOnce ?? SESSIONS_AT_ONCE) : 1;
+    const parallel = task?.parallel || this.mail.openTasks(session.id).some((t) => t.parallel);
+    const allowed = parallel ? (loadProjectConfig(this.paths).limits?.sessionsAtOnce ?? SESSIONS_AT_ONCE) : 1;
     const running = [...this.live.values()].filter((s) => s !== session && s.agentId === session.agentId && s.rec.topic && s.current).length;
     return running < allowed;
   }

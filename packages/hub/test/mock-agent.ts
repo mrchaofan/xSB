@@ -5,7 +5,12 @@
  *   !sleep <ms>           wait (a cancel ends the turn here)
  *   !busy <ms>            wait, and finish waiting even if cancelled (a tool call that has to run out)
  *   !call <tool> <json>   call a tool of the "xsb" MCP server and emit its result;
- *                         "$last" in the JSON is the id of the task or job started last
+ *                         "$last" in the JSON is the id of the task or job started last,
+ *                         "$task" the id of the <xsb-task> it stands in, or else of the one
+ *                         the session was given last (left as it is without one: it may be
+ *                         meant for the instructions of a task this session dispatches)
+ *   !done <result>        complete_task on that task
+ *   !echo                 emit the whole prompt, as a prompt without directives is
  *   !await <json>         await_tasks on every task dispatched since the last !await
  *   !perm                 ask the client for permission and emit the outcome
  *   !servers              emit the names of the MCP servers the session was given
@@ -26,6 +31,10 @@ type Session = {
   lines: string[];
   wake?: () => void;
   taskIds: string[];
+  /** The <xsb-task> the session was given last. */
+  task?: string;
+  /** The prompt of the running turn, as text. */
+  prompt: string;
   /** Names of the MCP servers the session was opened with. */
   servers: string[];
 };
@@ -37,7 +46,7 @@ const steering = flags.includes("--steering");
 let counter = 0;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
-  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], servers: mcpServers.map((s) => s.name) };
+  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name) };
   const server = mcpServers.find((s) => s.name === "xsb");
   if (server) {
     const env = Object.fromEntries(server.env.map((e: any) => [e.name, e.value]));
@@ -71,7 +80,8 @@ async function tool(session: Session, name: string, args: unknown): Promise<stri
 }
 
 async function step(session: Session, line: string): Promise<void> {
-  const [, directive, rest = ""] = /^!(\w+)\s*(.*)$/.exec(line) ?? [];
+  const [, directive, own, rest = ""] = /^!(\w+)(?:@(t_\w+))?\s*(.*)$/.exec(line) ?? [];
+  const task = own ?? session.task ?? "";
   switch (directive) {
     case "say":
       return say(session, rest + "\n");
@@ -89,11 +99,17 @@ async function step(session: Session, line: string): Promise<void> {
       return;
     case "call": {
       const [, name, json = "{}"] = /^(\w+)\s*(.*)$/.exec(rest)!;
-      const out = await tool(session, name, JSON.parse(json.replaceAll("$last", session.taskIds.at(-1) ?? "")));
+      const out = await tool(session, name, JSON.parse(json.replaceAll("$last", session.taskIds.at(-1) ?? "").replaceAll("$task", task || "$task")));
       const id = /"task_id": "(t_\w+)"/.exec(out)?.[1];
       if ((name === "dispatch_task" || name === "start_job") && id) session.taskIds.push(id);
       return say(session, `result(${name}): ${out}\n`);
     }
+    case "done": {
+      const out = await tool(session, "complete_task", { task_id: task, result: rest });
+      return say(session, `result(complete_task): ${out}\n`);
+    }
+    case "echo":
+      return say(session, `echo: ${session.prompt.replaceAll("\n", " | ")}\n`);
     case "usage":
       conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "usage_update", used: Number(rest), size: 1_000_000 } });
       return;
@@ -118,6 +134,12 @@ async function step(session: Session, line: string): Promise<void> {
 }
 
 const textOf = (prompt: any[]): string => prompt.map((b) => b.text ?? `<${b.type} ${b.mimeType ?? b.uri}>`).join("\n");
+/** Take note of the tasks a prompt gives; the directives in a task's instructions are that task's. */
+const given = (session: Session, text: string): string =>
+  text.replace(/(<xsb-task [^>]*task-id="(t_\w+)"[^>]*>)([\s\S]*?)(<\/xsb-task>)/g, (_, head, id, body, tail) => {
+    session.task = id;
+    return head + body.replace(/^!(\w+)/gm, `!$1@${id}`) + tail;
+  });
 const program = (source: string): string[] => {
   const lines = source.split("\n").filter((l) => l.startsWith("!"));
   return lines.length ? lines : [`!say echo: ${source.replaceAll("\n", " | ")}`];
@@ -141,7 +163,8 @@ conn.onRequest("session/prompt", async (p) => {
   if (flags.includes("--auth-required")) throw new RpcError(-32000, "Authentication required");
   session.running = true;
   session.cancelled = false;
-  session.lines = program(textOf(p.prompt));
+  session.prompt = textOf(p.prompt);
+  session.lines = program(given(session, session.prompt));
   session.taskIds = [];
   while (session.lines.length && !session.cancelled) await step(session, session.lines.shift()!);
   session.running = false;
@@ -158,7 +181,7 @@ if (steering) {
     const session = sessions.get(p.sessionId);
     if (!session?.running) return { outcome: "promptRequired", reason: "noRunningTurn" };
     // Like a real agent: the steered message is handled next, then the turn goes on.
-    session.lines.unshift(...program(textOf(p.prompt)));
+    session.lines.unshift(...program(given(session, textOf(p.prompt))));
     return { outcome: "injected" };
   });
 }

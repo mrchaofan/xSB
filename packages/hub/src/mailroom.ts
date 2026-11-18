@@ -2,26 +2,33 @@
  * Mail and tasks: everything one agent's session sends to another's.
  *
  * A task is either an agent's work or a job: one tool call the hub makes for
- * the dispatcher. An agent's task is one turn, unless that turn ends waiting
- * for a join (`await_tasks`): then the task stays open, and ends with the turn
- * that receives the joined results. A message, a task and the results of tasks (one task's own, or a joined
+ * the dispatcher. A job ends when its call does. An agent's task is not tied to
+ * a turn: the assignee works on the tasks it has, as many as it was given and in
+ * as many turns as it needs, and ends each with `complete_task`. Which turn
+ * serves which task is the model's judgement; the hub keeps the list, checks
+ * what a task has to deliver when it is finished, and when a session's turn
+ * ends with tasks open and nothing on the way that would wake it, reminds it
+ * once and then tells the dispatchers.
+ *
+ * A message, a task and the results of tasks (one task's own, or a joined
  * set) are all mail items. An item is first recorded in the mailbox log, then handed to the
- * recipient's session as a turn (or steered into its running turn), and
- * acknowledged when that turn ends. Delivery is therefore at least once: an
- * item that was not acknowledged when the hub stopped is delivered again.
+ * recipient's session as a turn (or steered into its running turn: a task is,
+ * when the backend takes steering natively), and acknowledged when that turn
+ * ends. Delivery is therefore at least once: an item that was not acknowledged
+ * when the hub stopped is delivered again.
  *
  * Changes that touch several logs (a task ends: its status, the ack of its
  * mail, the gate it closes, the result it sends, the tasks it releases) are
  * one store transaction.
  */
 import { Tasks, errorMessage, isTerminal, text, textOf } from "@xsb/protocol";
-import type { Addr, McpServer, OriginMeta, StopReason, Task, TaskStatus } from "@xsb/protocol";
+import type { Addr, Asset, McpServer, OriginMeta, StopReason, Task, TaskStatus } from "@xsb/protocol";
 import { loadProjectConfig } from "./config.ts";
 import type { Paths } from "./paths.ts";
 import type { Op } from "@xsb/store";
 import type { Hub } from "./hub.ts";
 import { mcpRequest } from "./mcp-client.ts";
-import { renderMail } from "./prompts.ts";
+import { renderMail, taskReminder } from "./prompts.ts";
 import type { TaskContext } from "./prompts.ts";
 import { skillBody } from "./roles.ts";
 import type { LiveSession, Turn } from "./session.ts";
@@ -38,9 +45,6 @@ const jobsAtOnce = (paths: Paths): number => loadProjectConfig(paths).limits?.jo
 
 /** How long a cancelled job's tool has to call off what it started and say so, before its server is stopped. */
 const JOB_CANCEL_GRACE_MS = 15_000;
-
-/** The task a turn works on: the one its mail delivers, or one it takes up again after the user stopped it. */
-export const taskOfTurn = (turn: Turn): string | undefined => turn.req.item?.taskId ?? turn.resumes;
 
 function taskMail(task: Task): MailItem {
   return {
@@ -60,6 +64,11 @@ export class Mailroom {
   private jobs = new Map<string, AbortController>();
   /** Jobs that wait for a place, per tool (`server/tool`), in the order they were started. */
   private waiting = new Map<string, Job[]>();
+  /**
+   * Open tasks whose session ended a turn without them and with nothing on the way: 1 once the session was
+   * reminded, 2 once their dispatchers were told. Forgotten when the task moves again, and on a restart.
+   */
+  private stalls = new Map<string, 1 | 2>();
 
   constructor(hub: Hub) {
     this.hub = hub;
@@ -136,7 +145,6 @@ export class Mailroom {
       to: self,
       after: [],
       tool: { server: input.server, name: input.tool, arguments: input.arguments },
-      partOf: this.openTask(from.current)?.id,
       status: waits ? "queued" : "running",
       createdAt: now(),
       updatedAt: now(),
@@ -181,39 +189,28 @@ export class Mailroom {
    * Join: the owner wants the results of `tasks` in one message. Results that
    * arrived but were not read yet are taken back into the join. Returns whether
    * it was already satisfied: then nothing is registered and the caller hands
-   * the results over itself. Otherwise `keeps` is the task the owner is working
-   * on, which the join keeps open until its results are in.
+   * the results over itself.
    */
-  join(owner: LiveSession, tasks: Task[], mode: "all" | "any", note: string | undefined): { satisfied: boolean; finished: number; keeps?: Task } {
+  join(owner: LiveSession, tasks: Task[], mode: "all" | "any", note: string | undefined): { satisfied: boolean; finished: number } {
     const ids = tasks.map((t) => t.id);
-    const keeps = this.openTask(owner.current);
-    const gate: Gate = {
-      id: newId("g"),
-      owner: { agentId: owner.agentId, sessionId: owner.id },
-      taskIds: ids,
-      mode,
-      note,
-      taskId: keeps?.id,
-      createdAt: now(),
-    };
+    const gate: Gate = { id: newId("g"), owner: { agentId: owner.agentId, sessionId: owner.id }, taskIds: ids, mode, note, createdAt: now() };
     const unread = owner.withdraw((m) => m.kind === "results" && !m.results!.mode && ids.includes(m.results!.taskIds[0]));
     const acks = unread.map((m) => ops.ack(m.id));
     const finished = tasks.filter((t) => isTerminal(t.status)).length;
     const satisfied = mode === "any" ? finished > 0 : finished === tasks.length;
     // The same wait asked for again is the one already registered: a second gate would deliver the results twice.
     const same = [...this.hub.state.gates.values()].find((g) => g.owner.sessionId === owner.id && g.mode === mode && g.taskIds.length === ids.length && ids.every((id) => g.taskIds.includes(id)));
-    if (same && !satisfied) {
-      this.hub.state.commit(acks);
-      return { satisfied, finished, keeps };
-    }
-    this.hub.state.commit(satisfied ? acks : [...acks, ops.openGate(gate)]);
-    return { satisfied, finished, keeps: satisfied ? undefined : keeps };
+    this.hub.state.commit(satisfied || same ? acks : [...acks, ops.openGate(gate)]);
+    return { satisfied, finished };
   }
 
   /**
    * Cancel a task on behalf of its dispatcher. Returns whether it had to be
    * stopped mid-run. Either way it ends like any task: the dispatcher receives
    * its result, with status "cancelled".
+   *
+   * An agent's task ends at once: what the assignee does is not stopped by the hub, for its turn may serve other
+   * work too. Once it was handed the task, it is told, and stops what it does for it itself.
    */
   cancel(task: Task): "stopping" | "cancelled" {
     if (task.tool) {
@@ -228,16 +225,29 @@ export class Mailroom {
       return "stopping";
     }
     const target = this.hub.live.get(task.to.sessionId);
-    if (target?.current && taskOfTurn(target.current) === task.id) {
-      target.cancel("dispatcher"); // ends as "cancelled" through `turnEnded`
-      return "stopping";
-    }
-    // No turn is working on it: it has not run yet, it waits for a join, or the user stopped the turn it ran in.
-    if (target?.resumes === task.id) target.resumes = undefined;
     const queued = target?.withdraw((m) => m.taskId === task.id) ?? [];
-    const result = task.status === "running" ? "Cancelled by the dispatcher while it waited for results." : "Cancelled by the dispatcher before it ran.";
+    const handed = task.status === "running";
+    const result = handed ? `Cancelled by the dispatcher while ${task.to.agentId} had it. ${task.to.agentId} is told to stop working on it.` : "Cancelled by the dispatcher before it ran.";
     this.finishTask(task, "cancelled", result, queued.map((m) => ops.ack(m.id)));
+    // Put into the running turn where that does not interrupt it (`deliver`); otherwise it is read next.
+    if (handed) {
+      this.tell(task.to, task.topic, `${task.from.agentId} cancelled the task "${task.title}" (${task.id}). Stop working on it, and cancel the tasks and jobs you started only for it; there is no result to give. Your other tasks go on.`, !!target?.steersNatively);
+    }
     return "cancelled";
+  }
+
+  /**
+   * The assignee finished a task: its result goes to the dispatcher like any task's. `assets` are what it named as
+   * delivered; whether they are what the task had to deliver is checked by the caller (tools.ts).
+   */
+  complete(task: Task, status: "completed" | "failed", result: string, assets: Asset[]): void {
+    this.stalls.delete(task.id);
+    this.finishTask({ ...task, ...(assets.length ? { assets: assets.map((a) => `${a.id}@${a.version}`) } : {}) }, status, result);
+  }
+
+  /** The agent tasks a session was handed and has not finished. */
+  openTasks(sessionId: string): Task[] {
+    return [...this.hub.state.tasks.values()].filter((t) => !t.tool && t.to.sessionId === sessionId && t.status === "running");
   }
 
   // ---- delivery -------------------------------------------------------------
@@ -282,6 +292,8 @@ export class Mailroom {
       }
     }
     for (const item of [...this.hub.state.mail.values()]) this.deliver(item);
+    // A task handed into a turn that the stop cut short has no mail left to bring it back: the session is reminded.
+    for (const session of this.hub.live.values()) this.checkStalled(session, "");
   }
 
   /**
@@ -323,12 +335,16 @@ export class Mailroom {
       role: item.kind === "results" ? "task_result" : item.kind,
     };
     const queue = (): void => void session.enqueue({ origin, prompt, item, gives });
-    if (!item.steer || !session.current) return queue();
+    // A task joins the work under way, where the backend takes that without being interrupted: the session sees
+    // it next to its other tasks, and decides how to go on.
+    const steer = item.steer || (item.kind === "task" && session.steersNatively);
+    if (!steer || !session.current) return queue();
     session.steer(prompt, origin, "promptRequired").then(
       (answer) => {
         if (answer.outcome === "injected") {
           session.take(gives);
           state.commit([ops.ack(item.id)]);
+          this.handed(item);
         }
         else queue();
       },
@@ -370,9 +386,9 @@ export class Mailroom {
     }
   }
 
-  /** A word from xsb to a session, as a message of its own. */
-  tell(to: Addr, topic: string | undefined, content: string): void {
-    const item: MailItem = { id: newId("m"), to, from: { kind: "system" }, kind: "message", topic, content, ts: now() };
+  /** A word from xsb to a session, as a message of its own, or put into its running turn (`steer`). */
+  tell(to: Addr, topic: string | undefined, content: string, steer = false): void {
+    const item: MailItem = { id: newId("m"), to, from: { kind: "system" }, kind: "message", topic, content, ...(steer ? { steer } : {}), ts: now() };
     this.hub.state.commit([ops.enqueue(item)]);
     this.deliver(item);
   }
@@ -381,54 +397,25 @@ export class Mailroom {
 
   /** A session began the turn for a mail item. */
   turnStarted(turn: Turn): void {
-    const item = turn.req.item;
-    const task = item?.kind === "task" ? this.hub.state.tasks.get(item.taskId!) : undefined;
-    if (task) this.saveTask({ ...task, status: "running" });
+    if (turn.req.item) this.handed(turn.req.item);
   }
 
-  /** The task a turn works on, while that task has not ended. */
-  private openTask(turn: Turn | undefined): Task | undefined {
-    const id = turn && taskOfTurn(turn);
-    const task = id ? this.hub.state.tasks.get(id) : undefined;
-    return task && !isTerminal(task.status) ? task : undefined;
+  /** The model has been given a task: it is its to work on now. */
+  private handed(item: MailItem): void {
+    const task = item.kind === "task" ? this.hub.state.tasks.get(item.taskId!) : undefined;
+    if (task?.status === "queued") this.saveTask({ ...task, status: "running" });
   }
 
-  /** A turn ended: acknowledge its mail and, when it worked on a task, route the result. */
+  /** A turn ended: acknowledge its mail, and see whether the session left work open with nothing to bring it back. */
   turnEnded(session: LiveSession, turn: Turn, stopReason: StopReason, failure: unknown): void {
     const item = turn.req.item;
-    const acks = item ? [ops.ack(item.id)] : [];
-    const task = this.openTask(turn);
-    if (task) {
-      // The user stopped the turn, not the work: the task stays open for the session's next turn (session.ts).
-      if (!failure && stopReason === "cancelled" && turn.cancelledBy === "user") {
-        session.resumes = task.id;
-        this.hub.state.commit(acks);
-        return this.tell(task.from, task.topic, `The user stopped ${session.agentId}'s turn on your task "${task.title}" (${task.id}). The task stays open, and ${session.agentId} finishes it in its next turn, with what the user says. Nothing for you to do, unless you no longer need it: then cancel it.`);
-      }
-      // The dispatcher's cancel is not the user's Esc: the turn may go on with what was steered into it, the task does not.
-      const status = failure ? "failed" : stopReason === "cancelled" || turn.cancelledBy === "dispatcher" ? "cancelled" : "completed";
-      const gates = [...this.hub.state.gates.values()];
-      // Jobs the task started that nobody awaits keep it open as a join of their own would: a result is not
-      // complete while what it is made of is still being generated.
-      const running = [...this.hub.state.tasks.values()].filter((t) => t.partOf === task.id && !isTerminal(t.status) && !gates.some((g) => g.taskIds.includes(t.id)));
-      if (status === "completed" && running.length) {
-        const note = "xsb kept your task open: jobs you started for it were still running when your turn ended. Check what they made, then finish the task.";
-        const gate: Gate = { id: newId("g"), owner: { agentId: session.agentId, sessionId: session.id }, taskIds: running.map((t) => t.id), mode: "all", note, taskId: task.id, createdAt: now() };
-        return this.hub.state.commit([...acks, ops.openGate(gate)]);
-      }
-      // A join the turn left behind keeps the task open: the turn that receives the joined results ends it.
-      const waits = status === "completed" && gates.some((g) => g.taskId === task.id);
-      if (waits) return this.hub.state.commit(acks);
-      const result = failure
-        ? `The agent could not run the task: ${errorMessage(failure)}`
-        : turn.lastText.trim() || `(the turn ended with "${stopReason}" and no text)`;
-      this.finishTask(task, status, result, acks);
-      return;
+    const task = item?.kind === "task" ? this.hub.state.tasks.get(item.taskId!) : undefined;
+    if (failure && task && !isTerminal(task.status)) {
+      return this.finishTask(task, "failed", `The agent could not run the task: ${errorMessage(failure)}`, [ops.ack(item!.id)]);
     }
-    if (!item) return;
-    const list = [ops.ack(item.id)];
+    const list: Op[] = item ? [ops.ack(item.id)] : [];
     let notice: MailItem | undefined;
-    if (failure && item.from.kind === "agent") {
+    if (failure && item && item.kind !== "task" && item.from.kind === "agent") {
       // The sender believes the message arrived; tell it otherwise.
       notice = {
         id: newId("m"),
@@ -441,8 +428,46 @@ export class Mailroom {
       };
       list.push(ops.enqueue(notice));
     }
-    this.hub.state.commit(list);
+    if (list.length) this.hub.state.commit(list);
     if (notice) this.deliver(notice);
+    if (failure) return;
+    // The user stopped the turn, not the work: the tasks stay open, and the session is not reminded of them.
+    if (stopReason === "cancelled" && turn.cancelledBy === "user") {
+      for (const open of this.openTasks(session.id)) {
+        this.tell(open.from, open.topic, `The user stopped ${session.agentId}'s turn while it had your task "${open.title}" (${open.id}). The task stays open, and ${session.agentId} goes on with it after hearing from the user. Nothing for you to do, unless you no longer need it: then cancel it.`);
+      }
+      return;
+    }
+    this.checkStalled(session, turn.lastText);
+  }
+
+  /**
+   * Whether the session has open tasks that nothing will bring back: no mail and no turn of the user's waits for it,
+   * no join of its own is open, no job it started is still running. Then it is reminded of them once, as a turn;
+   * should that turn too end with them so, their dispatchers are told, with what the session said last, and decide.
+   * Nothing is ended for the session: it may wait for something the hub does not see, like the user's answer.
+   */
+  private checkStalled(session: LiveSession, said: string): void {
+    const { state } = this.hub;
+    const open = this.openTasks(session.id);
+    const woken =
+      session.busy ||
+      [...state.mail.values()].some((m) => m.to.sessionId === session.id) ||
+      [...state.gates.values()].some((g) => g.owner.sessionId === session.id) ||
+      [...state.tasks.values()].some((t) => t.tool && t.from.sessionId === session.id && !isTerminal(t.status));
+    if (woken) {
+      for (const t of open) this.stalls.delete(t.id);
+      return;
+    }
+    const first = open.filter((t) => !this.stalls.has(t.id));
+    const again = open.filter((t) => this.stalls.get(t.id) === 1);
+    for (const t of first) this.stalls.set(t.id, 1);
+    for (const t of again) this.stalls.set(t.id, 2);
+    const quoted = said.trim() ? `It said last:\n"${said.trim().length > 600 ? `${said.trim().slice(0, 600)}…` : said.trim()}"\n` : "";
+    for (const t of again) {
+      this.tell(t.from, t.topic, `${session.agentId} ended its turn without finishing your task "${t.title}" (${t.id}), also after xsb reminded it. ${quoted}The task stays open. Wait for it, write to ${session.agentId}, or cancel the task.`);
+    }
+    if (first.length) this.tell({ agentId: session.agentId, sessionId: session.id }, first[0].topic, taskReminder(open));
   }
 
   private saveTask(task: Task): void {
@@ -461,10 +486,6 @@ export class Mailroom {
    * result to whoever dispatched it (on its own, or with the others once the
    * join that waits for it is satisfied), and release the tasks that were held
    * back until this one finished.
-   *
-   * A task that ends takes what it waited for with it: nobody wants those
-   * results any more, so its joins swallow them, and what still runs of them
-   * is cancelled, for it would only cost.
    */
   private finishTask(task: Task, status: TaskStatus, result: string, acks: Op[] = []): void {
     const { state } = this.hub;
@@ -480,16 +501,13 @@ export class Mailroom {
     const gate = [...state.gates.values()].find(
       (g) => g.owner.sessionId === task.from.sessionId && g.taskIds.includes(task.id),
     );
-    const unwanted = gate?.taskId !== undefined && this.finished(gate.taskId);
     if (!gate) {
       const from: MailItem["from"] = task.tool ? { kind: "system" } : { kind: "agent", ...task.to };
       send({ id: newId("m"), to: task.from, from, kind: "results", topic: task.topic, results: { taskIds: [task.id] }, ts: now() });
-    } else if (unwanted) {
-      if (gate.taskIds.every((id) => this.finished(id, done))) list.push(ops.closeGate(gate.id));
     } else if (gate.mode === "any" || gate.taskIds.every((id) => this.finished(id, done))) {
-      const { taskIds, mode, note, taskId } = gate;
+      const { taskIds, mode, note } = gate;
       list.push(ops.closeGate(gate.id));
-      send({ id: newId("m"), to: gate.owner, from: { kind: "system" }, kind: "results", results: { taskIds, mode, note }, taskId, ts: now() });
+      send({ id: newId("m"), to: gate.owner, from: { kind: "system" }, kind: "results", results: { taskIds, mode, note }, ts: now() });
     }
 
     for (const held of state.tasks.values()) {
@@ -504,8 +522,5 @@ export class Mailroom {
     state.commit(list);
     for (const t of changed) this.hub.broadcast(Tasks.update, { task: t });
     for (const item of outgoing) this.deliver(item);
-
-    const awaited = [...state.gates.values()].filter((g) => g.taskId === task.id).flatMap((g) => g.taskIds);
-    for (const id of new Set(awaited)) if (!this.finished(id)) this.cancel(state.tasks.get(id)!);
   }
 }

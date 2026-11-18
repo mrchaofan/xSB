@@ -109,14 +109,21 @@ You are one of several peer agents coordinated by xsb. A human user can talk to 
 - dispatch_task: hand a peer a piece of work. It returns immediately; the result comes back to you later as an <xsb-task-result> message. The peer sees nothing of your conversation, so the task has to carry everything it needs. Give \`after\` when the task must not start before other tasks have finished; the peer then receives their results too.
 - await_tasks: when you need the results of several tasks or jobs before you can continue, call this once with their ids and then end your turn. You receive all results together in one message when the condition holds. Results are delivered as a new turn, so they cannot reach you while this one is still running: polling or sleeping only delays them.
 - start_job: run one slow tool call (rendering, generation, anything that takes minutes) in the background. Like a task it returns immediately, its result comes back as an <xsb-task-result>, and it can be awaited and cancelled. Sitting in a slow call keeps you from everyone who needs you meanwhile, so make it a job.
-- get_task, cancel_task: inspect or stop tasks and jobs you started.
+- complete_task: finish a task you were given, with its result. This is the only way a task ends on your side.
+- get_task, cancel_task: inspect your tasks, or stop tasks and jobs you started.
 - put_asset, find_assets, get_asset: the shared asset library (see Assets).
 - remember, recall: your long-term memory, kept per topic.
 - ask_user: when the work cannot go on until the user decides or confirms something, ask in your reply as usual and call this so the user is told you are waiting for them; then end your turn. Not for questions you can settle yourself or with a peer.
 
 Messages wrapped in <xsb-message>, <xsb-task>, <xsb-task-result> or <xsb-task-results> come from peers or from xsb, not from the user. An <xsb-memory> block after one is your own note on its topic.
 
-When you work on an <xsb-task>, the final message of that turn is returned to the sender as the task's result, so make it complete and self-contained. Say in it plainly what you could not do, did not finish or did not verify: the sender builds on what you report. When the task needs jobs or tasks of your own, call await_tasks for them before you end the turn: the task then stays open, and its result is the final message of the turn that brings you their results. Without await_tasks, ending the turn ends the task with whatever you said last; only jobs you started for it keep it open by themselves, until they end. If the user stops your turn, the task stays open and you finish it in your next turn.
+# Tasks you are given
+An <xsb-task> stays yours until you call complete_task for it; ending a turn does not end it. You may have several at a time, and more may arrive while you work, put into your running turn. Decide yourself how they go together: a later task that corrects or extends an earlier one changes what you are doing; one that replaces it ends the earlier one with a result that says so; one on its own waits its turn. Finish each as soon as it is done, not all at the end: its sender is waiting for it.
+- The result goes to the sender as it is, so make it complete and self-contained. Say in it plainly what you could not do, did not finish or did not verify: the sender builds on what you report. When you cannot do the task, finish it as failed and say why.
+- A task that has to produce an asset type is finished by naming the asset you registered for it in \`assets\`.
+- When a task needs jobs or tasks of your own, call await_tasks for them and end your turn: their results come back as a turn, and you finish the task then.
+- If you end a turn with a task still open and nothing on its way to you, xsb reminds you of it; if you do not act on the reminder, its sender is told. When you wait for something xsb cannot see (the user's answer, say), say so when reminded.
+- If its sender cancels a task, you are told: stop working on it and give no result.
 
 While tasks you dispatched are still running, the user may talk to you. Answer them normally; pending results will still arrive. If a set of results comes with conditions you set yourself, check them by reasoning over what you received, and dispatch follow-up work if they are not met.
 
@@ -167,16 +174,15 @@ function resultBlock(state: State, task: Task, short = false): string {
   const by = task.tool ? `${task.tool.server}/${task.tool.name}` : task.to.agentId;
   const head = `task-id="${task.id}" by="${attr(by)}" topic="${attr(task.topic)}" title="${attr(task.title)}" status="${task.status}"`;
   if (!isTerminal(task.status)) return `<xsb-task-result ${head} />`;
-  // What the task was to deliver is checked here, not left to the wording of its result.
-  const assets = [...state.assets.values()].flat().filter((a) => a.taskId === task.id);
-  const registered = assets.length ? `\nAssets registered by this task:\n${assets.map((a) => renderAsset(a)).join("\n")}` : "";
-  const missing =
-    task.produces && !assets.some((a) => a.type === task.produces)
-      ? `\nNo "${attr(task.produces)}" asset was registered, although the task had to produce one.`
-      : "";
+  // What the task delivered is the library's record of the assets its assignee named, not the wording of its result.
+  const assets = (task.assets ?? []).map((ref) => {
+    const [id, version] = ref.split("@");
+    return state.assets.get(id)?.find((a) => a.version === Number(version));
+  }).filter((a): a is Asset => !!a);
+  const delivered = assets.length ? `\nAssets it delivered:\n${assets.map((a) => renderAsset(a)).join("\n")}` : "";
   const result = task.result ?? "";
   const told = short && result.length > PREREQUISITE_CHARS ? `${result.slice(0, PREREQUISITE_CHARS)}…\n(The result goes on; get_task ${task.id} has all of it.)` : result;
-  return `<xsb-task-result ${head}>\n${told}${registered}${missing}\n</xsb-task-result>`;
+  return `<xsb-task-result ${head}>\n${told}${delivered}\n</xsb-task-result>`;
 }
 
 /** What the hub adds to a task beyond the dispatcher's words. */
@@ -236,22 +242,19 @@ function mailText(state: State, item: MailItem, context: TaskContext | undefined
         ? `\nThis task works from the following assets. They are the reference: keep to them, and do not redefine what they define.\n${context.inputs.map((i) => renderInput(i, given, gives.assets, task.id)).join("\n")}`
         : "";
       const produces = task.produces
-        ? `\nThis task has to produce a "${attr(task.produces)}" asset. Register it with put_asset before you end your turn and name its id in your result.`
+        ? `\nThis task has to produce a "${attr(task.produces)}" asset. Register it with put_asset, and name it in complete_task's \`assets\`.`
+        : "";
+      const others = [...state.tasks.values()].filter((t) => !t.tool && t.id !== task.id && t.to.sessionId === item.to.sessionId && t.status === "running");
+      const open = others.length
+        ? `\nYou still have these tasks open here; see whether this one changes any of them:\n${others.map(taskLine).join("\n")}`
         : "";
       const skill = context?.skill
         ? `\nYour skill for this (files it refers to are in ${context.skill.dir}):\n<xsb-skill name="${attr(context.skill.name)}">\n${context.skill.body.trim()}\n</xsb-skill>`
         : "";
-      return `<xsb-task from="${from}" task-id="${task.id}" topic="${attr(task.topic)}" title="${attr(task.title)}">\n${task.instructions}\n</xsb-task>${prerequisites}${inputs}${produces}${skill}${hint(task.topic)}`;
+      return `<xsb-task from="${from}" task-id="${task.id}" topic="${attr(task.topic)}" title="${attr(task.title)}">\n${task.instructions}\n</xsb-task>${prerequisites}${inputs}${produces}${skill}${open}${hint(task.topic)}`;
     }
-    case "results": {
-      // Results that were awaited for a task: the turn they start is the one that ends it. (A task that ends
-      // meanwhile takes its queued results with it: mailroom.ts, `cancel`.)
-      const task = item.taskId ? state.tasks.get(item.taskId) : undefined;
-      const resumes = task
-        ? `\nYou awaited these for the task "${attr(task.title)}" (${task.id}) from ${task.from.agentId}, which is still open. Finish it now: the final message of this turn is returned as its result${task.produces ? `, and a "${attr(task.produces)}" asset has to be registered before the turn ends` : ""}. If it needs more jobs or tasks first, await them again.`
-        : "";
-      return renderResults(state, item.results!) + resumes + hint(item.topic);
-    }
+    case "results":
+      return renderResults(state, item.results!) + hint(item.topic);
   }
 }
 
@@ -268,9 +271,13 @@ export function renderResults(state: State, results: Results): string {
   return `<xsb-task-results waited-for="${results.mode}">\n${blocks}\n</xsb-task-results>${note}${pending}`;
 }
 
-/** Said in front of the turn that takes up a task whose turn the user stopped. */
-export const resumeNote = (task: Task): string =>
-  `[xsb] The user stopped your last turn while you worked on the task "${task.title}" (${task.id}) from ${task.from.agentId}. Stopping a turn does not cancel the task: it is still open. Take what the user says now into account and finish it in this turn; your final message is returned as its result${task.produces ? `, and a "${task.produces}" asset has to be registered before the turn ends` : ""}.`;
+/** A task given to the model, as one line of a list. */
+const taskLine = (t: Task): string =>
+  `- ${t.id} "${t.title}" from ${t.from.agentId}, topic "${t.topic}"${t.produces ? `, has to produce "${t.produces}"` : ""}`;
+
+/** What a session is told when it ended a turn with tasks open and nothing on its way to it (mailroom.ts). */
+export const taskReminder = (tasks: Task[]): string =>
+  `Your turn ended, and these tasks of yours are still open:\n${tasks.map(taskLine).join("\n")}\nNothing is on its way to you for them: no join, no job, no message. Finish each that is done with complete_task (as failed, with the reason, if it cannot be done). For one that is not done, go on with it now. If you wait for something xsb cannot see, say what; its sender is then told.`;
 
 export const STEER_CONTINUATION =
   "[xsb] A new message arrived while you were working and your turn was paused for it. Take it into account, then carry on with whatever you had not finished.";
@@ -329,7 +336,7 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
   const waiting = open.waiting.map((r) => `- waiting for ${r.taskIds.join(", ")} (${r.mode})${r.note ? `: ${r.note}` : ""}`);
   const assets = open.assets.map((a) => `- ${a.id}@${a.version}: ${a.description}`);
   const now = [
-    tasks.length ? `Unfinished tasks:\n${tasks.join("\n")}` : "No unfinished tasks.",
+    tasks.length ? `Unfinished tasks (one given to you ends only when you finish it with complete_task):\n${tasks.join("\n")}` : "No unfinished tasks.",
     waiting.length ? `Your awaits:\n${waiting.join("\n")}` : "",
     assets.length ? `Assets you registered (latest versions):\n${assets.join("\n")}` : "",
   ].filter(Boolean);

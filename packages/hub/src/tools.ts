@@ -239,7 +239,7 @@ export const TOOLS: Tool[] = [
   {
     name: "await_tasks",
     description:
-      "Register that you need the results of several tasks you dispatched or jobs you started before continuing, then end your turn. You receive them together in one message once all (or any) have finished; they cannot reach you while your turn is still running. Meanwhile you remain available to the user. Called while you work on a task, it keeps that task open until the results are in.",
+      "Register that you need the results of several tasks you dispatched or jobs you started before continuing, then end your turn. You receive them together in one message once all (or any) have finished; they cannot reach you while your turn is still running. Meanwhile you remain available to the user.",
     inputSchema: schema(
       {
         task_ids: { type: "array", items: { type: "string" }, description: "Ids of tasks you dispatched or jobs you started, from this session." },
@@ -257,10 +257,46 @@ export const TOOLS: Tool[] = [
       }
       const note = typeof args.note === "string" ? args.note : undefined;
       const mode = args.mode === "any" ? "any" : "all";
-      const { satisfied, finished, keeps } = ctx.hub.mail.join(ctx.session, tasks, mode, note);
+      const { satisfied, finished } = ctx.hub.mail.join(ctx.session, tasks, mode, note);
       if (satisfied) return `Nothing to wait for, the results are in:\n${renderResults(ctx.hub.state, { taskIds: ids, mode, note })}`;
-      const open = keeps ? ` The task you are working on (${keeps.id}) stays open until then; you finish it in the turn that brings them.` : "";
-      return `Registered (${finished}/${tasks.length} finished). End your turn now; the results arrive together in one message.${open}`;
+      return `Registered (${finished}/${tasks.length} finished). End your turn now; the results arrive together in one message.`;
+    },
+  },
+  {
+    name: "complete_task",
+    description:
+      "Finish a task you were given: the result goes to whoever dispatched it. Ending your turn does not finish a task; this does. Call it once per task, as soon as that task is done. For a task you cannot do, or that a later one replaced, set failed and say why.",
+    inputSchema: schema(
+      {
+        task_id: str("Id of the task, from its <xsb-task>."),
+        result: str("The result as its sender will read it: complete and self-contained. Say plainly what you could not do, did not finish or did not verify."),
+        assets: {
+          type: "array",
+          items: { type: "string" },
+          description: "Ids of the assets you registered for it (e.g. shot_list/scene3), the latest version unless you append @<version>. Required when the task has to produce an asset type.",
+        },
+        failed: { type: "boolean", description: "The task could not be done, or is no longer to be done." },
+      },
+      ["task_id", "result"],
+    ),
+    run(ctx, args) {
+      const me = ctx.session.agentId;
+      const id = need(args, "task_id");
+      const task = ctx.hub.state.tasks.get(id);
+      if (!task || task.tool || task.to.agentId !== me) throw new Error(`no task "${id}" given to you`);
+      if (task.status === "cancelled") throw new Error(`task ${id} was cancelled by ${task.from.agentId}; there is no result to give`);
+      if (isTerminal(task.status)) throw new Error(`task ${id} is ${task.status} already`);
+      if (task.status !== "running") throw new Error(`task ${id} has not been given to you yet; it arrives as an <xsb-task>`);
+      const result = need(args, "result");
+      const failed = args.failed === true;
+      const assets = (Array.isArray(args.assets) ? args.assets : []).map((ref: string) => asset(ctx, ref));
+      for (const a of assets) if (a.by !== me) throw new Error(`asset ${a.id} was registered by ${a.by}, not by you`);
+      if (!failed && task.produces && !assets.some((a: Asset) => a.type === task.produces)) {
+        throw new Error(`task ${id} has to produce a "${task.produces}" asset: register it with put_asset and name it in "assets". If it cannot be done, set failed and say why.`);
+      }
+      ctx.hub.mail.complete(task, failed ? "failed" : "completed", result, assets);
+      const open = ctx.hub.mail.openTasks(task.to.sessionId).map((t) => t.id);
+      return `Task ${id} ${failed ? "finished as failed" : "completed"}; the result goes to ${task.from.agentId}.${open.length ? ` Still open: ${open.join(", ")}.` : ""}`;
     },
   },
   {
@@ -282,7 +318,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "cancel_task",
-    description: "Cancel a task you dispatched or a job you started. You still receive its result, with status cancelled.",
+    description: "Cancel a task you dispatched or a job you started. A task ends at once and its assignee is told to stop; a job is stopped. You still receive the result, with status cancelled.",
     inputSchema: schema({ task_id: str("Task id.") }, ["task_id"]),
     run(ctx, args) {
       const task = ownTask(ctx, need(args, "task_id"), true);

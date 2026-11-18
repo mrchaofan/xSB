@@ -24,7 +24,7 @@ import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
 import { bridgeServer } from "./mcp.ts";
 import { Paths } from "./paths.ts";
-import { asPreface, handoff, resumeNote } from "./prompts.ts";
+import { asPreface, handoff } from "./prompts.ts";
 import type { Gives, Renewal } from "./prompts.ts";
 import { turnsSinceCleared } from "./transcript.ts";
 import type { MailItem, SessionRec } from "./state.ts";
@@ -62,12 +62,10 @@ export type Turn = {
   /** The backend has been prompted. */
   started: boolean;
   /**
-   * Who stopped it: the user (their client) or the dispatcher of the task it works on (`cancel_task`). Stopped before
-   * it started, it never will; stopped after, it may go on with what was steered into it (Backend.cancel).
+   * The user stopped it (their client). Stopped before it started, it never will; stopped after, it may go on with
+   * what was steered into it (Backend.cancel).
    */
-  cancelledBy?: "user" | "dispatcher";
-  /** A task this turn takes up again that a turn before it was stopped in by the user (`LiveSession.resumes`). */
-  resumes?: string;
+  cancelledBy?: "user";
   /** Agent text since the last tool call: what the turn ends up saying. */
   lastText: string;
 };
@@ -82,11 +80,6 @@ export class LiveSession {
   setup: { modes?: unknown; configOptions?: unknown } = {};
   /** MCP servers the creating client asked for, passed on next to the hub's own. */
   clientMcp: McpServer[] = [];
-  /**
-   * A task whose turn the user stopped. Stopping a turn is not cancelling the work: the task stays open, and the
-   * next turn of this session that is not another task's takes it up again and ends it.
-   */
-  resumes?: string;
 
   private hub: Hub;
   private queue: Queued[] = [];
@@ -118,6 +111,10 @@ export class LiveSession {
   }
   get busy(): boolean {
     return !!this.current || this.queue.length > 0;
+  }
+  /** Something can be put into the running turn without stopping it: it has not reached the backend yet, or the backend steers. */
+  get steersNatively(): boolean {
+    return !!this.current && (!this.current.started || !!this.backend?.caps.steering);
   }
 
   // ---- backend binding ----------------------------------------------------
@@ -347,15 +344,6 @@ export class LiveSession {
   private async run(req: Queued): Promise<void> {
     const own = inputOf(req.origin, req.prompt);
     const turn: Turn = { req, inputs: [own], started: false, lastText: "" };
-    // Another task's turn leaves the stopped one for later; any other turn takes it up.
-    if (this.resumes && !req.item?.taskId) {
-      const resumed = this.hub.state.tasks.get(this.resumes);
-      if (resumed && !isTerminal(resumed.status)) {
-        turn.resumes = resumed.id;
-        this.prefaces.push(resumeNote(resumed));
-      }
-      this.resumes = undefined;
-    }
     this.current = turn;
     this.hub.mail.turnStarted(turn);
     this.hub.agentChanged(this.agentId);
@@ -448,7 +436,7 @@ export class LiveSession {
   }
 
   /**
-   * Stop, as Esc does in Claude Code and Codex. `by`: the user, or the dispatcher of the task the turn works on.
+   * Stop, as Esc does in Claude Code and Codex.
    *
    * What the hub still holds is discarded, and shown so: a turn that has not reached the backend yet, with what was
    * steered into it, and, when the user stops, their own messages that wait for a turn. Mail is not theirs: mail that
@@ -456,14 +444,13 @@ export class LiveSession {
    * the backend runs is the backend's to stop (Backend.cancel): messages steered into it that it has not been given
    * yet are handed over now and the turn goes on with them, unless it is stopped again before they got there.
    */
-  cancel(by: "user" | "dispatcher" = "user"): void {
-    if (by === "user") this.dropQueued();
+  cancel(): void {
+    this.dropQueued();
     const turn = this.current;
     if (!turn) return;
     this.hub.permissions.cancel(this);
-    const mail = !turn.started && by === "user" && !!turn.req.item;
-    // The dispatcher's cancel stands: a stop of the user's after it does not leave the task open (mailroom.ts).
-    if (!mail && turn.cancelledBy !== "dispatcher") turn.cancelledBy = by;
+    const mail = !turn.started && !!turn.req.item;
+    if (!mail) turn.cancelledBy = "user";
     const dropped = turn.started
       ? (this.backend?.cancel(this.rec.backendSessionId!) ?? []).map((steer) => inputOf(steer.origin, steer.prompt))
       : turn.inputs.splice(mail ? 1 : 0);
