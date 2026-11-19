@@ -12,6 +12,7 @@ import { clock, t } from "./i18n.js";
 import { onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
 import { refreshSettings, settingsShell, showSettings } from "./settings.js";
 import { onPreferencesChanged, workspacePreferences } from "./preferences.js";
+import { bindArtifactResize } from "./resize.js";
 import { showOverview } from "./team.js";
 import { showWeb } from "./webview.js";
 
@@ -529,17 +530,7 @@ $("#artifact-modes").onclick = (e) => {
   renderArtifact();
 };
 
-// 拖动分隔线改右栏宽度
-$("#divider").onpointerdown = (e) => {
-  const divider = e.currentTarget;
-  divider.setPointerCapture(e.pointerId);
-  divider.classList.add("dragging");
-  divider.onpointermove = (move) => {
-    const width = Math.min(Math.max(window.innerWidth - move.clientX, 300), window.innerWidth * 0.6);
-    document.documentElement.style.setProperty("--artifact-w", `${width}px`);
-  };
-  divider.onpointerup = () => { divider.onpointermove = null; divider.classList.remove("dragging"); };
-};
+bindArtifactResize($("#divider"));
 
 // ⌘1…⌘9：打开并聚焦第 n 个 Agent 的输入框
 window.onkeydown = (e) => {

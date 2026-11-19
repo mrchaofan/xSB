@@ -128,7 +128,7 @@ body.no-workspace .hub { display: none; }
 .blank:has(+ .lanes:empty) { display: flex; }
 .blank p { margin: 0; }
 
-.divider { flex: none; width: 10px; background: transparent; position: relative; cursor: col-resize; }
+.divider { flex: none; width: 10px; background: transparent; position: relative; cursor: col-resize; touch-action: none; user-select: none; }
 .divider::after { content: ""; position: absolute; inset: 0 2px; border-radius: 4px; }
 .divider:hover::after, .divider.dragging::after { background: var(--accent-wash); }
 
