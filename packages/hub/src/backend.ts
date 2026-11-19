@@ -10,7 +10,7 @@
  * input into the work under way, a backend that reports `steering` (codex) is
  * given it with `_session/steering` instead (docs/DESIGN.md 3.1).
  */
-import { spawn } from "node:child_process";
+import spawn from "cross-spawn";
 import type { ChildProcess } from "node:child_process";
 import { Connection, OriginExt, PROTOCOL_VERSION, RpcError, failure, text } from "@xsb/protocol";
 import type { ContentBlock, InitializeResponse, OriginMeta, PermissionRequest, PromptResponse } from "@xsb/protocol";

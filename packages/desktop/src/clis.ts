@@ -1,7 +1,7 @@
 /**
  * Programs of the user's machine that the app needs but does not ship: the
  * agents' own (claude, codex) and tools that roles work with
- * (ffmpeg, arkcli). The app installs none of them. A program is there when it is on
+ * (ffmpeg, arkcli). AgentClis can install the two agents from official channels. A program is there when it is on
  * the user's PATH; when it is not, the user is asked where it is, and that
  * path is remembered (`paths.json`).
  *
@@ -28,9 +28,11 @@
  * shell. The PATH is the shell's; of the rest, what this process already has
  * stays as it is.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { COMMON_SERVERS_ENV, findCommand } from "@xsb/hub";
 import { SOCKET_ENV } from "./browser.ts";
@@ -73,6 +75,17 @@ function shellEnv(): Record<string, string> {
   }
 }
 
+/** Read login PATH asynchronously on refresh: installers may have changed shell startup files. */
+async function refreshedPath(): Promise<string> {
+  try {
+    const windows = process.platform === "win32";
+    const { stdout } = await promisify(execFile)(windows ? "powershell.exe" : process.env.SHELL || "/bin/zsh", windows
+      ? ["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')"]
+      : ["-ilc", 'printf "<xsb-path>%s</xsb-path>" "$PATH"'], { timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024 });
+    return windows ? stdout.trim() : /<xsb-path>(.*)<\/xsb-path>/s.exec(stdout)?.[1] ?? "";
+  } catch { return ""; }
+}
+
 /** The program of the user's machine a wrapper is built around, for a wrapper's command: what is missing when the wrapper is. */
 export const wrapped = (command: string): string | undefined => Object.keys(WRAPPERS).find((program) => WRAPPERS[program].command === command);
 
@@ -84,11 +97,12 @@ export class Clis {
   private paths: Record<string, string> = {};
   /** The PATH as the user has it, without the launchers. */
   private userPath: string;
+  private refreshing?: Promise<void>;
 
   constructor(dir: string) {
     const env = shellEnv();
     for (const [name, value] of Object.entries(env)) process.env[name] ??= value;
-    this.userPath = env.PATH ?? process.env.PATH ?? "";
+    this.userPath = [...new Set([env.PATH ?? process.env.PATH ?? "", path.join(os.homedir(), ".local", "bin")].flatMap((p) => p.split(path.delimiter)))].join(path.delimiter);
     this.browserSocket = path.join(dir, "browser.sock");
     this.bin = path.join(dir, "bin");
     this.file = path.join(dir, "paths.json");
@@ -109,6 +123,27 @@ export class Clis {
     return !this.locate(command);
   }
 
+  executable(command: string): string | null {
+    return this.locate(command)?.path ?? null;
+  }
+
+  /** Rebuild the same launcher files existing hubs see, with the fresh PATH baked in. */
+  async refresh(extra: string[] = []): Promise<void> {
+    if (this.refreshing) {
+      await this.refreshing;
+      if (!extra.length) return;
+      return this.refresh(extra);
+    }
+    const pending = (async () => {
+      const fresh = await refreshedPath();
+      this.userPath = [...new Set([...extra, ...fresh.split(path.delimiter), ...this.userPath.split(path.delimiter)].filter((p) => p && p !== this.bin))].join(path.delimiter);
+      process.env.PATH = `${this.bin}${path.delimiter}${this.userPath}`;
+      this.sync();
+    })();
+    this.refreshing = pending;
+    try { await pending; } finally { if (this.refreshing === pending) this.refreshing = undefined; }
+  }
+
   /** The user says where a program is. Whether it is one: a file that can be run. */
   setPath(command: string, file: string): boolean {
     if (!findCommand(file)) return false;
@@ -120,14 +155,16 @@ export class Clis {
 
   /** Where a program is: on the user's PATH, or else where the user said. */
   private locate(command: string): { path: string; configured: boolean } | null {
-    const onPath = findCommand(command, this.userPath);
-    if (onPath) return { path: onPath, configured: false };
+    // An explicit selection must override an older/broken copy on PATH; fall back if the selection disappears.
     const configured = this.paths[command] && findCommand(this.paths[command]);
-    return configured ? { path: configured, configured: true } : null;
+    if (configured) return { path: configured, configured: true };
+    const onPath = findCommand(command, this.userPath);
+    return onPath ? { path: onPath, configured: false } : null;
   }
 
   /** Make the launchers say what is true now. */
   private sync(): void {
+    if (process.platform === "win32") return this.syncWindows();
     // The browser's tool is told where the app listens for it.
     const launchers = new Map<string, string>(TOOLS.map((tool) => [tool, `${tool === BROWSER_TOOL ? `${SOCKET_ENV}=${quote(this.browserSocket)} ` : ""}${node(tool)}`]));
     for (const command of new Set([...Object.keys(WRAPPERS), ...Object.keys(this.paths)])) {
@@ -139,6 +176,22 @@ export class Clis {
       if (found.configured) launchers.set(command, `exec ${quote(found.path)} "$@"`);
     }
     for (const name of fs.readdirSync(this.bin)) if (!launchers.has(name)) fs.rmSync(path.join(this.bin, name));
-    for (const [name, line] of launchers) fs.writeFileSync(path.join(this.bin, name), `#!/bin/sh\n${line}\n`, { mode: 0o755 });
+    for (const [name, line] of launchers) fs.writeFileSync(path.join(this.bin, name), `#!/bin/sh\nexport PATH=${quote(process.env.PATH ?? "")}\n${line}\n`, { mode: 0o755 });
+  }
+
+  private syncWindows(): void {
+    const cmdQuote = (s: string): string => `"${s.replaceAll("%", "%%")}"`;
+    const set = (key: string, value: string): string => `set ${cmdQuote(`${key}=${value}`)}\r\n`;
+    const node = (program: string): string => `${set("ELECTRON_RUN_AS_NODE", "1")}${cmdQuote(process.execPath)} ${cmdQuote(path.join(SHIPPED, program))} %*`;
+    const launchers = new Map(TOOLS.map((tool) => [`${tool}.cmd`, `${tool === BROWSER_TOOL ? set(SOCKET_ENV, this.browserSocket) : ""}${node(tool)}`]));
+    for (const command of new Set([...Object.keys(WRAPPERS), ...Object.keys(this.paths)])) {
+      const found = this.locate(command);
+      if (!found) continue;
+      const wrapper = WRAPPERS[command];
+      if (wrapper) launchers.set(`${wrapper.command}.cmd`, `${set(wrapper.env, found.path)}${node(wrapper.command)}`);
+      if (found.configured) launchers.set(`${command}.cmd`, `${cmdQuote(found.path)} %*`);
+    }
+    for (const name of fs.readdirSync(this.bin)) if (!launchers.has(name)) fs.rmSync(path.join(this.bin, name));
+    for (const [name, body] of launchers) fs.writeFileSync(path.join(this.bin, name), `@echo off\r\n${set("PATH", process.env.PATH ?? "")}${body}\r\n`);
   }
 }

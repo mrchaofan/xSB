@@ -428,23 +428,15 @@ renderer ──window.xsb──▶ preload.cjs ──ipc──▶ main.ts ──
 
 ## 8. 后端从哪来
 
-应用不安装任何东西（[clis.ts](../packages/desktop/src/clis.ts)）。下面说的是各家 agent 的程序；角色要用的工具（`ffmpeg`）走的是同一套：在 PATH 上找，找不到请用户指定路径，指定后为它生成同名的启动脚本。
+CLI 生命周期由 [agent-cli.ts](../packages/desktop/src/agent-cli.ts) 管理，路径与 ACP 启动器由 [clis.ts](../packages/desktop/src/clis.ts) 管理。全局设置和智能体编辑页共用 [backend.js](../packages/desktop/renderer/backend.js) 控件。
 
-1. **封装在应用里**。claude 和 codex 自己不说 ACP，它们的开源封装 `claude-agent-acp`、`codex-acp` 连同 JS 依赖打进了应用，由 Electron 自己的二进制运行。用户只需要有 `claude` / `codex` 程序本身，不需要另装 ACP 入口，也不需要 Node。两个封装都说 ACP v2。gemini 和 grok 的 ACP 入口只说 v1，不再支持。
-2. **检测 = 在 PATH 上找**。`claude` / `codex` 在用户的 PATH 上，对应的后端就可用。
-3. **找不到就请用户指出路径**。新建 Agent 的后端列表里，缺失的一项显示"PATH 中没有 claude"和"指定路径…"按钮，点开是系统的选择文件对话框。选中的路径记在 `userData/backends/paths.json`，之后一直有效；PATH 上有的优先于指定的。
+1. **ACP 封装随应用提供**。用户只需安装 Codex / Claude 原生 CLI，无需另装 ACP 入口或 Node.js。
+2. **配置文件入口**。存在时直接在系统文件管理器中聚焦；不存在时由主进程弹窗确认后创建。使用 `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 覆盖路径；独占创建不覆盖已有文件。Codex 模板保留命令确认、默认只读；Claude 默认请求权限确认，没有自动允许规则。JSON 字段说明放在相邻的 `settings.README.md`。
+3. **官方一键安装**。Codex 下载 `openai/codex` GitHub Release 的对应平台原生包；Claude 执行 `claude.ai` 官方安装脚本。下载和执行均有超时，重复点击共用同一安装操作。安装后的可执行文件路径记在 `userData/backends/paths.json`。
+4. **PATH 立即生效**。刷新登录 shell / Windows 用户 PATH，将安装目录加入用户 shell 配置 / Windows 用户环境变量，同时重建已有 Hub 会使用的启动器，启动器显式设置最新 PATH。原有终端需重新打开；外部 `xsb` 命令先启动的 Hub 需重启。Windows `.cmd` 经 `cross-spawn` 启动，支持带空格的路径。
+5. **无 token 检测**。仅执行 `--version`、`codex login status` 或 `claude auth status --json`，区分缺失、无法运行、未登录、登录状态未确认和凭据已配置；不建立模型会话，不发送提示词。原始输出和账号信息不传给界面。
 
-Hub 仍然"只启动、不安装"，一行没改：应用在 `userData/backends/bin/` 下为每个可用的后端生成一个启动脚本，并把这个目录放在启动 Hub 时的 PATH 最前面，Hub 的内置后端表（`claude-agent-acp`、`codex-acp`）照常按命令名找到它们。脚本只在对应的程序存在时存在，所以"后端是否已安装"仍然只有一个含义：命令在 PATH 上。
-
-已知的边界：
-
-- **不处理版本兼容**。封装的版本固定在应用里，程序是用户机器上的，两者之间的版本差异没有检查。
-- 程序在不在与登录无关；未登录时对话里会显示 Hub 的 `auth_required` 错误。
-- 指定路径后，已经在运行的 Hub 立刻能用（它每次启动后端时才找命令）；但由 `xsb` 命令行先启动的 Hub 没有这个 PATH，要先 `xsb hub stop`。
-- 指定的路径不能在界面里查看或改掉，只能在缺失时重新指定，或直接改 `paths.json`。
-- **同步用户 shell 的全部环境变量**。从访达或程序坞启动的应用拿不到用户 shell 的环境：PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，shell 启动文件里设的变量（比如智能体自己的配置里指名的 API 密钥、代理设置）一个也没有。应用启动时向用户的登录 shell 问一次全部环境（`$SHELL -ilc 'env -0'`），找程序和启动 Hub 都用它，Hub 再把它传给各后端和 MCP server：PATH 用 shell 的，其余变量进程自己已有的不动、没有的补上；shell 没有回答时用进程自己的环境。这只是读取用户已经设好的环境，不改写任何 agent 的配置。Windows 上进程的环境就是用户的，不问。
-- 后端的包装程序（`claude-agent-acp`、`codex-acp`）是应用自带的；缺的是它包着的那个程序时，报错说的是"没有找到 claude 程序"并指向"指定路径…"，而不是 Hub 原话里的"安装 claude-agent-acp"。
-- 启动脚本是 POSIX shell，Windows 没有做。
+检测验证本地程序及凭据状态，不验证服务可达性、额度、凭据是否过期或 ACP 全部协议兼容性。第三方认证状态无法本地确认时明确显示“未确认”。详细设计与验证范围见 [CLI_SETUP.md](CLI_SETUP.md)。
 
 ## 8.1 Hub 一侧的限制
 

@@ -13,6 +13,7 @@
 // The layout repeats the sources': code in one directory finds the pages in
 // ../renderer and the hub's two programs in ../bin (see daemon.ts and mcp.ts in @xsb/hub).
 import fs from "node:fs";
+import path from "node:path";
 import { createRequire } from "node:module";
 import { defineConfig } from "rolldown";
 
@@ -57,7 +58,8 @@ const presets = {
     fs.rmSync("dist/presets", { recursive: true, force: true });
     fs.cpSync("../hub/presets", "dist/presets", { recursive: true });
     for (const code of ["dist/app", "dist/bin"]) {
-      const teams = `${code}/../presets/en`;
+      // Later entrypoints create dist/bin; normalize .. before checking presets on a first build.
+      const teams = path.resolve(code, "../presets/en");
       if (!fs.existsSync(teams) || !fs.readdirSync(teams).some((team) => fs.existsSync(`${teams}/${team}/team.json`))) {
         throw new Error(`no preset teams next to ${code}: the hub looks for them in ../presets`);
       }
