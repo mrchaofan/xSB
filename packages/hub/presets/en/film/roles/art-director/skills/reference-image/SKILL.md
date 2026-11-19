@@ -25,9 +25,13 @@ Pass existing images as reference images and refer to them in the prompt in orde
 
 Editing an image works the same way: say what to keep first, then what to change ("keep the person and pose in 图一 unchanged, and change the trench coat to beige").
 
+Map identity, costume, props, setting and pose to the individual reference images. Borrowing a prop or pose from another person's image can also import that face; prefer an isolated prop reference or a permitted crop. When multiple photos of the subject are required, actually pass them; report capability limits rather than silently dropping inputs, and do not count copies of one photo as independent references.
+
+For revisions, pin the user-selected baseline asset and version and state what stays and what changes. Record approval status separately from reference use: an older candidate can remain a valid reference. Do not revoke a verified source or existing permission just because it belongs to an earlier round; explain any actual tool restriction with evidence.
+
 ## Checking
 
-Look at each image yourself as soon as it comes out: does it match the appearance description item by item? Are the hands or face distorted? Is there any stray text or extra object? If it fails, revise the prompt and regenerate, changing only one thing at a time.
+Compare each image with its baseline: identity, costume, props, subject count and composition should remain intact, and the requested change must actually appear. Check faces, hands and text, and measure dimensions and aspect ratio. Cropping must preserve needed heads, hands and props; do not stretch. Calibrate subjective performance against the user's selected images. Revise for a specific issue each round; repeated failures call for reporting the unmet requirement and proposing reference or design changes within the authorised retry scope.
 
 ## Registering
 

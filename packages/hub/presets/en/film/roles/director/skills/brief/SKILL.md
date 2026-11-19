@@ -21,12 +21,12 @@ There is exactly one for the whole film, registered as `brief/<title>`. It is th
 | Cap on generation costs | The most that images and video may cost, as the user confirms it; with your estimate as a range | At most 150; estimated 90–130 |
 | Reshoots and non-negotiables | Maximum rounds of reshoots; what cannot be compromised | At most three rounds per shot; the characters' faces must stay consistent |
 
-Running time determines scale: a single generated shot usually runs 4–15 seconds, and each shot averages 4–6 seconds in the finished film, so 60 seconds is roughly 10–15 shots and 3–5 scenes. State the order of magnitude of the shot count in the brief, so the departments downstream do not keep making the project bigger.
+Running time determines scale: estimate the edit's shot count from its pacing, then estimate generated footage from supported durations and editing margins. Rapid action cuts and long takes need different proportions of source footage; do not apply a fixed seconds-per-shot rule. State the order of magnitude of the shot count in the brief, so the departments downstream do not keep making the project bigger.
 
-Estimate the cost as "shots × draft unit price × average generations per shot, plus the finals", written as a range. Take the unit price from the technical check or the provider's price list, not from memory; one not known yet is "after the technical check". The cap is final only once the user confirmed it. xsb does not hold generation back for you: when it comes near, ask the user first.
+Estimate the cost as "shots × draft unit price × average generations per shot, plus the finals", written as a range. Take the unit price from the technical check or the provider's price list, not from memory; one not known yet is "after the technical check". The user may confirm a cap or explicitly leave it uncapped; record that decision without repeatedly requesting a number. xsb does not hold generation back for you: when it comes near, ask the user first.
 
 When the generation plan cannot be filled in, because the user has no image or video model the team can use, say so in the brief: this time only the written part can be done (brief, script, shot list), and images and video wait until the user connects models (the "Volcengine Ark video" team, say, or a tool server or skill of their own for the generating roles).
 
-Be honest in the sound item: dialogue and production sound can be generated with the shots, but music and narration require audio files from the user.
+Describe sound from the current model and tools. For missing generation capabilities, identify existing audio, user files or a later integration as the source rather than treating one team's missing tools as a universal model limitation.
 
 When you finish, show the user the full text and ask for user sign-off. Until the user signs off, do not register it and do not dispatch any tasks.

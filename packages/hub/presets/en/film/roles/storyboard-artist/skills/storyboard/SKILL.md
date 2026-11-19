@@ -22,6 +22,12 @@ Example:
 
 > The person in 图一, keeping the face, hair, and costume exactly the same: A thirty-year-old woman with shoulder-length black hair and a lean face, wearing a long dark gray trench coat over a white shirt, carrying a faded dark green canvas bag. She stands at the left edge of the frame, dragging a suitcase, her body turned toward the ticket booth at the right of the frame. Scene reference 图二: A ferry landing late at night, fog over the river, a single dim yellow light on in the ticket booth. Medium shot, eye level. The only light source is the ticket booth. Realistic cinematic look, low-key lighting, warm tungsten light with teal shadows, shallow depth of field, film grain, restrained color, no text in frame. 16:9 horizontal composition.
 
+## Action and prop continuity
+
+The first frame must leave a feasible path for the action: where the hand starts and ends, which way a usable part of the object faces, and when contact or release happens. For grasping or turning, check the hand, grip point and object orientation together rather than judging only the still's appearance. Prefer prop references independent of other people; verify every identity and position in group scenes.
+
+Even a local revision needs comparison with adjacent shots: moving or flipping an object affects grip, motion direction and the next shot's axis. Check both preserved and changed details. Report conflicts for the director to resolve rather than silently redesigning the shot. Measure the source and final crop's aspect ratio and check needed details; a ratio in the prompt does not prove the output complies.
+
 ## What to draw for each generation method
 
 | Shot list says | What to draw |

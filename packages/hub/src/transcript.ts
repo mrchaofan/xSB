@@ -42,6 +42,9 @@ export function turnsSinceCleared(store: Store, agentId: string, sessionId: stri
   const turns: PastTurn[] = [];
   let input: { id: string; entry: PastTurn["inputs"][number] } | undefined;
   let message: { id: string; text: string } | undefined;
+  // Backends may report a tool entirely through updates. Track it per turn so
+  // lifecycle updates refine one entry, while ids reused in later turns stay separate.
+  let tools = new Map<string, number>();
   const turn = (): PastTurn | undefined => turns.at(-1);
   for (const { ts, update } of records) {
     switch (update?.sessionUpdate) {
@@ -54,21 +57,36 @@ export function turnsSinceCleared(store: Store, agentId: string, sessionId: stri
         const entry = { origin, text: said(update.content) };
         input = { id: update.messageId, entry };
         if (origin.steered && turn()) turn()!.inputs.push(entry);
-        else turns.push({ at: ts, inputs: [entry], tools: [], reply: "" });
+        else {
+          turns.push({ at: ts, inputs: [entry], tools: [], reply: "" });
+          tools = new Map();
+        }
         message = undefined;
         break;
       }
-      case "agent_message_chunk": {
+      case "agent_message_chunk":
+      case "agent_message": {
         const current = turn();
-        if (!current || update.content?.type !== "text") break;
+        const piece = update.sessionUpdate === "agent_message"
+          ? (update.content ?? []).map(said).join("")
+          : update.content?.type === "text" ? update.content.text : "";
+        if (!current || !piece) break;
         if (!message || message.id !== update.messageId) message = { id: update.messageId, text: "" };
-        message.text += update.content.text;
+        message.text += piece;
         current.reply = message.text;
         break;
       }
-      case "tool_call": {
+      case "tool_call":
+      case "tool_call_update": {
         const current = turn();
-        if (current && update.title) current.tools.push(String(update.title));
+        if (current && update.title) {
+          const id = String(update.toolCallId ?? "");
+          const index = tools.get(id);
+          if (index === undefined) {
+            tools.set(id, current.tools.length);
+            current.tools.push(String(update.title));
+          } else current.tools[index] = String(update.title);
+        }
         message = undefined;
         break;
       }
