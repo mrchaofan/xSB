@@ -371,7 +371,7 @@ const a = await newSession("a");
   said.set(bs, "");
   await prompt(bs, call("send_message", { to: "c", content: "hello" }));
   assert.match(said.get(bs)!, /"delivery": /);
-  assert.deepEqual(loadProjectConfig(paths).permissions, { b: { message: ["c"] } });
+  assert.deepEqual(loadProjectConfig(paths).permissions, { "agent:b": { message: ["agent:c"] } });
   permissionChoice = undefined;
   await prompt(bs, call("send_message", { to: "c", content: "hello again" }));
   assert.equal(permissionAsked, asked + 2, "allowed always: not asked again");
@@ -1717,6 +1717,106 @@ const p = await newSession("p1");
   assert.match(result.text, /work was stopped/);
   assert.ok(![...hub.state.tasks.values()].some((t) => t.title === "MUST-NOT-DISPATCH-AFTER-STOP"));
   console.log("ok 38 in-flight authorization cannot create new work after stop");
+}
+
+// 39. Dynamic types, instances and bounded delegation use the same dispatch policy.
+{
+  hub.putAgent({ id: "team-builder", role: "lead", backend: "mock" });
+  const builder = hub.mainSession("team-builder");
+  const invoke = (session: LiveSession, name: string, args: unknown) => callTool(hub, session, name, args);
+  const ok = async (session: LiveSession, name: string, args: unknown) => {
+    const result = await invoke(session, name, args);
+    assert.equal(result.isError, false, result.text);
+    return JSON.parse(result.text);
+  };
+  // Exercise the new tool through the actual backend and MCP bridge, not just the tool entry point.
+  await prompt(builder.id, call("create_role", { name: "dynamic-worker", instructions: "DYNAMIC-WORKER", skills: [{ name: "research", content: "---\ndescription: Research\nproduces: research\n---\nRESEARCH-PROCEDURE" }] }));
+  const worker = (await conn.request(Roles.get, { name: "dynamic-worker" })).role;
+  assert.equal(worker.instructions, "DYNAMIC-WORKER");
+  assert.equal(worker.grants, undefined);
+  assert.equal(worker.skills[0].produces, "research");
+  await until("dynamic role announced", () => roleEvents.includes("dynamic-worker: undefined"));
+  await ok(builder, "grant_permission", { role: "dynamic-worker", cap: "dispatch", to: ["painter"] });
+  await ok(builder, "create_agent", { id: "dw1", role: "dynamic-worker" });
+  await ok(builder, "create_agent", { id: "dw2", role: "dynamic-worker" });
+  const w1 = hub.mainSession("dw1"), w2 = hub.mainSession("dw2");
+  assert.equal(hub.agent("dw1").backend, "mock");
+  assert.match(hub.systemPromptFor(hub.agent("dw1")), /DYNAMIC-WORKER/);
+  const types = await ok(w1, "list_roles", {});
+  assert.deepEqual(types.roles.find((r: any) => r.name === "painter").you_may, ["dispatch", "create_agent", "grant_permission"]);
+  // Inherited dispatch works through real delivery; it does not imply permission to send messages.
+  let asked = permissionAsked;
+  const task = await ok(w2, "dispatch_task", { to: "p1", title: "dynamic dispatch", instructions: "!say DYNAMIC-RESULT", topic: "dynamic team" });
+  await until("dynamic task complete", () => hub.state.tasks.get(task.task_id)?.status === "completed");
+  assert.equal(permissionAsked, asked);
+  permissionChoice = "no";
+  assert.equal((await invoke(w1, "send_message", { to: "p1", content: "unauthorized message" })).isError, true);
+  assert.equal(permissionAsked, asked + 1);
+  // Dispatch authority to the recipient is necessary, and only owned destination rights can be transferred.
+  await ok(builder, "create_role", { name: "dynamic-specialist", instructions: "SPECIALIST" });
+  asked = permissionAsked;
+  assert.equal((await invoke(w1, "grant_permission", { role: "dynamic-specialist", cap: "dispatch", to: ["painter"] })).isError, true);
+  assert.equal(permissionAsked, asked + 1);
+  assert.equal(loadProjectConfig(paths).permissions?.["dynamic-specialist"], undefined);
+  assert.match((await invoke(w1, "grant_permission", { role: "painter", cap: "message", to: ["painter"] })).text, /only message permissions/);
+  assert.match((await invoke(w1, "grant_permission", { role: "painter", cap: "dispatch", to: ["*"] })).text, /only dispatch permissions/);
+  assert.match((await invoke(w1, "grant_permission", { role: "painter", cap: "dispatch", to: ["lead"] })).text, /only dispatch permissions/);
+  // Rejection leaves no role. Once creates a type, without persisting an authorization edge.
+  assert.equal((await invoke(w1, "create_role", { name: "dynamic-denied", instructions: "NO" })).isError, true);
+  assert.ok(!fs.existsSync(paths.roleDir("dynamic-denied")));
+  permissionChoice = "once";
+  await ok(w1, "create_role", { name: "dynamic-once", instructions: "ONCE" });
+  assert.ok(!loadProjectConfig(paths).permissions?.["dynamic-worker"]?.dispatch?.includes("dynamic-once"));
+  permissionChoice = "no";
+  assert.equal((await invoke(w1, "create_agent", { id: "once-instance", role: "dynamic-once" })).isError, true);
+  assert.ok(!hub.state.agents.has("once-instance"));
+  // Always stores type names before there are instances, and another instance reuses both edges.
+  permissionChoice = "always";
+  await ok(w1, "create_role", { name: "dynamic-always", instructions: "ALWAYS" });
+  asked = permissionAsked;
+  await ok(w2, "create_agent", { id: "always-instance", role: "dynamic-always" });
+  await ok(w2, "grant_permission", { role: "dynamic-always", cap: "dispatch", to: ["painter", "painter"] });
+  assert.equal(permissionAsked, asked);
+  assert.deepEqual(loadProjectConfig(paths).permissions?.["dynamic-always"], { dispatch: ["painter"] });
+  const inherited = await ok(hub.mainSession("always-instance"), "list_agents", {});
+  assert.ok(inherited.agents.find((agent: any) => agent.id === "p1").you_may.includes("dispatch"));
+  assert.ok(!inherited.agents.find((agent: any) => agent.id === "p1").you_may.includes("message"));
+  // Cannot use the creation tools to overwrite roles/instances or smuggle universal grants.
+  assert.match((await invoke(builder, "create_role", { name: "dynamic-worker", instructions: "OVERWRITE" })).text, /already exists/);
+  assert.match((await invoke(builder, "create_agent", { id: "dw1", role: "lead" })).text, /already exists/);
+  assert.match((await invoke(builder, "create_role", { name: "dynamic-escalation", instructions: "BAD", grants: ["dispatch"] })).text, /starts without grants/);
+  assert.equal((await invoke(builder, "create_role", { name: "../escape", instructions: "BAD" })).isError, true);
+  assert.equal((await invoke(builder, "create_role", { name: "bad-skill", instructions: "BAD", skills: [{ name: "s" }] })).isError, true);
+  assert.ok(!fs.existsSync(paths.roleDir("dynamic-escalation")));
+  assert.equal((await conn.request(Roles.get, { name: "dynamic-worker" })).role.instructions, "DYNAMIC-WORKER");
+  // Already-authorized calls also yield. Stopping at that boundary must prevent every mutation.
+  for (const [tool, args] of [
+    ["create_role", { name: "dynamic-admitted-stop", instructions: "STOP" }],
+    ["create_agent", { id: "dynamic-admitted-instance", role: "dynamic-specialist" }],
+    ["grant_permission", { role: "dynamic-specialist", cap: "dispatch", to: ["lead"] }],
+  ] as const) {
+    const id = `race-${tool}`;
+    hub.putAgent({ id, role: "lead", backend: "mock" });
+    const source = hub.mainSession(id);
+    const pending = invoke(source, tool, args);
+    hub.delivery.userStop(source);
+    const result = await pending;
+    assert.equal(result.isError, true, tool);
+    assert.match(result.text, /work was stopped/);
+  }
+  assert.ok(!fs.existsSync(paths.roleDir("dynamic-admitted-stop")));
+  assert.ok(!hub.state.agents.has("dynamic-admitted-instance"));
+  assert.equal(loadProjectConfig(paths).permissions?.["dynamic-specialist"], undefined);
+  // A stop while waiting on approval voids the creation and its persistent authorization.
+  const pending = invoke(w2, "create_role", { name: "dynamic-stopped", instructions: "STOPPED" });
+  hub.delivery.userStop(w2);
+  const stopped = await pending;
+  assert.equal(stopped.isError, true);
+  assert.match(stopped.text, /work was stopped/);
+  assert.ok(!fs.existsSync(paths.roleDir("dynamic-stopped")));
+  assert.ok(!loadProjectConfig(paths).permissions?.["dynamic-worker"]?.dispatch?.includes("dynamic-stopped"));
+  permissionChoice = undefined;
+  console.log("ok 39 dynamic roles, shared type authorization and bounded delegation");
 }
 
 await hub.shutdown();

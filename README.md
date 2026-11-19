@@ -70,6 +70,8 @@ npx xsb agent add dp1 --role cinematographer --name 摄影1
 
 格式和机制见 [packages/hub/README.md](packages/hub/README.md) 与设计文档 5.4–5.6。
 
+Agent 也可以按需使用 `team` 的 `create_role`、`create_agent` 创建新角色与实例，并通过 `grant_permission` 授予自己已有的权限。创建和授权复用向目标角色类型派发任务的授权机制；同类型的所有实例共享持久权限。设计与调用示例见 [动态角色与转授权](docs/DYNAMIC-ROLES.md)。
+
 语言：命令输出和报错跟随终端的语言（`LANG` 等），桌面应用跟随系统语言，目前有简体中文和英文。Agent 的工作语言是项目的设置（`.xsb/config.json` 的 `language`），第一次打开项目时按当时的语言写入，之后可以手改；预设团队按它读取对应语言的一份。详见设计文档 3.4。
 
 后端需要你自己装好并登录，xsb 不安装、不保存凭据、也不决定权限模式，这些都用各后端自己的设置。`npx xsb backends` 列出本机后端及是否已安装；缺了会报错并给出错误码（见设计文档 2.4）。

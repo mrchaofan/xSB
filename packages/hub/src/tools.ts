@@ -22,17 +22,17 @@
  * of what a tool answers. What a tool does to messages and tasks is the
  * kernel's; the tools are one of its users, with the caller's identity.
  */
-import { Agents, isTerminal } from "@xsb/protocol";
-import type { Addr, Asset, DeliveryPref, Grant, LedgerState, PermissionOption, Task } from "@xsb/protocol";
-import { loadProjectConfig } from "./config.ts";
+import { AGENT_ID, Agents, isTerminal } from "@xsb/protocol";
+import type { Addr, Asset, DeliveryPref, Grant, LedgerState, PermissionOption, RoleInput, Task } from "@xsb/protocol";
+import { backends, loadProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
 import { isVeto } from "./hooks.ts";
 import type { Veto } from "./hooks.ts";
-import { allowAlways, capabilities, reaches } from "./capabilities.ts";
+import { allowRoles, capabilities, reaches, roleKey, roleReach } from "./capabilities.ts";
 import type { Capabilities } from "./capabilities.ts";
 import { agentPrincipal } from "./kernel.ts";
 import { renderAsset, renderMail, renderResults } from "./prompts.ts";
-import { skillBody } from "./roles.ts";
+import { loadRole, roleNames, skillBody, validateRole } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { ops, topicKey } from "./state.ts";
 import { startedFor } from "./task-graph.ts";
@@ -159,16 +159,31 @@ async function authorize(ctx: Ctx, cap: Grant["cap"], to: string[]): Promise<voi
   const asked = to.filter((id) => !reaches(ctx.caps[cap], id));
   if (!asked.length) return;
   const what = cap === "dispatch" ? "give a task to" : "send a message to";
+  await authorizeKeys(ctx, cap, asked.map((id) => roleKey(ctx.hub.agent(id))), what, asked.join(", "), cap === "dispatch" ? "dispatch_task" : "send_message");
+}
+
+/** The same human authorization path for instances and types that do not have instances yet. */
+async function authorizeKeys(ctx: Ctx, cap: Grant["cap"], keys: string[], what: string, target: string, tool: string): Promise<void> {
+  ctx.assertActive();
+  const source = roleKey(ctx.hub.agent(ctx.session.agentId));
   const answer = await ctx.hub.permissions.request(ctx.session, {
     sessionId: ctx.session.id,
-    title: `${ctx.session.agentId} wants to ${what} ${asked.join(", ")}`,
-    subject: { type: "tool_call", toolCall: { toolCallId: newId("perm"), title: `team/${cap === "dispatch" ? "dispatch_task" : "send_message"}` } },
+    title: `${ctx.session.agentId} (${source}) wants to ${what} ${target}; always allow applies to role types`,
+    subject: { type: "tool_call", toolCall: { toolCallId: newId("perm"), title: `team/${tool}` } },
     options: ALLOW,
   });
   ctx.assertActive();
   const chosen = answer.outcome.outcome === "selected" ? answer.outcome.optionId : undefined;
-  if (chosen === "always") allowAlways(ctx.hub, ctx.session.agentId, cap, asked);
-  if (chosen !== "once" && chosen !== "always") throw new Error(`the user did not allow you to ${what} ${asked.join(", ")}.`);
+  if (roleKey(ctx.hub.agent(ctx.session.agentId)) !== source) throw new Error("Your role changed while authorization was pending; retry the call.");
+  if (chosen === "always") allowRoles(ctx.hub, source, cap, keys);
+  if (chosen !== "once" && chosen !== "always") throw new Error(`the user did not allow you to ${what} ${target}.`);
+}
+
+async function authorizeRole(ctx: Ctx, role: string, tool: string): Promise<void> {
+  if (!reaches(roleReach(ctx.hub, ctx.hub.agent(ctx.session.agentId), "dispatch"), role)) {
+    await authorizeKeys(ctx, "dispatch", [role], tool === "create_role" ? "create role" : tool === "create_agent" ? "create an agent of role" : "grant permissions to role", role, tool);
+  }
+  ctx.assertActive();
 }
 
 const DELIVERY = {
@@ -430,6 +445,82 @@ export const TOOLS: Tool[] = [
         for (const item of items) ctx.hub.kernel.mark(item.id, "seen");
       }
       return text;
+    },
+  },
+  {
+    name: "list_roles",
+    description: "List role types, their instructions, skills, instances and whether you may dispatch to (and grant permissions to) each type. Includes types with no agents yet.",
+    inputSchema: schema({}),
+    run(ctx) {
+      const reach = roleReach(ctx.hub, ctx.hub.agent(ctx.session.agentId), "dispatch");
+      return json({ roles: roleNames(ctx.hub.paths).map((name) => ({ ...ctx.hub.roleDetail(name), you_may: reaches(reach, name) ? ["dispatch", "create_agent", "grant_permission"] : [] })) });
+    },
+  },
+  {
+    name: "create_role",
+    description: "Create a new role type for work the team needs. Uses dispatch authorization to the new type, asking the user if needed. Existing roles cannot be overwritten. The new role starts without permissions; use grant_permission to give it part of your own authority, then create_agent to instantiate it.",
+    inputSchema: schema({
+      name: str("New role type name: letters, digits, underscores or hyphens."),
+      description: str("What this role does."),
+      instructions: str("How this role works."),
+      backend: str("Optional configured backend default."),
+      mcpServers: { type: "object", description: "Optional MCP servers keyed by name, each with command, args and env." },
+      skills: { type: "array", items: schema({ name: str("Skill name."), content: str("Complete SKILL.md content.") }, ["name", "content"]) },
+    }, ["name", "instructions"]),
+    async run(ctx, args) {
+      if (args.grants !== undefined) throw new Error("A new role starts without grants; use grant_permission.");
+      const input: RoleInput = { name: need(args, "name"), instructions: need(args, "instructions"), description: args.description, backend: args.backend, mcpServers: args.mcpServers, skills: args.skills };
+      validateRole(input);
+      const fresh = () => { if (roleNames(ctx.hub.paths).includes(input.name)) throw new Error(`role "${input.name}" already exists; cannot overwrite it`); };
+      fresh();
+      await authorizeRole(ctx, input.name, "create_role");
+      ctx.assertActive();
+      fresh();
+      return json({ role: ctx.hub.putRole(input) });
+    },
+  },
+  {
+    name: "create_agent",
+    description: "Create an instance of an existing role type. Uses exactly the role's dispatch authorization, asking the user if needed. Existing agents cannot be overwritten. Backend defaults to the role's, then yours. The agent appears on the team immediately; dispatch_task gives it work.",
+    inputSchema: schema({ id: str("New agent id."), role: str("Existing role type."), name: str("Display name."), description: str("Instance description."), backend: str("Optional configured backend."), instructions: str("Optional instance instructions, added to the role's.") }, ["id", "role"]),
+    async run(ctx, args) {
+      const id = need(args, "id");
+      if (!AGENT_ID.test(id)) throw new Error("invalid agent id");
+      const role = loadRole(ctx.hub.paths, need(args, "role"));
+      for (const key of ["name", "description", "backend", "instructions"]) if (args[key] !== undefined && typeof args[key] !== "string") throw new Error(`${key} must be a string`);
+      const backend = args.backend ?? role.backend ?? ctx.hub.agent(ctx.session.agentId).backend;
+      if (!Object.keys(backends()).includes(backend)) throw new Error(`no backend named "${backend}"`);
+      const fresh = () => { if (ctx.hub.state.agents.has(id)) throw new Error(`agent "${id}" already exists; cannot overwrite it`); };
+      fresh();
+      await authorizeRole(ctx, role.name, "create_agent");
+      ctx.assertActive();
+      fresh();
+      return json({ agent: ctx.hub.putAgent({ id, role: role.name, name: args.name, description: args.description, backend }, args.instructions) });
+    },
+  },
+  {
+    name: "grant_permission",
+    description: "Authorize a role type to dispatch to or message other role types, persistently for all its present and future instances. You must be allowed to dispatch to the recipient role, and can give only permissions you yourself already have. This does not confer message permissions through dispatch, or temporary rights from tasks or replies.",
+    inputSchema: schema({ role: str("Role type receiving permission."), cap: { type: "string", enum: ["dispatch", "message"] }, to: { type: "array", items: { type: "string" }, description: "Destination role types. '*' requires your own unrestricted permission for this capability.", minItems: 1 } }, ["role", "cap", "to"]),
+    async run(ctx, args) {
+      const role = loadRole(ctx.hub.paths, need(args, "role")).name;
+      const cap: Grant["cap"] = args.cap;
+      if (cap !== "dispatch" && cap !== "message") throw new Error("cap must be dispatch or message");
+      if (!Array.isArray(args.to) || !args.to.length || args.to.some((name: unknown) => typeof name !== "string" || !name.trim())) throw new Error("to must contain role type names");
+      const to = [...new Set<string>(args.to)];
+      for (const name of to) if (name !== "*") loadRole(ctx.hub.paths, name);
+      const transferable = () => {
+        const reach = roleReach(ctx.hub, ctx.hub.agent(ctx.session.agentId), cap);
+        if (to.some((name) => name === "*" ? reach !== "any" : !reaches(reach, name))) throw new Error(`You can grant only ${cap} permissions your own role already has.`);
+      };
+      transferable();
+      await authorizeRole(ctx, role, "grant_permission");
+      ctx.assertActive();
+      transferable();
+      // Re-read after the permission wait; the role might have been removed meanwhile.
+      loadRole(ctx.hub.paths, role);
+      allowRoles(ctx.hub, role, cap, to);
+      return json({ role, cap, to, scope: "all present and future instances of this role" });
     },
   },
   {

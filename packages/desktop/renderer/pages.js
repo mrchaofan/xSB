@@ -1,6 +1,8 @@
 // 右栏的标签：制品目录、独立制品预览，以及主进程持有的网页（../src/pages.ts）。
 // 这里显示它们的标签和地址栏，并把当前的那个显示出来。网页也可以移到自己的窗口里（page-window.js）。
 import { renderArtifact, revealArtifacts, state } from "./app.js";
+import { artifactLabel } from "./artifacts.js";
+import { openDialog } from "./form.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { t } from "./i18n.js";
 import { showWeb } from "./webview.js";
@@ -20,12 +22,12 @@ export function renderSide() {
   $("#side-artifacts").hidden = !!page;
   $("#side-web").hidden = !page;
   $("#tabs").hidden = false;      // 没有 webview2 时仍然可以打开制品标签
-  fill($("#tabs"),
-    h("div", { class: "tab", "aria-current": String(state.tab === null) }, h("button", { onclick: () => selectTab(null) }, t("tabs.artifacts"))),
+  const tabList = h("div", { class: "tab-list" });
+  fill(tabList,
     ...state.artifactTabs.map((tab) => {
       const artifact = state.artifacts.find((a) => a.id === tab.artifactId);
-      return h("div", { class: "tab", "aria-current": String(tab.id === state.tab), title: artifact?.path },
-        h("button", { onclick: () => selectTab(tab.id) }, h("span", {}, artifact?.name ?? tab.artifactId)),
+      return h("div", { class: "tab", "aria-current": String(tab.id === state.tab), title: artifact ? `${artifact.name}\n${artifact.path}` : tab.artifactId },
+        h("button", { onclick: () => selectTab(tab.id) }, h("span", {}, artifact ? artifactLabel(artifact) : tab.artifactId)),
         h("button", { class: "icon-btn", title: t("tabs.close"), "aria-label": t("tabs.close"), html: ICON.close, onclick: () => {
           const index = state.artifactTabs.indexOf(tab);
           state.artifactTabs.splice(index, 1);
@@ -37,8 +39,15 @@ export function renderSide() {
       h("button", { onclick: () => selectTab(p.id) },
         p.agent && h("i", { class: "state", "data-state": p.loading ? "running" : "idle", title: t("tabs.agent") }),
         h("span", {}, titleOf(p))),
-      h("button", { class: "icon-btn", title: t("tabs.close"), "aria-label": t("tabs.close"), html: ICON.close, onclick: () => xsb.page(p.id, "close") }))),
-    state.pages && h("button", { class: "icon-btn", title: t("tabs.new"), "aria-label": t("tabs.new"), html: ICON.plus, onclick: newTab }));
+      h("button", { class: "icon-btn", title: t("tabs.close"), "aria-label": t("tabs.close"), html: ICON.close, onclick: () => xsb.page(p.id, "close") }))));
+  fill($("#tabs"),
+    h("div", { class: "tab catalog-tab", "aria-current": String(state.tab === null) }, h("button", { onclick: () => selectTab(null), title: t("artifact.list.all"), html: ICON.grid }, h("span", {}, t("tabs.artifacts")))),
+    tabList,
+    h("button", { class: "icon-btn", title: t("tabs.opened"), "aria-label": t("tabs.opened"), html: ICON.list, onclick: openedTabs }),
+    state.pages && h("button", { class: "icon-btn", title: t("tabs.new"), "aria-label": t("tabs.new"), html: ICON.plus, onclick: newTab }),
+    h("button", { class: "icon-btn", title: t(document.body.classList.contains("artifact-focused") ? "artifact.restore" : "artifact.focus"), "aria-label": t(document.body.classList.contains("artifact-focused") ? "artifact.restore" : "artifact.focus"), html: document.body.classList.contains("artifact-focused") ? ICON.collapse : ICON.expand, onclick: () => { document.body.classList.toggle("artifact-focused"); renderSide(); } }),
+    h("button", { class: "icon-btn side-close", title: t("side.close"), "aria-label": t("side.close"), html: ICON.close, onclick: () => { document.body.classList.remove("artifact-focused", "artifact-expanded"); renderSide(); } }));
+  tabList.querySelector('.tab[aria-current="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
   if (!page) {
     const tab = state.artifactTabs.find((tab) => tab.id === state.tab);
     state.listing = !tab;
@@ -58,6 +67,25 @@ export function renderSide() {
         h("button", { class: "btn primary", onclick: () => xsb.page(page.id, "restore") }, t("web.restore")),
         h("button", { class: "btn", onclick: () => xsb.page(page.id, "show") }, t("web.show")))));
   } else showWeb($("#web-body"), page);
+}
+
+function openedTabs() {
+  const list = h("div", { class: "opened-tabs" });
+  const search = h("input", { type: "search", class: "artifact-search", placeholder: t("tabs.search"), "aria-label": t("tabs.search"), oninput: render });
+  const dialog = openDialog(t("tabs.opened"), [search, list], [{ label: t("common.close") }]);
+  dialog.classList.add("tabs-dialog");
+  function render() {
+    const query = search.value.trim().toLocaleLowerCase();
+    const items = [
+      ...state.artifactTabs.map((tab) => { const a = state.artifacts.find((a) => a.id === tab.artifactId); return { id: tab.id, title: a?.name ?? tab.artifactId, path: a?.path, icon: ICON.file }; }),
+      ...(state.pages ?? []).map((p) => ({ id: p.id, title: titleOf(p), path: p.url, icon: ICON.code })),
+    ].filter((item) => `${item.title} ${item.path ?? ""}`.toLocaleLowerCase().includes(query));
+    fill(list, ...items.map((item) => h("button", { class: "row", "aria-pressed": String(item.id === state.tab), onclick: () => { selectTab(item.id); dialog.close(); } },
+      h("span", { html: item.icon }), h("span", { class: "row-text" }, h("strong", {}, item.title), h("small", {}, item.path)))),
+      !items.length && h("p", { class: "empty" }, t("tabs.empty")));
+  }
+  render();
+  search.focus();
 }
 
 async function newTab() {

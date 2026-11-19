@@ -18,11 +18,12 @@
  */
 import fs from "node:fs";
 import net from "node:net";
-import { AGENT_ID, Agents, Connection, Ledger, RpcError, Tasks, failure } from "@xsb/protocol";
-import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
+import { AGENT_ID, Agents, Connection, Ledger, Roles, RpcError, Tasks, failure } from "@xsb/protocol";
+import type { AgentInfo, AgentSpec, McpServer, RoleDetail, RoleInput } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Client } from "./acp-server.ts";
 import { Assets } from "./assets.ts";
+import { migratePermissions } from "./capabilities.ts";
 import { auditHook, auditReports } from "./audit.ts";
 import { BackendPool } from "./backends.ts";
 import { DEFAULT_BACKEND, loadProjectConfig, migrateProjectConfig, projectLanguage } from "./config.ts";
@@ -39,7 +40,7 @@ import { systemPrompt } from "./prompts.ts";
 import type { ToolOrigin } from "./prompts.ts";
 import { catalog } from "./presets.ts";
 import { copyTemplate } from "./templates.ts";
-import { loadRole } from "./roles.ts";
+import { describeRole, loadRole, saveRole } from "./roles.ts";
 import type { Contract, Role } from "./roles.ts";
 import { LiveSession } from "./session.ts";
 import type { MailItem, SessionRec } from "./state.ts";
@@ -100,6 +101,7 @@ export class Hub {
       try { copyTemplate(this.paths, sources, id); }
       catch (e) { this.log(`template snapshot ${id}: ${(e as Error).message}`); }
     }
+    migratePermissions(this);
     await this.listen(this.paths.socket("acp"), (socket) => {
       const client = new Client(this, new Connection(socket, socket, "client"));
       this.clients.add(client);
@@ -206,6 +208,18 @@ export class Hub {
   /** The agent's role as its files say right now, if it has one. */
   role(agent: AgentSpec): Role | undefined {
     return agent.role ? loadRole(this.paths, agent.role) : undefined;
+  }
+
+  /** Shared role mutation for human ACP clients and the team's dynamic-role tools. */
+  putRole(input: RoleInput): RoleDetail {
+    saveRole(this.paths, input);
+    const role = this.roleDetail(input.name);
+    this.broadcast(Roles.update, { role });
+    return role;
+  }
+
+  roleDetail(name: string): RoleDetail {
+    return { ...describeRole(loadRole(this.paths, name)), agents: [...this.state.agents.values()].filter((a) => a.role === name).map((a) => a.id) };
   }
 
   /**
