@@ -127,14 +127,17 @@ test("a blocked replacement does not stop work before its dependencies finish", 
 });
 
 test("replacement runs first, then unread prompts retain FIFO order ahead of the old queue", async (t) => {
-  const { kernel, A, B, C, session, give, settle, idle, unread, prompts } = setup(t);
+  const { kernel, A, B, C, session, give, settle, idle, unread, prompts, effects } = setup(t);
   give(A, B, "old"); await settle();
+  const backendId = session.rec.backendSessionId;
   const queued = give(C, B, "already queued");
   unread("one"); unread("two");
   const replacement = give(A, B, "replacement");
   assert.equal(kernel.replace(replacement, session.current!.id).length, 1);
   await settle(); idle("cancelled"); await settle();
   assert.equal(session.current!.first.item!.taskId, replacement.id);
+  assert.equal(session.rec.backendSessionId, backendId);
+  assert.deepEqual(effects, ["cancel"]);
   idle(); await settle(); assert.equal(session.current!.first.messageId, "one");
   idle(); await settle(); assert.equal(session.current!.first.messageId, "two");
   idle(); await settle(); assert.equal(session.current!.first.item!.taskId, queued.id);
@@ -165,18 +168,17 @@ test("committed stops reject jobs and dispatch before the halt observer runs", a
   assert.ok(![...state.tasks.values()].some((task) => task.title === "late"));
 });
 
-test("late tagged updates and old backend session updates cannot end or write into the new turn", async (t) => {
+test("confirmed stop preserves the backend while rejecting old turn-tagged updates", async (t) => {
   const { state, A, B, session, give, settle, stop, idle, effects } = setup(t);
   const old = give(A, B, "old"); await settle();
   const oldTurn = session.current!.id, oldBackend = session.rec.backendSessionId!;
   give(A, B, "new"); stop(old); await settle(); idle("cancelled"); await settle();
   const current = session.current!;
-  assert.notEqual(session.rec.backendSessionId, oldBackend);
-  assert.ok(effects.includes(`close ${oldBackend}`));
+  assert.equal(session.rec.backendSessionId, oldBackend);
+  assert.deepEqual(effects, ["cancel"]);
   session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "cancelled", _meta: { [TurnExt.key]: { id: oldTurn } } });
-  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }, oldBackend);
   const before = state.store.read(Paths.transcript(B.agentId, B.sessionId)).length;
-  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("old output") }, oldBackend);
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("old output"), _meta: { [TurnExt.key]: { id: oldTurn } } }, oldBackend);
   assert.equal(session.current, current);
   assert.equal(state.store.read(Paths.transcript(B.agentId, B.sessionId)).length, before);
 });
@@ -237,8 +239,9 @@ test("append accepted just before target expiry is discarded instead of queued",
 });
 
 test("a task stop that never receives idle expires and retires the old tools before queueing new work", async (t) => {
-  const { effects, A, B, session, give, settle, stop } = setup(t);
+  const { effects, state, A, B, session, give, settle, stop } = setup(t);
   const old = give(A, B, "old"); await settle();
+  const oldBackend = session.rec.backendSessionId!;
   t.mock.timers.enable({ apis: ["setTimeout"] });
   stop(old); await settle();
   assert.equal(session.acceptsTools, false);
@@ -246,6 +249,15 @@ test("a task stop that never receives idle expires and retires the old tools bef
   assert.equal(session.current, undefined);
   assert.ok(effects.includes("revoke"));
   assert.ok(effects.includes("close transport"));
+  assert.equal(session.rec.renew, "stopped");
+  give(A, B, "new"); await settle();
+  assert.notEqual(session.rec.backendSessionId, oldBackend);
+  const current = session.current;
+  const before = state.store.read(Paths.transcript(B.agentId, B.sessionId)).length;
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle" }, oldBackend);
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("old output") }, oldBackend);
+  assert.equal(session.current, current);
+  assert.equal(state.store.read(Paths.transcript(B.agentId, B.sessionId)).length, before);
 });
 
 test("user input accepted by a stop hook protects the turn before replacement commits", async (t) => {
@@ -274,7 +286,7 @@ test("user input after replacement commit joins and protects the replacement tur
 });
 
 test("an unread append expires on normal completion instead of becoming another turn", async (t) => {
-  const { hub, state, A, B, session, give, settle, idle } = setup(t);
+  const { hub, state, A, B, session, give, settle, idle, effects } = setup(t);
   const old = give(A, B, "old"); await settle();
   const append = hub.delivery.append(session, session.current!.id, A, "unread append");
   await settle();
@@ -282,6 +294,21 @@ test("an unread append expires on normal completion instead of becoming another 
   idle(); await assert.rejects(append, /ended or changed/); await settle();
   assert.equal(session.busy, false);
   assert.equal(state.tasks.get(old.id)!.status, "completed");
+  assert.ok(![...state.mail.values()].some((m) => m.targetTurnId));
+  assert.ok(effects.includes("revoke"), "unconfirmed append expiry keeps its isolation path");
+});
+
+test("confirmed stop discards an unread targeted append while preserving the conversation", async (t) => {
+  const { hub, state, A, B, session, give, settle, stop, idle, effects } = setup(t);
+  const old = give(A, B, "old"); await settle();
+  const backendId = session.rec.backendSessionId;
+  const append = hub.delivery.append(session, session.current!.id, A, "unread append");
+  const rejected = assert.rejects(append, /ended or changed/);
+  await settle(); stop(old); await settle(); idle("cancelled");
+  await rejected; await settle();
+  assert.equal(session.busy, false);
+  assert.equal(session.rec.backendSessionId, backendId);
+  assert.deepEqual(effects, ["cancel"]);
   assert.ok(![...state.mail.values()].some((m) => m.targetTurnId));
 });
 
@@ -312,7 +339,7 @@ test("a stop inside task creation is rechecked before committing the new child",
   assert.ok(![...state.tasks.values()].some((t) => t.title === "late child"));
 });
 
-test("idle before the deferred halt still retires the stopped turn and its backend", async (t) => {
+test("idle before the deferred halt still cancels the stopped turn and preserves its backend", async (t) => {
   const { effects, A, B, session, give, settle, stop, idle } = setup(t);
   const old = give(A, B, "old"); await settle();
   const oldTurn = session.current!, oldBackend = session.rec.backendSessionId!;
@@ -321,7 +348,7 @@ test("idle before the deferred halt still retires the stopped turn and its backe
   idle();
   await settle();
   assert.equal((await oldTurn.done.promise).stopReason, "cancelled");
-  assert.ok(effects.includes(`close ${oldBackend}`));
+  assert.ok(!effects.some((e) => e.startsWith("close") || e === "revoke"));
   assert.equal(session.current!.first.item!.taskId, next.id);
-  assert.notEqual(session.rec.backendSessionId, oldBackend);
+  assert.equal(session.rec.backendSessionId, oldBackend);
 });

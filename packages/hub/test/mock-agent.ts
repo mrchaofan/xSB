@@ -16,6 +16,7 @@
  *   !servers              emit the names of the MCP servers the session was given
  *   !tools                emit the names of the team's tools the session has now
  *   !usage <n>            report that the conversation uses n tokens of context
+ *   !images               emit image data retained in this backend conversation
  *
  * A prompt without directives is echoed. As ACP v2 has it, a prompt is answered with its message id once it is
  * inserted; work is reported with `state_update`. Each directive is a step, as a tool call is for a model.
@@ -52,6 +53,7 @@ type Session = {
   held: Held[];
   /** Input given with `_session/steering`, to insert before the next step. */
   steered: any[][];
+  images: string[];
   /** The agent message being written, until a tool call. */
   message?: string;
 };
@@ -64,7 +66,7 @@ const steerExt = flags.includes("--steer-ext");
 let counter = 0;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
-  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], steered: [] };
+  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], steered: [], images: [] };
   const server = mcpServers.find((s) => s.name === "team");
   if (server) {
     const env = Object.fromEntries(server.env.map((e: any) => [e.name, e.value]));
@@ -126,6 +128,8 @@ async function step(session: Session, line: string): Promise<void> {
       return say(session, `echo: ${session.prompt.replaceAll("\n", " | ")}\n`);
     case "usage":
       return update(session, { sessionUpdate: "usage_update", used: Number(rest), size: 1_000_000 });
+    case "images":
+      return say(session, `images: ${JSON.stringify(session.images)}\n`);
     case "servers":
       return say(session, `servers: ${session.servers.join(", ")}\n`);
     case "tools": {
@@ -176,6 +180,7 @@ const program = (source: string): string[] => {
 
 /** Insert input into the conversation: it is echoed, answered (a prompt), and its program is what the work does next. */
 function insert(session: Session, prompt: any[], answer?: (r: { messageId: string }) => void): void {
+  session.images.push(...prompt.filter((b) => b.type === "image").map((b) => b.data));
   const messageId = `user_${++counter}`;
   update(session, { sessionUpdate: "user_message", messageId, content: prompt });
   answer?.({ messageId });

@@ -1819,6 +1819,44 @@ const p = await newSession("p1");
   console.log("ok 39 dynamic roles, shared type authorization and bounded delegation");
 }
 
+// 40. Confirmed stops keep the backend conversation, image context and attached MCP bridge.
+{
+  for (const backend of ["mock", "steerable", "codexlike"]) {
+    const agentId = `stop-context-${backend}`;
+    await conn.request(Agents.put, { agent: { id: agentId, backend } });
+    const sessionId = await newSession(agentId), session = hub.session(sessionId);
+    const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" };
+    const boundaries = () => hub.state.store.read(Paths.transcript(agentId, sessionId))
+      .map((r: any) => r.update._meta?.[Boundaries.key]).filter(Boolean);
+    const boundaryCount = boundaries().length;
+    let backendId: string | undefined, bridgeToken: string | undefined;
+    for (let n = 0; n < 3; n++) {
+      const blocks = [{ type: "text", text: "!sleep 3000\n!say MUST-NOT-RUN" },
+        ...(backend === "steerable" && n === 0 ? [image] : [])];
+      await conn.request("session/prompt", { sessionId, prompt: blocks });
+      await until("context work inserted", () => session.current?.inserted);
+      backendId ??= session.rec.backendSessionId;
+      bridgeToken ??= session.bridgeToken;
+      session.given.notes.set("retained-context", "v1");
+      conn.notify("session/cancel", { sessionId });
+      await until("context work stopped", () => !session.busy);
+      assert.equal(session.rec.backendSessionId, backendId);
+      assert.equal(session.bridgeToken, bridgeToken);
+      assert.notEqual(session.rec.renew, "stopped");
+      await prompt(sessionId, `${call("list_agents", {})}\n!images\n!say CONTEXT-AFTER-${n}`);
+      await idle(agentId);
+      assert.match(answered(agentId), /result\(list_agents\):/);
+      assert.doesNotMatch(answered(agentId), /work was stopped|revoked|MUST-NOT-RUN/);
+      if (backend === "steerable") assert.ok(answered(agentId).includes(`images: ["${image.data}"]`), "original image bytes remain in backend context");
+      assert.equal(session.rec.backendSessionId, backendId);
+      assert.equal(session.bridgeToken, bridgeToken);
+      assert.equal(session.given.notes.get("retained-context"), "v1");
+      assert.equal(boundaries().length, boundaryCount, "normal stop adds no summary handoff boundary");
+    }
+  }
+  console.log("ok 40 repeated stops preserve context, images and subsequent MCP calls");
+}
+
 await hub.shutdown();
 fs.rmSync(project, { recursive: true, force: true });
 console.log("e2e: ok");

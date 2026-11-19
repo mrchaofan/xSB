@@ -661,7 +661,7 @@ export class LiveSession {
     const turn = this.current;
     if (!turn) return;
     // The backend may report idle before the deferred halt hook runs. The committed
-    // stop still owns this turn, including its unread input and backend retirement.
+    // stop still owns this turn, including its unread input.
     if (!end.failure && !turn.cancelledBy && this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })) {
       turn.cancelledBy = "hub";
       end = { ...end, stopReason: "cancelled" };
@@ -686,10 +686,11 @@ export class LiveSession {
       turn.items = itemsOf(turn.inputs);
     }
     this.current = undefined;
-    if ((turn.cancelledBy || expiredAppend) && this.backend) {
-      // ACP backends need not echo a turn id. Retire their old session, and its tool bridges,
-      // before the next turn binds a new conversation with a transcript handoff.
-      if (expiredAppend && !turn.cancelledBy) this.backend.cancel(this.rec.backendSessionId!);
+    if (expiredAppend && !turn.cancelledBy && this.backend) {
+      // Normal cancellation has already confirmed idle and settled prompt receipts:
+      // keep that conversation and its tools, including image context. An unread
+      // targeted append on normal completion still needs isolation before new work.
+      this.backend.cancel(this.rec.backendSessionId!);
       this.backend.close?.(this.rec.backendSessionId!);
       this.hub.rotateBridge(this);
       this.backend = undefined;
