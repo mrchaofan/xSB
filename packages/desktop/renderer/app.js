@@ -6,6 +6,7 @@ import { avatarImage } from "./avatars.js";
 import { createArtifactBrowser, artifactNavigation } from "./artifacts.js";
 import { editAgent } from "./agent.js";
 import { contentView, createEditor, markdownView } from "./content.js";
+import { draftKey, loadDraft, moveDraft, saveDraft } from "./drafts.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { clock, t } from "./i18n.js";
 import { onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
@@ -20,7 +21,8 @@ export const state = {
   activities: {},        // 智能体的标识 → 它此刻在做什么（有一轮在进行时）
   assetNames: {},       // 资产类型 -> 显示名
   pages: [],            // 右栏打开的网页；null 表示这个 Electron 显示不了网页
-  tab: null,            // 右栏的当前标签：null = 制品，否则是网页的 id
+  tab: null,            // null = 制品目录，否则是制品标签或网页的 id
+  artifactTabs: [],     // { id, artifactId, mode }：每份打开的制品独立保留查看方式
   history: {},
   transcripts: {},      // agentId -> Entry[]
   open: [],             // 已打开对话栏的 agentId，按显示顺序。最多两个：第一栏，和分屏出来的第二栏
@@ -155,7 +157,8 @@ export function focusLane(agentId) {
 }
 
 function openLane(agentId) {
-  const send = () => {
+  const send = async () => {
+    try { await editor.ready(); } catch { return; }
     const content = editor.read();
     if (!content.length) return;
     editor.clear();
@@ -165,7 +168,12 @@ function openLane(agentId) {
   };
   // 一个按钮管两件事：输入框里有内容就是发送；没有内容而智能体在工作，就是停止。
   const press = () => (lane.dataset.action === "stop" ? xsb.cancel(agentId) : send(false));
-  const editor = createEditor(send, () => syncLane(agentId));
+  let key = draftKey(state.workspace.path, agentOf(agentId));
+  const editor = createEditor(send, () => {
+    saveDraft(key, editor.snapshot());
+    syncLane(agentId);
+  });
+  editor.restore(loadDraft(key));
 
   const lane = h("section", { class: "lane", "data-agent": agentId },
     h("header", { class: "bar lane-head" },
@@ -175,11 +183,19 @@ function openLane(agentId) {
       h("button", { class: "icon-btn", title: t("lane.close"), "aria-label": t("lane.close"), html: ICON.close, onclick: () => closeLane(agentId) })),
     h("div", { class: "transcript" }, h("button", { class: "btn history-more", hidden: state.history?.[agentId] == null, onclick: () => loadHistory(agentId) }, t("history.more")), h("div", { class: "entries" })),
     h("div", { class: "composer" },
-      editor.el,
+      editor.el, editor.error,
       h("div", { class: "composer-row" },
         h("span", { class: "hint", role: "status" }, h("i", { class: "state" }), h("span", {})),
         h("button", { class: "send", onclick: press }))));
   lane.editor = editor;
+  lane.updateSession = (previous) => {
+    const next = draftKey(state.workspace.path, agentOf(agentId));
+    if (next === key) return;
+    saveDraft(key, editor.snapshot());
+    if (!previous?.mainSessionId) moveDraft(key, next);
+    key = next;
+    editor.restore(loadDraft(key));
+  };
 
   $("#lanes").append(lane);
   state.open.push(agentId);
@@ -243,7 +259,7 @@ function syncLane(agentId) {
   pin.setAttribute("aria-label", pinLabel);
   pin.setAttribute("aria-pressed", String(state.pinned));
 
-  const action = s !== "idle" && !lane.editor.read().length ? "stop" : "send";
+  const action = s !== "idle" && !lane.editor.read().length && !lane.editor.isReading() ? "stop" : "send";
   const label = t(action === "stop" ? "lane.stop" : s === "idle" ? "lane.send" : "lane.send.queue");
   const button = lane.querySelector(".send");
   if (lane.dataset.action !== action) button.innerHTML = ICON[action];
@@ -336,7 +352,6 @@ async function followContentLink(href, container, agentId, baseFile) {
     }
     const artifact = await xsb.openArtifact(href, agentId, baseFile);
     upsert(state.artifacts, artifact);
-    state.mode = "preview";
     showArtifact(artifact.id);
   } catch (error) {
     container.append(h("div", { class: "content-error", role: "status" }, t("content.openFailed", { error: error.message })));
@@ -345,12 +360,13 @@ async function followContentLink(href, container, agentId, baseFile) {
 
 function showArtifact(id) {
   if (state.listing) catalogScroll = $("#artifact-body").scrollTop;
-  state.artifactId = id;
-  state.listing = false;
-  state.tab = null;
+  let tab = state.artifactTabs.find((tab) => tab.artifactId === id);
+  if (!tab) {
+    tab = { id: `artifact:${id}`, artifactId: id, mode: "preview" };
+    state.artifactTabs.push(tab);
+  }
   revealArtifacts();
-  renderSide();
-  renderArtifact();
+  selectTab(tab.id);
 }
 
 let catalogScroll = 0;
@@ -362,7 +378,6 @@ function browseArtifacts() {
   state.tab = null;
   revealArtifacts();
   renderSide();
-  renderArtifact();
 }
 
 // HTML 制品的预览是一个网页，和右栏的网页一样由主进程持有，只是不进标签栏：它在自己的进程里运行，
@@ -380,7 +395,7 @@ function closeEmbedded() {
   embedded = null;
 }
 
-async function renderArtifact() {
+export async function renderArtifact() {
   const request = ++artifactRender;
   const artifact = state.listing ? null : artifactOf(state.artifactId);
   const caption = (a) => t("artifact.caption", { agent: nameOf(a.agentId), time: clock(a.updatedAt), path: a.path });
@@ -390,6 +405,7 @@ async function renderArtifact() {
   const navigation = $("#artifact-navigation");
   $("#artifact-list").hidden = !artifact;
   navigation.hidden = !artifact;
+  $("#artifact-reveal").hidden = !artifact;
   artifactBrowser.update(state.artifacts, state.artifactId);
   if (!(artifact?.kind === "html" && state.mode === "preview")) closeEmbedded();
 
@@ -470,9 +486,18 @@ $("#toggle-artifact").onclick = () => {
   } else document.body.classList.toggle("no-artifact");
 };
 $("#artifact-list").onclick = browseArtifacts;
+$("#artifact-reveal").onclick = async () => {
+  const button = $("#artifact-reveal");
+  try {
+    await xsb.revealArtifact(state.artifactId);
+    button.title = t("artifact.reveal");
+  } catch (error) { button.title = t("content.openFailed", { error: error.message }); }
+};
 $("#artifact-modes").onclick = (e) => {
   if (!e.target.dataset.mode) return;
   state.mode = e.target.dataset.mode;
+  const tab = state.artifactTabs.find((tab) => tab.id === state.tab);
+  if (tab) tab.mode = state.mode;
   renderArtifact();
 };
 
@@ -503,7 +528,13 @@ window.onkeydown = (e) => {
 
 /** 一个 Agent 新增或改变了。putAgent 的返回值和事件都走这里。 */
 export function onAgent(agent) {
+  const previous = agentOf(agent.id);
   upsert(state.agents, agent);
+  const lane = laneOf(agent.id);
+  if (lane) lane.updateSession(previous);
+  else if (previous && !previous.mainSessionId && agent.mainSessionId) {
+    moveDraft(draftKey(state.workspace.path, previous), draftKey(state.workspace.path, agent));
+  }
   state.transcripts[agent.id] ??= [];
   renderRail();
   refreshSettings();
@@ -548,7 +579,7 @@ xsb.on((event) => {
 
 /** 读一次快照并画出整个窗口。打开工作区之后再调用一次。 */
 export async function start() {
-  Object.assign(state, { activities: {} }, await xsb.load(), { open: [], pinned: false, page: null, settings: null, listing: true, tab: null });
+  Object.assign(state, { activities: {} }, await xsb.load(), { open: [], pinned: false, page: null, settings: null, listing: true, tab: null, artifactTabs: [] });
   catalogScroll = 0;
   $("#artifact-body").scrollTop = 0;
   artifactBrowser.reset();
@@ -564,7 +595,6 @@ export async function start() {
   state.artifactId = state.artifacts[0]?.id ?? null;
   renderRail();
   renderSide();
-  renderArtifact();
 }
 
 // Other workspace windows share global appearance and update immediately.

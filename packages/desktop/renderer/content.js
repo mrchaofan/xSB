@@ -5,8 +5,10 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { append } from "../src/content.ts";
+import { fromClipboard } from "./clipboard.js";
 import { ICON, h } from "./dom.js";
 import { t } from "./i18n.js";
+export { fromClipboard } from "./clipboard.js";
 
 // 模型和其他 Agent 写的内容不可信。脚本由 DOMPurify 去掉；外链图片也去掉，否则一张图片的地址就能把对话内容带出去。
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
@@ -92,28 +94,6 @@ export function contentView(content, openLink, { streaming = false } = {}) {
   return el;
 }
 
-const base64 = (file) => new Promise((resolve, reject) => {
-  const reader = new FileReader();
-  reader.onload = () => resolve(reader.result.slice(reader.result.indexOf(",") + 1));
-  reader.onerror = () => reject(reader.error);
-  reader.readAsDataURL(file);
-});
-
-/**
- * 剪贴板或拖放的数据 → 内容。图片成为 image 块（带上字节），其他文件成为 resource_link（只带路径），
- * 没有文件时取纯文本。data 在事件结束后就不能读了，所以先同步取出文件和文本。
- */
-export function fromClipboard(data) {
-  const files = [...data.files];
-  const text = data.getData("text/plain");
-  if (!files.length) return Promise.resolve(text ? [{ type: "text", text }] : []);
-  return Promise.all(files.map(async (file) => {
-    if (file.type.startsWith("image/")) return { type: "image", mimeType: file.type, data: await base64(file) };
-    const path = xsb.pathOf(file);
-    return { type: "resource_link", uri: path ? `file://${path.split("/").map(encodeURIComponent).join("/")}` : file.name, name: file.name, size: file.size, ...(file.type ? { mimeType: file.type } : {}) };
-  }));
-}
-
 /**
  * 输入框：内容的编辑形态。文本就是文本（markdown 源码），其余的块是一个不可编辑的小方块，
  * 可以像一个字符那样被光标越过和删除。onEnter() 在按下回车时调用；⇧↩ 换行。
@@ -121,13 +101,29 @@ export function fromClipboard(data) {
  */
 export function createEditor(onEnter, onChange = () => {}) {
   const el = h("div", { class: "editor", contenteditable: "plaintext-only", role: "textbox", "aria-multiline": "true" });
+  const error = h("div", { class: "content-error", role: "status", hidden: true });
+  let pending = Promise.resolve();
+  let reading = 0;
   const blocks = new WeakMap();      // 小方块的节点 → 它代表的块
 
   /** 内容 → 输入框：插到光标处。 */
   function insert(content) {
+    // 图片读取可能晚于对话切换；离开后只更新原对话草稿。
+    if (!el.isConnected) {
+      restore([...read(false), ...content]);
+      onChange();
+      return;
+    }
     el.focus();
     const selection = getSelection();
-    const range = selection.getRangeAt(0);
+    let range = selection.rangeCount ? selection.getRangeAt(0) : null;
+    if (!range || !el.contains(range.commonAncestorContainer)) {
+      range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
     range.deleteContents();
     for (const block of content) {
       const node = block.type === "text" ? document.createTextNode(block.text) : partNode(block);
@@ -143,18 +139,32 @@ export function createEditor(onEnter, onChange = () => {}) {
   }
 
   /** 输入框 → 内容：按节点顺序读出，首尾的空白不算。 */
-  function read() {
+  function read(trim = true) {
     let content = [];
     for (const node of el.childNodes) {
       content = append(content, blocks.get(node) ?? { type: "text", text: node.nodeName === "BR" ? "\n" : node.textContent });
     }
+    if (!trim) return content;
     const trimmed = content.map((block, i) => (block.type !== "text" ? block
       : { ...block, text: block.text.slice(i === 0 ? block.text.search(/\S|$/) : 0).replace(i === content.length - 1 ? /\s+$/ : /$^/, "") }));
     return trimmed.filter((block) => block.type !== "text" || block.text);
   }
 
-  const take = (data) => fromClipboard(data).then(insert);
-  el.onpaste = (e) => { e.preventDefault(); take(e.clipboardData); };
+  const take = (data, native = false) => {
+    error.hidden = true;
+    reading++;
+    onChange();
+    // Start reading immediately, then insert in paste order even if image decoding finishes out of order.
+    const content = fromClipboard(data, native);
+    content.catch(() => {});
+    pending = pending.catch(() => {}).then(() => content).then(insert).catch((e) => {
+      error.textContent = t("content.pasteFailed", { error: e.message });
+      error.hidden = false;
+      throw e;
+    }).finally(() => { reading--; onChange(); });
+    pending.catch(() => {});
+  };
+  el.onpaste = (e) => { e.preventDefault(); take(e.clipboardData, true); };
   el.ondragover = (e) => e.preventDefault();
   el.ondrop = (e) => { e.preventDefault(); take(e.dataTransfer); };
   el.onkeydown = (e) => {
@@ -163,7 +173,23 @@ export function createEditor(onEnter, onChange = () => {}) {
     onEnter();
   };
   // 删空之后浏览器会留下一个换行，清掉它，占位文字才会回来
-  el.oninput = () => { if (!read().length) el.replaceChildren(); onChange(); };
+  el.oninput = () => { error.hidden = true; if (!reading) pending = pending.catch(() => {}); if (!read().length) el.replaceChildren(); onChange(); };
 
-  return { el, insert, read, clear: () => { el.replaceChildren(); onChange(); } };
+  // 恢复草稿不抢焦点；附件重新关联到 WeakMap，仍可正常编辑和发送。
+  function restore(content) {
+    el.replaceChildren(...content.map((block) => {
+      if (block.type === "text") return document.createTextNode(block.text);
+      const node = partNode(block);
+      node.contentEditable = "false";
+      blocks.set(node, block);
+      return node;
+    }));
+  }
+
+  async function ready() {
+    let task;
+    do { task = pending; await task; } while (task !== pending);
+  }
+
+  return { el, error, isReading: () => reading > 0, ready, insert, read, snapshot: () => read(false), restore, clear: () => { el.replaceChildren(); onChange(); } };
 }
