@@ -22,4 +22,8 @@ Electron 用的是带 `<webview2>` 的私有构建：`npm install` 后 [scripts/
 
 代码由 Rolldown 打进 `dist/`（[rolldown.config.js](rolldown.config.js)），`npm start` 会先打包；单独打包用 `npm run build -w @xsb/desktop`。`npm run package -w @xsb/desktop` 用 electron-builder 把 `dist/` 做成应用（[electron-builder.config.mjs](electron-builder.config.mjs)），产物在 `release/`：macOS arm64 与 Windows x64 各一个 zip，不签名（macOS 只做 ad-hoc）。里面的 Electron 同样来自私有镜像；图标在 [build/](build)。
 
+GitHub [Desktop CI and Release](../../.github/workflows/desktop.yml) 在 PR、推送 `main` 和手动运行时，先执行所有工作区的测试与类型检查，再分别在 macOS 和 Windows runner 打包。Actions 的 `xsb-mac-arm64`、`xsb-win-x64` 制品保存 30 天，包含应用 zip 和对应的 `.sha256` 校验文件，无需配置额外密钥。
+
+发布时先更新 `packages/desktop/package.json` 的版本（同时维护相关工作区版本和 `package-lock.json`），再推送一致的版本标签，例如 `v0.1.0`。CI 确认标签等于桌面应用版本、检查与双平台打包均成功后，创建 GitHub Release 并上传两个应用包和校验文件。带预发布后缀的版本会标记为 prerelease；重跑同一标签会更新原 Release 的附件。普通分支构建和手动运行只保存 Actions 制品。
+
 设计、接口对应关系和已知限制见 [docs/GUI.md](../../docs/GUI.md)。
