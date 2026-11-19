@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, net, protocol, session, shell, webContents } from "electron";
+import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, net, protocol, session, shell, webContents } from "electron";
 import type { WebPreferences } from "electron";
 import { Paths, describeBackends, presetRoots, stopHub } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
@@ -25,6 +25,7 @@ import type { Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
 import type { BackendView, Event } from "./bridge.ts";
 import { serveBrowser } from "./browser.ts";
+import { imagesFromPaths } from "./clipboard-image.ts";
 import { AGENTS, Clis, wrapped } from "./clis.ts";
 import { notice, setUpNotices } from "./notices.ts";
 import { PREVIEW_PARTITION, Pages } from "./pages.ts";
@@ -286,9 +287,26 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
   const pages = panels.get(event.sender.id) ?? [...panels.values()].find((p) => p.shownIn(event.sender));
   if (!pages) throw new Error("this window is closing");
   switch (method) {
+    case "readClipboardImages": {
+      const formats = clipboard.availableFormats();
+      const fileUrl = formats.includes("public.file-url") ? clipboard.readBuffer("public.file-url").toString("utf8").replace(/\0+$/, "") : "";
+      const images = imagesFromPaths(fileUrl || clipboard.readText(), (file) => nativeImage.createFromPath(file).toPNG());
+      if (images) return images;
+      // A copied non-image file can include an icon/thumbnail; that is not the attachment.
+      if (fileUrl || formats.includes("NSFilenamesPboardType")) return null;
+      const image = clipboard.readImage();
+      return image.isEmpty() ? null : [{ type: "image", mimeType: "image/png", data: image.toPNG().toString("base64") }];
+    }
     case "copyText":
       if (typeof args[0] !== "string") throw new Error("text is required");
       return clipboard.writeText(args[0]);
+    case "revealArtifact": {
+      if (!workspace) throw new Error("this window has no workspace open");
+      const artifact = workspace.artifacts.get(args[0]);
+      if (!artifact) throw new Error("unknown artifact");
+      if (!fs.statSync(artifact.id, { throwIfNoEntry: false })?.isFile()) throw new Error("file not found");
+      return shell.showItemInFolder(artifact.id);
+    }
     case "openArtifact":
       if (!workspace) throw new Error("this window has no workspace open");
       return workspace.openArtifact(args[0], args[1], args[2]);
