@@ -32,7 +32,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { NAME, failure, RpcError } from "@xsb/protocol";
 import type { Grant, McpServer, McpServerSpec, RoleDetail, RoleInput } from "@xsb/protocol";
-import { loadProjectConfig } from "./config.ts";
+import { backends, loadProjectConfig } from "./config.ts";
 import { projectCatalog } from "./templates.ts";
 import type { Paths } from "./paths.ts";
 import { teamRole, teamRoleNames } from "./presets.ts";
@@ -142,13 +142,30 @@ export function readRole(dir: string, name: string): Role {
  * Create a role or change one. See `Roles.put` in @xsb/protocol for what a field left out means.
  * The change is always to the project's own role: a team's role is first copied to become one.
  */
-export function saveRole(paths: Paths, input: RoleInput): void {
+export function validateRole(input: RoleInput): void {
   if (!NAME.test(input.name ?? "")) throw failure("role_name_invalid");
+  for (const field of ["name", "description", "backend", "instructions"] as const) {
+    if (input[field] !== undefined && typeof input[field] !== "string") throw RpcError.invalidParams(`${field} must be a string`);
+  }
+  const known = Object.keys(backends());
+  if (input.backend && !known.includes(input.backend)) throw failure("no_such_backend", { backend: input.backend, known });
+  if (input.grants !== undefined && (!Array.isArray(input.grants) || input.grants.some((cap) => cap !== "dispatch" && cap !== "message"))) throw RpcError.invalidParams("grants must contain dispatch or message");
   if (input.avatar !== undefined && (typeof input.avatar !== "string" || (input.avatar !== "" && !/^[a-z][a-z0-9-]{0,63}$/.test(input.avatar)))) throw RpcError.invalidParams("avatar must be a bundled avatar ID or empty");
+  if (input.mcpServers !== undefined && (!input.mcpServers || typeof input.mcpServers !== "object" || Array.isArray(input.mcpServers))) throw RpcError.invalidParams("mcpServers must be an object");
   for (const [server, spec] of Object.entries(input.mcpServers ?? {})) {
     if (!NAME.test(server) || typeof spec?.command !== "string" || !spec.command) throw failure("server_invalid", { server });
+    if (spec.args !== undefined && (!Array.isArray(spec.args) || spec.args.some((arg) => typeof arg !== "string"))) throw failure("server_invalid", { server });
+    if (spec.env !== undefined && (!spec.env || typeof spec.env !== "object" || Array.isArray(spec.env) || Object.values(spec.env).some((value) => typeof value !== "string"))) throw failure("server_invalid", { server });
   }
-  for (const skill of input.skills ?? []) if (!NAME.test(skill.name ?? "")) throw failure("skill_name_invalid", { skill: skill.name });
+  if (input.skills !== undefined && !Array.isArray(input.skills)) throw RpcError.invalidParams("skills must be an array");
+  for (const skill of input.skills ?? []) {
+    if (!NAME.test(skill?.name ?? "")) throw failure("skill_name_invalid", { skill: skill?.name });
+    if (typeof skill.content !== "string") throw RpcError.invalidParams("skill content must be a string");
+  }
+}
+
+export function saveRole(paths: Paths, input: RoleInput): void {
+  validateRole(input);
 
   const dir = paths.roleDir(input.name);
   const file = path.join(dir, "role.json");

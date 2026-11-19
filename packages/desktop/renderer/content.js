@@ -6,6 +6,7 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { append } from "../src/content.ts";
 import { fromClipboard } from "./clipboard.js";
+import { openDialog } from "./form.js";
 import { ICON, h } from "./dom.js";
 import { t } from "./i18n.js";
 export { fromClipboard } from "./clipboard.js";
@@ -51,19 +52,31 @@ function copyButton(text, label, className = "") {
 /** 对话和文档共用：链接交给侧栏，代码块有独立复制按钮。 */
 export function markdownView(text, openLink, className = "md") {
   const el = h("div", { class: className, html: markdownHtml(text) });
-  el.onclick = (event) => {
+  const followLink = (container) => (event) => {
     const link = event.target.closest("a");
-    if (!link || !el.contains(link)) return;
+    if (!link || !container.contains(link)) return;
     const href = link.dataset.fileHref ?? link.getAttribute("href");
     if (!href) return;
     if (href.startsWith("#")) {
       event.preventDefault();
-      [...el.querySelectorAll("[id]")].find((node) => node.id === href.slice(1))?.scrollIntoView({ block: "nearest" });
+      [...container.querySelectorAll("[id]")].find((node) => node.id === href.slice(1))?.scrollIntoView({ block: "nearest" });
       return;
     }
     event.preventDefault();
-    openLink?.(href, el);
+    openLink?.(href, container);
   };
+  el.onclick = followLink(el);
+  el.querySelectorAll("table").forEach((table) => {
+    const expand = h("button", { class: "icon-btn", title: t("content.tableExpand"), "aria-label": t("content.tableExpand"), html: ICON.expand, onclick: () => {
+      const view = h("div", { class: "md table-expanded" }, table.cloneNode(true));
+      view.onclick = followLink(view);
+      const dialog = openDialog(t("content.table"), [view], [{ label: t("common.close") }]);
+      dialog.classList.add("table-dialog");
+    } });
+    const wrapper = h("div", { class: "table-block" }, h("div", { class: "table-toolbar" }, h("span", {}, t("content.table")), expand));
+    table.replaceWith(wrapper);
+    wrapper.append(table);
+  });
   el.querySelectorAll("pre > code").forEach((code) => {
     const pre = code.parentElement;
     const toolbar = h("div", { class: "code-toolbar" },

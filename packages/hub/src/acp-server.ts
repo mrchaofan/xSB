@@ -13,13 +13,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { Agents, Assets, Backends, History, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Tasks, Teams, errorMessage, failure, isTerminal } from "@xsb/protocol";
 import type { Connection, HistoryImage, McpServerCheck, OriginMeta, RoleDetail, PresetProblem, TeamInfo } from "@xsb/protocol";
-import { backends, describeBackends, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
+import { describeBackends, loadProjectConfig, projectLanguage, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
 import { isVeto } from "./hooks.ts";
 import { USER } from "./kernel.ts";
 import { mcpRequest } from "./mcp-client.ts";
 import { Paths } from "./paths.ts";
-import { describeRole, loadRole, roleNames, saveRole } from "./roles.ts";
+import { describeRole, loadRole, roleNames } from "./roles.ts";
 import type { Role } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { catalog, check, clashes, derive, teamRole, teamRoleNames } from "./presets.ts";
@@ -205,14 +205,7 @@ export class Client {
     conn.onRequest(Roles.list, () => ({ roles: roleNames(hub.paths).map((name) => roleDetail(loadRole(hub.paths, name))) }));
     conn.onRequest(Roles.get, (p) => ({ role: roleDetail(loadRole(hub.paths, p.name)) }));
     conn.onRequest(Roles.put, (p) => {
-      const known = Object.keys(backends());
-      if (p.role?.backend && !known.includes(p.role.backend)) {
-        throw failure("no_such_backend", { backend: p.role.backend, known });
-      }
-      saveRole(hub.paths, p.role ?? {});
-      const role = roleDetail(loadRole(hub.paths, p.role.name));
-      hub.broadcast(Roles.update, { role });
-      return { role };
+      return { role: hub.putRole(p.role ?? {}) };
     });
     conn.onRequest(Roles.remove, (p) => {
       const role = roleDetail(loadRole(hub.paths, p.name));

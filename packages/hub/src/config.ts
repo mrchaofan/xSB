@@ -61,7 +61,7 @@ export type ProjectConfig = {
   teams?: string[];
   language?: Language;
   limits?: { jobsAtOnce?: number; sessionTokens?: number; awaitSeconds?: number };
-  /** Role -> whom (roles, or "*") it may dispatch tasks to and message, as the user allowed it always (capabilities.ts). */
+  /** Role type (or agent:<id> for a roleless instance) -> destination types/instance keys or "*". */
   permissions?: Record<string, { dispatch?: string[]; message?: string[] }>;
 };
 

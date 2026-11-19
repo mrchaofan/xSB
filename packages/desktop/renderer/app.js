@@ -3,7 +3,7 @@
 // Agent 的创建与编辑在 agent.js，角色与产出总览在 team.js。
 // xsb 是全局对象：Electron 里由 preload 注入，浏览器里直接打开时由 mock.js 提供。
 import { avatarImage } from "./avatars.js";
-import { createArtifactBrowser, artifactNavigation } from "./artifacts.js";
+import { createArtifactBrowser, artifactDetails, artifactLabel, artifactNavigation } from "./artifacts.js";
 import { editAgent } from "./agent.js";
 import { contentView, createEditor, markdownView } from "./content.js";
 import { draftKey, loadDraft, moveDraft, saveDraft } from "./drafts.js";
@@ -120,6 +120,7 @@ function renderRail() {
 /** 主区域换成一个页面（角色编辑、产出总览）；closePage 回到对话。 */
 export function showPage(key, ...content) {
   if (key === "overview") state.settings = null;
+  document.body.classList.remove("artifact-focused");
   state.page = key;
   fill($("#page"), ...(state.settings ? settingsShell(...content) : content));
   document.body.classList.toggle("settings-open", !!state.settings);
@@ -372,6 +373,7 @@ function showArtifact(id) {
 let catalogScroll = 0;
 const artifactBrowser = createArtifactBrowser(showArtifact, nameOf, assetName);
 let artifactRender = 0;
+let artifactView = null;
 
 function browseArtifacts() {
   state.listing = true;
@@ -395,21 +397,23 @@ function closeEmbedded() {
   embedded = null;
 }
 
-export async function renderArtifact() {
-  const request = ++artifactRender;
+export async function renderArtifact(force = false) {
   const artifact = state.listing ? null : artifactOf(state.artifactId);
-  const caption = (a) => t("artifact.caption", { agent: nameOf(a.agentId), time: clock(a.updatedAt), path: a.path });
   document.querySelectorAll(".chip").forEach((chip) => chip.setAttribute("aria-pressed", String(chip.dataset.artifact === artifact?.id)));
   const body = $("#artifact-body");
   const modes = $("#artifact-modes");
   const navigation = $("#artifact-navigation");
   $("#artifact-list").hidden = !artifact;
   navigation.hidden = !artifact;
-  $("#artifact-reveal").hidden = !artifact;
+  $("#artifact-info").hidden = !artifact;
+  $("#artifact-details").hidden = !artifact || !state.artifactDetails;
+  $("#artifact-info").setAttribute("aria-expanded", String(!!artifact && !!state.artifactDetails));
   artifactBrowser.update(state.artifacts, state.artifactId);
   if (!(artifact?.kind === "html" && state.mode === "preview")) closeEmbedded();
 
   if (!artifact) {
+    artifactView = null;
+    ++artifactRender;
     $("#artifact-name").textContent = t("artifact.list.title");
     $("#artifact-meta").textContent = t("artifact.catalog.count", { count: artifactBrowser.groups().length, files: state.artifacts.length });
     modes.hidden = true;
@@ -420,6 +424,7 @@ export async function renderArtifact() {
     return;
   }
 
+  fill($("#artifact-detail-content"), artifactDetails(artifactBrowser, artifact, nameOf, showArtifact));
   fill(navigation, artifactNavigation(artifactBrowser, artifact, showArtifact));
 
   // 文本只有源码，图片和视频只有预览，markdown 和 html 两者都有
@@ -427,11 +432,25 @@ export async function renderArtifact() {
   const preview = media || (artifact.kind !== "text" && state.mode === "preview");
   modes.hidden = media || artifact.kind === "text";
   modes.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String((b.dataset.mode === "preview") === preview)));
-  $("#artifact-name").textContent = artifact.name;
-  $("#artifact-meta").textContent = caption(artifact);
+  $("#artifact-name").textContent = artifactLabel(artifact);
+  $("#artifact-name").title = artifact.name;
+  $("#artifact-meta").textContent = "";
 
-  if (artifact.kind === "image") return fill(body, h("figure", {}, h("img", { src: artifact.url, alt: artifact.name })));
-  if (artifact.kind === "video") return fill(body, h("figure", {}, h("video", { src: artifact.url, controls: true })));
+  // 改详情、放大或调整窗口不重建同一预览：视频播放位置和图片节点保持原样。
+  const view = JSON.stringify([artifact.id, artifact.url, artifact.kind, artifact.updatedAt, preview]);
+  if (!force && artifactView === view) return;
+  artifactView = view;
+  const request = ++artifactRender;
+
+  if (media) {
+    const node = h(artifact.kind === "image" ? "img" : "video", { src: artifact.url, alt: artifact.name, controls: artifact.kind === "video" });
+    const fit = () => {
+      const width = node.videoWidth || node.naturalWidth, height = node.videoHeight || node.naturalHeight;
+      if (width && height) node.style.setProperty("--media-ratio", String(width / height));
+    };
+    node.onload = node.onloadedmetadata = fit;
+    return fill(body, h("figure", {}, node));
+  }
   if (preview && artifact.kind === "html") {
     // 显示不了网页的 Electron 上，退回到不执行脚本的 iframe
     if (!state.pages) return fill(body, h("iframe", { src: artifact.url, sandbox: "", title: artifact.name }));
@@ -452,7 +471,7 @@ export async function renderArtifact() {
   } catch (error) {
     if (request !== artifactRender) return;
     fill(body, h("div", { class: "catalog-empty", role: "status" }, t("content.openFailed", { error: error.message }),
-      h("button", { class: "btn", onclick: renderArtifact }, t("artifact.retry"))));
+      h("button", { class: "btn", onclick: () => renderArtifact(true) }, t("artifact.retry"))));
   }
   body.scrollTop = 0;
 }
@@ -482,16 +501,25 @@ export function revealArtifacts() {
 $("#toggle-artifact").onclick = () => {
   if (window.innerWidth <= 1000) {
     document.body.classList.remove("no-artifact");
+    document.body.classList.remove("artifact-focused");
     document.body.classList.toggle("artifact-expanded");
-  } else document.body.classList.toggle("no-artifact");
+  } else { document.body.classList.remove("artifact-focused"); document.body.classList.toggle("no-artifact"); }
 };
 $("#artifact-list").onclick = browseArtifacts;
+const showArtifactDetails = (open) => {
+  state.artifactDetails = open;
+  $("#artifact-details").hidden = !open;
+  $("#artifact-info").setAttribute("aria-expanded", String(open));
+  if (open) $("#artifact-details-close").focus(); else $("#artifact-info").focus();
+};
+$("#artifact-info").onclick = () => showArtifactDetails(!state.artifactDetails);
+$("#artifact-details-close").onclick = () => showArtifactDetails(false);
 $("#artifact-reveal").onclick = async () => {
-  const button = $("#artifact-reveal");
+  const error = $("#artifact-detail-error");
+  error.hidden = true;
   try {
     await xsb.revealArtifact(state.artifactId);
-    button.title = t("artifact.reveal");
-  } catch (error) { button.title = t("content.openFailed", { error: error.message }); }
+  } catch (e) { error.textContent = t("content.openFailed", { error: e.message }); error.hidden = false; }
 };
 $("#artifact-modes").onclick = (e) => {
   if (!e.target.dataset.mode) return;
@@ -518,6 +546,9 @@ window.onkeydown = (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === ",") { e.preventDefault(); showSettings(); return; }
   if (e.key === "Escape" && state.settings && !document.querySelector("dialog[open]")) { closePage(); return; }
   if (document.querySelector("dialog[open]")) return;
+  if (e.key === "Escape" && state.artifactDetails) { showArtifactDetails(false); return; }
+  if (e.key === "Escape" && document.body.classList.contains("artifact-focused")) { document.body.classList.remove("artifact-focused"); renderSide(); return; }
+  if (e.key === "Escape" && document.body.classList.contains("artifact-expanded")) { document.body.classList.remove("artifact-expanded"); return; }
   const agent = (e.metaKey || e.ctrlKey) && state.agents[Number(e.key) - 1];
   if (!agent) return;
   e.preventDefault();
@@ -579,7 +610,7 @@ xsb.on((event) => {
 
 /** 读一次快照并画出整个窗口。打开工作区之后再调用一次。 */
 export async function start() {
-  Object.assign(state, { activities: {} }, await xsb.load(), { open: [], pinned: false, page: null, settings: null, listing: true, tab: null, artifactTabs: [] });
+  Object.assign(state, { activities: {} }, await xsb.load(), { open: [], pinned: false, page: null, settings: null, listing: true, tab: null, artifactTabs: [], artifactDetails: false });
   catalogScroll = 0;
   $("#artifact-body").scrollTop = 0;
   artifactBrowser.reset();

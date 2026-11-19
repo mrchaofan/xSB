@@ -10,6 +10,8 @@ const dateLabel = (iso) => {
 };
 
 /** 搜索控件保持原节点：新制品到达时不会打断输入或失去焦点。 */
+export const artifactLabel = (artifact) => artifact.name.replaceAll("\\", "/").split("/").at(-1);
+
 export function createArtifactBrowser(open, nameOf, assetName) {
   const filters = { query: "", category: "", agentId: "", scope: "", sort: "recent" };
   let artifacts = [], groups = [], selectedId = null;
@@ -28,9 +30,13 @@ export function createArtifactBrowser(open, nameOf, assetName) {
     ...["", "assets", "files"].map((value) => h("option", { value }, t(`artifact.scope.${value || "all"}`))));
   const sort = h("select", { "aria-label": t("artifact.sort"), onchange: () => { filters.sort = sort.value; render(); } },
     h("option", { value: "recent" }, t("artifact.sort.recent")), h("option", { value: "name" }, t("artifact.sort.name")));
+  const advanced = h("details", { class: "catalog-advanced" },
+    h("summary", { html: ICON.filter }, h("span", {}, t("artifact.filter.more"))),
+    h("div", { class: "catalog-filters" },
+      h("label", {}, t("artifact.filter.agent"), agent), h("label", {}, t("artifact.filter.scope"), scope), h("label", {}, t("artifact.sort"), sort)));
   const el = h("div", { class: "artifact-browser" },
-    h("div", { class: "catalog-controls" }, search, chips, h("div", { class: "catalog-filters" }, agent, scope, sort),
-      h("div", { class: "catalog-summary" }, summary, clear)), results);
+    h("div", { class: "catalog-controls" }, search, chips,
+      h("div", { class: "catalog-summary" }, summary, advanced, clear)), results);
   const visible = () => visibleArtifacts(groups, filters, nameOf);
 
   function reset() {
@@ -44,6 +50,7 @@ export function createArtifactBrowser(open, nameOf, assetName) {
     const list = visible();
     summary.textContent = t("artifact.results", { count: list.length, total: groups.length });
     clear.hidden = !filters.query && !filters.category && !filters.agentId && !filters.scope;
+    advanced.classList.toggle("filtered", !!filters.agentId || !!filters.scope || filters.sort !== "recent");
     chips.querySelectorAll("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.category === filters.category)));
     fill(results, ...list.map((group) => {
       const a = group.latest;
@@ -57,10 +64,9 @@ export function createArtifactBrowser(open, nameOf, assetName) {
       const label = `${a.name}\n${nameOf(a.agentId)} · ${a.updatedAt}\n${a.path}`;
       return h("button", { class: "artifact-card", type: "button", title: label, "data-id": a.id, "aria-pressed": String(group.versions.some((version) => version.id === selectedId)), onclick: () => open(a.id) },
         thumb, h("span", { class: "artifact-card-text" },
-          h("strong", {}, a.name),
+          h("strong", {}, artifactLabel(a)),
           h("span", { class: "artifact-card-meta" }, h("span", {}, nameOf(a.agentId)), h("time", { datetime: a.updatedAt }, dateLabel(a.updatedAt))),
           a.description && h("small", { class: "artifact-description" }, a.description),
-          h("small", { class: "artifact-path" }, a.path),
           h("span", { class: "artifact-badges" }, h("span", {}, group.assetId ? assetName(a.assetType ?? group.assetId.split("/")[0]) : t(`artifact.type.${category}`)),
             group.assetId && h("span", {}, versionOf(a) ? `v${versionOf(a)}` : t("artifact.latest")),
             group.versions.length > 1 && h("span", {}, t("artifact.versions", { count: group.versions.length })))));
@@ -88,10 +94,27 @@ export function artifactNavigation(browser, artifact, open) {
   const list = browser.visible();
   const index = list.findIndex((g) => g.key === group?.key);
   const previous = list[index - 1], next = index >= 0 ? list[index + 1] : null;
-  const move = (neighbor, label, icon) => h("button", { class: "artifact-step", disabled: !neighbor, title: neighbor?.latest.name, "aria-label": t(label), onclick: () => neighbor && open(neighbor.latest.id), html: icon }, t(label));
+  const move = (neighbor, label, icon) => h("button", { class: "icon-btn artifact-step", disabled: !neighbor, title: `${t(label)}${neighbor ? ` · ${neighbor.latest.name}` : ""}`, "aria-label": t(label), onclick: () => neighbor && open(neighbor.latest.id), html: icon });
   return h("div", { class: "artifact-navigation" }, move(previous, "artifact.previous", ICON.back),
-    h("span", { class: "artifact-position" }, index >= 0 ? `${index + 1} / ${list.length}` : t("artifact.outsideFilter")),
-    group?.versions.length > 1 && h("select", { "aria-label": t("artifact.version"), onchange: (event) => open(event.target.value) },
-      ...group.versions.map((a) => h("option", { value: a.id, selected: a.id === artifact.id }, `v${versionOf(a)} · ${dateLabel(a.updatedAt)}`))),
+    h("span", { class: "artifact-position", title: t("artifact.results", { count: index + 1, total: list.length }) }, index >= 0 ? `${index + 1}/${list.length}` : "–"),
     move(next, "artifact.next", ICON.forward));
+}
+
+/** 完整信息只在详情面板显示，路径可复制，版本与查看方式保持可访问。 */
+export function artifactDetails(browser, artifact, nameOf, open) {
+  const group = browser.groups().find((g) => g.versions.some((a) => a.id === artifact.id));
+  const path = h("code", {}, artifact.path);
+  const copy = h("button", { class: "icon-btn", title: t("artifact.copyPath"), "aria-label": t("artifact.copyPath"), html: ICON.copy, onclick: async () => {
+    try { await xsb.copyText(artifact.path); copy.title = t("content.copied"); }
+    catch { copy.title = t("content.copyFailed"); }
+  } });
+  const item = (label, value) => h("div", { class: "artifact-detail-field" }, h("small", {}, t(label)), value);
+  return h("div", { class: "artifact-detail-fields" },
+    item("artifact.fileName", h("strong", {}, artifact.name)),
+    artifact.description && item("artifact.description", h("p", {}, artifact.description)),
+    item("artifact.location", h("div", { class: "artifact-location" }, path, copy)),
+    item("artifact.createdBy", h("span", {}, nameOf(artifact.agentId))),
+    item("artifact.updated", h("time", { datetime: artifact.updatedAt }, new Date(artifact.updatedAt).toLocaleString(language))),
+    group?.versions.length > 1 && item("artifact.version", h("select", { "aria-label": t("artifact.version"), onchange: (event) => open(event.target.value) },
+      ...group.versions.map((a) => h("option", { value: a.id, selected: a.id === artifact.id }, `v${versionOf(a)} · ${dateLabel(a.updatedAt)}`)))));
 }
