@@ -32,8 +32,9 @@ const en = {
   xsb role list | show <name> | remove <name>
   xsb role check <name>                 start the role's MCP servers and list their tools
   xsb team list                         the preset teams (xsb's own and yours in ~/.xsb/presets), and which the project uses
-  xsb team use <id> | drop <id>         use a team's roles in this project as they ship, or stop;
-                                        nothing is copied, and 'xsb role add' makes a role the project's own
+  xsb team use <id> | drop <id>         copy a team's roles into the project, or stop using it;
+                                        copies stay unchanged until explicit synchronization
+  xsb team sync <id> [--preview] [--yes] refresh the copy; overwrites custom changes after confirmation
   xsb team check [<id>]                 what is wrong with the preset teams, as far as can be checked without running them
   xsb team new <id> --extends <base>    start a team of yours in ~/.xsb/presets that builds on <base>
   xsb team eval <id> [--backend <name>] [--runs <n>] [--only S1,S2] [--language en|zh-CN] [--timeout <s>]
@@ -79,6 +80,11 @@ const en = {
   noRoles: "no roles; add one with `xsb role add`",
   roleHas: (servers: number, skills: number, agents: string[]) => `${servers} mcp, ${skills} skills, agents: ${agents.join(", ") || "none"}`,
   teamUsed: (id: string) => `using team ${id}; its roles are in 'xsb role list'`,
+  teamSyncRisk: (id: string, roles: string[], overwritten: string[], removed: string[]) => `WARNING: synchronizing ${id} replaces its project template files (instructions, skills, tools and avatars). Custom changes will be lost.\nRoles: ${roles.join(", ")}\nProject overrides discarded: ${overwritten.join(", ") || "none"}\nRemoved roles: ${removed.join(", ") || "none"}`,
+  teamSyncAsk: "Overwrite custom changes? [y/N] ",
+  teamSyncNeedsYes: "confirmation is required; use --preview to inspect or --yes to accept loss of custom changes",
+  teamSyncCancelled: "Synchronization cancelled; project copies were kept.",
+  teamSynced: (id: string) => `synchronized team ${id}; restart affected agents to apply the new instructions and tools`,
   teamDropped: (id: string) => `dropped team ${id}`,
   used: (yes: boolean): string => (yes ? "used" : "    "),
   teamSource: (source: string): string => (source === "user" ? "yours" : "xsb"),
@@ -135,8 +141,9 @@ const zh: typeof en = {
   xsb role list | show <名称> | remove <名称>
   xsb role check <名称>                 启动角色的工具服务并列出各自的工具
   xsb team list                         预设团队（xsb 自带的，和你放在 ~/.xsb/presets 里的），以及项目用了哪些
-  xsb team use <标识> | drop <标识>     在项目里原样使用一支团队的角色，或停止使用；
-                                        不复制任何文件，'xsb role add' 会把角色变成项目自己的
+  xsb team use <标识> | drop <标识>     在项目里复制一支团队的角色，或停止使用；
+                                        副本只在显式同步后更新
+  xsb team sync <标识> [--preview] [--yes] 同步模板；确认后覆盖自定义改动
   xsb team check [<标识>]               不运行就能查出的预设团队的问题
   xsb team new <标识> --extends <基础>  在 ~/.xsb/presets 里新建一支基于 <基础> 的团队
   xsb team eval <标识> [--backend <名称>] [--runs <次数>] [--only S1,S2] [--language en|zh-CN] [--timeout <秒>]
@@ -180,6 +187,11 @@ const zh: typeof en = {
   noRoles: "还没有角色；用 `xsb role add` 添加一个",
   roleHas: (servers, skills, agents) => `${servers} 个工具服务，${skills} 个技能，智能体：${agents.join("、") || "无"}`,
   teamUsed: (id) => `已使用团队 ${id}；它的角色见 'xsb role list'`,
+  teamSyncRisk: (id, roles, overwritten, removed) => `风险：同步 ${id} 会覆盖项目模板中的说明、技能、工具配置和头像，自定义改动会丢失。\n角色：${roles.join("、")}\n丢弃的项目覆盖版本：${overwritten.join("、") || "无"}\n移除的角色：${removed.join("、") || "无"}`,
+  teamSyncAsk: "确认覆盖并丢弃自定义改动？[y/N] ",
+  teamSyncNeedsYes: "需要明确确认；用 --preview 查看范围，或用 --yes 接受丢失自定义改动的风险",
+  teamSyncCancelled: "已取消同步，项目副本保持不变。",
+  teamSynced: (id) => `已同步团队 ${id}；重启受影响的智能体后应用新的说明与工具配置`,
   teamDropped: (id) => `已停用团队 ${id}`,
   used: (yes) => (yes ? "在用" : "　　"),
   teamSource: (source) => (source === "user" ? "我的" : "自带"),

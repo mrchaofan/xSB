@@ -23,6 +23,7 @@ import { describeRole, loadRole, roleNames, saveRole } from "./roles.ts";
 import type { Role } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { catalog, check, clashes, derive, teamRole, teamRoleNames } from "./presets.ts";
+import { copyTemplate, planSync, projectCatalog, snapshot, syncTemplate } from "./templates.ts";
 import type { Catalog, TeamEntry } from "./presets.ts";
 import { historyPage, historyImage } from "./history.ts";
 import { VERSION } from "./util.ts";
@@ -66,7 +67,7 @@ export class Client {
             [Agents.capability]: { version: 1 },
             [History.capability]: { version: 1 },
             [Roles.capability]: { version: 1 },
-            [Teams.capability]: { version: 1 },
+            [Teams.capability]: { version: 2 },
             [Backends.capability]: { version: 1 },
             [Tasks.capability]: { version: 1 },
             [Assets.capability]: { version: 1 },
@@ -237,20 +238,20 @@ export class Client {
     // ---- teams ------------------------------------------------------------
 
     const team = (id: string): TeamEntry => {
-      const cat = catalog(projectLanguage(hub.paths));
-      const found = cat.teams.get(id);
+      const cat = projectCatalog(hub.paths);
+      const found = snapshot(hub.paths, id) ?? cat.teams.get(id);
       if (!found) throw failure("team_unknown", { team: id, known: [...cat.teams.keys()] });
       return found;
     };
     /** Change which teams the project uses, unless that leaves an agent without its role or two teams clash. */
     const setTeams = (used: string[], changed: string): void => {
-      const clash = clashes(catalog(projectLanguage(hub.paths)), used).find((c) => c.teams.includes(changed));
+      const clash = clashes(projectCatalog(hub.paths, undefined, used), used).find((c) => c.teams.includes(changed));
       if (clash) throw failure("team_clash", { team: changed, other: clash.teams.find((t) => t !== changed), role: clash.role });
       const left = roleNames(hub.paths, used);
       const stranded = [...hub.state.agents.values()].filter((a) => a.role && !left.includes(a.role)).map((a) => a.id);
       if (stranded.length) throw failure("team_in_use", { team: changed, agents: stranded });
       saveProjectConfig(hub.paths, { ...loadProjectConfig(hub.paths), teams: used });
-      announceRoles(teamRoleNames(catalog(projectLanguage(hub.paths)), changed));
+      announceRoles(teamRoleNames(projectCatalog(hub.paths), changed));
     };
     /** A team as a client is told of it: its roles as they apply, what is wrong with it, what it starts. */
     const teamInfo = (cat: Catalog, entry: TeamEntry, used: string[]): TeamInfo => {
@@ -262,9 +263,13 @@ export class Client {
           return []; // said among its problems
         }
       });
+      const source = catalog(projectLanguage(hub.paths)).teams.get(entry.id);
       const own = cat.problems.filter((p) => p.team === entry.id && p.source === entry.source);
       return {
         id: entry.id,
+        snapshot: entry.snapshot,
+        sourceDir: source?.source === entry.source ? source.dir : undefined,
+        syncAvailable: source?.source === entry.source,
         source: entry.source,
         ...(entry.extends ? { extends: entry.extends } : {}),
         dir: entry.dir,
@@ -280,7 +285,7 @@ export class Client {
     };
     conn.onRequest(Teams.list, (): { teams: TeamInfo[]; problems: PresetProblem[] } => {
       const used = loadProjectConfig(hub.paths).teams ?? [];
-      const cat = catalog(projectLanguage(hub.paths));
+      const cat = projectCatalog(hub.paths);
       return {
         teams: [...cat.teams.values()].map((entry) => teamInfo(cat, entry, used)),
         // What belongs to no team in the list: a team left out, or one of the user's that is not the one listed.
@@ -295,8 +300,26 @@ export class Client {
     });
     conn.onRequest(Teams.use, (p) => {
       const used = loadProjectConfig(hub.paths).teams ?? [];
-      if (!used.includes(team(p.id).id)) setTeams([...used, p.id], p.id);
+      const entry = team(p.id);
+      if (!used.includes(entry.id)) {
+        // Validate conflicts before any copying; first use never discards a project's own roles.
+        const clash = clashes(projectCatalog(hub.paths, undefined, [...used, entry.id]), [...used, entry.id]).find((c) => c.teams.includes(entry.id));
+        if (clash) throw failure("team_clash", { team: entry.id, other: clash.teams.find((t) => t !== entry.id), role: clash.role });
+        copyTemplate(hub.paths, catalog(projectLanguage(hub.paths)), entry.id);
+        setTeams([...used, entry.id], entry.id);
+      } else if (!snapshot(hub.paths, entry.id)) copyTemplate(hub.paths, catalog(projectLanguage(hub.paths)), entry.id);
       return {};
+    });
+    conn.onRequest(Teams.syncPreview, (p) => planSync(hub.paths, String(p?.id ?? "")));
+    conn.onRequest(Teams.sync, (p) => {
+      const id = String(p?.id ?? "");
+      const plan = planSync(hub.paths, id);
+      const stranded = [...hub.state.agents.values()].filter((a) => a.role && plan.removed.includes(a.role) && !fs.existsSync(hub.paths.roleDir(a.role))).map((a) => a.id);
+      if (stranded.length) throw failure("team_in_use", { team: id, agents: stranded });
+      // Existing sessions keep their running backend until the user applies/restarts the role.
+      const result = syncTemplate(hub.paths, id, p?.revision, p?.confirm);
+      announceRoles([...result.roles, ...result.removed]);
+      return result;
     });
     conn.onRequest(Teams.drop, (p) => {
       const used = loadProjectConfig(hub.paths).teams ?? [];

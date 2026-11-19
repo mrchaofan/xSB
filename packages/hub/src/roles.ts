@@ -2,11 +2,13 @@
  * Roles: what makes one agent different from another.
  *
  * A role is a directory, the project's own (`.xsb/roles/<role>/`, written by
- * the user) or that of a preset team the project uses (presets.ts):
+ * the user) or the project copy of a preset team it uses (templates.ts):
  *
  *   role.json                 { description?, backend?, mcpServers?, grants? }
  *   instructions.md           what the role is and how it works
  *   skills/<name>/SKILL.md    how to do one kind of work; may have files next to it
+ *
+ * Source templates are copied into .xsb/templates/<team>/ on first use and only refreshed explicitly.
  *
  * An agent is an instance of a role (`AgentSpec.role`); several agents can
  * share one. `description` and `backend` are the defaults a new
@@ -30,9 +32,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { NAME, failure, RpcError } from "@xsb/protocol";
 import type { Grant, McpServer, McpServerSpec, RoleDetail, RoleInput } from "@xsb/protocol";
-import { loadProjectConfig, projectLanguage } from "./config.ts";
+import { loadProjectConfig } from "./config.ts";
+import { projectCatalog } from "./templates.ts";
 import type { Paths } from "./paths.ts";
-import { catalog, teamRole, teamRoleNames } from "./presets.ts";
+import { teamRole, teamRoleNames } from "./presets.ts";
 
 export type Skill = { name: string; description: string; produces?: string; inputs: string[]; dir: string };
 
@@ -83,7 +86,7 @@ const ownNames = (paths: Paths): string[] => (fs.existsSync(paths.roles) ? fs.re
 
 /** The names of the project's roles; with `used`, what they would be if it used those teams. */
 export function roleNames(paths: Paths, used = loadProjectConfig(paths).teams ?? []): string[] {
-  const cat = catalog(projectLanguage(paths));
+  const cat = projectCatalog(paths, undefined, used);
   return [...new Set([...ownNames(paths), ...used.flatMap((team) => teamRoleNames(cat, team))])];
 }
 
@@ -93,7 +96,7 @@ export function roleNames(paths: Paths, used = loadProjectConfig(paths).teams ??
  */
 export function loadRole(paths: Paths, name: string): Role {
   const used = loadProjectConfig(paths).teams ?? [];
-  const cat = catalog(projectLanguage(paths));
+  const cat = projectCatalog(paths);
   const team = NAME.test(name) ? used.find((id) => teamRoleNames(cat, id).includes(name)) : undefined;
   const entry = team ? cat.teams.get(team) : undefined;
   const own = NAME.test(name) && has(paths.roles, name);
@@ -150,7 +153,14 @@ export function saveRole(paths: Paths, input: RoleInput): void {
   const dir = paths.roleDir(input.name);
   const file = path.join(dir, "role.json");
   // A team's role becomes the project's own as it applies, laid over its base team's if it is: written out whole.
-  if (!has(paths.roles, input.name) && roleNames(paths).includes(input.name)) materialize(loadRole(paths, input.name), dir);
+  if (!has(paths.roles, input.name) && roleNames(paths).includes(input.name)) {
+    const base = loadRole(paths, input.name);
+    materialize(base, dir);
+    if (base.preset) {
+      const source = projectCatalog(paths).teams.get(base.preset.team)!.source;
+      fs.writeFileSync(path.join(dir, ".template-origin.json"), JSON.stringify({ source, team: base.preset.team, role: input.name }) + "\n");
+    }
+  }
   fs.mkdirSync(dir, { recursive: true });
   const prior: RoleFile = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
   const { avatar = prior.avatar, description = prior.description, backend = prior.backend, grants = prior.grants, mcpServers = prior.mcpServers } = input;
@@ -168,13 +178,13 @@ export function saveRole(paths: Paths, input: RoleInput): void {
 }
 
 /** Write a role out as a directory of its own: one role.json, one instructions.md, and every skill with its files. */
-function materialize(role: Role, dir: string): void {
+export function materialize(role: Role, dir: string): void {
   fs.mkdirSync(path.join(dir, "skills"), { recursive: true });
   const json: RoleFile = { avatar: role.avatarFile ? "role" : role.avatar, description: role.description, backend: role.backend, grants: role.grants, mcpServers: role.servers };
   fs.writeFileSync(path.join(dir, "role.json"), JSON.stringify(json, null, 2) + "\n");
   fs.writeFileSync(path.join(dir, "instructions.md"), role.instructions);
   if (role.avatarFile) fs.copyFileSync(role.avatarFile, path.join(dir, "avatar.png"));
-  for (const skill of role.skills) fs.cpSync(skill.dir, path.join(dir, "skills", skill.name), { recursive: true });
+  for (const skill of role.skills) fs.cpSync(skill.dir, path.join(dir, "skills", skill.name), { recursive: true, dereference: true });
 }
 
 /** A role as it crosses the wire, but for who uses it. */

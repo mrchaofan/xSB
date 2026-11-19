@@ -1,5 +1,5 @@
 // 预设团队：应用自带的几支团队（软件开发、电影制作），以及用户自己放在 ~/.xsb/presets 里的团队，两处的组织一样。
-// 工作区"使用"一支团队，就有了它的全部角色。使用不是复制：角色按团队里的版本生效，团队更新了它们也跟着更新。
+// 工作区"使用"一支团队，就有了它的全部角色。首次使用会复制模板；副本只在用户确认同步后更新。
 // 在工作区里改过的角色才是工作区自己的，可以随时恢复成预设。一支团队可以基于另一支（extends），只放不同的部分。
 import { assetName, roleOf, showPage, state } from "./app.js";
 import { markdownHtml } from "./content.js";
@@ -60,6 +60,26 @@ function derive(pack) {
   ]);
 }
 
+/** Preview first, then explicitly acknowledge losing custom changes. */
+async function synchronize(pack) {
+  try {
+    const plan = await xsb.previewTeamSync(pack.id);
+    openDialog(t("presets.sync.title", { title: pack.title }), [
+      h("p", { class: "notice" }, t("presets.sync.risk")),
+      h("p", {}, t("presets.sync.roles", { roles: plan.roles.join(t("list.separator")) })),
+      plan.overwritten.length > 0 && h("p", {}, t("presets.sync.overrides", { roles: plan.overwritten.join(t("list.separator")) })),
+      plan.removed.length > 0 && h("p", {}, t("presets.sync.removed", { roles: plan.removed.join(t("list.separator")) })),
+    ].filter(Boolean), [
+      { label: t("common.cancel") },
+      { label: t("presets.sync.confirm"), primary: true, run: async () => {
+        await xsb.syncTeam(pack.id, plan.revision);
+        notice = [t("presets.sync.done", { title: pack.title })];
+        await showPresets();
+      } },
+    ]);
+  } catch (e) { notice = [e.message]; await showPresets(); }
+}
+
 function packSection(pack) {
   /** 使用这支团队，并给还没有 Agent 的角色各建一个（id 用角色名）。可以重复执行：只补缺的。 */
   const buildTeam = run(async () => {
@@ -85,8 +105,9 @@ function packSection(pack) {
         ? h("button", { class: "btn", title: t("presets.drop.title"), onclick: drop }, t("presets.drop"))
         : h("button", { class: "btn", title: t("presets.use.title"), onclick: use }, t("presets.use")),
       h("button", { class: "btn primary", title: t("presets.build.title"), onclick: buildTeam, disabled: errors.length > 0 }, t("presets.build")),
+      pack.used && h("button", { class: "btn", disabled: pack.syncAvailable === false, onclick: () => synchronize(pack) }, t("presets.sync")),
       h("button", { class: "btn", title: t("presets.derive.hint"), onclick: () => derive(pack) }, t("presets.derive")),
-      pack.source === "user" && h("button", { class: "btn", onclick: () => xsb.openFolder(pack.dir) }, t("presets.open"))),
+      pack.source === "user" && (!pack.snapshot || pack.sourceDir) && h("button", { class: "btn", onclick: () => xsb.openFolder(pack.sourceDir ?? pack.dir) }, t("presets.open"))),
     ...pack.roles.map((entry) => roleCard(pack, entry)));
 }
 

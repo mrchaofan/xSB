@@ -9,3 +9,4 @@ export { Paths, findProject } from "./paths.ts";
 export { COMMON_SERVERS_ENV } from "./mcp.ts";
 export { describeBackends, findCommand, globalConfigPath, initProject } from "./config.ts";
 export { catalog, lineage, presetRoots } from "./presets.ts";
+export type { Catalog, PresetRoot, TeamEntry } from "./presets.ts";

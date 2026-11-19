@@ -116,6 +116,17 @@ try {
   assert.match(ok("send", "a", "after the kill"), /echo: after the kill/);
   assert.notEqual(Number(/pid (\d+)/.exec(ok("hub", "status"))![1]), process.pid);
   console.log("ok 7 a killed hub, and a stale file");
+  // Explicit template synchronization warns, requires confirmation, and replaces matching overrides.
+  ok("team", "use", "software");
+  ok("role", "add", "reviewer", "--instructions", "CUSTOM-SYNC-RULES");
+  assert.match(ok("team", "sync", "software", "--preview"), /WARNING:.*Custom changes will be lost/);
+  const unconfirmed = xsb("team", "sync", "software");
+  assert.equal(unconfirmed.code, 1);
+  assert.match(unconfirmed.err, /confirmation is required/);
+  assert.match(ok("role", "show", "reviewer"), /CUSTOM-SYNC-RULES/);
+  assert.match(ok("team", "sync", "software", "--yes"), /synchronized team software/);
+  assert.doesNotMatch(ok("role", "show", "reviewer"), /CUSTOM-SYNC-RULES/);
+  ok("team", "drop", "software");
   // 8. Preset teams and their scenarios: a team of the user's, its problems, and a run of the scenarios.
   const mine = path.join(home, "presets", "en", "mine");
   fs.mkdirSync(path.join(mine, "evals"), { recursive: true });

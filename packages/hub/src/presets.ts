@@ -1,10 +1,13 @@
 /**
  * Preset teams: sets of roles for a kind of work (software development, film production). They come from two
- * places organised the same way, one directory per language, one per team:
+ * places organised the same way, one directory per team, with optional language subdirectories:
  *
- *   <root>/<language>/<team>/team.json        { title, description, extends?, roles: [{ role, name, requires? }], assets? }
- *   <root>/<language>/<team>/roles/<role>/    a role, laid out as a project has it in .xsb/roles/ (roles.ts)
- *   <root>/<language>/<team>/evals/           scenarios to measure the team by (optional)
+ *   <root>/<team>/<language>/team.json        { title, description, extends?, roles: [{ role, name, requires? }], assets? }
+ *   <root>/<team>/<language>/roles/<role>/    a role, laid out as a project has it in .xsb/roles/ (roles.ts)
+ *   <root>/<team>/<language>/evals/           scenarios to measure the team by (optional)
+ *   <root>/<team>/team.json                  a single-language team, with roles/ and evals/ alongside
+ *
+ * The previous <root>/<language>/<team>/ layout is still read for existing user templates.
  *
  *   builtin   presets/ next to xsb's code (paths.ts, `shipped`), the same in the sources and in the app
  *   user      ~/.xsb/presets/ (`globalDir`), the user's own: copy a team there, or make one that extends another
@@ -24,7 +27,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { LANGUAGES } from "@xsb/protocol";
+import { LANGUAGES, NAME } from "@xsb/protocol";
 import type { Language } from "@xsb/protocol";
 import { globalDir } from "./config.ts";
 import { shipped } from "./paths.ts";
@@ -35,6 +38,8 @@ export type Source = "builtin" | "user";
 
 export type TeamEntry = {
   id: string;
+  /** A project copy has its inheritance materialized and reads only its own role files. */
+  snapshot?: boolean;
   source: Source;
   /** The team's directory, in the language it was found in. */
   dir: string;
@@ -54,45 +59,91 @@ export type Problem = { source: Source; team?: string; path: string; code: strin
 export type Catalog = { teams: Map<string, TeamEntry>; problems: Problem[] };
 
 /** Where preset teams are read from, builtin first. */
-export const presetRoots = (): { source: Source; dir: string }[] => [
+export const presetRoots = (): PresetRoot[] => [
   { source: "builtin", dir: shipped("presets") },
   { source: "user", dir: path.join(globalDir(), "presets") },
 ];
 
 type Raw = Omit<TeamEntry, "assets"> & { assets: Record<string, string> };
 
-/** The teams of one root, in the language asked for, or another when a team has none in it. */
+/** A root can also be supplied by an installer or a catalog test; all sources use the same reader. */
+export type PresetRoot = { source: Source; dir: string };
+
+const TEAM_ID = /^[a-z0-9][a-z0-9_-]*$/;
+const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+
+/** Validate before exposing a manifest to the hub, CLI or desktop. Unknown fields are kept forward-compatible. */
+function manifestProblem(json: unknown): string | undefined {
+  if (!object(json) || typeof json.title !== "string" || !json.title.trim()) return "needs a nonempty title";
+  if (json.description !== undefined && typeof json.description !== "string") return "description must be a string";
+  if (json.language !== undefined && !LANGUAGES.includes(json.language as Language)) return "language must be en or zh-CN";
+  if (json.extends !== undefined && (typeof json.extends !== "string" || !TEAM_ID.test(json.extends))) return "extends must be a team id";
+  if (json.assets !== undefined && (!object(json.assets) || Object.values(json.assets).some((v) => typeof v !== "string"))) return "assets must map asset types to names";
+  if (json.roles !== undefined && !Array.isArray(json.roles)) return "roles must be a list";
+  const names = new Set<string>();
+  for (const role of (json.roles ?? []) as unknown[]) {
+    if (!object(role) || typeof role.role !== "string" || !NAME.test(role.role)) return "each role needs a valid role id";
+    if (names.has(role.role)) return `role "${role.role}" is listed twice`;
+    names.add(role.role);
+    if (role.name !== undefined && typeof role.name !== "string") return "role names must be strings";
+    if (role.requires !== undefined && (!Array.isArray(role.requires) || role.requires.some((r) => !object(r) || typeof r.command !== "string" || !r.command.trim() || typeof r.install !== "string"))) return "requires must list command and install strings";
+  }
+}
+
+/** Discover team folders; the previous <language>/<team> layout remains readable. */
 function readRoot(source: Source, root: string, language: Language, problems: Problem[]): Raw[] {
-  const ids = new Set<string>();
-  for (const lang of LANGUAGES) {
-    const dir = path.join(root, lang);
-    if (fs.existsSync(dir)) for (const id of fs.readdirSync(dir)) if (fs.existsSync(path.join(dir, id, "team.json"))) ids.add(id);
+  type Candidate = { dir: string; language?: Language; legacy: boolean };
+  const candidates = new Map<string, Candidate[]>();
+  const directories = (dir: string): string[] => {
+    try {
+      return fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") problems.push({ source, path: dir, code: "preset_directory_unreadable", detail: (e as Error).message, severity: "error" });
+      return [];
+    }
+  };
+  const add = (id: string, candidate: Candidate): void => {
+    if (!fs.existsSync(path.join(candidate.dir, "team.json"))) return;
+    if (!TEAM_ID.test(id)) {
+      problems.push({ source, team: id, path: candidate.dir, code: "team_id_invalid", detail: "a team id is lower-case letters, digits, '-' or '_'", severity: "error" });
+      return;
+    }
+    candidates.set(id, [...(candidates.get(id) ?? []), candidate]);
+  };
+  for (const id of directories(root)) {
+    if (LANGUAGES.includes(id as Language)) {
+      for (const team of directories(path.join(root, id))) add(team, { dir: path.join(root, id, team), language: id as Language, legacy: true });
+      continue;
+    }
+    const dir = path.join(root, id);
+    add(id, { dir, legacy: false });
+    for (const lang of LANGUAGES) add(id, { dir: path.join(dir, lang), language: lang, legacy: false });
   }
   const out: Raw[] = [];
-  for (const id of [...ids].sort()) {
-    const lang = [language, ...LANGUAGES.filter((l) => l !== language)].find((l) => fs.existsSync(path.join(root, l, id, "team.json")))!;
-    const dir = path.join(root, lang, id);
+  for (const [id, variants] of [...candidates].sort(([a], [b]) => a.localeCompare(b))) {
+    // The requested translation, then a single-language folder, then another translation. Modern layout wins
+    // over a legacy copy of the same translation, so installing a new layout is deterministic.
+    const score = (v: Candidate): number => (v.language === language ? 0 : v.language === undefined ? 2 : 4 + LANGUAGES.indexOf(v.language) * 2) + Number(v.legacy);
+    variants.sort((a, b) => score(a) - score(b));
+    const { dir, language: lang } = variants[0];
+    for (const v of variants.slice(1)) if (v.language === lang) problems.push({ source, team: id, path: v.dir, code: "team_duplicate", detail: `another copy is used from ${dir}`, severity: "warning" });
     const file = path.join(dir, "team.json");
     let json: any;
     try {
       json = JSON.parse(fs.readFileSync(file, "utf8"));
+      const detail = manifestProblem(json);
+      if (detail) throw new Error(detail);
+      if (lang && json.language !== undefined && json.language !== lang) throw new Error("language must match its directory");
     } catch (e) {
       problems.push({ source, team: id, path: file, code: "team_json_invalid", detail: (e as Error).message, severity: "error" });
       continue;
     }
-    if (typeof json?.title !== "string" || !Array.isArray(json.roles ?? [])) {
-      problems.push({ source, team: id, path: file, code: "team_json_invalid", detail: "needs a title and a list of roles", severity: "error" });
-      continue;
-    }
     out.push({
-      id,
-      source,
-      dir,
-      language: lang,
+      id, source, dir, language: lang ?? json.language ?? "en",
       title: json.title,
       description: json.description ?? "",
-      ...(typeof json.extends === "string" ? { extends: json.extends } : {}),
-      roles: (json.roles ?? []).filter((r: any) => typeof r?.role === "string").map((r: any) => ({ role: r.role, name: r.name ?? r.role, ...(r.requires ? { requires: r.requires } : {}) })),
+      ...(json.extends ? { extends: json.extends } : {}),
+      roles: (json.roles ?? []).map((r: any) => ({ role: r.role, name: r.name ?? r.role, ...(r.requires ? { requires: r.requires } : {}) })),
       assets: json.assets ?? {},
     });
   }
@@ -100,13 +151,15 @@ function readRoot(source: Source, root: string, language: Language, problems: Pr
 }
 
 /** Every preset team there is for a project in `language`, and what is wrong among them. */
-export function catalog(language: Language): Catalog {
+export function catalog(language: Language, roots: PresetRoot[] = presetRoots()): Catalog {
   const problems: Problem[] = [];
-  const [builtin, user] = presetRoots().map(({ source, dir }) => readRoot(source, dir, language, problems));
-  const teams = new Map<string, Raw>(builtin.map((t) => [t.id, t]));
-  for (const t of user) {
-    if (teams.has(t.id) && teams.get(t.id)!.source === "builtin") {
+  const entries = [...roots].sort((a, b) => Number(a.source === "user") - Number(b.source === "user")).flatMap(({ source, dir }) => readRoot(source, dir, language, problems));
+  const teams = new Map<string, Raw>();
+  for (const t of entries) {
+    if (t.source === "user" && teams.has(t.id) && teams.get(t.id)!.source === "builtin") {
       problems.push({ source: "user", team: t.id, path: t.dir, code: "team_shadows_builtin", detail: `a builtin team is called "${t.id}": give this one another id, and to build on that team say "extends": "${t.id}"`, severity: "error" });
+    } else if (teams.has(t.id)) {
+      problems.push({ source: t.source, team: t.id, path: t.dir, code: "team_duplicate", detail: `another copy is used from ${teams.get(t.id)!.dir}`, severity: "error" });
     } else teams.set(t.id, t);
   }
   // A team whose base is missing, or that is its own base somewhere up the line, is left out; so is a builtin
@@ -145,7 +198,7 @@ export function lineage(cat: Catalog, id: string): TeamEntry[] {
 
 /** The roles a team gives, its bases' included: each name once, where it is defined the topmost. */
 export function teamRoleNames(cat: Catalog, id: string): string[] {
-  const names = lineage(cat, id).flatMap((team) => {
+  const names = (cat.teams.get(id)?.snapshot ? [cat.teams.get(id)!] : lineage(cat, id)).flatMap((team) => {
     const dir = path.join(team.dir, "roles");
     return fs.existsSync(dir) ? fs.readdirSync(dir).filter((name) => fs.existsSync(path.join(dir, name, "role.json"))) : [];
   });
@@ -157,7 +210,7 @@ export function teamRoleNames(cat: Catalog, id: string): string[] {
  * one below (`overlay`). Undefined when the team has none of that name.
  */
 export function teamRole(cat: Catalog, id: string, name: string): Role | undefined {
-  const layers = lineage(cat, id)
+  const layers = (cat.teams.get(id)?.snapshot ? [cat.teams.get(id)!] : lineage(cat, id))
     .reverse()
     .map((team) => path.join(team.dir, "roles", name))
     .filter((dir) => fs.existsSync(path.join(dir, "role.json")));
@@ -247,16 +300,18 @@ export function check(cat: Catalog, id: string): Problem[] {
 }
 
 /**
- * Start a user team that builds on another: `~/.xsb/presets/<language>/<id>/team.json` with `extends`, listing the
+ * Start a user team that builds on another: `~/.xsb/presets/<id>/<language>/team.json` with `extends`, listing the
  * base's roles. What it is to change goes into its `roles/` afterwards.
  */
 export function derive(cat: Catalog, id: string, base: string, language: Language): TeamEntry {
   const from = cat.teams.get(base);
   if (!from) throw new Error(`no team "${base}" to build on`);
-  if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) throw new Error("a team id is lower-case letters, digits, '-' or '_'");
+  if (!TEAM_ID.test(id)) throw new Error("a team id is lower-case letters, digits, '-' or '_'");
+  if (LANGUAGES.includes(id as Language)) throw new Error("language directory names are reserved for legacy templates");
   if (cat.teams.has(id)) throw new Error(`there is a team "${id}" already`);
-  const dir = path.join(presetRoots().find((r) => r.source === "user")!.dir, language, id);
-  if (fs.existsSync(dir)) throw new Error(`${dir} exists already`);
+  const folder = path.join(presetRoots().find((r) => r.source === "user")!.dir, id);
+  const dir = path.join(folder, language);
+  if (fs.existsSync(folder)) throw new Error(`${folder} exists already`);
   fs.mkdirSync(path.join(dir, "roles"), { recursive: true });
   const json = { title: `${from.title} (${id})`, description: from.description, extends: base, roles: from.roles };
   fs.writeFileSync(path.join(dir, "team.json"), JSON.stringify(json, null, 2) + "\n");

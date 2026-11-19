@@ -14,7 +14,7 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import { Agents, Assets, Backends, History, Boundaries, Connection, Discarded, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
-import type { HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, PresetProblem, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
+import type { TeamSyncPlan, HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, PresetProblem, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
 import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
@@ -657,6 +657,14 @@ export class Workspace {
   /** Use a team's roles in this workspace, or stop. The roles that come and go arrive as events. */
   async useTeam(id: string): Promise<void> {
     await this.conn.request(Teams.use, { id });
+  }
+
+  previewTeamSync(id: string): Promise<TeamSyncPlan> {
+    return this.conn.request(Teams.syncPreview, { id });
+  }
+
+  syncTeam(id: string, revision: string): Promise<TeamSyncPlan> {
+    return this.conn.request(Teams.sync, { id, revision, confirm: true });
   }
 
   async dropTeam(id: string): Promise<void> {

@@ -64,6 +64,10 @@ export class Paths {
   get assets(): string {
     return path.join(this.dir, "assets");
   }
+  /** Project-local template snapshots, never implicitly refreshed after creation. */
+  get templates(): string {
+    return path.join(this.dir, "templates");
+  }
   /** The project's own roles. */
   get roles(): string {
     return path.join(this.dir, "roles");

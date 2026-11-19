@@ -436,10 +436,22 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
       return { tools: serverName === "render" ? ["render_preview", "list_fixtures"] : ["generate", "get_status"] };
     },
     // ---------- 预设团队 ----------
-    presets: async () => ({ teams: [{ ...structuredClone(TEAM), source: "builtin", dir: "/app/presets/zh-CN/film", language: "zh-CN", problems: [], programs: [], used: data.teams.includes(TEAM.id) }], problems: [] }),
-    deriveTeam: async (id) => `~/.xsb/presets/zh-CN/${id}`,
+    presets: async () => ({ teams: [{ ...structuredClone(TEAM), source: "builtin", dir: "/app/presets/film/zh-CN", language: "zh-CN", problems: [], programs: [], used: data.teams.includes(TEAM.id) }], problems: [] }),
+    previewTeamSync: async (id) => ({ id, roles: TEAM.roles.map(({ role }) => role.name), overwritten: data.roles.filter((r) => r.preset?.own && r.preset.team === id).map((r) => r.name), removed: [], revision: JSON.stringify(data.roles) }),
+    async syncTeam(id, revision) {
+      if (revision !== JSON.stringify(data.roles)) throw new Error(say("角色已更改，请重新预览。", "Roles changed; preview again."));
+      const plan = await this.previewTeamSync(id);
+      for (const { role } of TEAM.roles) {
+        const updated = { ...structuredClone(role), preset: presetOf(role.name, false) };
+        const index = data.roles.findIndex((r) => r.name === role.name);
+        if (index < 0) data.roles.push(updated); else data.roles[index] = updated;
+        emit({ role: updated });
+      }
+      return plan;
+    },
+    deriveTeam: async (id) => `~/.xsb/presets/${id}/zh-CN`,
     openFolder: async () => {},
-    /** 使用一支团队：它的角色成为工作区的角色，但不复制；工作区已有的同名角色仍以工作区的为准。 */
+    /** 使用一支团队：复制角色到工作区；工作区已有的同名角色仍以工作区的为准。 */
     async useTeam(teamId) {
       if (data.teams.includes(teamId)) return;
       data.teams.push(teamId);

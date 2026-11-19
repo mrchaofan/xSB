@@ -5,7 +5,7 @@ import readline from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Paths, describeBackends, findProject, globalConfigPath, hubSocket, initProject, readHubInfo, stopHub } from "@xsb/hub";
 import { Agents, Assets, Backends, Boundaries, Roles, Tasks, Teams, exitCode, explain, isTerminal, text } from "@xsb/protocol";
-import type { AgentInfo, Asset, BackendInfo, McpServerCheck, RoleDetail, Connection, PermissionRequest, PermissionResponse, Task, TeamInfo, PresetProblem, Language } from "@xsb/protocol";
+import type { AgentInfo, Asset, BackendInfo, McpServerCheck, RoleDetail, Connection, PermissionRequest, PermissionResponse, Task, TeamInfo, TeamSyncPlan, PresetProblem, Language } from "@xsb/protocol";
 import { connectHub } from "./client.ts";
 import type { HubConnection } from "./client.ts";
 import { evaluate, scenariosOf } from "./eval.ts";
@@ -19,7 +19,7 @@ const why = (e: unknown): string => explain(e, language);
 type Args = { _: string[]; [flag: string]: string | boolean | string[] };
 
 /** Flags that take no value: what follows them is the next argument, not theirs. */
-const SWITCHES = new Set(["new", "history", "help", "keep"]);
+const SWITCHES = new Set(["new", "history", "help", "keep", "yes", "preview"]);
 
 function parse(argv: string[]): Args {
   const args: Args = { _: [] };
@@ -196,6 +196,20 @@ async function team(args: Args, [action, id]: string[]): Promise<void> {
     if (action === "use" || action === "drop") {
       await conn.request(Teams[action], { id });
       console.log(action === "use" ? t.teamUsed(id) : t.teamDropped(id));
+    } else if (action === "sync") {
+      const plan = await conn.request<TeamSyncPlan>(Teams.syncPreview, { id });
+      console.log(t.teamSyncRisk(id, plan.roles, plan.overwritten, plan.removed));
+      if (args.preview === true) return;
+      if (args.yes !== true) {
+        if (!process.stdin.isTTY) throw new Error(t.teamSyncNeedsYes);
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        let answer: string;
+        try { answer = await new Promise((resolve) => rl.question(t.teamSyncAsk, resolve)); }
+        finally { rl.close(); }
+        if (!/^(y|yes)$/i.test(answer.trim())) { console.log(t.teamSyncCancelled); return; }
+      }
+      await conn.request(Teams.sync, { id, revision: plan.revision, confirm: true });
+      console.log(t.teamSynced(id));
     } else if (action === "new") {
       const { team } = await conn.request<{ team: TeamInfo }>(Teams.derive, { id, base: flag(args, "extends") });
       console.log(t.teamMade(team.dir));
