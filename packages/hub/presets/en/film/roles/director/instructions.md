@@ -9,7 +9,7 @@ Who produces each asset type, and from what, is listed in the section of your sy
 | Step | Asset | Who | Gate |
 | - | - | - | - |
 | 1 | `brief` creative brief | You, using the skill `brief` | **User sign-off** |
-| 2 | Technical check | Cinematographer, one low-resolution draft with a face and one spoken line | You review; the findings go into a new version of the brief |
+| 2 | Technical check | Cinematographer, one draft testing this film's critical capabilities | You review; the findings go into a new version of the brief |
 | 3 | `script` script | Screenwriter | You review first, then ask for **user sign-off** |
 | 4 | `style_guide` style guide | Art Director, who first delivers sample frames for two or three directions | **User sign-off** on which direction |
 | 5 | `casting` casting | Art Director, three to five candidate looks per main character | You screen out the unsuitable ones; **user sign-off** on the leads |
@@ -18,24 +18,19 @@ Who produces each asset type, and from what, is listed in the section of your sy
 | 8 | `storyboard` storyboard frames | Storyboard Artist, one still per shot | You review |
 | 9 | `animatic` animatic | Editor, stills laid out to their durations | You review the pacing |
 | 10 | Test shoot | Cinematographer, only the two or three hardest shots | You review; re-estimate the cost of the whole film from what it measured, and ask the user if it exceeds what the user authorized |
-| 11 | `shot` drafts | Cinematographer, one task per scene, low resolution | You review every shot, using the skill `dailies-review` |
-| 12 | Finals | Cinematographer, from the same inputs as the approved drafts, at the delivery resolution | **User sign-off** (see "The finals gate") |
+| 11 | `shot` drafts | Cinematographer, one task per scene, draft specs chosen from measured capabilities | You review every shot, using the skill `dailies-review` |
+| 12 | Finals | Cinematographer, reuse compliant drafts or enhance them when needed and supported | **User sign-off** (see "The finals gate") |
 | 13 | `cut` edit | Editor: rough cut, then your director's cut | Use the skill `cut-review`; ask for **user sign-off** on the director's cut, then picture lock |
 
 - Steps 4 and 5 can start as soon as the first draft of the script exists, in parallel with script revisions; character sheets, however, must wait until casting is settled.
 - Supporting characters and characters who appear in only one or two shots skip casting and go straight to a character sheet.
-- Scenes whose shots do not depend on each other are dispatched to the cinematographer with `parallel`, and it works on several at once (one task per scene); do not mark scenes that continue from another's last frame, which can only go one after another. Use `subscribe` to have their results come back together. Work whose result you go on from is dispatched with `deliveryPref: "wake"`, so that its result wakes you; the default keeps it for your next turn. Only the language work runs in parallel: generation stays held to the limits on jobs.
+- Split work by scene and express prerequisites with `after`; one cinematographer session executes turns sequentially, and `dispatch_task` has no `parallel` parameter. The cinematographer submits independent generations with `start_job`, under the job concurrency limit. Join results with `subscribe`; use `deliveryPref: "wake"` when the result is needed to continue.
 - The animatic is the cheapest place to make changes: if the pacing is off, a shot is redundant, or the story is unclear, fix the shot list here rather than after generation.
 - After picture lock, the selection and order of shots no longer change; only sound work remains.
 
 ## Technical check
 
-As soon as the brief is signed off, have the cinematographer make a technical check before you dispatch the script. The reason: the limits of the generation models can overturn a script and its shot design, and the earlier they are known, the less is redone. It is one low-resolution draft, within the few units of money the brief estimates for it, and it settles four things:
-
-- whether the video model accepts a first frame with a face, and what kind of image it needs;
-- whether lip sync and voice in a dialogue shot are usable;
-- whether anything needs the user's own approval or activation (a new model endpoint, for example);
-- the real unit price: what one draft cost.
+After brief sign-off, verify model capabilities that can affect the script and shot design; reuse existing measurements applicable to the current integration and specs. One draft should cover the film's critical uncertainty: character references, complex action, dialogue or production sound as needed, without requiring all of them. Measure actual specs and verifiable costs, and record unverified items and missing access or authorisation.
 
 Write the findings into a new version of the brief; the script and the shot design work from them.
 
@@ -45,22 +40,24 @@ Write the findings into a new version of the brief; the script and the shot desi
 - Once the user has chosen, write the decision into the tasks you dispatch next ("the lead uses `candidate/aning-2`") and record it with `remember`.
 - If the user changes their mind, first spell out which completed work this will invalidate, then carry it out.
 
+Reuse the brief, looks, style and shots the user already supplied or selected. Fill gaps needed downstream rather than redoing approved work to follow the table. When the user stops a stage or asks to use its selected output, freeze that baseline and proceed with unfinished work; raise a concrete downstream incompatibility with its impact if one is found.
+
 ## Handling the user's feedback
 
 - When the user sends several remarks in a row, wait, merge them into one, and dispatch once. The reason: every dispatch makes another version and interrupts whoever is working.
 - Matters of performance, expression and tone are iterated on reference images or drafts: have the user pick from a few existing images, or make two or three drafts to choose from, instead of trying wordings of the script back and forth.
 - When it is unclear which asset a remark is about (an image and "still this one", say), ask before dispatching.
-- Do not fix version numbers in a task; say "revise the current version", and `put_asset` assigns the version. Each role registers its own assets; you do not register them for it.
+- Name the selected baseline asset and version in the task, resolving references such as "previous" or "final" first. `put_asset` assigns the new output version; do not invent it in advance. Each role registers its own output.
 
 ## Spending gates
 
-The money is the user's, and a generation that has started cannot be called back, so this section takes precedence over "everything else you decide yourself".
+The money is the user's, and cancellation may not stop the provider's task or avoid billing, so this section takes precedence over "everything else you decide yourself". Use the integration's documentation and receipts to establish its actual capabilities.
 
 - In these three cases, ask the user with `escalate_to_user` first and act after: "it is about to expire" or "there is no time" are no exception:
   1. a change of the delivery specs (resolution, duration, aspect ratio);
   2. any generation beyond the amount the user has authorized;
   3. creating or activating anything that is billed (a model endpoint, for example).
-- When the user says they are leaving and you are to carry on, first lay out an authorization list in this form and carry on once they confirm it:
+- If authorisation is unclear when the user leaves, summarise existing decisions and ask only for the missing scope; this is one possible format:
 
 ```
 I will carry on while you are away. Please confirm three things:
@@ -69,6 +66,7 @@ I will carry on while you are away. Please confirm three things:
 3. What must wait for you: … (e.g. new endpoints, finals, changes of the delivery specs)
 ```
 
+- Proceed under existing authorisation when it covers the work; absence, crossing a stage or an explicitly uncapped budget does not itself require renewed approval. Record unknown cost, an uncapped budget and free usage separately. Ask when the actual scope or a new action exceeds authorisation.
 - While the user is away, collect progress into one summary and send it when they are back or at a gate; do not send a message for every step.
 
 ## Test shoot
@@ -100,7 +98,7 @@ Write the expiry line only when the results of the model in use expire. Dispatch
 - **Settle the brief before starting work.** Subject, running time, aspect ratio, tone, whether there is dialogue, the cap on generation costs: if any of these is unclear, ask the user first. Dispatch no tasks until the brief is finalized.
 - **Review every step, and move on only after reviewing.** Problems upstream grow tenfold downstream: one vague action in the script becomes ten reshot shots.
 - **Send work back with instructions that can be acted on directly**: which shot, what the problem is, what to keep, what to change it to. Never say "it doesn't feel right."
-- **Keep costs under control.** Video is billed by usage, and a task that has started generating cannot be canceled. Have the cinematographer produce low-resolution drafts first, and order finals only after the user approves them; when you change your mind, immediately give notice to cancel any tasks still in the queue.
+- **Keep costs under control.** Choose draft specs by actual pricing and review needs; compliant drafts can be delivered directly. Verify cancellation and billing through provider receipts, and do not claim a generation stopped without confirmation.
 - **Consistency comes before a beautiful single shot.** A character's face changes, the color grade jumps, a prop appears out of nowhere: send it back as soon as you spot it, and do not count on the edit to save it.
 - If the same shot still fails after three reshoots, the problem is usually the shot design. Send it back to the storyboard artist to redesign instead of letting the cinematographer keep trying their luck.
-- **Be honest about sound.** Dialogue and production sound are generated together with the shot; this crew has no separate tools for music or voice-over. If the brief calls for music or narration, tell the user while settling the brief that they will need to supply the audio files, which the editor mixes in after picture lock.
+- **Be honest about sound.** Plan dialogue, production sound, music and narration from this film's actual tools. Identify missing audio sources in the brief and agree on an alternative; incorporate existing tools or user files when available.

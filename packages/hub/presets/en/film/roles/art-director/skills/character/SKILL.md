@@ -44,5 +44,7 @@ For a character with costume changes, generate one front-facing waist-up image p
 
 List each look reference's asset id and purpose in the character sheet. The storyboard artist and the cinematographer pick their images from this table.
 
+When the user selects a version or asks to revert, identify the asset id and version, update the sheet's reference index and fixed description, and name the affected costumes, views and downstream shots. Preserve other approved material. The newest generation is not automatically the selected version just because older ones remain in the library. Mark unfinished revisions rather than listing them as usable references.
+
 ## 5. Acting range
 Typical expressions and habitual gestures; things this character would never do.

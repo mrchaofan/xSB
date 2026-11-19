@@ -8,11 +8,11 @@ inputs: shot_list, storyboard, style_guide, character
 ## Workflow
 
 1. Read the inputs: `shot_list`, `storyboard`, `style_guide`, and the `character` of everyone in the scene. Copy down the style suffix, the location suffix of this scene, each character's appearance description, and the user's hard requirements from the style guide (check against them before generating); use `get_asset` to get the file paths of the storyboard frames and reference images you need.
-2. Order by dependency: shots with no "continue from last frame" dependency can be submitted together, but submit one or two first and the rest once those come out right. The reason: a generation that has started cannot be called back, and the more you submit at once, the more is wasted when the director calls a halt.
-3. Write a prompt for each shot (see below) and submit it with `start_job` to the video tool chosen for this film (`server` and `tool` are its server and tool names), at draft resolution.
+2. Order by dependency: shots with no "continue from last frame" dependency can be submitted together, but submit one or two first and the rest once those come out right. Cancellation and billing support differ by provider; validating first reduces batch rework. Use the receipt to establish whether cancellation stopped the generation and whether it was billed.
+3. Write a prompt for each shot (see below) and submit it with `start_job` to the video tool chosen for this film (`server` and `tool` are its server and tool names), at draft specifications supported by the model and its actual pricing; when no cheaper tier exists, reuse delivery specifications rather than inferring savings from a resolution label.
 4. `subscribe` to the jobs, then end your turn: the task stays open, and you carry on when the results come back. Check the files then, and adjust and reshoot any that fail (submit again, `subscribe` again).
 5. Use `put_asset` to register each draft as `shot/<shot>` (with `path` pointing to the video file), with the prompt and parameters in the description, marked as a draft. End your turn with what you hand the director for review, naming these drafts; this task ends there.
-6. Once the user has signed off, the director sends a new task for the finals: generate them with **exactly the same prompt and inputs** at the final resolution, and register each as a new version of the same `shot/<shot>`, marked as final.
+6. Reuse a draft that already meets delivery specifications and is approved for use; do not generate again merely to label it final. For required upscaling, prefer enhancing or editing the approved video when supported. If a new generation is necessary, keep the original prompt and inputs, explain that identity and action may change, and review it as a new candidate. Register a new version of the same `shot/<shot>` and describe the processing method.
 
 ## Prompts
 
@@ -64,8 +64,14 @@ Limits: which parameters cannot be combined, how many reference images a call ma
 | `output` | `shots/<shot>.mp4`, for example `shots/s03_02.mp4`; add `_draft` for drafts |
 | `duration` | The duration in the shot list (which already includes editing margin), not exceeding the limit in the tool description |
 | `ratio` | The same for the whole film, following the aspect ratio in the brief |
-| `resolution` | The model's lowest resolution for drafts (e.g. `480p`); for finals, follow the delivery specs in the brief |
+| `resolution` | Choose drafts by supported tiers, actual price and review needs; deliver to the brief, reusing compliant drafts |
 | `audio` | true for shots with dialogue or that need production sound; false for picture-only shots (the editor handles the sound) |
+
+## First frames and measured outputs
+
+Before submission, check identity, hand and prop contact, the starting action and direction against adjacent shots. If the first frame prevents the action, report it and request an upstream adjustment rather than repeatedly reshooting with more prompt text.
+
+Use `ffprobe` to measure width, height, duration, frame rate and audio streams. Request parameters are targets; receipts and files establish results. Metadata compliance does not prove usable action, performance or sound: inspect usable intervals and state any unverified checks. Record generation duration separately from the duration used in the edit.
 
 ## Self-check (every shot, before delivery)
 
@@ -75,7 +81,7 @@ When reshooting, **change only one thing at a time**, or you will not know which
 
 ## Technical check
 
-The technical check the director sends once the brief is signed off: one low-resolution draft with a face and one spoken line. In the result, say whether the first frame with the face was accepted and which image it was; whether lip sync and voice are usable; whether anything needs the user's own approval or activation; and whether the output is usable.
+After brief sign-off, use one draft to test the capabilities this film actually depends on. Test character references when needed, dialogue and lip sync when needed, and the relevant action or production sound; do not add people or dialogue to films that need neither. Report accepted inputs, measured specifications, usable action and sound, missing access or authorisation, and verifiable usage and cost. Mark unknown prices explicitly.
 
 ## Test shoot
 

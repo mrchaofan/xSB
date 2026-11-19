@@ -7,13 +7,13 @@ inputs: brief, script, style_guide
 
 One per main character, registered as `casting/<character>`, in markdown. It contains candidates only, nothing final: the character sheet is made only after the user has chosen (skill `character`).
 
-Cast main characters only. Supporting characters and characters who appear in only one or two shots go straight to a character sheet. For a character whose look the user specified in the brief or supplied a photo for, do not produce candidates; register the user's image as the sole candidate and note where it came from. When what the user supplied is a photo of a real person, warn the director in your result: many video models do not accept an uploaded real face, as the chosen model's rules say (the technical check tests it), so the user may first have to register and authorise that person's portrait with the model's platform, or a generated look has to be used instead.
+First distinguish casting an identity from choosing a look for an established person. When the user specifies a person or supplies identity references, preserve their face and identity; requested look candidates vary costume, hair styling and performance rather than the actor. If the user has already chosen a usable look and wants no candidates, record its source and proceed to the character sheet. Supporting characters may go straight to a character sheet. Whether real-person references are accepted depends on this film's model documentation and technical check; report verified restrictions rather than importing another platform's rules.
 
 ## 1. First write down what this character requires
 Copy the fixed conditions from the script: age range, gender, role, and any traits the story needs ("should look more tired than their actual age"). Candidates vary only within these conditions.
 
 ## 2. Produce three to five candidates
-The candidates must be **clearly distinct** from one another: different face shapes, temperaments, and apparent ages, so the choice means something. Do not offer three minor variations of the same face.
+When identity is open, candidates may vary face shape, temperament and apparent age within the script's conditions. When identity is fixed, distinguish candidates along the requested styling dimensions while preserving the face and stable traits. Follow the task and authorised scope for candidate count; do not generate extras to meet a quota.
 
 So that the comparison is only about the person, shoot every candidate the same way:
 
@@ -35,7 +35,7 @@ An image takes a few seconds to generate: if a candidate's face is distorted or 
 End with your recommendation and the reason.
 
 ## 4. Multiple main characters
-Put the candidates you recommend for each character side by side in a lineup-style comparison image (same background, same lighting), and check whether they look like people from the same film when standing together, and whether they are easy to tell apart. Register it as `candidate/lineup-<n>`. If two of them look too much alike, replace one.
+Arrange the original candidates side by side without stretching, keeping their individual asset references, to compare style and recognisability. Register it as `candidate/lineup-<n>`. A comparison montage preserves the faces; generate an actual group image separately when requested and check it. If established people are hard to distinguish, adjust styling and composition before considering any change of identity.
 
 ## What to include in the result
 Each character's candidate asset ids, and your recommendation. Do not decide yourself: the director asks the user to choose.

@@ -324,11 +324,18 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
     const turn = turns[i];
     const verbatim = turns.length - i <= HANDOFF_VERBATIM;
     // What was said is set off by an indent, so that it reads as quoted history, not as the handoff's own words.
-    const quote = (text: string): string => (verbatim ? text.trim() : firstLine(text)).split("\n").map((line) => `  ${line}`).join("\n");
-    const inputs = turn.inputs.map((input) => `${whoSaid(input.origin)}:\n${quote(input.text)}`).join("\n");
-    const tools = turn.tools.length ? `\ntools used: ${[...new Set(turn.tools)].join(", ")}` : "";
-    const reply = turn.reply.trim() ? `\nyou answered:\n${quote(turn.reply)}` : "";
-    const text = `<xsb-past-turn at="${turn.at}">\n${inputs}${tools}${reply}\n</xsb-past-turn>`;
+    const render = (full: boolean, excerpt = false): string => {
+      const quote = (text: string): string => (full ? text.trim() : firstLine(text)).split("\n").map((line) => `  ${line}`).join("\n");
+      const inputs = turn.inputs.map((input) => `${whoSaid(input.origin)}:\n${quote(input.text)}`).join("\n");
+      // Tool titles can contain whole shell scripts; the transcript retains the details.
+      const tools = turn.tools.length ? `\ntools used: ${[...new Set(turn.tools.map(firstLine))].join(", ")}` : "";
+      const reply = turn.reply.trim() ? `\nyou answered:\n${quote(turn.reply)}` : "";
+      const note = excerpt ? "Excerpt of this turn; consult the transcript and current assets for details.\n" : "";
+      return `<xsb-past-turn at="${turn.at}">\n${note}${inputs}${tools}${reply}\n</xsb-past-turn>`;
+    };
+    let text = render(verbatim);
+    // A large asset injection must not erase the latest turn or everything before it.
+    if (text.length > left) text = render(false, true);
     if (text.length > left) {
       omitted = i + 1;
       break;
