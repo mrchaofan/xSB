@@ -107,9 +107,12 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
   const permission = { id: id(), kind: "permission", detail: "python3 budget.py --scene 3 --days 2" };
 
   const BACKENDS = [
-    { name: "claude", command: "claude-agent-acp", installed: true },
-    { name: "codex", command: "codex-acp", installed: true },
+    { name: "claude", cli: "claude", configPath: "~/.claude/settings.json", command: "claude-agent-acp", installed: true },
+    { name: "codex", cli: "codex", configPath: "~/.codex/config.toml", command: "codex-acp", installed: true },
   ];
+  // Preview missing-program setup without touching real installations.
+  const missingCli = new URLSearchParams(location.search).get("missing");
+  for (const backend of BACKENDS) if (backend.name === missingCli) Object.assign(backend, { installed: false, missing: backend.name });
   const skill = (name, produces, description, body, inputs = "") => ({ name, produces, inputs, description, body });
 
   /** 应用自带的一支预设团队（原型里只放了一个角色作示意）。 */
@@ -458,6 +461,20 @@ td,th{border-top:1px solid #000;padding:8px 10px 8px 0;text-align:left;vertical-
       for (const r of data.roles) if (r.preset?.team === teamId) { r.preset = null; emit({ role: structuredClone(r) }); }
     },
     backends: async () => structuredClone(BACKENDS),
+    cliConfig: async (name) => ({ path: name === "codex" ? "~/.codex/config.toml" : "~/.claude/settings.json", exists: true }),
+    revealCliConfig: async () => true,
+    async checkCli(name) {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const previewState = new URLSearchParams(location.search).get("cli-state");
+      if (previewState === "error") throw new Error("Preview: CLI check timed out. No real CLI was run.");
+      return { state: !BACKENDS.find((b) => b.name === name)?.installed ? "missing"
+        : ["unauthenticated", "unknown", "broken"].includes(previewState) ? previewState : "ready", version: "1.0.0" };
+    },
+    async installCli(name) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      Object.assign(BACKENDS.find((b) => b.name === name), { installed: true, missing: undefined });
+      return { state: "unauthenticated", version: "1.0.0" };
+    },
     async locateProgram(command) {       // Electron：系统的选择文件对话框
       Object.assign(BACKENDS.find((b) => b.name === command) ?? {}, { installed: true, missing: undefined });
       return true;

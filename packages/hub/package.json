@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "@xsb/protocol": "0.1.0",
-    "@xsb/store": "0.1.0"
+    "@xsb/store": "0.1.0",
+    "cross-spawn": "^7.0.6"
   },
   "engines": {
     "node": ">=22.18"
@@ -23,6 +24,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@xsb/adapter": "0.1.0"
   }
 }

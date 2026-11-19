@@ -1,6 +1,7 @@
 // Agent 的创建、编辑、删除，以及它与角色页共用的两个对话框：重启确认、系统说明预览。
 import { OVER, STATE_TEXT, TASK_TEXT, agentOf, focusLane, initiatorOf, onAgent, roleOf, roleTitle, state } from "./app.js";
 import { avatarPicker } from "./avatars.js";
+import { backendControls } from "./backend.js";
 import { fill, h } from "./dom.js";
 import { confirmDialog, field, input, openDialog, select } from "./form.js";
 import { t } from "./i18n.js";
@@ -57,26 +58,19 @@ export async function editAgent(agent) {
     render();
   };
 
-  // 应用不安装任何东西：程序不在 PATH 上时，请用户指出它在哪。
-  const locate = async (b, status) => {
-    try {
-      if (!await xsb.locateProgram(b.missing)) return;
-      state.backends = await xsb.backends();
-      if (!edited.has("backend")) draft.backend = b.name;
-      render();
-    } catch (e) {
-      status.textContent = e.message;
-    }
-  };
   const backends = () => h("div", { class: "choices" }, ...state.backends.map((b) => {
     // 后端就叫它自己的名字。启动命令只在它说明了名字说明不了的东西时才显示：用户自己登记的后端。
     const named = b.command.split(" ")[0].startsWith(b.name);
-    const status = h("small", {}, b.installed ? (named ? "" : b.command) : t("backend.missing", { command: b.missing ?? b.command.split(" ")[0] }));
-    return h("label", { class: "choice" },
-      h("input", { type: "radio", name: "backend", checked: draft.backend === b.name, disabled: !b.installed,
-        onchange: () => { draft.backend = b.name; edited.add("backend"); } }),
-      h("strong", {}, b.name), status,
-      b.missing && h("button", { class: "btn", type: "button", onclick: (e) => { e.preventDefault(); locate(b, status); } }, t("common.locate")));
+    const radio = h("input", { type: "radio", name: "backend", checked: draft.backend === b.name, disabled: !b.installed,
+      onchange: () => { draft.backend = b.name; edited.add("backend"); } });
+    return h("div", { class: "choice backend-choice" },
+      h("label", { class: "backend-name" }, radio, h("strong", {}, b.cli === "claude" ? "Claude Code" : b.cli === "codex" ? "Codex" : b.name)),
+      !named && h("small", {}, b.command),
+      backendControls(b, (updated) => {
+        radio.disabled = !updated.installed;
+        if (creating && !draft.backend && updated.installed) draft.backend = b.name;
+        radio.checked = draft.backend === b.name;
+      }));
   }));
 
   const render = () => fill(fields,
@@ -119,9 +113,10 @@ export async function editAgent(agent) {
   };
 
   render();
-  openDialog(creating ? t("agent.new.title") : t("agent.edit.title", { name: agent.name, agent: agent.id }), [fields, error], creating
+  const dialog = openDialog(creating ? t("agent.new.title") : t("agent.edit.title", { name: agent.name, agent: agent.id }), [fields, error], creating
     ? [{ label: t("common.cancel") }, { label: t("agent.create"), primary: true, run: save }]
     : [{ label: t("agent.delete"), side: true, run: remove },
        { label: t("prompt.preview"), run: () => { previewPrompt([agent]); return false; } },
        { label: t("common.cancel") }, { label: t("common.save"), primary: true, run: save }]);
+  dialog.classList.add("agent-editor");
 }

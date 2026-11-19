@@ -23,10 +23,11 @@ import { Paths, describeBackends, presetRoots, stopHub } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
+import { AgentClis, agentCli, configPath } from "./agent-cli.ts";
 import type { BackendView, Event } from "./bridge.ts";
 import { serveBrowser } from "./browser.ts";
 import { imagesFromPaths } from "./clipboard-image.ts";
-import { AGENTS, Clis, wrapped } from "./clis.ts";
+import { Clis, wrapped } from "./clis.ts";
 import { notice, setUpNotices } from "./notices.ts";
 import { PREVIEW_PARTITION, Pages } from "./pages.ts";
 import { ARTIFACT_SCHEME, Workspace } from "./workspace.ts";
@@ -39,11 +40,17 @@ const PRELOAD = fileURLToPath(new URL("./preload.cjs", import.meta.url));
 
 /** Set up once this is known to be the one running app, and before any hub is started: the hub inherits the PATH it sets up, and finds the agents' programs on it. */
 let clis: Clis;
+let agentClis: AgentClis;
 
 /** The hub's backends, with which of them lack their program. */
 async function backends(workspace?: Workspace): Promise<BackendView[]> {
+  await clis.refresh();
   const list = workspace ? await workspace.backends() : describeBackends().map((b) => ({ name: b.name, command: [b.command, ...b.args].join(" "), installed: b.installed }));
-  return list.map((b) => ({ ...b, missing: AGENTS.has(b.name) && clis.missing(b.name) ? b.name : undefined }));
+  return list.map((b) => {
+    const cli = wrapped(b.command.split(" ")[0]);
+    return { ...b, installed: cli ? !clis.missing(cli) : b.installed, missing: cli && clis.missing(cli) ? cli : undefined,
+      cli: cli ? agentCli(cli) : undefined, configPath: cli ? configPath(agentCli(cli)) : undefined };
+  });
 }
 
 /** The language the user's system is in: what the pages are worded in, and what the hub is told the user reads. */
@@ -118,6 +125,26 @@ async function locateProgram(win: BrowserWindow, command: string): Promise<boole
   const { filePaths } = await dialog.showOpenDialog(win, { title: text.locate(command), properties: ["openFile", "showHiddenFiles"] });
   if (!filePaths[0]) return false;
   if (!clis.setPath(command, filePaths[0])) throw new Error(text.notRunnable(filePaths[0]));
+  return true;
+}
+
+/** Confirmation lives in main: an IPC caller cannot create a missing config without this user decision. */
+async function revealCliConfig(win: BrowserWindow, name: "codex" | "claude"): Promise<boolean> {
+  let config = await agentClis.config(name);
+  if (!config.exists) {
+    const zh = language() === "zh-CN";
+    const choice = await dialog.showMessageBox(win, {
+      type: "info",
+      message: zh ? `创建 ${name === "claude" ? "Claude Code" : "Codex"} 配置文件？` : `Create a ${name === "claude" ? "Claude Code" : "Codex"} configuration file?`,
+      detail: zh
+        ? `这个文件还不存在，将使用模板创建：\n${config.path}\n\n${name === "codex" ? "默认只读，执行命令需要确认。可修改字段附有注释。" : "默认请求操作确认。字段说明保存在旁边的 settings.README.md。"}\n\n创建后会在文件管理器中显示。使用前仍需登录，或按说明配置你的服务。`
+        : `This file does not exist yet. A template will be created at:\n${config.path}\n\n${name === "codex" ? "Read-only by default, with command approval. Editable fields have comments." : "Operations request approval by default. Field notes are in the adjacent settings.README.md."}\n\nThen it will be shown in your file manager. Sign in or configure your provider before use.`,
+      buttons: zh ? ["取消", "创建并查看"] : ["Cancel", "Create and show"], defaultId: 1, cancelId: 0,
+    });
+    if (choice.response !== 1) return false;
+    config = await agentClis.config(name, true, language());
+  }
+  shell.showItemInFolder(config.path);
   return true;
 }
 
@@ -334,6 +361,14 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       return backends(workspace);
     case "locateProgram":
       return locateProgram(win, args[0]);
+    case "cliConfig":
+      return agentClis.config(agentCli(args[0]));
+    case "revealCliConfig":
+      return revealCliConfig(win, agentCli(args[0]));
+    case "installCli":
+      return agentClis.install(agentCli(args[0]));
+    case "checkCli":
+      return agentClis.check(agentCli(args[0]));
     case "newWindow":
       return createWindow();
   }
@@ -418,6 +453,7 @@ void app.whenReady().then(() => {
   if (!first) return;
   setUpNotices();
   clis = new Clis(path.join(app.getPath("userData"), "backends"));
+  agentClis = new AgentClis(clis, path.join(app.getPath("userData"), "backends", "installed"));
   protocol.handle(APP_SCHEME, (request) => {
     const file = path.join(RENDERER, decodeURIComponent(new URL(request.url).pathname));
     const inside = !path.relative(RENDERER, file).startsWith("..");

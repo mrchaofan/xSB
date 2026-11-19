@@ -53,7 +53,9 @@ export type PageView = { id: string; contentsId: number; url: string; title: str
 /** How far something done to several agents got: their ids, and why it stopped if it did. */
 export type Progress = { done: string[]; failed?: string; error?: string };
 
-export type BackendView = { name: string; command: string; installed: boolean; missing?: string };
+export type BackendView = { name: string; command: string; installed: boolean; missing?: string; cli?: "codex" | "claude"; configPath?: string };
+
+export type { CliCheck, CliConfig } from "./agent-cli.ts";
 
 /** A role as it is edited: servers and variables as lists, a skill's front matter as fields. */
 export type RoleView = {

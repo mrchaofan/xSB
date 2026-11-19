@@ -9,7 +9,7 @@ const METHODS = [
   "history", "send", "cancel", "clear", "permit",
   "putAgent", "removeAgent", "inspectAgent",
   "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "revealSkill",
-  "backends", "locateProgram", "presets", "useTeam", "dropTeam", "buildTeam", "deriveTeam", "openFolder",
+  "backends", "locateProgram", "cliConfig", "revealCliConfig", "installCli", "checkCli", "presets", "useTeam", "dropTeam", "buildTeam", "deriveTeam", "openFolder",
   "openPage", "page", "pageWindow",
   "readClipboardImages", "copyText", "openArtifact", "revealArtifact",
 ];

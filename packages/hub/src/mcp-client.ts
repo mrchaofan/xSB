@@ -8,7 +8,7 @@
  * started something outside (a generation that is billed) calls it off and says
  * so. Only after that is the server stopped.
  */
-import { spawn } from "node:child_process";
+import spawn from "cross-spawn";
 import { Connection } from "@xsb/protocol";
 import type { McpServer } from "@xsb/protocol";
 import { VERSION } from "./util.ts";
@@ -17,8 +17,8 @@ export async function mcpRequest(server: McpServer, method: string, params: unkn
   if (server.type !== "stdio") throw new Error(`MCP server "${server.name}" is not a stdio server`);
   const env = { ...process.env, ...Object.fromEntries((server.env ?? []).map((e) => [e.name, e.value])) };
   const proc = spawn(server.command, server.args ?? [], { cwd, env, stdio: ["pipe", "pipe", "ignore"] });
-  const conn = new Connection(proc.stdout, proc.stdin, `MCP server "${server.name}"`);
-  proc.stdin.on("error", () => {});
+  const conn = new Connection(proc.stdout!, proc.stdin!, `MCP server "${server.name}"`);
+  proc.stdin!.on("error", () => {});
 
   let grace: NodeJS.Timeout | undefined;
   let giveUp = (): void => {};

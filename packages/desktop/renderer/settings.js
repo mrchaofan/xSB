@@ -1,6 +1,7 @@
 import { closePage, refreshRail, roleOf, roleTitle, showPage, state, STATE_TEXT } from "./app.js";
 import { editAgent } from "./agent.js";
 import { avatarImage } from "./avatars.js";
+import { backendControls, refreshBackendControls } from "./backend.js";
 import { $, ICON, h } from "./dom.js";
 import { field, select } from "./form.js";
 import { t } from "./i18n.js";
@@ -54,7 +55,8 @@ export function showSettings(key = "general", refresh = true) {
     control.setAttribute("aria-label", t(`settings.${name}`));
     return control;
   };
-  let content;
+  let content, backendList;
+  const backendCards = () => state.backends.map((backend) => backendControls(backend, undefined, { card: true }));
   if (key === "general") content = [
     section(t("settings.appearance"),
       settingRow(t("settings.theme"), t("settings.themeHint"), choose("theme", ["light", "dark", "system"])),
@@ -62,18 +64,11 @@ export function showSettings(key = "general", refresh = true) {
     section(t("settings.conversation"), settingRow(t("settings.showTools"), t("settings.showToolsHint"),
       toggle(t("settings.showTools"), global.showTools, (value) => save(() => saveGlobalPreferences({ showTools: value }))))),
   ];
-  if (key === "backends") content = [section(t("settings.backends"),
+  if (key === "backends") content = [
     h("p", { class: "hint" }, t("settings.backendsHint")),
-    ...state.backends.map((backend) => settingRow(backend.name, backend.command,
-      backend.installed ? h("span", { class: "badge available" }, t("settings.available"))
-        : h("button", { class: "btn", disabled: !backend.missing, onclick: async (e) => {
-            const button = e.currentTarget;
-            button.disabled = true;
-            try { if (await xsb.locateProgram(backend.missing)) { state.backends = await xsb.backends(); showSettings("backends"); } }
-            catch (error) { failure.textContent = error.message; }
-            finally { button.disabled = false; }
-          } }, t("common.locate")))),
-    !state.backends.length && h("p", { class: "hint" }, t("settings.backendsEmpty")))];
+    backendList = h("div", { class: "backend-list" }, ...backendCards()),
+    h("div", { class: "backend-assurance" }, h("span", { "aria-hidden": "true", html: ICON.check }), h("span", {}, t("backend.check.free"))),
+    h("details", { class: "backend-explanation" }, h("summary", {}, t("backend.check.scope")), h("p", { class: "hint" }, t("backend.check.hint")))];
   if (key === "workspace") {
     const prefs = workspacePreferences(state.workspace.path);
     content = [section(t("settings.workspaceInfo"),
@@ -103,13 +98,15 @@ export function showSettings(key = "general", refresh = true) {
     h("div", { class: "settings-heading" }, h("span", { class: "scope-label" }, t(["general", "backends"].includes(key) ? "settings.globalScope" : "settings.workspaceScope")),
       h("h1", { tabindex: "-1" }, t(`settings.${key}`)), h("p", {}, t(["general", "backends"].includes(key) ? "settings.globalHint" : "settings.workspaceHint"))),
     failure, ...content,
-    h("small", { class: "settings-saved", role: "status" }, t("settings.autoSave"))));
+    key !== "backends" && h("small", { class: "settings-saved", role: "status" }, t("settings.autoSave"))));
   $(".settings-heading h1")?.focus({ preventScroll: true });
   if (key === "backends" && refresh) {
     xsb.backends().then((backends) => {
       if (current !== revision || state.settings !== "backends") return;
+      const sameNames = state.backends.map((b) => b.name).join("\0") === backends.map((b) => b.name).join("\0");
       state.backends = backends;
-      showSettings("backends", false);
+      if (sameNames) refreshBackendControls(); else backendList.replaceChildren(...backendCards());
+      if (!backends.length) backendList.replaceChildren(h("p", { class: "hint" }, t("settings.backendsEmpty")));
     }, (error) => {
       if (current === revision && state.settings === "backends") failure.textContent = error.message;
     });
