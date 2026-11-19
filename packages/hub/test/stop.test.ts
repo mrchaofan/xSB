@@ -127,7 +127,7 @@ test("cancelled idle waits for an in-flight prompt's real insertion receipt", as
   const hub = {
     state, kernel, paths: { dir }, stopping: false,
     agentChanged() {}, log() {}, permissions: { cancel() {} },
-    delivery: { turnEnded() {} },
+    delivery: { turnEnded() {} }, rotateBridge() {},
   };
   const session = new LiveSession(hub as any, state.sessions.get(B.sessionId)!);
   const input = (id: string, inserted: boolean): Input => ({
@@ -137,7 +137,7 @@ test("cancelled idle waits for an in-flight prompt's real insertion receipt", as
   });
   const first = input("first", true), pending = input("pending", false);
   pending.batch = [pending];
-  const turn = { first, inputs: [first, pending], held: [], items: [], inserted: true, started: true, done: deferred<any>() };
+  const turn = { id: "old", protected: true, first, inputs: [first, pending], held: [], items: [], inserted: true, started: true, done: deferred<any>() };
   session.current = turn;
   Object.assign(session, { backend: { cancel() {}, caps: { steering: false } }, backendIdle: false });
   session.beginUserStop();
@@ -166,7 +166,7 @@ test("stop timeout revokes the old tools and closes the backend before unfreezin
     messageId: "timeout", origin: { kind: "user" as const, messageId: "timeout" },
     prompt: [], content: [], in: true, inserted: deferred<void>(),
   };
-  session.current = { first, inputs: [first], held: [], items: [], inserted: true, started: true, done: deferred<any>() };
+  session.current = { id: "old", protected: true, first, inputs: [first], held: [], items: [], inserted: true, started: true, done: deferred<any>() };
   Object.assign(session, { backend: { cancel() { effects.push("cancel"); }, stop() { effects.push("close transport"); } }, backendIdle: false });
   t.mock.timers.enable({ apis: ["setTimeout"] });
   session.beginUserStop();

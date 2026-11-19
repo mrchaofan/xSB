@@ -29,7 +29,7 @@ export function addEdges(graph: Graph, task: Task): void {
  * left running is its dispatcher's now; the root for a task started for nothing. A parent that ended otherwise
  * (cancelled, failed, interrupted) holds nothing up any more. Memoised in `memo`, for a task is asked about once per walk.
  */
-function holders(g: Tasks, id: string, memo: Map<string, Set<string>>): Set<string> {
+function holders(g: Tasks, id: string, memo: Map<string, Set<string>>, roots: Set<string>): Set<string> {
   const known = memo.get(id);
   if (known) return known;
   const held = new Set<string>();
@@ -37,9 +37,10 @@ function holders(g: Tasks, id: string, memo: Map<string, Set<string>>): Set<stri
   if (!parents.length) held.add(ROOT);
   for (const p of parents) {
     const parent = g.tasks.get(p);
-    if (!parent) held.add(ROOT);
+    if (roots.has(p)) held.add(p);
+    else if (!parent) held.add(ROOT);
     else if (!isTerminal(parent.status)) held.add(p);
-    else if (parent.status === "completed") for (const h of holders(g, p, memo)) held.add(h);
+    else if (parent.status === "completed" && !parent.cascadeStopped) for (const h of holders(g, p, memo, roots)) held.add(h);
   }
   memo.set(id, held);
   return held;
@@ -72,12 +73,13 @@ export function doomMany(g: Tasks, roots: Task[], force = new Set<string>()): { 
     if (!forcedBelow.has(child)) { forcedBelow.add(child); forcedQueue.push(child); }
   }
   const stopped = new Set(roots.map((t) => t.id));
-  const doomed = [...roots];
+  const rootIds = new Set(stopped);
+  const doomed = roots.filter((t) => !isTerminal(t.status));
   const spared: Task[] = [];
   const memo = new Map<string, Set<string>>();
   for (const task of g.tasks.values()) {
     if (!below.has(task.id) || stopped.has(task.id) || isTerminal(task.status)) continue;
-    const held = [...holders(g, task.id, memo)];
+    const held = [...holders(g, task.id, memo, rootIds)];
     if (held.every((h) => stopped.has(h)) || (forcedBelow.has(task.id) && held.some((h) => stopped.has(h)))) {
       stopped.add(task.id);
       doomed.push(task);

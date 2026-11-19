@@ -62,6 +62,11 @@ export class Backend {
     this.sessions.set(backendSessionId, session);
   }
 
+  /** Retire a stopped conversation before a new one can receive its late updates. */
+  close(backendSessionId: string): void {
+    this.sessions.delete(backendSessionId);
+  }
+
   /** What this backend can read of some input: an image it cannot see is named instead, so the model knows one was there. */
   private readable(prompt: ContentBlock[]): ContentBlock[] {
     if (this.caps.image) return prompt;
@@ -147,7 +152,7 @@ export class Backend {
       const session = backend.sessions.get(p.sessionId);
       // Every session of a backend is one the hub opened (LiveSession.bind): anything else is not taken into account.
       if (!session) return events.log(`update of session ${p.sessionId}, which the hub did not open: ignored`);
-      session.onBackendUpdate(p.update);
+      session.onBackendUpdate(p.update, p.sessionId);
     });
     conn.onRequest("session/request_permission", (p: PermissionRequest) => {
       const session = backend.sessions.get(p.sessionId);

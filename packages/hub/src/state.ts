@@ -28,7 +28,7 @@ export type SessionRec = {
    * The conversation grew past `limits.sessionTokens`: its next turn starts a new backend session, handed the
    * conversation so far (session.ts, `renewed`). The session stays the same.
    */
-  renew?: boolean;
+  renew?: boolean | "stopped";
   /** How much of the backend's context window the conversation used at the end of its last turn, in tokens. */
   used?: number;
   title?: string;
@@ -74,6 +74,8 @@ export type MailItem = {
   prompt?: ContentBlock[];
   /** Of xsb's word on work the recipient has open: it goes into the running turn (kernel.ts, `deliveryPolicy`). */
   steer?: boolean;
+  /** An explicit append belongs only to this turn, never to a later one. */
+  targetTurnId?: string;
   /** How it is to reach its recipient (kernel.ts, `deliveryPolicy`). Absent: `wake`. */
   pref?: DeliveryPref;
   /** The recipient's generation when this result was requested. */

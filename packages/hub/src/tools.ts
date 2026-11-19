@@ -292,6 +292,7 @@ export const TOOLS: Tool[] = [
           description:
             'If the peer is at work on a task of yours. "queue" (default): this task waits until that work is done, and both are done. "replace": this task takes its place: that task is stopped (with what was started for it) and ends as superseded, and the peer starts on this one. Use it when you changed what you want, not to run work alongside.',
         },
+        target_turn_id: str("For replace: the current turn id returned by list_agents. Missing, expired or user-protected targets are queued."),
       },
       ["to", "title", "instructions"],
     ),
@@ -310,7 +311,7 @@ export const TOOLS: Tool[] = [
       // An agent has one conversation, and does all its work there, one turn at a time (Hub.mainSession).
       const session = ctx.hub.mainSession(to);
       const task = allowed(ctx.hub.kernel.dispatch(self(ctx), { agentId: to, sessionId: session.id }, { title, topic: topic ?? title, instructions, after, inputs, produces, deliveryPref }));
-      const replaced = args.onBusy === "replace" ? ctx.hub.kernel.replace(task) : [];
+      const replaced = args.onBusy === "replace" ? ctx.hub.kernel.replace(task, args.target_turn_id) : [];
       const held = task.status === "blocked";
       const answer = { task_id: task.id, status: held ? "held until the tasks in `after` finish" : busyNote(ctx, task, replaced) ?? "dispatched", delivery: deliveryPref, ...(note ? { note } : {}) };
       if (deliveryPref !== "sync") return json(answer);
@@ -426,7 +427,6 @@ export const TOOLS: Tool[] = [
     inputSchema: schema({ task_id: str("Task id.") }, ["task_id"]),
     run(ctx, args) {
       const task = ownTask(ctx, need(args, "task_id"), true);
-      if (isTerminal(task.status)) return `Task ${task.id} already ${task.status}.`;
       const { stopping, with: went } = allowed(ctx.hub.kernel.stop(task, agentPrincipal(ctx.session.agentId), { status: "cancelled", reason: "cancelled", result: "Cancelled by the dispatcher." }));
       const also = went.length ? ` Stopped with it, as started for it: ${went.map((t) => `${t.id} "${t.title}"`).join(", ")}.` : "";
       return `Task ${task.id} ${stopping ? "is being stopped" : "cancelled"}.${also}`;
@@ -538,6 +538,8 @@ export const TOOLS: Tool[] = [
           description: a.description,
           produces: team.filter((c) => c.agents.includes(a.id)).map((c) => c.produces),
           state: ctx.hub.agentInfo(a).state,
+          current_turn_id: ctx.hub.agentInfo(a).currentTurnId,
+          turn_protected: ctx.hub.agentInfo(a).turnProtected,
           topics_with_you: topicsWith(ctx, a.id),
           you_may: [...(reaches(ctx.caps.dispatch, a.id) ? ["dispatch"] : []), ...(reaches(ctx.caps.message, a.id) ? ["message"] : []), ...(ctx.caps.upward.has(a.id) ? ["report", "ask"] : [])],
         }));
@@ -545,9 +547,21 @@ export const TOOLS: Tool[] = [
     },
   },
   {
+    name: "append_instruction",
+    description: "Append instructions to a specific running turn. Obtain target_turn_id from list_agents. An ended or changed target fails; it never queues or enters a later turn.",
+    inputSchema: schema({ to: str("Agent id."), target_turn_id: str("The running turn id."), content: str("Additional instructions."), topic: TOPIC }, ["to", "target_turn_id", "content"]),
+    async run(ctx, args) {
+      const to = peer(ctx, need(args, "to"));
+      await authorize(ctx, "message", [to]);
+      ctx.assertActive();
+      const id = await ctx.hub.delivery.append(ctx.hub.mainSession(to), need(args, "target_turn_id"), self(ctx), need(args, "content"), args.topic);
+      return json({ message_id: id, delivery: "inserted into the specified turn" });
+    },
+  },
+  {
     name: "send_message",
     description:
-      "Send a message to another agent. If the peer is working on a task you gave it, it goes into its running work; otherwise, if it is busy, it is read as its next turn. The result says which; message_status tells later whether its model has seen it.",
+      "Send a message to another agent as a turn of its own. A busy peer queues it. Use append_instruction with a target_turn_id to add to a specific running turn. message_status tells whether its model has seen it.",
     inputSchema: schema({ to: str("Agent id."), content: str("The message."), topic: TOPIC }, ["to", "content"]),
     async run(ctx, args) {
       const to = peer(ctx, need(args, "to"));

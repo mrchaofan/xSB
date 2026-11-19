@@ -20,7 +20,7 @@ import path from "node:path";
  * stopped while the hub still held it. The user's is then kept for the next
  * turn; mail waits for a turn of its own.
  */
-import { Boundaries, Discarded, OriginExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
+import { Boundaries, Discarded, OriginExt, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
 import type { Boundary, ContentBlock, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
@@ -71,6 +71,8 @@ export type Input = Discarded &
     batch?: Input[];
     /** It is in the conversation. */
     in?: boolean;
+    /** User input accepted after a replacement committed joins that replacement's new turn. */
+    joinsTaskId?: string;
   };
 const inputOf = (req: TurnRequest): Input => {
   const messageId = req.origin.messageId ?? newId("m");
@@ -89,6 +91,13 @@ const itemsOf = (inputs: Input[]): MailItem[] => inputs.flatMap((i) => (i.item ?
 export type TurnEnd = { stopReason: StopReason; failure?: unknown };
 
 export type Turn = {
+  id: string;
+  protected: boolean;
+  /** Unread inputs are moved together when the turn ends. */
+  recovered?: Input[];
+  order?: Input[];
+  /** Work inherited when this turn began, retained after report_result completes it. */
+  taskIds?: string[];
   first: Input;
   /** Every input of the turn, in the order it came: in the conversation, on its way, or held by the hub. */
   inputs: Input[];
@@ -121,6 +130,7 @@ export class LiveSession {
   private queue: Input[] = [];
   /** What the user said that a stop kept from the model: it goes first when the next turn starts. */
   private carried: Input[] = [];
+  private priorityTaskId?: string;
   /** A user stop freezes dispatch until the old turn is confirmed idle. */
   private userStopping = false;
   private stopTimer?: NodeJS.Timeout;
@@ -163,7 +173,25 @@ export class LiveSession {
   }
 
   get acceptsTools(): boolean {
-    return !this.userStopping && !this.current?.cancelledBy;
+    return !this.userStopping && !this.current?.cancelledBy && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id });
+  }
+
+  protect(): void {
+    if (this.current && this.acceptsTools) this.current.protected = true;
+  }
+
+  prioritize(taskId: string, turnId: string): void {
+    if (this.current?.id === turnId) this.priorityTaskId = taskId;
+  }
+
+  taskIds(): string[] {
+    const turn = this.current;
+    if (!turn) return [];
+    return [...new Set([
+      ...(turn.taskIds ?? []),
+      ...turn.items.flatMap((m) => m.kind === "task" ? [m.taskId!] : []),
+      ...turn.inputs.flatMap((i) => i.origin.role === "task" && i.origin.taskId ? [i.origin.taskId] : []),
+    ])];
   }
 
   /** The agents whose chat this session is reading in its running turn: it may answer them (capabilities.ts). */
@@ -204,7 +232,7 @@ export class LiveSession {
     // A backend session of another backend is not that backend's to restore: the conversation is handed over instead.
     let renewal: Renewal | undefined = prior && this.rec.backend && this.rec.backend !== agent.backend ? "backend_changed" : undefined;
     // A conversation that grew too long goes on in a new backend session, handed what came before (`renew`).
-    if (!prior && this.rec.renew) renewal = "renewed";
+    if (!prior && this.rec.renew) renewal = this.rec.renew === "stopped" ? "stopped" : "renewed";
     if (prior && !renewal) {
       try {
         // Every ACP v2 agent resumes; the history is not replayed (the hub has it).
@@ -231,7 +259,7 @@ export class LiveSession {
       // The handoff is made before the boundary is written: what it tells is what precedes the boundary.
       this.prefaces.push(this.handoff(renewal));
       this.boundary({ kind: renewal, backend: agent.backend, handoff: true });
-      this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : renewal === "renewed" ? "renewed, its conversation having grown long" : "backend session renewed"}, with a handoff of the conversation`);
+      this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : renewal === "renewed" ? "renewed, its conversation having grown long" : renewal === "stopped" ? "continued after stopping" : "backend session renewed"}, with a handoff of the conversation`);
     }
   }
 
@@ -329,8 +357,13 @@ export class LiveSession {
   // ---- updates ------------------------------------------------------------
 
   /** An update from the backend. */
-  onBackendUpdate(update: SessionUpdate): void {
+  onBackendUpdate(update: SessionUpdate, backendSessionId?: string): void {
     const turn = this.current;
+    if (backendSessionId && backendSessionId !== this.rec.backendSessionId) return;
+    const correlation = update._meta?.[TurnExt.key] as { id?: string } | undefined;
+    const origin = update._meta?.[OriginExt.key] as OriginMeta | undefined;
+    const turnId = correlation?.id ?? origin?.turnId;
+    if (turnId && turnId !== turn?.id) return;
     switch (update.sessionUpdate) {
       case "user_message":
       case "user_message_chunk": {
@@ -418,6 +451,7 @@ export class LiveSession {
   /** Queue input as a turn of its own (`first`: ahead of what waits; the user's). Resolves once it is inserted. */
   enqueue(req: TurnRequest, first = false): Input {
     const input = inputOf(req);
+    if (users(input) && this.priorityTaskId) input.joinsTaskId = this.priorityTaskId;
     if (first) this.queue.unshift(input);
     else this.queue.push(input);
     this.pump();
@@ -430,6 +464,7 @@ export class LiveSession {
     this.queue = this.queue.filter((q) => {
       if (!q.item || !match(q.item)) return true;
       taken.push(q.item);
+      if (q.item.taskId === this.priorityTaskId) this.priorityTaskId = undefined;
       q.inserted.reject(RpcError.cancelled());
       return false;
     });
@@ -442,15 +477,29 @@ export class LiveSession {
    */
   pump(): void {
     if (this.userStopping || this.current || !this.queue.length) return;
+    if (this.priorityTaskId) {
+      const task = this.hub.state.tasks.get(this.priorityTaskId);
+      if (!task || task.stopping || isTerminal(task.status)) this.priorityTaskId = undefined;
+    }
+    if (this.priorityTaskId) {
+      const index = this.queue.findIndex((i) => i.item?.taskId === this.priorityTaskId);
+      if (index < 0) return;
+      const first = this.queue.splice(index, 1)[0];
+      const more = this.queue.filter((i) => i.joinsTaskId === this.priorityTaskId);
+      this.queue = this.queue.filter((i) => i.joinsTaskId !== this.priorityTaskId);
+      this.priorityTaskId = undefined;
+      return void this.run(first, more);
+    }
     if (this.carried.length) {
       const [first, ...more] = this.carried.splice(0);
       return void this.run(this.users(again(first)), more);
     }
-    void this.run(this.queue.shift()!);
+    void this.run(this.users(this.queue.shift()!));
   }
 
   private async run(first: Input, more: Input[] = []): Promise<void> {
-    const turn: Turn = { first, inputs: [first, ...more], held: [...more], inserted: false, items: itemsOf([first, ...more]), started: false, done: deferred() };
+    const turn: Turn = { id: newId("turn"), protected: [first, ...more].some(users), first, inputs: [first, ...more], order: [first, ...more], held: [...more], inserted: false, items: itemsOf([first, ...more]), started: false, done: deferred() };
+    turn.taskIds = this.hub.kernel.openTasks(this.id).filter((t) => !t.stopping).map((t) => t.id);
     this.current = turn;
     this.hub.agentChanged(this.agentId);
     this.state("running");
@@ -468,6 +517,7 @@ export class LiveSession {
     // What waited in the inbox comes with this turn, in its first prompt.
     const digest = this.hub.delivery.digest(this).map((d) => inputOf(d));
     turn.inputs.splice(1, 0, ...digest);
+    turn.order!.splice(1, 0, ...digest);
     turn.items.push(...itemsOf(digest));
     this.send([first, ...digest]);
   }
@@ -487,7 +537,7 @@ export class LiveSession {
     const prompt = (): Promise<boolean> => {
       if (this.current !== turn || turn.cancelledBy) return Promise.reject(RpcError.cancelled());
       for (const input of batch) input.sent = "prompt";
-      return backend.prompt(sessionId, content, batch[0].origin).then(() => true);
+      return backend.prompt(sessionId, content, { ...batch[0].origin, turnId: turn.id }).then(() => true);
     };
     for (const input of batch) input.batch = batch;
     // The tasks it brings are the executor's from now: its tools (and calls of them) may come before the answer.
@@ -557,7 +607,7 @@ export class LiveSession {
     // The work that ended was not this turn's: the backend has not taken its first input yet.
     if (!turn.inserted && !turn.cancelledBy) return;
     // A prompt receipt can follow idle. Settle its real insertion outcome before discarding it for user stop.
-    if (this.userStopping && turn.inputs.some((i) => i.sent === "prompt" && !i.in)) return;
+    if ((turn.cancelledBy || this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })) && turn.inputs.some((i) => i.sent === "prompt" && !i.in)) return;
     const { stopReason, error } = this.lastStop;
     if (stopReason === "error") return this.end({ stopReason, failure: new RpcError(error?.code ?? -32603, error?.message ?? "the agent failed", error?.data) });
     this.end({ stopReason });
@@ -593,31 +643,57 @@ export class LiveSession {
    * next turn (docs/DESIGN.md 3.1, 7). Mail waits for a turn of its own; unless the kernel took it back meanwhile (its
    * task was stopped).
    */
-  private leave(input: Input): void {
+  private leave(input: Input, carry = false): void {
+    const turn = this.current;
     this.drop(input);
     input.sent = undefined;
     if (this.userStopping) return this.discard(input);
-    if (users(input)) return void this.carried.push(input);
-    if (!input.item || !this.hub.state.mail.has(input.item.id)) return this.discard(input);
-    this.queue.unshift(again(input));
+    if (input.item?.targetTurnId) {
+      this.hub.kernel.ack([input.item.id]);
+      return this.discard(input, new Error("Target turn has ended or changed."));
+    }
+    if (carry && users(input)) return void this.carried.push(input);
+    if (!users(input) && (!input.item || !this.hub.state.mail.has(input.item.id))) return this.discard(input);
+    if (turn) (turn.recovered ??= []).push(input);
   }
 
   private end(end: TurnEnd): void {
     const turn = this.current;
     if (!turn) return;
-    this.current = undefined;
+    // The backend may report idle before the deferred halt hook runs. The committed
+    // stop still owns this turn, including its unread input and backend retirement.
+    if (!end.failure && !turn.cancelledBy && this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })) {
+      turn.cancelledBy = "hub";
+      end = { ...end, stopReason: "cancelled" };
+    }
     // What is not in the conversation: on its way, or held by the hub.
     const out = turn.inputs.filter((i) => !i.in);
+    const order = turn.order ?? [...turn.inputs];
+    const expiredAppend = out.some((i) => i.item?.targetTurnId);
     let next: Input[] = [];
     if (!turn.started && end.failure) {
       // It never reached the backend: nothing else will run what it brought (its tasks fail with it).
       for (const input of out) this.discard(input, end.failure);
     } else {
+      // Stopped or failed: the backend drops what it did not take. Ended: it runs it next, a turn of its own (3.1, 5).
+      if (turn.cancelledBy || end.failure || !turn.started || expiredAppend) for (const input of out) this.leave(input);
+      else next = out;
+    }
+    const recovered = (turn.recovered ?? []).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    this.queue.unshift(...recovered.map(again));
+    if (turn.started || !end.failure) {
       turn.inputs = turn.inputs.filter((i) => i.in);
       turn.items = itemsOf(turn.inputs);
-      // Stopped or failed: the backend drops what it did not take. Ended: it runs it next, a turn of its own (3.1, 5).
-      if (turn.cancelledBy || end.failure || !turn.started) for (const input of out) this.leave(input);
-      else next = out;
+    }
+    this.current = undefined;
+    if ((turn.cancelledBy || expiredAppend) && this.backend) {
+      // ACP backends need not echo a turn id. Retire their old session, and its tool bridges,
+      // before the next turn binds a new conversation with a transcript handoff.
+      if (expiredAppend && !turn.cancelledBy) this.backend.cancel(this.rec.backendSessionId!);
+      this.backend.close?.(this.rec.backendSessionId!);
+      this.hub.rotateBridge(this);
+      this.backend = undefined;
+      this.save({ backendSessionId: undefined, renew: "stopped" });
     }
     if (this.used !== undefined && this.used !== this.rec.used) this.save({ used: this.used });
     // While the hub stops, nothing is acknowledged: the turn runs again on the next start.
@@ -625,7 +701,7 @@ export class LiveSession {
       if (end.failure) this.hub.log(`${this.agentId}/${this.id}: turn failed: ${errorMessage(end.failure)}`);
       // Its failure goes into the transcript, where the user sees it: the prompt that started it may have been answered long ago.
       if (end.failure) this.emit({ sessionUpdate: "session_info_update", _meta: { [TurnFailure.key]: { message: errorMessage(end.failure), data: (end.failure as RpcError).data } } } as SessionUpdate);
-      this.hub.kernel.hooks.emit("acp.turn_ended", { agentId: this.agentId, sessionId: this.id, stopReason: end.stopReason, failed: !!end.failure });
+      this.hub.kernel.hooks.emit("acp.turn_ended", { agentId: this.agentId, sessionId: this.id, turnId: turn.id, stopReason: end.stopReason, failed: !!end.failure });
       this.hub.delivery.turnEnded(this, turn, end);
       this.hub.agentChanged(this.agentId);
     }
@@ -643,7 +719,8 @@ export class LiveSession {
    * again, as a prompt.
    */
   private resume(inputs: Input[]): void {
-    const turn: Turn = { first: inputs[0], inputs, held: [], inserted: false, items: itemsOf(inputs), started: true, done: deferred() };
+    const turn: Turn = { id: newId("turn"), protected: inputs.some(users), first: inputs[0], inputs, order: [...inputs], held: [], inserted: false, items: itemsOf(inputs), started: true, done: deferred() };
+    turn.taskIds = this.hub.kernel.openTasks(this.id).filter((t) => !t.stopping).map((t) => t.id);
     this.current = turn;
     this.ranSince = false;
     this.users(inputs[0]);
@@ -671,10 +748,13 @@ export class LiveSession {
    * Put input into the running turn: once the backend has the turn's first input, it goes to the backend at once, on
    * its own (docs/DESIGN.md 3.1, 2-3). Returns undefined when no turn runs, or the running one is being stopped.
    */
-  steer(req: TurnRequest): Input | undefined {
+  steer(req: TurnRequest, targetTurnId?: string): Input | undefined {
     const turn = this.current;
-    if (!turn || turn.cancelledBy) return undefined;
+    if (!turn || !this.acceptsTools || (targetTurnId && targetTurnId !== turn.id)) return undefined;
+    if (req.origin.kind === "user") turn.protected = true;
     const input = inputOf({ ...req, origin: { ...req.origin, steered: true } });
+    turn.order ??= [...turn.inputs];
+    turn.order.push(input);
     turn.inputs.push(input);
     if (req.item) turn.items.push(req.item);
     if (turn.started && turn.inserted) this.send([input]);
@@ -703,6 +783,7 @@ export class LiveSession {
 
   /** Persistent mail/tasks were withdrawn already. Retire local copies and stop the backend last. */
   cancelUserWork(): void {
+    this.priorityTaskId = undefined;
     for (const input of [...this.queue.splice(0), ...this.carried.splice(0)]) this.discard(input);
     const turn = this.current;
     if (!turn) return this.releaseUserStop();
@@ -721,6 +802,7 @@ export class LiveSession {
       this.hub.backends.stop(this.agentId);
       this.backend?.stop();
       this.backend = undefined;
+      this.save({ backendSessionId: undefined, renew: "stopped" });
       this.end({ stopReason: "cancelled" });
     }, 10_000);
     this.backend?.cancel(this.rec.backendSessionId!);
@@ -737,7 +819,7 @@ export class LiveSession {
     if (!turn) return;
     this.hub.permissions.cancel(this);
     if (!turn.started && !users(turn.first)) {
-      for (const input of turn.held.filter(users)) this.leave(input);
+      for (const input of turn.held.filter(users)) this.leave(input, true);
       return;
     }
     turn.cancelledBy = "user";
@@ -746,11 +828,21 @@ export class LiveSession {
   }
 
   /** The hub stops the running turn, for the work it ran for was stopped. */
-  halt(): void {
+  halt(targetTurnId: string): void {
     const turn = this.current;
-    if (!turn) return;
+    if (!turn || turn.id !== targetTurnId) return;
     turn.cancelledBy ??= "hub";
     this.hub.permissions.cancel(this);
+    if (turn.started && !this.stopTimer) this.stopTimer = setTimeout(() => {
+      if (this.current !== turn) return;
+      this.hub.log(`${this.agentId}/${this.id}: task stop timed out; closing the old backend`);
+      this.hub.rotateBridge(this);
+      this.hub.backends.stop(this.agentId);
+      this.backend?.stop();
+      this.backend = undefined;
+      this.save({ backendSessionId: undefined, renew: "stopped" });
+      this.end({ stopReason: "cancelled" });
+    }, 10_000);
     if (turn.started && this.backend) this.backend.cancel(this.rec.backendSessionId!);
     if (turn.started) this.settle();
   }

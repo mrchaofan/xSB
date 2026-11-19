@@ -20,7 +20,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "node --test test/capabilities.test.ts test/presets.test.ts test/templates.test.ts test/history.test.ts test/stop.test.ts test/transcript.test.ts && node test/kernel.test.ts && node test/e2e.test.ts",
+    "test": "node --test test/capabilities.test.ts test/presets.test.ts test/templates.test.ts test/history.test.ts test/stop.test.ts test/turns.test.ts test/transcript.test.ts && node test/kernel.test.ts && node test/e2e.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

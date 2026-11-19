@@ -334,7 +334,7 @@ const a = await newSession("a");
   await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "old cut", instructions: "!sleep 2500\n!done OLD", topic: "interject" }));
   await until("b at work again", () => (hub.mainSession("b").current?.inserted ? hub.mainSession("b") : undefined));
   said.set(a, "");
-  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "new cut", instructions: "!done NEW", topic: "interject", onBusy: "replace" }));
+  await prompt(a, call("dispatch_task", { deliveryPref: "wake", to: "b", title: "new cut", instructions: "!done NEW", topic: "interject", onBusy: "replace", target_turn_id: hub.mainSession("b").current!.id }));
   assert.match(said.get(a)!, /it replaces t_\w+ \\"old cut\\"/);
   const old = await until("old cut superseded", async () => (await tasks()).find((t) => t.title === "old cut" && t.status === "cancelled"));
   assert.deepEqual(old.ended, { reason: "superseded", stopper: { kind: "agent", agentId: "a" } });
