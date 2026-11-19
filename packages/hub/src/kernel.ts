@@ -48,6 +48,9 @@ export type Recipient = {
   busy: boolean;
   /** A tool call of its running turn waits for the end of this task. */
   awaits(taskId: string): boolean;
+  turn?: { id: string; protected: boolean; taskIds: string[] };
+  protect?(): void;
+  prioritize?(taskId: string, turnId: string): void;
 };
 
 export type Delivery = { to: Addr; from: Origin; item: MailItem; route?: Route };
@@ -74,7 +77,7 @@ export type KernelObserve = {
   /** Any change of a task, for whoever shows them. */
   "task.changed": Task;
   /** It is being stopped: a running job is called off, a session that ran only for it is stopped. It ends when that is done. */
-  "task.stopping": Task;
+  "task.stopping": Task & { turnId?: string };
   "task.ended": { ended: { task: Task; was: TaskStatus }[] };
   "message.routed": { item: MailItem; route: Route };
   /** Taken back out before they reached anyone. */
@@ -88,7 +91,7 @@ export type KernelObserve = {
   /** Every change of the ledger. */
   "message.ledger": LedgerEntry;
   "acp.session_update": { agentId: string; sessionId: string; update: SessionUpdate };
-  "acp.turn_ended": { agentId: string; sessionId: string; stopReason: StopReason; failed: boolean };
+  "acp.turn_ended": { agentId: string; sessionId: string; turnId?: string; stopReason: StopReason; failed: boolean };
   /** The backend session was replaced: what it held is gone. */
   "acp.session_renewed": { agentId: string; sessionId: string };
 };
@@ -107,7 +110,7 @@ const byWhom = (stopper: Principal, reason: EndReason): string =>
 type End = { task: Task; status: TaskStatus; result: string; reason: EndReason; stopper: Principal; cause?: string };
 
 /** A stop that waits for sessions to confirm they stopped (`idle(cancelled)`) before its tasks end. */
-type PendingStop = { taskIds: string[]; sessions: Set<string>; timer: NodeJS.Timeout };
+type PendingStop = { taskIds: string[]; sessions: Map<string, string | undefined>; timer: NodeJS.Timeout };
 
 /** The end a task that is being stopped comes to (`Task.stopping`). `said`: what its executor added. */
 const endOf = (task: Task, said = ""): End => {
@@ -148,7 +151,7 @@ export class Kernel {
     this.recipient = recipient;
     this.policies();
     ledgerHook(this);
-    hooks.on("acp.turn_ended", ({ sessionId }) => this.confirmed(sessionId));
+    hooks.on("acp.turn_ended", ({ sessionId, turnId }) => this.confirmed(sessionId, turnId));
   }
 
   // ---- built-in policies ------------------------------------------------------
@@ -195,6 +198,8 @@ export class Kernel {
    */
   private deliveryPolicy({ to, from, item }: Delivery): Route {
     const r = this.recipient(to);
+    if (from.kind === "user") r.protect?.();
+    if (item.targetTurnId) return r.exists && r.turn?.id === item.targetTurnId ? "interject" : "drop";
     const results = item.results;
     if (!r.exists) return "drop";
     if (results && (item.workGeneration ?? 0) < this.generation(to.sessionId)) return "inbox";
@@ -212,6 +217,13 @@ export class Kernel {
 
   generation(sessionId: string): number {
     return this.state.sessions.get(sessionId)?.workGeneration ?? 0;
+  }
+
+  /** Check the committed stop, rather than waiting for its delivery hook to halt the backend. */
+  sourceStopped(from: Addr): boolean {
+    const turn = this.recipient(from).turn;
+    const tasks = turn ? turn.taskIds.map((id) => this.state.tasks.get(id)).filter((t): t is Task => !!t) : this.openTasks(from.sessionId);
+    return tasks.length > 0 && tasks.every((t) => !!t.stopping || !!t.cascadeStopped || ["cancelled", "interrupted"].includes(t.status));
   }
 
   /** The user's task of a session that has not ended: what the user says there belongs to it. */
@@ -253,6 +265,7 @@ export class Kernel {
     to: Addr,
     input: { title: string; topic: string; instructions: string; after: string[]; produces?: string; inputs?: string[]; deliveryPref?: DeliveryPref },
   ): Task | Veto {
+    if (this.sourceStopped(from)) return { veto: "This work was stopped; no new work was submitted." };
     const held = input.after.some((id) => !this.finished(id));
     const parents = this.openTasks(from.sessionId).filter((t) => !t.stopping).map((t) => t.id);
     const { deliveryPref, ...rest } = input;
@@ -298,12 +311,17 @@ export class Kernel {
     const decided = this.hooks.decide("task.pre_create", { task: draft });
     if (isVeto(decided)) return decided;
     const { task } = decided;
+    if (task.from && (this.sourceStopped(task.from) || task.parents?.some((id) => {
+      const parent = this.state.tasks.get(id);
+      return parent?.stopping || parent?.cascadeStopped || parent?.status === "cancelled" || parent?.status === "interrupted";
+    }))) return { veto: "This work was stopped; no new work was submitted." };
     this.write([ops.putTask(task)], { changed: [task], created: [task], mail: withoutMail ? [] : [taskMail(task, mail?.prompt, mail?.id)] });
     return task;
   }
 
   /** A job: one call of a tool of the dispatcher's, run in the background (jobs.ts). Its result wakes the dispatcher. */
   createJob(from: Addr, input: { title: string; topic: string; tool: NonNullable<Task["tool"]> }): Task | Veto {
+    if (this.sourceStopped(from)) return { veto: "This work was stopped; no new work was submitted." };
     const parents = this.openTasks(from.sessionId).filter((t) => !t.stopping).map((t) => t.id);
     return this.create(
       {
@@ -333,14 +351,26 @@ export class Kernel {
    * for it goes with it (cascade), and the dispatcher, its stopper, is not told. `by` runs once the session stopped.
    * Work the dispatcher's own open work was started for is left alone: replacing it would stop the dispatcher too.
    */
-  replace(by: Task): Task[] {
+  replace(by: Task, targetTurnId?: string): Task[] {
+    const r = this.recipient(by.to);
+    const valid = (): boolean => {
+      const turn = this.recipient(by.to).turn;
+      const task = this.state.tasks.get(by.id);
+      return !!targetTurnId && turn?.id === targetTurnId && !turn.protected && task?.status === "queued" && !task.stopping;
+    };
+    if (!valid() || !r.turn) return [];
     const own = new Set(by.parents ?? []);
     const replaced = this.openTasks(by.to.sessionId).filter(
-      (t) => t.id !== by.id && same(t.initiator, by.initiator) && !doom(this.state, t).doomed.some((d) => own.has(d.id)),
+      (t) => t.id !== by.id && !t.stopping && r.turn!.taskIds.includes(t.id) && same(t.initiator, by.initiator) && !doom(this.state, t).doomed.some((d) => own.has(d.id)),
     );
-    for (const task of replaced) {
-      this.stop(task, by.initiator, { status: "cancelled", reason: "superseded", result: `Replaced by ${by.id} "${by.title}".` });
-    }
+    if (!replaced.length) return [];
+    const stopped = this.stopMany(replaced, by.initiator, { status: "cancelled", reason: "superseded", result: `Replaced by ${by.id} "${by.title}".` }, [], [], [], undefined, () => {
+      // Hooks may synchronously accept user input. Recheck after them, immediately before committing.
+      if (!valid()) return false;
+      r.prioritize?.(by.id, targetTurnId!);
+      return true;
+    });
+    if (isVeto(stopped)) return [];
     return replaced;
   }
 
@@ -448,7 +478,7 @@ export class Kernel {
    */
   stop(root: Task, stopper: Principal, end: { status: "cancelled" | "failed"; reason: EndReason; result: string }): Veto | { stopping: boolean; with: Task[] } {
     const current = this.state.tasks.get(root.id) ?? root;
-    if (isTerminal(current.status) || current.stopping) {
+    if (current.stopping) {
       const asked = this.hooks.decide("task.pre_stop", { task: current, stopper });
       if (isVeto(asked)) return asked;
       return { stopping: !!current.stopping, with: [] };
@@ -483,7 +513,7 @@ export class Kernel {
     return this.stopMany(roots, USER, end, first, mail.filter((m) => !sent.has(m.id)), kept, to.sessionId);
   }
 
-  private stopMany(roots: Task[], stopper: Principal, end: { status: "cancelled" | "failed"; reason: EndReason; result: string }, first: Op[] = [], taken: MailItem[] = [], kept: MailItem[] = [], stoppedSession?: string): Veto | { stopping: boolean; with: Task[] } {
+  private stopMany(roots: Task[], stopper: Principal, end: { status: "cancelled" | "failed"; reason: EndReason; result: string }, first: Op[] = [], taken: MailItem[] = [], kept: MailItem[] = [], stoppedSession?: string, commitGuard?: () => boolean): Veto | { stopping: boolean; with: Task[] } {
     const forced = new Set<string>();
     for (const task of roots) {
       const asked = this.hooks.decide("task.pre_stop", { task, stopper });
@@ -492,6 +522,7 @@ export class Kernel {
       if (!isVeto(propagate) && propagate.cascade === "force") forced.add(task.id);
     }
     const { doomed, spared } = doomMany(this.state, roots, forced);
+    const retired = roots.filter((t) => isTerminal(t.status)).map((t) => ({ ...t, cascadeStopped: true }));
     const causes = new Map(roots.map((r) => [r.id, r]));
     for (const r of roots) {
       const queue = [r.id];
@@ -507,13 +538,20 @@ export class Kernel {
     const cause = byWhom(stopper, end.reason);
     const handed = (t: Task): boolean => !t.tool && t.status === "running";
     // Sessions whose open work all goes: their running work is stopped, and the stop waits for them.
-    const halted = new Set<string>();
+    const halted = new Map<string, string | undefined>();
     const notices: MailItem[] = [...kept];
+    // report_result can end a task while its turn is still running. Stopping that
+    // finished root retires its remaining turn too, without changing the recorded result.
+    const retiredIds = new Set(retired.map((t) => t.id));
+    for (const root of retired) {
+      const turn = this.recipient(root.to).turn;
+      if (turn?.taskIds.includes(root.id) && turn.taskIds.every((id) => going.has(id) || retiredIds.has(id))) halted.set(root.to.sessionId, turn.id);
+    }
     for (const sessionId of new Set(doomed.filter(handed).map((t) => t.to.sessionId))) {
       const own = doomed.filter((t) => handed(t) && t.to.sessionId === sessionId);
       // A session working only for what goes is stopped; it needs no word of it then.
       if (this.openTasks(sessionId).every((t) => going.has(t.id)) && this.recipient(own[0].to).busy) {
-        halted.add(sessionId);
+        halted.set(sessionId, this.recipient(own[0].to).turn?.id);
         continue;
       }
       if (same(stopper, agentPrincipal(own[0].to.agentId))) continue;
@@ -527,11 +565,11 @@ export class Kernel {
       notices.push({ id: newId("m"), to: { agentId: own[0].to.agentId, sessionId }, from: { kind: "system" }, kind: "message", topic: own[0].topic, content: text, steer: true, pref: "lazy", ts: now() });
     }
     // A session told just now of what went is not told of each of them again; one whose work all went, of none.
-    const told = new Set([...notices.map((n) => n.to.sessionId), ...halted, ...(stoppedSession ? [stoppedSession] : [])]);
+    const told = new Set([...notices.map((n) => n.to.sessionId), ...halted.keys(), ...(stoppedSession ? [stoppedSession] : [])]);
     const quiet = new Set(doomed.filter((t) => same(stopper, t.initiator) || (t.from && told.has(t.from.sessionId))).map((t) => t.id));
     // The freeze: every task that goes is marked with the end it comes to, in one transaction with taking back its mail.
     const frozen: Task[] = [];
-    const freeze: Op[] = [...first];
+    const freeze: Op[] = [...first, ...retired.map(ops.putTask)];
     const withdrawn: MailItem[] = [...taken];
     const calledOff: Task[] = [];
     for (const task of doomed) {
@@ -555,6 +593,7 @@ export class Kernel {
     }
     freeze.push(...frozen.map(ops.putTask));
     const ends = frozen.filter((t) => !calledOff.some((c) => c.id === t.id)).map((t) => endOf(t));
+    if (commitGuard && !commitGuard()) return { veto: "The target turn changed or became protected; the new task was queued." };
     if (!halted.size) {
       this.finish(ends, freeze, notices, quiet, withdrawn);
     } else {
@@ -562,15 +601,16 @@ export class Kernel {
       this.write(freeze, { changed: frozen, mail: notices, withdrawn });
       const pending: PendingStop = { taskIds: ends.map((e) => e.task.id), sessions: halted, timer: setTimeout(() => this.settleStop(pending), STOP_CONFIRM_MS) };
       this.pendingStops.push(pending);
-      for (const task of doomed.filter((t) => handed(t) && halted.has(t.to.sessionId))) this.hooks.emit("task.stopping", task);
+      for (const task of [...doomed.filter(handed), ...retired].filter((t) => halted.has(t.to.sessionId))) this.hooks.emit("task.stopping", { ...task, turnId: halted.get(task.to.sessionId) });
     }
     for (const task of calledOff) this.hooks.emit("task.stopping", task);
     return { stopping: calledOff.some((t) => roots.some((r) => r.id === t.id)) || halted.size > 0, with: doomed.filter((t) => !roots.some((r) => r.id === t.id)) };
   }
 
   /** A session's turn ended: the stops that waited for it to stop may be recorded. */
-  private confirmed(sessionId: string): void {
+  private confirmed(sessionId: string, turnId?: string): void {
     for (const pending of [...this.pendingStops]) {
+      if (!pending.sessions.has(sessionId) || (pending.sessions.get(sessionId) && pending.sessions.get(sessionId) !== turnId)) continue;
       pending.sessions.delete(sessionId);
       if (!pending.sessions.size) this.settleStop(pending);
     }

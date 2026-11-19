@@ -335,7 +335,6 @@ export class Client {
     conn.onRequest(Tasks.cancel, (p) => {
       const task = hub.state.tasks.get(p?.taskId);
       if (!task) throw RpcError.notFound(`task ${p?.taskId}`);
-      if (isTerminal(task.status)) return { task, with: [] };
       const stopped = hub.kernel.stop(task, USER, { status: "cancelled", reason: "cancelled", result: "Cancelled by the user." });
       if (isVeto(stopped)) throw RpcError.invalidParams(stopped.veto);
       return { task: hub.state.tasks.get(task.id), with: stopped.with };

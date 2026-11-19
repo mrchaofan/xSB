@@ -154,7 +154,8 @@ export class Hub {
   agentInfo(agent: AgentSpec): AgentInfo {
     const busy = [...this.live.values()].some((s) => s.agentId === agent.id && s.busy);
     const state = this.permissions.waitingOn(agent.id) ? "requires_action" : busy ? "running" : "idle";
-    return { ...agent, state, mainSessionId: this.state.mainSession(agent.id)?.id };
+    const turn = this.live.get(this.state.mainSession(agent.id)?.id ?? "")?.current;
+    return { ...agent, state, mainSessionId: this.state.mainSession(agent.id)?.id, ...(turn ? { currentTurnId: turn.id, turnProtected: turn.protected } : {}) };
   }
 
   /** The agent a client reaches when it names none. Read on every use, like the backend table. */

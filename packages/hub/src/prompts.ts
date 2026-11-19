@@ -112,9 +112,10 @@ You are one of several peer agents coordinated by xsb. A human user can talk to 
 - ask: ask whoever gave you your task (or, if your work allows it, another agent) a question, and wait in the call for the answer.
 - report_result: report a task you were given before your turn ends, or with a result other than the record of your work (a structured one, or that it failed). Usually not needed: ending your turn ends your task, and the record of your work on it is its result.
 - task_status, cancel_task: look at tasks, or stop tasks and jobs you started. A task you cancel ends at once; no result comes back for it.
-- send_message, broadcast, message_status: tell one or several peers something; see whether a peer's model has seen a message of yours. A message about work you gave the peer reaches it in its running turn; anything else waits until its turn ends.
+- send_message, broadcast, message_status: tell one or several peers something; see whether a peer's model has seen a message of yours. A busy peer queues these messages for a later turn.
+- append_instruction: add instructions to a specific running turn, using its \`target_turn_id\` from list_agents. An expired target fails, and unread instructions are discarded when that turn ends.
 - inbox: what is waiting for your next turn (lazy results and notices), if you need it now.
-- list_agents: who is on the team, what each of them can produce, and which topics you already handled with each.
+- list_agents: who is on the team, what each of them can produce, and which topics you already handled with each; also its \`current_turn_id\` and \`turn_protected\`. To replace your task in a peer's running turn, dispatch_task with \`onBusy: "replace"\` and that \`target_turn_id\`. Missing or expired targets and turns protected by user input queue the new task. A successful replacement runs before the previous queue.
 - list_roles: role types, including those without instances, their procedures and your authorization to reach them.
 - create_role, create_agent: when the team needs a new specialty, define a new role and instantiate it. Both use the same authorization as dispatching to that role type. They create new entries and cannot overwrite existing ones. Give the role only its specialty's instructions and skills; permissions are separate.
 - grant_permission: give a role type dispatch or message permission to other types. If you can dispatch to the recipient role, you can authorize it, but only within your own role's existing permissions for that capability. The permission applies to every current and future instance; temporary task/reply rights cannot be passed on. New roles have no permissions until authorized.
@@ -306,7 +307,7 @@ const firstLine = (text: string): string => {
 };
 
 /** Why a session goes on in a backend session that has none of its conversation. */
-export type Renewal = "backend_changed" | "not_restored" | "renewed";
+export type Renewal = "backend_changed" | "not_restored" | "renewed" | "stopped";
 
 /**
  * The first thing a backend session is told when it takes over a conversation it has none of: the earlier turns
@@ -319,7 +320,9 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
       ? "This session now runs on another agent program, which has none of the earlier conversation."
       : why === "renewed"
         ? "This conversation had grown long, and goes on in a new session of the agent program. You have none of the earlier conversation but this handoff."
-        : "The earlier conversation of this session could not be restored in the agent program.";
+        : why === "stopped"
+          ? "The earlier turn was stopped. This new session receives its history only as context; do not resume stopped work unless asked."
+          : "The earlier conversation of this session could not be restored in the agent program.";
   const told: string[] = [];
   let left = HANDOFF_CHARS;
   let omitted = 0;

@@ -66,6 +66,9 @@ export type AgentInfo = AgentSpec & {
   state: AgentState;
   /** The agent's conversation, once it has one: the one session the user, its peers and xsb talk to it in. */
   mainSessionId?: string;
+  /** Snapshot for turn-bound operations. Recheck at execution time. */
+  currentTurnId?: string;
+  turnProtected?: boolean;
 };
 
 export const Agents = {
@@ -359,6 +362,8 @@ export type Task = {
    * the transaction that decided the stop, so a crash does not lose it. `quiet`: its initiator is not told.
    */
   stopping?: { status: "cancelled" | "failed"; reason: EndReason; stopper: Principal; cause?: string; result: string; quiet?: boolean };
+  /** Its remaining descendants were stopped after it ended; its recorded outcome stays intact. */
+  cascadeStopped?: boolean;
   result?: string;
   /** The assets the assignee named as what the task delivered (`id@version`), when it finished it. */
   assets?: string[];
@@ -413,7 +418,7 @@ export const Ledger = { update: `_${NS}/messages/update` } as const;
  * `renewed`: the conversation grew past the project's limit, and goes on in a new backend session, handed what came
  * before.
  */
-export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed";
+export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed" | "stopped";
 export type Boundary = {
   kind: BoundaryKind;
   /** The backend the session continues on. */
@@ -541,6 +546,9 @@ export const OriginExt = {
   key: `${NS}/origin`,
 } as const;
 
+/** Correlation for backends that echo it on turn updates. */
+export const TurnExt = { key: `${NS}/turn` } as const;
+
 export type Origin =
   | { kind: "user" }
   | { kind: "agent"; agentId: string; sessionId: string }
@@ -549,6 +557,7 @@ export type Origin =
 export type OriginMeta = Origin & {
   messageId?: string;
   taskId?: string;
+  turnId?: string;
   /** What the message is: free text, a task, or a task's result. */
   role?: "message" | "task" | "task_result";
   /** True when it went into running work. */

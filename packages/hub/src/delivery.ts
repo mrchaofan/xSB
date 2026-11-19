@@ -38,7 +38,7 @@ export class Delivery {
   /** Task id -> the tool call that waits for its result. */
   private waiters = new Map<string, Waiter>();
   /** Message id -> the user's `session/prompt` that waits for its insertion, and the client that sent it. */
-  private inserted = new Map<string, { done: Deferred<void>; client: Client }>();
+  private inserted = new Map<string, { done: Deferred<void>; client?: Client }>();
 
   constructor(hub: Hub) {
     this.hub = hub;
@@ -48,13 +48,15 @@ export class Delivery {
       for (const item of items) this.hub.live.get(item.to.sessionId)?.withdraw((m) => m.id === item.id);
     });
     hooks.on("task.stopping", (task) => {
-      if (task.tool || !this.hub.state.tasks.get(task.id)?.stopping) return;
+      const currentTask = this.hub.state.tasks.get(task.id);
+      if (task.tool || (!currentTask?.stopping && !currentTask?.cascadeStopped)) return;
       const session = this.hub.live.get(task.to.sessionId);
       // Stop observations may outlive their turn. Never cancel a newly accepted task with an old event.
       const first = session?.current?.first.item;
-      if (first?.kind === "task" && !this.hub.state.tasks.get(first.taskId!)?.stopping) return;
+      const firstTask = first?.kind === "task" ? this.hub.state.tasks.get(first.taskId!) : undefined;
+      if (firstTask && !firstTask.stopping && !firstTask.cascadeStopped) return;
       if (this.hub.kernel.openTasks(task.to.sessionId).some((t) => !t.stopping)) return;
-      session?.halt();
+      if (task.turnId) session?.halt(task.turnId);
     });
   }
 
@@ -65,6 +67,11 @@ export class Delivery {
     return {
       exists: !!session,
       busy: !!session?.busy,
+      ...(session?.current && !session.current.cancelledBy ? {
+        turn: { id: session.current.id, protected: session.current.protected, taskIds: session.taskIds() },
+      } : {}),
+      protect: () => session?.protect(),
+      prioritize: (taskId, turnId) => session?.prioritize(taskId, turnId),
       awaits: (taskId) => {
         const waiter = this.waiters.get(taskId);
         return !!waiter && waiter.session === session && waiter.session.current === waiter.turn;
@@ -77,7 +84,7 @@ export class Delivery {
   private deliver(item: MailItem, route: Route): void {
     const user = this.inserted.get(item.id);
     const waiting = user?.done;
-    if (route === "drop") return waiting?.reject(new Error(`agent "${item.to.agentId}" no longer exists`));
+    if (route === "drop") return waiting?.reject(new Error(item.targetTurnId ? "Target turn has ended or changed." : `agent "${item.to.agentId}" no longer exists`));
     if (!this.hub.state.mail.has(item.id)) return waiting?.reject(RpcError.cancelled());
     if (route === "inbox") return waiting?.resolve();
     // A route observation can arrive after a user stop changed the result's receiving generation.
@@ -88,10 +95,17 @@ export class Delivery {
     const session = this.hub.live.get(item.to.sessionId);
     if (!session) return waiting?.reject(new Error(`session ${item.to.sessionId} is not registered`));
     const rendered = this.render(item, session);
-    const delivered = rendered && user ? { ...rendered, from: user.client } : rendered;
+    const delivered = rendered && user?.client ? { ...rendered, from: user.client } : rendered;
     if (!delivered) return waiting?.reject(new Error("the message was refused"));
     if (route === "return") return this.returned(item, delivered);
-    const input = (route === "interject" && session.steer(delivered)) || session.enqueue(delivered, item.from.kind === "user");
+    const steered = route === "interject" && session.steer(delivered, item.targetTurnId);
+    if (item.targetTurnId && !steered) {
+      this.hub.kernel.mark(item.id, "discarded_unseen");
+      this.hub.kernel.ack([item.id]);
+      waiting?.reject(new Error("Target turn has ended or changed."));
+      return;
+    }
+    const input = steered || session.enqueue(delivered, item.from.kind === "user");
     if (waiting) input.inserted.promise.then(waiting.resolve, waiting.reject);
   }
 
@@ -166,6 +180,20 @@ export class Delivery {
 
   // ---- the user -----------------------------------------------------------------
 
+  /** Explicit agent append: its delivery cannot fall back to a different turn or the queue. */
+  async append(session: LiveSession, targetTurnId: string, from: Addr, content: string, topic?: string): Promise<string> {
+    if (session.current?.id !== targetTurnId || session.current.cancelledBy) throw new Error("Target turn has ended or changed.");
+    const id = newId("m"), done = deferred<void>();
+    this.inserted.set(id, { done });
+    try {
+      this.hub.kernel.post({ id, to: { agentId: session.agentId, sessionId: session.id }, from: { kind: "agent", ...from }, kind: "message", content, topic, targetTurnId, pref: "wake" });
+      await done.promise;
+      return id;
+    } finally {
+      this.inserted.delete(id);
+    }
+  }
+
   /**
    * What the user says in a session (docs/DESIGN.md 3.1, 1-2). Said while a task of the user's is open there, it is
    * more of it. Said while the session works on tasks, it goes into that work: no task of its own. Otherwise it is a new task the user initiates (into the
@@ -174,6 +202,7 @@ export class Delivery {
    */
   async fromUser(session: LiveSession, prompt: ContentBlock[], origin: OriginMeta, client: Client): Promise<{ messageId: string }> {
     const { kernel } = this.hub;
+    session.protect();
     const messageId = origin.messageId ?? newId("m");
     const to = { agentId: session.agentId, sessionId: session.id };
     const waiting = deferred<void>();
