@@ -59,8 +59,8 @@ const presets = {
     fs.cpSync("../hub/presets", "dist/presets", { recursive: true });
     for (const code of ["dist/app", "dist/bin"]) {
       // Later entrypoints create dist/bin; normalize .. before checking presets on a first build.
-      const teams = path.resolve(code, "../presets/en");
-      if (!fs.existsSync(teams) || !fs.readdirSync(teams).some((team) => fs.existsSync(`${teams}/${team}/team.json`))) {
+      const teams = path.resolve(code, "../presets");
+      if (!fs.existsSync(teams) || !fs.readdirSync(teams).some((team) => fs.existsSync(`${teams}/${team}/en/team.json`))) {
         throw new Error(`no preset teams next to ${code}: the hub looks for them in ../presets`);
       }
     }

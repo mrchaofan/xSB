@@ -176,18 +176,22 @@ export type McpServerCheck = { server: string; tools?: { name: string; descripti
 /**
  * Teams: the sets of roles xsb ships, and which of them the project uses.
  * Using a team copies nothing: its roles are among the project's from then on
- * (`RoleDetail.preset`), as they ship with the hub that runs.
+ * (`RoleDetail.preset`), from a frozen project copy of the template.
  *
- *   advertise  capabilities._meta["dev.xsb/teams"] = { version: 1 }
+ *   advertise  capabilities._meta["dev.xsb/teams"] = { version: 2 }
  *   request    _dev.xsb/teams/list {}     -> { teams: TeamInfo[] }
- *              _dev.xsb/teams/use  { id } -> {}
+ *              _dev.xsb/teams/use  { id } -> {}    copy on first use; later use preserves the copy
  *              _dev.xsb/teams/drop { id } -> {}    refused while an agent has a role only that team gives
  *              _dev.xsb/teams/derive { id, base } -> { team: TeamInfo }
  *                                  start a team of the user's (~/.xsb/presets) that extends `base`
+ *              _dev.xsb/teams/sync-preview { id } -> TeamSyncPlan
+ *              _dev.xsb/teams/sync { id, revision, confirm: true } -> TeamSyncPlan
+ *                                  replace the project copy and matching custom overrides; changes are lost
  *   The list says, besides the teams, what is wrong among the preset directories that belongs to no team
  *   (`problems`). Teams come from xsb (`builtin`) and from the user's ~/.xsb/presets (`user`), organised alike.
  *
- * A team ships once per language (`Language`); the project's language decides which is read.
+ * The project language selects the initial copy and explicit updates. Team and role folder names identify the
+ * origin, with builtin/user source roots distinguishing otherwise equal paths; no extra template id is used.
  *
  * Observers hear of the roles that came, changed or went as `roles/update` and `roles/removed`.
  */
@@ -197,13 +201,28 @@ export const Teams = {
   use: `_${NS}/teams/use`,
   drop: `_${NS}/teams/drop`,
   derive: `_${NS}/teams/derive`,
+  syncPreview: `_${NS}/teams/sync-preview`,
+  sync: `_${NS}/teams/sync`,
 } as const;
 
 /** Something wrong with a preset team or one of its files (`error`: left out; `warning`: used all the same). */
 export type PresetProblem = { team?: string; path: string; code: string; detail: string; severity: "error" | "warning" };
 
+export type TeamSyncPlan = {
+  id: string;
+  roles: string[];
+  /** Project overrides removed for matching role codes. */
+  overwritten: string[];
+  removed: string[];
+  /** Binds confirmation to the previewed source and project files. */
+  revision: string;
+};
+
 export type TeamInfo = {
   id: string;
+  snapshot?: boolean;
+  sourceDir?: string;
+  syncAvailable?: boolean;
   /** Shipped with xsb, or the user's own (~/.xsb/presets). */
   source: "builtin" | "user";
   /** The team it builds on. */
@@ -223,7 +242,7 @@ export type TeamInfo = {
   /** The project uses it. */
   used: boolean;
   /**
-   * Its roles as they ship, in order. `name` is what an agent of the role would be called;
+   * Its roles in order: the project copy when used, otherwise the source template. `name` is what an agent of the role would be called;
    * `requires` are the programs of the machine the role works with, each with how to get it.
    */
   roles: { name: string; role: Omit<RoleDetail, "agents" | "preset">; requires: { command: string; install: string }[] }[];

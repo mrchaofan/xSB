@@ -80,6 +80,9 @@ export type RoleView = {
  */
 export type Pack = {
   id: string;
+  snapshot?: boolean;
+  sourceDir?: string;
+  syncAvailable?: boolean;
   /** Shipped with xsb, or the user's own (~/.xsb/presets). */
   source: "builtin" | "user";
   extends?: string;

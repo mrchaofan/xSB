@@ -61,7 +61,7 @@ Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src
 | `kernel.ts` / `hooks.ts` / `task-graph.ts` / `ledger.ts` | 任务调度框架，与后端无关：任务、撤销与传染、汇合、收件箱、通知、台账，以及挂载一切横切行为的 Hooks（[KERNEL.md](KERNEL.md)） |
 | `delivery.ts` / `jobs.ts` / `audit.ts` | 挂在 Hooks 上的 Effector：投进会话、跑后台任务、审计 |
 | `roles.ts` | 角色：按名字查找（项目自己的优先，再找所用的预设团队），读取说明、MCP 配置和 skills |
-| `presets.ts` | 预设团队：应用自带的（`presets/<语言>/<团队>/`）和用户自己的（`~/.xsb/presets/`），组织相同；继承（`extends`）与叠加、冲突与问题、检查。写法见 [PRESETS.md](PRESETS.md) |
+| `presets.ts` | 预设团队：应用自带的（`presets/<团队>/<语言>/`）和用户自己的（`~/.xsb/presets/`），组织相同；继承（`extends`）与叠加、冲突与问题、检查。写法见 [PRESETS.md](PRESETS.md) |
 | `assets.ts` | 资产库：登记、版本、查找 |
 | `mcp-client.ts` | 调用一次 stdio MCP server 的一个工具（后台任务用） |
 | `permissions.ts` | 把后端的权限请求转给人 |
@@ -381,17 +381,19 @@ job 不是新机制，它就是"执行者是工具而不是 Agent 的任务"（`
 
 角色可以直接改文件，也可以经 `dev.xsb/roles` 扩展读写（`xsb role ...` 用的就是它）。`put` 里没给的字段保持不变；`mcpServers` 和 `skills` 给了就是全集，不在其中的被删除。有 Agent 在用的角色不能删除。`check` 启动角色的 MCP server 并列出各自的工具，配置错误在这里暴露，而不是等到模型"不会用工具"。
 
-**预设团队：引用，不复制。** xsb 自带几支团队（`packages/hub/presets/<团队>/`：`team.json` 加上若干角色目录，格式与项目自己的完全相同）。项目在 `.xsb/config.json` 的 `teams` 里写上团队的名字就是在用它，没有任何文件被复制。角色按名字查找，只在 `loadRole` 一处：
+**预设团队：项目快照与显式同步。** xsb 自带几支团队（`packages/hub/presets/<团队>/`：`team.json` 加上若干角色目录，格式与项目自己的完全相同）。首次使用时，团队角色和继承内容复制到 `.xsb/templates/<团队>/`，项目配置 `teams` 记录使用关系。角色按名字查找，只在 `loadRole` 一处：
 
 1. 项目自己的 `.xsb/roles/<角色>/`；
-2. 项目所用各团队里的同名角色。
+2. 项目所用各团队在 `.xsb/templates/<团队>/roles/` 中的同名角色。
 
-由此得到的行为不需要额外的机制：
+副本与覆盖版本的行为：
 
-- 用着预设的项目，升级 xsb 之后角色就是新的；同一支团队可以随时再用、反复"建立"。
+- 升级 xsb 不会改变项目快照；同一支团队可以反复“建立”，只补智能体。显式 `teams/sync-preview`、`teams/sync` 在用户确认自定义改动丢失后才更新副本。
 - `roles/put` 改的永远是项目自己的角色。改一个团队的角色时，先把它整个目录复制成项目自己的再改（skill 旁边的文件一并带上），此后以项目的为准。
 - `roles/remove` 删的也是项目自己的角色。团队里有同名角色时，这就是"恢复预设"，有 Agent 在用也可以；只属于团队的角色不能单独删，随团队一起停用。
 - 停用一支团队时，若有 Agent 的角色只有它才有，则拒绝。
+
+同步按来源根目录类别、团队文件夹名和角色文件夹名匹配，不增加模板 ID。`templates.ts` 负责复制、预览与确认、完整目录替换及失败回滚；`.template-origin.json` 区分模板修改与独立创建的同名角色。
 
 `RoleDetail.preset = { team, own }` 告诉客户端一个角色与预设的关系：来自哪支团队，项目是否已有自己的版本。
 
@@ -411,7 +413,7 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
 | 怎么做 | skill 正文 | 随任务注入 |
 | 用什么工具 | 角色的 `mcpServers` | 只给这个角色的 Agent |
 
-预设团队（[packages/hub/presets/](../packages/hub/presets)）每种语言一份：`presets/<语言>/<团队>/`，读哪一份由项目的工作语言决定。各语言之间只有文字不同，团队、角色、skill、契约、工具必须相同，测试逐项比对。`team.json` 里除了角色还有 `assets`：每种资产类型的显示名，界面用它代替 `shot_list` 这样的标识符。
+预设团队（[packages/hub/presets/](../packages/hub/presets)）每种语言一份：`presets/<团队>/<语言>/`，读哪一份由项目的工作语言决定。各语言之间只有文字不同，团队、角色、skill、契约、工具必须相同，测试逐项比对。`team.json` 里除了角色还有 `assets`：每种资产类型的显示名，界面用它代替 `shot_list` 这样的标识符。
 
 团队不是一个存储的对象：项目里各 Agent 的角色所声明的全部契约就是团队（`Hub.team`）。它有三个去处，对任何团队都一样，代码里没有按角色或预设的分支：
 

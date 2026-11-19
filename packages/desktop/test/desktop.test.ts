@@ -47,6 +47,20 @@ function snapshot(peer: Peer, agents = []) {
   peer.requests.set(Assets.list, () => ({ assets: [] }));
 }
 
+test("template preview stays read-only and synchronization forwards the confirmed revision", async () => {
+  const peer = new Peer();
+  const plan = { id: "software", roles: ["developer"], overwritten: ["developer"], removed: [], revision: "reviewed-files" };
+  const synced: unknown[] = [];
+  peer.requests.set(Teams.syncPreview, ({ id }) => { assert.equal(id, "software"); return plan; });
+  peer.requests.set(Teams.sync, (params) => { synced.push(params); return plan; });
+  const ws = workspace(peer);
+  assert.deepEqual(await ws.previewTeamSync("software"), plan);
+  assert.deepEqual(synced, []);
+  await ws.syncTeam("software", plan.revision);
+  assert.deepEqual(synced, [{ id: "software", revision: "reviewed-files", confirm: true }]);
+  ws.close();
+});
+
 test("both address entry points share web and local-file normalization", () => {
   assert.equal(address(" example.com "), "https://example.com/");
   assert.equal(address("localhost:3000/a"), "http://localhost:3000/a");

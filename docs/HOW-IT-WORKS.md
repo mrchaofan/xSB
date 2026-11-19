@@ -922,4 +922,4 @@ inputs: brief, cut
 | 资产库 | [assets.ts](../packages/hub/src/assets.ts) |
 | 角色与技能声明的读取 | [roles.ts](../packages/hub/src/roles.ts) |
 | 分工表的计算 | [hub.ts](../packages/hub/src/hub.ts) 的 `team()` |
-| 预设团队的角色与技能 | [presets/zh-CN/](../packages/hub/presets/zh-CN) |
+| 预设团队的角色与技能 | [presets/](../packages/hub/presets) |

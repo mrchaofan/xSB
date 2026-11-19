@@ -292,7 +292,7 @@ async function pickFolder(win: BrowserWindow): Promise<{ path: string; initializ
 // ---- window.xsb -------------------------------------------------------------
 
 /** The calls that are a method of the window's workspace, arguments and all. */
-const WORKSPACE_CALLS = new Set(["history", "send", "cancel", "clear", "permit", "deriveTeam", "putAgent", "removeAgent", "inspectAgent", "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "useTeam", "dropTeam", "buildTeam"]);
+const WORKSPACE_CALLS = new Set(["history", "send", "cancel", "clear", "permit", "deriveTeam", "putAgent", "removeAgent", "inspectAgent", "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "useTeam", "dropTeam", "previewTeamSync", "syncTeam", "buildTeam"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();

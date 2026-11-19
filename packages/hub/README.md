@@ -113,7 +113,7 @@ await hub.shutdown();
 - `skills/<名称>/SKILL.md`：front matter 里写了 `produces: <资产类型>` 的 skill 会随"要产出该类型"的任务自动送达；所有 skill 都列在系统说明里，模型可以用 `load_skill` 读取。front matter 还可以带 `description:`，否则取正文第一行作为说明。
 - 声明了 `produces` 的 skill 是一条产出契约，`inputs: <类型>, <类型>` 写它依据哪些资产。所有 Agent 的契约合起来就是团队：每个 Agent 的系统说明里列出"哪种资产、谁产出、依据什么"，`list_agents` 返回各自能产出的类型，`dispatch_task` 在对方没有这条契约或缺少输入时提示。
 - `description`、`backend` 只是新建 Agent 时的默认值；其余内容每次使用时读取，改了不必重启 Hub。已经绑定后端的会话要等下次绑定才看到新的说明和工具，`xsb agent restart <id>` 可以立即应用。
-- xsb 自带几支预设团队（[presets/](presets)，每种语言一份，按项目的工作语言读取）。`xsb team use <团队>` 之后它的角色就是项目的角色，不复制文件，随 xsb 更新；`xsb role add` 改过的才是项目自己的，`xsb role remove` 删掉自己的版本就恢复成预设。
+- xsb 自带几支预设团队（[presets/](presets)，每支团队一个目录，中英版本放在团队目录内，按项目的工作语言读取）。`xsb team use <团队>` 之后它的角色就是项目的角色，首次复制到 `.xsb/templates/<团队>/`，不会自动更新；`xsb team sync <团队>` 在确认覆盖自定义改动后更新副本；`xsb role add` 改过的才是项目自己的，`xsb role remove` 删掉自己的版本就恢复成预设。
 - 角色也可以经 ACP 扩展 `dev.xsb/roles` 读写（`list | get | put | remove | check`），`xsb role ...` 和图形界面走的都是它。
 
 Hub 只启动后端：不安装、不保存凭据、不决定权限模式。后端进程继承启动 Hub 时的环境变量。

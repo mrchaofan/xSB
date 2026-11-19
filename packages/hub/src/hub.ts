@@ -37,6 +37,8 @@ import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
 import { systemPrompt } from "./prompts.ts";
 import type { ToolOrigin } from "./prompts.ts";
+import { catalog } from "./presets.ts";
+import { copyTemplate } from "./templates.ts";
 import { loadRole } from "./roles.ts";
 import type { Contract, Role } from "./roles.ts";
 import { LiveSession } from "./session.ts";
@@ -91,6 +93,13 @@ export class Hub {
     fs.mkdirSync(this.paths.run, { recursive: true });
     fs.mkdirSync(this.paths.shared, { recursive: true });
     fs.mkdirSync(this.paths.assets, { recursive: true });
+    const migrated = migrateProjectConfig(this.paths);
+    if (migrated) this.log(migrated);
+    const sources = catalog(projectLanguage(this.paths));
+    for (const id of loadProjectConfig(this.paths).teams ?? []) {
+      try { copyTemplate(this.paths, sources, id); }
+      catch (e) { this.log(`template snapshot ${id}: ${(e as Error).message}`); }
+    }
     await this.listen(this.paths.socket("acp"), (socket) => {
       const client = new Client(this, new Connection(socket, socket, "client"));
       this.clients.add(client);
@@ -99,8 +108,6 @@ export class Hub {
     await this.listen(this.paths.socket("mcp"), (socket) => {
       serveMcp(this, new Connection(socket, socket, "mcp"), (token) => this.bridgeTokens.get(token));
     });
-    const migrated = migrateProjectConfig(this.paths);
-    if (migrated) this.log(migrated);
     // Whoever stopped the last hub may have said that its unfinished work is not to be taken up again.
     if (fs.existsSync(this.paths.abandonMark)) {
       const { mail, tasks } = this.kernel.abandon();

@@ -1244,8 +1244,12 @@ const p = await newSession("p1");
   const refused = await conn.request(Teams.use, { id: "other" }).then(() => undefined, (e) => e);
   assert.deepEqual([refused.data.reason, refused.data.role], ["team_clash", "reviewer"]);
 
-  // An edit holds at once.
+  // Source edits leave the project copy unchanged until a confirmed synchronization.
   write("en/solo/roles/poet/instructions.md", "POET-RULES-2");
+  assert.doesNotMatch((await conn.request(Agents.get, { id: "poet1" })).systemPrompt, /POET-RULES-2/);
+  const preview = await conn.request(Teams.syncPreview, { id: "solo" });
+  await assert.rejects(conn.request(Teams.sync, { id: "solo", revision: preview.revision }), /explicit confirmation/);
+  await conn.request(Teams.sync, { id: "solo", revision: preview.revision, confirm: true });
   assert.match((await conn.request(Agents.get, { id: "poet1" })).systemPrompt, /POET-RULES-2/);
 
   // Made the project's own, a laid-over role is written out as it applies.
@@ -1257,7 +1261,7 @@ const p = await newSession("p1");
   // A team of the user's that builds on another is started from the app.
   const { team: mine } = await conn.request(Teams.derive, { id: "film-mine", base: "film" });
   assert.deepEqual([mine.source, mine.extends, mine.language], ["user", "film", "zh-CN"]);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "zh-CN/film-mine/team.json"), "utf8")).extends, "film");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "film-mine/zh-CN/team.json"), "utf8")).extends, "film");
   await assert.rejects(conn.request(Teams.derive, { id: "film", base: "software" }), /there is a team "film" already/);
 
   await conn.request(Agents.remove, { id: "poet1" });
