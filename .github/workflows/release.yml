@@ -1,0 +1,115 @@
+name: Release App
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version increment
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+        required: true
+
+permissions:
+  contents: read
+
+# Two manual releases must never reserve the same version or cancel each other.
+concurrency:
+  group: xsb-manual-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Increment and commit version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.version.outputs.commit }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Require main branch
+        env:
+          SELECTED_REF: ${{ github.ref }}
+        run: test "$SELECTED_REF" = refs/heads/main
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Reserve version and push commit
+        id: version
+        env:
+          VERSION_BUMP: ${{ inputs.bump }}
+        run: |
+          marker="Release-Run: ${GITHUB_RUN_ID}"
+          commit=$(git log --format=%H --grep="^${marker}$" -1)
+          if [[ -n "$commit" ]]; then
+            # A rerun builds the already reserved version, even if main has advanced.
+            version=$(git show "$commit:packages/desktop/package.json" | node --input-type=module -e 'let text = ""; for await (const chunk of process.stdin) text += chunk; console.log(JSON.parse(text).version)')
+          else
+            version=$(node scripts/release-version.mjs "$VERSION_BUMP")
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add package.json package-lock.json 'packages/*/package.json'
+            git commit -m "chore: release v$version" -m "$marker"
+            commit=$(git rev-parse HEAD)
+            # Reject a concurrent update to main instead of overwriting it.
+            git push origin HEAD:main
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build reserved version
+    needs: version
+    uses: ./.github/workflows/desktop.yml
+    with:
+      ref: ${{ needs.version.outputs.commit }}
+
+  publish:
+    name: Tag and publish application
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.version.outputs.commit }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: xsb-*
+          path: release
+          merge-multiple: true
+      - name: Verify downloaded archives
+        working-directory: release
+        run: sha256sum --check *.zip.sha256
+      - name: Create and push version tag
+        env:
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.version.outputs.commit }}
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag -a "$RELEASE_TAG" "$RELEASE_COMMIT" -m "xsb $RELEASE_TAG"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release/*.zip release/*.zip.sha256 --clobber
+          else
+            gh release create "$RELEASE_TAG" release/*.zip release/*.zip.sha256 --verify-tag --generate-notes
+          fi

@@ -22,8 +22,10 @@ Electron 用的是带 `<webview2>` 的私有构建：`npm install` 后 [scripts/
 
 代码由 Rolldown 打进 `dist/`（[rolldown.config.js](rolldown.config.js)），`npm start` 会先打包；单独打包用 `npm run build -w @xsb/desktop`。`npm run package -w @xsb/desktop` 用 electron-builder 把 `dist/` 做成应用（[electron-builder.config.mjs](electron-builder.config.mjs)），产物在 `release/`：macOS arm64 与 Windows x64 各一个 zip，不签名（macOS 只做 ad-hoc）。里面的 Electron 同样来自私有镜像；图标在 [build/](build)。
 
-GitHub [Desktop CI and Release](../../.github/workflows/desktop.yml) 在 PR、推送 `main` 和手动运行时，先执行所有工作区的测试与类型检查，再分别在 macOS 和 Windows runner 打包。Actions 的 `xsb-mac-arm64`、`xsb-win-x64` 制品保存 30 天，包含应用 zip 和对应的 `.sha256` 校验文件，无需配置额外密钥。
+GitHub [Desktop CI](../../.github/workflows/desktop.yml) 在 PR 和推送 `main` 时，先执行所有工作区的测试与类型检查，再分别在 macOS 和 Windows runner 打包。Actions 的 `xsb-mac-arm64`、`xsb-win-x64` 制品保存 30 天，包含应用 zip 和对应的 `.sha256` 校验文件。普通合并只跑 CI，不递增版本、不创建标签、不发布 Release；推送标签也不会触发发布。
 
-发布时先更新 `packages/desktop/package.json` 的版本（同时维护相关工作区版本和 `package-lock.json`），再推送一致的版本标签，例如 `v0.1.0`。CI 确认标签等于桌面应用版本、检查与双平台打包均成功后，创建 GitHub Release 并上传两个应用包和校验文件。带预发布后缀的版本会标记为 prerelease；重跑同一标签会更新原 Release 的附件。普通分支构建和手动运行只保存 Actions 制品。
+发布只能在 GitHub Actions 的 [Release App](../../.github/workflows/release.yml) 点击 **Run workflow**，选择 `main` 和版本递增方式（默认 `patch`，也支持 `minor` / `major`）。流程自动同步根项目、所有工作区、内部依赖及 lockfile 的版本，提交回写 `main`，再针对该提交执行完整检查与双平台构建。成功后创建并推送对应的 annotated Git tag（如 `v0.1.1`），发布 GitHub Release，上传应用包和校验文件，无需额外密钥。自动回写使用 `GITHUB_TOKEN`，由本次发布流程直接构建该提交，不会递归触发发布。
+
+手动发布串行运行。构建失败时版本提交会保留，尚不创建标签或 Release；使用同一运行记录的 **Re-run failed jobs** 重试可继续发布，完整重跑同一记录也会复用已提交的版本。重新点击 **Run workflow** 才会再递增版本。并发修改导致版本提交无法快进推送时，流程会失败，不覆盖 `main`。
 
 设计、接口对应关系和已知限制见 [docs/GUI.md](../../docs/GUI.md)。
