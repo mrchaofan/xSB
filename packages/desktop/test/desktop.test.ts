@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { PassThrough } from "node:stream";
 import { Paths } from "@xsb/hub";
-import { Agents, Assets, History, Roles, Tasks, Teams } from "@xsb/protocol";
+import { Agents, Assets, Connection, History, Roles, Tasks, Teams } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
@@ -88,6 +89,66 @@ test("roles are one list answer, and an event after it is the newer word", async
     (await ws.load()).roles.map((r) => [r.name, r.instructions]),
     [["developer", "new"]],
   );
+  ws.close();
+});
+
+test("agent idle and removal events during loading win over the earlier list", async () => {
+  const peer = new Peer();
+  snapshot(peer, [{ ...agent("a"), state: "running" }, agent("b")]);
+  peer.requests.set(Teams.list, async () => {
+    await new Promise((resolve) => setTimeout(resolve));
+    peer.emit(Agents.update, { agent: agent("a") });
+    peer.emit(Agents.removed, { id: "b" });
+    return { teams: [] };
+  });
+  const ws = workspace(peer);
+  const loaded = await ws.load();
+  assert.deepEqual(loaded.agents.map(a => [a.id, a.state]), [["a", "idle"]]);
+  assert.deepEqual(ws.working(), []);
+  ws.close();
+});
+
+test("reloading replaces missing agents and tasks instead of retaining phantom work", async () => {
+  const peer = new Peer();
+  snapshot(peer, [agent("a"), { ...agent("b"), state: "running" }]);
+  peer.requests.set(Tasks.list, () => ({ tasks: [{ id: "job", status: "running", tool: { name: "render" }, to: { agentId: "a" } }] }));
+  const ws = workspace(peer);
+  await ws.load();
+  assert.deepEqual(ws.working().sort(), ["a", "b"]);
+  snapshot(peer, [agent("a")]);
+  const loaded = await ws.load();
+  assert.deepEqual(loaded.agents.map(a => a.id), ["a"]);
+  assert.deepEqual(loaded.tasks, []);
+  assert.deepEqual(ws.working(), []);
+  ws.close();
+});
+
+test("coalesced RPC responses and later notifications cannot restore busy snapshots", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const conn = new Connection(input, output);
+  const responses = [];
+  const task = { id: "t", status: "running", to: { agentId: "a" } };
+  const lists = {
+    [Roles.list]: { roles: [] }, [Teams.list]: { teams: [] },
+    [Agents.list]: { agents: [{ ...agent("a"), state: "running" }, agent("b")] },
+    [Tasks.list]: { tasks: [task] }, [Assets.list]: { assets: [] },
+  };
+  output.on("data", chunk => {
+    const request = JSON.parse(chunk.toString());
+    responses.push({ jsonrpc: "2.0", id: request.id, result: lists[request.method] });
+  });
+  const ws = workspace(conn);
+  const loaded = ws.load();
+  input.write([...responses,
+    { jsonrpc: "2.0", method: Agents.update, params: { agent: agent("a") } },
+    { jsonrpc: "2.0", method: Agents.removed, params: { id: "b" } },
+    { jsonrpc: "2.0", method: Tasks.update, params: { task: { ...task, status: "completed" } } },
+  ].map(message => JSON.stringify(message) + "\n").join(""));
+  const snapshot = await loaded;
+  assert.deepEqual(snapshot.agents.map(a => [a.id, a.state]), [["a", "idle"]]);
+  assert.equal(snapshot.tasks[0].status, "completed");
+  assert.deepEqual(ws.working(), []);
   ws.close();
 });
 
@@ -252,6 +313,19 @@ test("awaited jobs count as work even between idle agent turns", async () => {
   assert.deepEqual(ws.working(), ["a"]);
   peer.isClosed = true;
   assert.deepEqual(ws.working(), []);
+  ws.close();
+});
+
+test("task history of a removed agent does not count as current work", async () => {
+  const peer = new Peer();
+  snapshot(peer, [agent("a")]);
+  peer.requests.set(Tasks.list, () => ({ tasks: [{ id: "task", status: "running", to: { agentId: "a" } }] }));
+  const ws = workspace(peer);
+  await ws.load();
+  assert.deepEqual(ws.working(), ["a"]);
+  peer.emit(Agents.removed, { id: "a" });
+  assert.deepEqual(ws.working(), []);
+  assert.equal(ws["tasks"].has("task"), true);
   ws.close();
 });
 

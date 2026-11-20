@@ -55,6 +55,7 @@ export class Workspace {
   private agents = new Map<string, AgentInfo>();
   private agentVersions = new Map<string, number>();
   private tasks = new Map<string, Task>();
+  private taskVersions = new Map<string, number>();
   /** The roles as last heard of, by name: what a window is shown when it loads. */
   private roles = new Map<string, RoleView>();
   private transcripts = new Map<string, Entry[]>();
@@ -175,7 +176,7 @@ export class Workspace {
   private atWork(): Set<string> {
     const busy = new Set([...this.agents.values()].filter((agent) => agent.state !== "idle").map((agent) => agent.id));
     for (const task of this.tasks.values()) {
-      if (!isTerminal(task.status)) busy.add(task.to.agentId);
+      if (!isTerminal(task.status) && this.agents.has(task.to.agentId)) busy.add(task.to.agentId);
     }
     return busy;
   }
@@ -202,16 +203,27 @@ export class Workspace {
   /** Everything of the workspace that the window shows at first. What changes afterwards arrives as events. */
   async load(): Promise<Omit<Snapshot, "pages" | "backends">> {
     this.live = false;
-    // Roles and tasks are kept as they are answered. The hub answers in order on one connection, so what changes
-    // while the rest still loads arrives after the answer, as an event, and is the newer word.
-    const [, { teams }, { agents }, , { assets }] = await Promise.all([
+    // Keep updates received while these requests are pending. Notifications run synchronously;
+    // a response's promise may run later even when the response came first in the same chunk.
+    const agentVersions = new Map(this.agentVersions);
+    const taskVersions = new Map(this.taskVersions);
+    const unchanged = (versions: Map<string, number>, before: Map<string, number>, id: string): boolean =>
+      (versions.get(id) ?? 0) === (before.get(id) ?? 0);
+    const [, { teams }, , , { assets }] = await Promise.all([
       this.conn.request<{ roles: RoleDetail[] }>(Roles.list).then(({ roles }) => (this.roles = new Map(roles.map((r) => [r.name, this.roleView(r)])))),
       this.conn.request<{ teams: TeamInfo[] }>(Teams.list),
-      this.conn.request<{ agents: AgentInfo[] }>(Agents.list),
-      this.conn.request<{ tasks: Task[] }>(Tasks.list, {}).then(({ tasks }) => tasks.forEach((task) => this.tasks.set(task.id, task))),
+      this.conn.request<{ agents: AgentInfo[] }>(Agents.list).then(({ agents }) => {
+        const ids = new Set(agents.map(agent => agent.id));
+        for (const id of this.agents.keys()) if (!ids.has(id) && unchanged(this.agentVersions, agentVersions, id)) this.onAgentRemoved(id);
+        for (const agent of agents) if (unchanged(this.agentVersions, agentVersions, agent.id)) this.onAgent(agent);
+      }),
+      this.conn.request<{ tasks: Task[] }>(Tasks.list, {}).then(({ tasks }) => {
+        const next = new Map(tasks.map(task => [task.id, task]));
+        for (const [id, task] of this.tasks) if (!unchanged(this.taskVersions, taskVersions, id)) next.set(id, task);
+        this.tasks = next;
+      }),
       this.conn.request<{ assets: Asset[] }>(Assets.list, {}),
     ]);
-    agents.forEach((agent) => this.onAgent(agent));
     assets.forEach((asset) => this.asset(asset));
     // Attaching to a session replays its history; the snapshot is complete once every replay is.
     await Promise.allSettled(this.mains.values());
@@ -260,6 +272,7 @@ export class Workspace {
   }
 
   private onTask(task: Task): void {
+    this.taskVersions.set(task.id, (this.taskVersions.get(task.id) ?? 0) + 1);
     const agentId = task.to.agentId;
     if (task.status === "failed" && this.tasks.get(task.id)?.status !== "failed") this.notify({ agentId, kind: "failed", detail: task.title });
     this.tasks.set(task.id, task);
@@ -268,9 +281,12 @@ export class Workspace {
   }
 
   private onAgentRemoved(id: string): void {
+    // Invalidate a pending history page too: it must not restore a removed agent.
+    this.agentVersions.set(id, (this.agentVersions.get(id) ?? 0) + 1);
     for (const [sessionId, agentId] of this.sessionAgent) if (agentId === id) this.sessionAgent.delete(sessionId);
     for (const perAgent of [this.agents, this.transcripts, this.mains, this.growing, this.activities, this.tools, this.historyUpdates, this.historyCursors]) perAgent.delete(id);
     this.emit({ removedAgent: id });
+    this.busy = this.atWork().size > 0;
   }
 
   /** The agent's main session with this client attached, created if the agent has none. */
