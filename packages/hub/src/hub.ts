@@ -34,6 +34,9 @@ import { Jobs } from "./jobs.ts";
 import { Kernel } from "./kernel.ts";
 import type { KernelHooks } from "./kernel.ts";
 import { commonServers, serveMcp } from "./mcp.ts";
+import { contextServer } from "./tool-context.ts";
+import type { ContextOwner } from "./tool-context.ts";
+import { randomBytes } from "node:crypto";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
 import { systemPrompt } from "./prompts.ts";
@@ -64,6 +67,8 @@ export class Hub {
   private servers: net.Server[] = [];
   /** Bridge token -> session: how a tool call is known to come from that session. */
   private bridgeTokens = new Map<string, LiveSession>();
+  private contextTokens = new Map<string, ContextOwner>();
+  private mcpClients = new Set<Connection>();
 
   constructor(project: string) {
     this.paths = new Paths(project);
@@ -108,7 +113,10 @@ export class Hub {
       void client.conn.closed.then(() => this.clients.delete(client));
     });
     await this.listen(this.paths.socket("mcp"), (socket) => {
-      serveMcp(this, new Connection(socket, socket, "mcp"), (token) => this.bridgeTokens.get(token));
+      const conn = new Connection(socket, socket, "mcp");
+      this.mcpClients.add(conn);
+      void conn.closed.then(() => this.mcpClients.delete(conn));
+      serveMcp(this, conn, (token) => this.bridgeTokens.get(token), (token) => this.contextTokens.get(token));
     });
     // Whoever stopped the last hub may have said that its unfinished work is not to be taken up again.
     if (fs.existsSync(this.paths.abandonMark)) {
@@ -136,6 +144,8 @@ export class Hub {
 
   async shutdown(): Promise<void> {
     this.stopping = true;
+    this.contextTokens.clear();
+    for (const conn of this.mcpClients) conn.close();
     for (const server of this.servers) server.close();
     for (const client of this.clients) client.conn.close();
     await this.backends.stopAll();
@@ -304,8 +314,18 @@ export class Hub {
 
   /** Revoke an unresponsive backend's existing tool bridges before accepting a new run. */
   rotateBridge(session: LiveSession): void {
+    for (const [token, owner] of this.contextTokens) if (owner.session === session) this.contextTokens.delete(token);
     this.bridgeTokens.delete(session.bridgeToken);
     session.bridgeToken = newId("tok");
     this.bridgeTokens.set(session.bridgeToken, session);
+  }
+
+  /** Every stdio tool receives read-only runtime identity, never messaging rights. */
+  withToolContext(server: McpServer, session: LiveSession): McpServer {
+    if (server.type !== "stdio") return server;
+    for (const [token, owner] of this.contextTokens) if (owner.session === session && owner.server === server.name) return contextServer(server, this.paths.socket("mcp"), token);
+    const token = randomBytes(32).toString("hex");
+    this.contextTokens.set(token, { session, server: server.name });
+    return contextServer(server, this.paths.socket("mcp"), token);
   }
 }

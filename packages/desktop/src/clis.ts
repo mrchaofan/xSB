@@ -35,7 +35,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { COMMON_SERVERS_ENV, findCommand } from "@xsb/hub";
-import { SOCKET_ENV } from "./browser.ts";
+import { BROWSER_INSTRUCTIONS, SOCKET_ENV } from "./browser.ts";
 
 /** The hub's built-in backends: each is named after the program of the user's machine it is, or is built around. */
 export const AGENTS = new Set(["claude", "codex"]);
@@ -52,7 +52,7 @@ const BROWSER_TOOL = "xsb-browser-mcp";
  * and a request for "the browser" means this one.
  */
 const BROWSER_ABOUT =
-  'It is the browser in the side panel of the xsb app, which the user watches and can take over. When the user says "the browser", "the built-in browser", "the side-panel browser" or "IAB" (浏览器, 内置浏览器, 右栏浏览器), they mean this one: use its tools (browser_navigate first), not a browser or computer-use tool of your agent program, which cannot reach the side panel.';
+  `${BROWSER_INSTRUCTIONS} The user can watch; page input is locked during active Agent control and released when the turn ends. Use these tools for the xsb browser: a browser or computer-use tool of your agent program cannot reach it. Use another browser only when the user names that application.`;
 /** MCP servers shipped in the app. A role names one by its command; the browser every agent has. */
 const TOOLS = ["xsb-media-mcp", BROWSER_TOOL];
 

@@ -6,6 +6,7 @@ import { openDialog } from "./form.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { t } from "./i18n.js";
 import { showWeb } from "./webview.js";
+import { clearControl } from "./page-control.js";
 
 const pageOf = (id) => state.pages?.find((p) => p.id === id);
 const titleOf = (page) => (!page.url || page.url === "about:blank" ? t("tabs.new") : page.title || page.url);
@@ -19,6 +20,7 @@ export function selectTab(id) {
 /** 按 state.tab 和 state.pages 画出标签栏和当前的网页。 */
 export function renderSide() {
   const page = pageOf(state.tab);
+  if (!page || page.window) clearControl();
   $("#side-artifacts").hidden = !!page;
   $("#side-web").hidden = !page;
   $("#tabs").hidden = false;      // 没有 webview2 时仍然可以打开制品标签

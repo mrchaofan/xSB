@@ -24,6 +24,8 @@ import { readRole } from "../src/roles.ts";
 import { catalog, teamRole } from "../src/presets.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { ToolContext } from "@xsb/protocol";
+
 const MOCK = fileURLToPath(new URL("./mock-agent.ts", import.meta.url));
 const GENERATOR = fileURLToPath(new URL("./mock-generator.ts", import.meta.url));
 const THIRD_PARTY = fileURLToPath(new URL("./third-party-agent.ts", import.meta.url));
@@ -1856,6 +1858,35 @@ const p = await newSession("p1");
     }
   }
   console.log("ok 40 repeated stops preserve context, images and subsequent MCP calls");
+}
+
+// 41. Tools can observe runtime turns without posting prompts or waking an agent.
+{
+  const agentId = 'context-owner';
+  await conn.request(Agents.put, { agent: { id: agentId, backend: 'mock' } });
+  const sessionId = await newSession(agentId), session = hub.session(sessionId);
+  const scoped = hub.withToolContext({ type: 'stdio', name: 'browser', command: 'browser' }, session);
+  assert.ok(scoped.type === 'stdio');
+  const token = scoped.env!.find(e => e.name === ToolContext.tokenEnv)!.value;
+  const socket = net.connect(paths.socket('mcp')); await new Promise(resolve => socket.once('connect', resolve));
+  const watcher = new Connection(socket, socket, 'tool-context'), frames: any[] = [];
+  watcher.onNotification(ToolContext.changed, frame => frames.push(frame));
+  assert.equal((await watcher.request(ToolContext.attach, { token })).turnId, null);
+  await conn.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '!sleep 300\n!say FIRST' }] });
+  await until('first runtime turn observed', () => frames.some(f => f.active));
+  const first = (await watcher.request(ToolContext.current)).turnId;
+  assert.ok(first); await idle(agentId);
+  await until('runtime end observed', () => frames.some(f => !f.active && f.turns.some((t: any) => t.id === first && t.endedAt)));
+  await conn.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '!sleep 300\n!say SECOND' }] });
+  await until('second runtime turn observed', () => frames.some(f => f.active && f.turnId !== first));
+  const second = (await watcher.request(ToolContext.current)).turnId;
+  assert.notEqual(second, first); await idle(agentId);
+  assert.equal(received(agentId).length, 2, 'runtime notifications never become model input');
+  await assert.rejects(watcher.request('_xsb/tool-events/publish', {}), /Method not found/);
+  hub.rotateBridge(session);
+  await assert.rejects(watcher.request(ToolContext.current), /revoked/);
+  watcher.close();
+  console.log('ok 41 runtime turn identity is read-only, changes between turns, and never wakes the model');
 }
 
 await hub.shutdown();

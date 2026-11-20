@@ -41,8 +41,9 @@ export class Hooks<Decide extends Points, Observe extends Points> {
     this.deciders.set(point, [...(this.deciders.get(point) ?? []), handler]);
   }
 
-  on<K extends keyof Observe>(point: K, handler: (event: Observe[K]) => void | Promise<void>): void {
+  on<K extends keyof Observe>(point: K, handler: (event: Observe[K]) => void | Promise<void>): () => void {
     this.observers.set(point, [...(this.observers.get(point) ?? []), handler]);
+    return () => this.observers.set(point, (this.observers.get(point) ?? []).filter((h) => h !== handler));
   }
 
   decide<K extends keyof Decide>(point: K, payload: Decide[K]): Decide[K] | Veto {

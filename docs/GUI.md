@@ -225,7 +225,7 @@ dist/renderer/            页面：index.html、styles.css、打成一个文件�
 
 - **网页归主进程所有**（[pages.ts](../packages/desktop/src/pages.ts)）：用私有 Electron 的 `webContents.create({ type: "webview2" })` 创建，界面只用 `<webview2 web-contents-id>` 把它显示出来（[webview.js](../packages/desktop/renderer/webview.js)）。元素移走不影响网页，所以切换标签、收起右栏都不会让网页重新加载。
 - **地址**：地址栏和 Agent 的 `browser_navigate` 用同一条规则（`Pages.navigate`，补全由 `address.ts` 实现）：没写协议的按网站处理，补 `https://`（`localhost`、`127.0.0.1` 补 `http://`，本机服务通常没有证书）；支持 `http`、`https`、绝对路径和 `file://` 本地文件；其他协议不打开，原因显示在地址栏上。
-- **从哪来**：标签栏的"＋"；对话和文档里的 http(s) 链接（不再跳到系统浏览器，地址栏旁有"在浏览器中打开"）；网页自己打开的新窗口；Agent（见 3.2）。
+- **从哪来**：标签栏的"＋"；对话和文档里的 http(s) 链接（不再跳到系统浏览器，地址栏旁有"在浏览器中打开"）；网站 `window.open` / `target=_blank`；Agent（见 3.2）。网站弹出页一律成为受控标签，无论有无 AI，不创建独立 Electron 窗口。主进程用 `WebContentsView` 接管 Chromium 已创建的 guest，保留 opener、POST 和 about:blank 脚本语义；它在选中标签的视口中显示，切换标签或打开应用弹窗时隐藏。
 - **独立窗口**：地址栏旁的按钮把当前网页移到它自己的窗口里，是同一个网页，不刷新。此时标签的内容区显示"在主窗口中展示"和"显示窗口"；独立窗口的标题栏是网页标题、置顶、"在主窗口中显示"。关掉独立窗口就关掉了这个网页和它的标签。
 - **隔离**：网页用单独的持久分区（`persist:xsb-web`），与应用自己的页面不共用 cookie；沙箱、无 preload；网站申请权限（摄像头、定位、通知）一律拒绝。HTML 制品的预览是一个不进标签栏的网页，用另一个分区，只有它能读 `xsb-artifact://`，网站读不到制品。
 - **没有 `<webview2>` 的 Electron**（官方版，如 Linux）：制品仍有独立标签，网页链接交给系统浏览器，HTML 制品退回到不执行脚本的 iframe。
@@ -241,9 +241,10 @@ agent ──stdio MCP──▶ xsb-browser-mcp（管道）──unix socket─�
 - **每个 Agent 都有，不看角色**：浏览器是应用的基础能力，不是某个角色的专用工具。桌面端启动 Hub 时用环境变量 `XSB_MCP_SERVERS`（`.mcp.json` 的格式）告诉它每个 Agent 都有的 MCP server，这里就是 `browser → xsb-browser-mcp`；Hub 给每个会话都挂上，没有角色的 Agent 也一样。角色里有同名的 server 时以角色的为准。角色专用的工具（如 `xsb-media-mcp`）仍然只在角色的 MCP 配置里，没有该角色就没有。
 - **操控走 Chromium DevTools Protocol**，经 `webContents.debugger.attach`：`Accessibility.getFullAXTree` 是 Agent 读到的页面（可操作的元素带编号），`Input.dispatchMouseEvent` / `dispatchKeyEvent` / `insertText` 是它的鼠标和键盘，`Page.captureScreenshot` 是截图。协议不出主进程，不开调试端口。
 - **去哪个窗口**：按管道报来的工作目录找，哪个窗口的工作区有 Agent 在这个目录工作（或目录在项目里），网页就开在哪个窗口的右栏。
-- **边界**：一个 MCP 连接是一个 Agent 会话，它只能看到和操作自己打开的标签，碰不到用户开的标签，更碰不到应用自己的窗口。它的标签上有一个状态点。用户在右栏看着，可以随时接手或关掉。
+- **边界**：一个 MCP 连接是一个 Agent 会话，它只能看到和操作自己关联的标签，碰不到用户开的标签，更碰不到应用自己的窗口。Agent turn 运行期间，关联网页显示红色呼吸边框和“Agent 正在操作网页”，用户鼠标、键盘输入被主进程原生遮罩及输入保护阻止；停止或 turn 结束后解除。用户仍可停止任务、关闭标签或调整窗口展示位置。
 - **不在前台时**：读页面、点击、输入、跳转照常；截图需要网页在屏幕上，所以截图前会把它的标签切到前台。
-- **工具**：`browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_press_key`、`browser_back`、`browser_screenshot`。
+- **工具**：`browser_navigate` 导航当前页；`browser_open` 保留原页并新开标签，可明确指定 `presentation: window`；`browser_tabs` / `browser_select` / `browser_close` 管理本连接的多个页面；快照、点击、输入、按键、后退和截图操作当前页。网站弹出页继承所属连接，成为当前操作目标，返回结果包含 pageId。
+- **下载**：AI 关联页面持续接管原生下载，不依赖具体点击工具；同步设置保存路径，写入项目 `.xsb/downloads/`，保留默认名字，重名增加 `(1)`、`(2)`。`browser_downloads_list` 立即列当前 Agent turn 的下载；`browser_downloads_progress(id)` 立即查询单条字节数、百分比、速率、暂停及终态，模型可按需 sleep 后轮询。新 turn 清空可见清单但不删除文件；上一轮晚完成的文件不会串入新清单，旧 id 不能查询。下载不插话、不自动唤醒模型。详细设计与验证见 [In App Browser：多页面与自动下载](optimization/in-app-browser.md)。
 
 没有采用的方案：给应用开调试端口再接 Playwright MCP 或 chrome-devtools-mcp。它们要的是浏览器级的 CDP 端点，那会把应用的每个窗口（包括应用自己的页面）都交出去，也没法在右栏里开标签。
 
@@ -465,7 +466,7 @@ CLI 生命周期由 [agent-cli.ts](../packages/desktop/src/agent-cli.ts) 管理�
 没有验证或没有做：
 
 - browser use 只用脚本当 MCP 客户端测过，没有让真实的 Agent（claude、codex）用过。每个 Agent 都挂上它（`XSB_MCP_SERVERS`）由 Hub 的端到端测试覆盖，真实 Agent 里没有跑过。
-- 网页没有下载、文件选择、`alert` 之类对话框的处理；browser use 没有多标签、拖拽、悬停、上传这些工具。
+- AI 页面已支持自动下载和多标签；文件选择、`alert` 之类对话框，以及拖拽、悬停、上传工具尚未支持。
 - 独立窗口的置顶、红绿灯位置只在 macOS 上看过。
 
 - 改为 ACP v2 之后，桌面端没有接真实后端跑过；codex 没有在桌面端里跑过。

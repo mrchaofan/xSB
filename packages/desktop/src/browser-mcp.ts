@@ -6,6 +6,7 @@
  */
 import net from "node:net";
 import { ATTACH, SOCKET_ENV } from "./browser.ts";
+import { ToolContext } from "@xsb/protocol";
 
 const fail = (message: string): never => {
   process.stderr.write(`xsb-browser-mcp: ${message}\n`);
@@ -16,6 +17,6 @@ const socketPath = process.env[SOCKET_ENV] ?? fail("started through the launcher
 const socket = net.connect(socketPath);
 socket.on("error", () => fail("the xsb app is not running: its browser is used through the app"));
 socket.on("close", () => process.exit(0));
-socket.write(JSON.stringify({ jsonrpc: "2.0", method: ATTACH, params: { cwd: process.cwd() } }) + "\n");
+socket.write(JSON.stringify({ jsonrpc: "2.0", method: ATTACH, params: { cwd: process.cwd(), contextSocket: process.env[ToolContext.socketEnv], contextToken: process.env[ToolContext.tokenEnv] } }) + "\n");
 socket.pipe(process.stdout);
 process.stdin.pipe(socket);

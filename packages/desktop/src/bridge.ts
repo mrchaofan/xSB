@@ -41,10 +41,11 @@ export type Activity = { kind: "waiting" | "thinking" | "writing" | "tool"; deta
 export type Artifact = { id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string; assetId?: string; assetVersion?: number; description?: string };
 
 /**
- * A web page of the side panel (pages.ts). `contentsId` is what `<webview2 web-contents-id>` shows it by.
+ * A web page of the side panel (pages.ts). `nativeView` popup guests are mounted by main;
+ * other pages are shown by `<webview2 web-contents-id>` using `contentsId`.
  * `window`: it is shown in a window of its own, `pinned` on top of the others. `agent`: an agent opened it and drives it.
  */
-export type PageView = { id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; pinned: boolean; agent: boolean; error?: string };
+export type PageView = { id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; nativeView?: boolean; pinned: boolean; agent: boolean; controlling?: boolean; error?: string };
 
 /**
  * `missing` is set when the backend is one of the known agents and its

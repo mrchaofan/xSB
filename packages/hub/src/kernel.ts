@@ -91,6 +91,7 @@ export type KernelObserve = {
   /** Every change of the ledger. */
   "message.ledger": LedgerEntry;
   "acp.session_update": { agentId: string; sessionId: string; update: SessionUpdate };
+  "acp.turn_changed": { agentId: string; sessionId: string };
   "acp.turn_ended": { agentId: string; sessionId: string; turnId?: string; stopReason: StopReason; failed: boolean };
   /** The backend session was replaced: what it held is gone. */
   "acp.session_renewed": { agentId: string; sessionId: string };
