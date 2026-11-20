@@ -1,6 +1,6 @@
 {
   "name": "@xsb/hub",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The xsb hub daemon: an ACP agent to clients, an ACP client to every backend",
   "type": "module",
   "private": true,
@@ -12,8 +12,8 @@
     "xsb-mcp-bridge": "bin/xsb-mcp-bridge"
   },
   "dependencies": {
-    "@xsb/protocol": "0.1.0",
-    "@xsb/store": "0.1.0",
+    "@xsb/protocol": "0.1.1",
+    "@xsb/store": "0.1.1",
     "cross-spawn": "^7.0.6"
   },
   "engines": {
@@ -25,6 +25,6 @@
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",
-    "@xsb/adapter": "0.1.0"
+    "@xsb/adapter": "0.1.1"
   }
 }

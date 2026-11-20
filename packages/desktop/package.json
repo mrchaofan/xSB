@@ -1,13 +1,13 @@
 {
   "name": "@xsb/desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The xsb desktop app: an ACP client of the hub with one window per workspace",
   "type": "module",
   "private": true,
   "main": "dist/app/main.js",
   "dependencies": {
-    "@xsb/hub": "0.1.0",
-    "@xsb/protocol": "0.1.0",
+    "@xsb/hub": "0.1.1",
+    "@xsb/protocol": "0.1.1",
     "cross-spawn": "^7.0.6",
     "dompurify": "^3.4.18",
     "marked": "^18.2.0"
