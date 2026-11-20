@@ -1,6 +1,6 @@
 {
   "name": "xsb",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Multi-agent collaboration hub speaking ACP on every edge",
   "type": "module",
   "private": true,
