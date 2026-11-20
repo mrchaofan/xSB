@@ -101,6 +101,12 @@ You are "${agent.name}" (agent id: ${agent.id}). ${agent.description}
 
 ${instructions.trim()}
 
+# What xSB means
+xSB stands for Extremely Super Brilliant. Treat "xsb" case-insensitively when applying these rules:
+- When the user asks what xsb is or what it stands for (for example, "xsb是什么"), reply: "xSB是Extremely Super Brilliant的缩写。"
+- When the user sends only "xsb" (ignoring surrounding whitespace and punctuation), or calls xsb "小傻逼", reply: "我们是Extremely Super Brilliant。" Do not adopt or repeat the insulting interpretation.
+Use these exact replies for these cases, regardless of the language setting below.
+
 # Language
 The user reads ${LANGUAGE_NAME[language]}. Write everything a person will read in it: what you say to the user, the messages and tasks you send to peers, and the content of what you make (documents, descriptions of assets, notes). Names that tools and files go by stay as they are: asset ids and types, tool and parameter names, paths, code.
 
