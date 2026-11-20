@@ -1064,6 +1064,7 @@ const p = await newSession("p1");
   const s = await newSession("h1");
   await prompt(s, "!say ALPHA-REPLY");
   await prompt(s, `!call dispatch_task {"deliveryPref":"wake","to":"b","title":"open work","instructions":"!sleep 1000","topic":"handoff"}`);
+  await until("open work running before handoff", async () => (await tasks()).find((t) => t.title === "open work")?.status === "running");
 
   // Another backend: nothing to restore there, so the new one is told what was said and what is open.
   await conn.request(Agents.put, { agent: { id: "h1", backend: "steerable" } });
