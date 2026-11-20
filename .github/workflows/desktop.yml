@@ -1,18 +1,18 @@
-name: Desktop CI and Release
+name: Desktop CI
 
 on:
   pull_request:
   push:
     branches: [main]
-    tags: ['v*']
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact version commit to build
+        type: string
+        required: true
 
 permissions:
   contents: read
-
-concurrency:
-  group: desktop-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   # npm installs the patched downloader; electron-builder fetches the configured mirror at packaging time.
@@ -25,22 +25,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: npm
-      - name: Validate release version
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          const { version } = JSON.parse(fs.readFileSync('packages/desktop/package.json', 'utf8'));
-          if (process.env.RELEASE_TAG !== `v${version}`) {
-            throw new Error(`Release tag must match the desktop version: v${version}`);
-          }
-          NODE
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
@@ -69,6 +59,8 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
@@ -102,35 +94,5 @@ jobs:
             packages/desktop/release/*.zip.sha256
           if-no-files-found: error
           compression-level: 0
+          overwrite: true
           retention-days: 30
-
-  release:
-    name: Publish release archives
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: package
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: xsb-*
-          path: release
-          merge-multiple: true
-      - name: Verify downloaded archives
-        working-directory: release
-        run: sha256sum --check *.zip.sha256
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release/*.zip release/*.zip.sha256 --clobber
-          else
-            options=(--verify-tag --generate-notes)
-            if [[ "$RELEASE_TAG" == *-* ]]; then options+=(--prerelease); fi
-            gh release create "$RELEASE_TAG" release/*.zip release/*.zip.sha256 "${options[@]}"
-          fi
