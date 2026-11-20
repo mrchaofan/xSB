@@ -3,9 +3,14 @@
 // 元素移走不影响网页本身，所以它在这几处之间移动时不会重新加载。
 import { fill, h } from "./dom.js";
 import { t } from "./i18n.js";
+import { clearNative, showNative } from "./native-page.js";
+import { showControl } from "./page-control.js";
 
 /** container 里显示 page；page 打不开时显示原因。container 里换成别的内容，就是不再显示它。 */
 export function showWeb(container, page) {
+  showControl(container, page);
+  if (!page.error && page.nativeView) return showNative(container, page);
+  clearNative();
   if (page.error) {
     return fill(container, h("div", { class: "web-note" },
       h("p", {}, t("web.error", { error: page.error })),

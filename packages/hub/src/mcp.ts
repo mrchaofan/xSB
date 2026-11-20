@@ -16,6 +16,8 @@ import { mcpServers } from "./roles.ts";
 import type { LiveSession } from "./session.ts";
 import { TOOLS, callTool } from "./tools.ts";
 import { VERSION } from "./util.ts";
+import { serveToolContext } from "./tool-context.ts";
+import type { ContextOwner } from "./tool-context.ts";
 
 const MCP_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const BRIDGE = path.join(shipped("bin"), "xsb-mcp-bridge");
@@ -65,7 +67,8 @@ export function commonServers(): { server: McpServer; about?: string }[] {
  * once and keep it (codex does, whatever `notifications/tools/list_changed` says). Whether a call is allowed is
  * decided when it is made (capabilities.ts).
  */
-export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => LiveSession | undefined): void {
+export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => LiveSession | undefined, contextLookup: (token: string) => ContextOwner | undefined = () => undefined): void {
+  serveToolContext(hub, conn, contextLookup);
   let session: LiveSession | undefined;
   let token: string | undefined;
   const attached = (): LiveSession => {

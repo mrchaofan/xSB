@@ -62,6 +62,7 @@ type Words = {
   notRunnable: (file: string) => string;
   noProgram: (agent: string, program: string) => string;
   badAddress: string;
+  agentControl: string;
   /** A notification of the system: what became of an agent's work (`Notice`). */
   notice: (n: Notice) => { title: string; body: string };
   /** Asking before a quit that cuts agents short: `names` are theirs. */
@@ -74,6 +75,7 @@ const TEXT: Record<Language, Words> = {
     notRunnable: (file) => `${file} is not a program that can be run`,
     noProgram: (agent, program) => `Agent "${agent}" runs on ${program}, and the ${program} program was not found on your PATH. Install it, or open this agent's settings and use "Locate…" next to its backend.`,
     badAddress: "Enter a valid address: http, https, file://, or an absolute file path.",
+    agentControl: "Agent is operating this page",
     notice: ({ kind, name, detail }) =>
       ({
         done: { title: `${name} finished`, body: "All work is done. Nobody is working now." },
@@ -93,6 +95,7 @@ const TEXT: Record<Language, Words> = {
     notRunnable: (file) => `${file} 不是可执行文件`,
     noProgram: (agent, program) => `智能体“${agent}”要用 ${program}，但在 PATH 中没有找到 ${program} 程序。请安装它，或打开这个智能体的设置，在后端旁点“指定路径…”。`,
     badAddress: "请输入有效地址，支持 http、https、file:// 或绝对文件路径。",
+    agentControl: "Agent 正在操作网页",
     notice: ({ kind, name, detail }) =>
       ({
         done: { title: `${name}完成了工作`, body: "工作已全部完成，现在没有智能体在工作。" },
@@ -201,7 +204,7 @@ async function createWindow(project?: string): Promise<void> {
     webPreferences: { preload: PRELOAD, webview2Tag: Pages.supported } as WebPreferences,
   });
   const id = win.webContents.id;
-  const pages = new Pages(win.webContents, { preload: PRELOAD, pageWindowUrl: `${APP_SCHEME}://xsb/page.html` });
+  const pages = new Pages(win.webContents, { preload: PRELOAD, pageWindowUrl: `${APP_SCHEME}://xsb/page.html`, controlText: TEXT[language()].agentControl });
   panels.set(id, pages);
   // A window shows the app and nothing else. A link in what an agent wrote opens as a page
   // of the side panel, or in the user's browser where there are no such pages.
@@ -343,6 +346,8 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       return null;
     case "page":
       try {
+        if (args[1] === "bounds") return pages.layout(args[0], event.sender, args[2]);
+        if (args[1] === "controlBounds") return pages.controlLayout(args[0], event.sender, args[2]);
         return pages.call(args[0], args[1], args[2]);
       } catch (e) {
         throw e instanceof BadAddress ? new Error(TEXT[language()].badAddress) : e;
@@ -478,8 +483,9 @@ void app.whenReady().then(() => {
   }
   // Agents reach the browser of the side panel here (browser.ts): each the one of the window its workspace is open in.
   const browser = serveBrowser(clis.browserSocket, (cwd) => {
-    const [id] = [...windows].find(([, project]) => projects.get(project)?.worksIn(cwd)) ?? [];
-    return id === undefined ? undefined : panels.get(id);
+    const [id, project] = [...windows].find(([, project]) => projects.get(project)?.worksIn(cwd)) ?? [];
+    const pages = id === undefined ? undefined : panels.get(id);
+    return pages && project ? { pages, project } : undefined;
   });
   app.on("will-quit", () => browser.close());
   void createWindow(folderOf(process.argv, process.cwd()));

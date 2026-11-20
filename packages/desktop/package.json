@@ -26,6 +26,7 @@
     "start": "rolldown -c && electron .",
     "package": "rolldown -c && electron-builder --config electron-builder.config.mjs --mac --win",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "test:browser-native": "node test/browser-native.mjs"
   }
 }

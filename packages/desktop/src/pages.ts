@@ -1,12 +1,13 @@
 /**
  * The web pages of one window: the page tabs of its side panel.
  *
- * A page is a WebContents that the main process owns
+ * A page is a WebContents that the main process owns. Explicitly opened pages use
  * (`webContents.create({ type: "webview2" })`, an API of the private Electron
  * build this app runs on; see scripts/patch-electron.mjs). A document shows
  * one with `<webview2 web-contents-id>`. Taking the element away does not
  * touch the page, and that is what lets a page move between the side panel
- * and a window of its own without loading again:
+ * and a window of its own without loading again. Chromium-created popup guests
+ * instead use a WebContentsView in the same tab viewport, preserving their opener:
  *
  *   side panel   (renderer/pages.js)        ┐
  *   page window  (renderer/page-window.js)  ┴ <webview2> ──shows──▶ a page here
@@ -15,10 +16,13 @@
  * A page ends when its tab is closed, when its window is closed, or with the
  * window whose side panel it belongs to.
  */
-import { BrowserWindow, session, shell, webContents } from "electron";
-import type { WebContents, WebPreferences } from "electron";
+import { BrowserWindow, WebContentsView, session, shell, webContents } from "electron";
+import type { BrowserWindowConstructorOptions, Rectangle, WebContents, WebPreferences } from "electron";
 import { address } from "./address.ts";
 import type { PageView } from "./bridge.ts";
+import { ownDownloads } from "./browser-downloads.ts";
+import type { BrowserDownloads } from "./browser-downloads.ts";
+import { controlInput, installInputGuard } from "./page-input.ts";
 
 /** What the private Electron adds to the official one's types. */
 type Webview2 = WebContents & { isAttached(): boolean; detach(): boolean; destroy(): void };
@@ -29,9 +33,10 @@ const WEB_PARTITION = "persist:xsb-web";
 /** Previews of the HTML files agents wrote: the only pages that can read `xsb-artifact://`, and no website is among them. */
 export const PREVIEW_PARTITION = "xsb-preview";
 
-type Page = { id: string; contents: Webview2; embedded: boolean; agent: boolean; window?: BrowserWindow; error?: string };
+export type PageOptions = { embedded?: boolean; agent?: boolean; downloads?: BrowserDownloads; onPopup?: (id: string, openerId: string) => void };
+type Page = { id: string; contents: Webview2; embedded: boolean; agent: boolean; controlling?: boolean; controlBounds?: { sender: WebContents; bounds: Rectangle | null }; controlView?: WebContentsView; controlHost?: BrowserWindow; window?: BrowserWindow; nativeView?: WebContentsView; viewHost?: BrowserWindow; error?: string; releaseDownloads?: () => void; options: PageOptions };
 /** Where the app's own files are, for a page's window. */
-type Shell = { preload: string; pageWindowUrl: string };
+type Shell = { preload: string; pageWindowUrl: string; controlText?: string };
 
 export class Pages {
   /** False on an Electron without `<webview2>` (the official one): there are no page tabs then. */
@@ -60,7 +65,8 @@ export class Pages {
    * Open a page. An embedded one is shown inside something else (the preview of an HTML
    * artifact) and is no tab; one an agent opened says so on its tab.
    */
-  open(url: string, { embedded = false, agent = false } = {}): PageView {
+  open(url: string, options: PageOptions = {}): PageView {
+    const { embedded = false } = options;
     if (url !== "about:blank" && !(embedded && url.startsWith("xsb-artifact:"))) url = address(url);
     if (!create) throw new Error("this Electron has no <webview2>");
     const contents = create.call(webContents, {
@@ -70,8 +76,21 @@ export class Pages {
       contextIsolation: true,
       nodeIntegration: false,
     });
-    const page: Page = { id: `p${++this.seq}`, contents, embedded, agent };
+    const page = this.register(contents, options);
+    void contents.loadURL(url).catch(() => {});
+    this.changed(page);
+    return this.view(page);
+  }
+
+  /** All pages, including Chromium's pre-created native popups, share ownership and lifecycle. */
+  private register(contents: Webview2, options: PageOptions, nativeView?: WebContentsView): Page {
+    const { embedded = false, agent = false, downloads } = options;
+    const page: Page = { id: `p${++this.seq}`, contents, embedded, agent, options, nativeView };
+    nativeView?.setVisible(false);
     this.pages.set(page.id, page);
+    installInputGuard(contents);
+    if (downloads) page.releaseDownloads = ownDownloads(contents, page.id, downloads, () => { page.error = undefined; this.changed(page); });
+    contents.once("destroyed", () => this.close(page));
 
     const changed = (): void => this.changed(page);
     for (const event of ["did-start-loading", "did-stop-loading", "did-navigate", "did-navigate-in-page", "page-title-updated"] as const) contents.on(event as any, changed);
@@ -83,16 +102,32 @@ export class Pages {
       page.error = description;
       changed();
     });
-    // What a page opens in a new window becomes a tab next to it. An agent's page loads it itself: the agent acts on that one tab.
+    // Keep the opener intact. Chromium, rather than loadURL, performs the child navigation.
     contents.setWindowOpenHandler(({ url: target }) => {
-      if (!/^https?:/.test(target)) return { action: "deny" };
-      if (page.agent) void contents.loadURL(target).catch(() => {});
-      else this.open(target);
-      return { action: "deny" };
+      if (!/^https?:/i.test(target) && target !== "about:blank" && !target.startsWith("blob:")) return { action: "deny" };
+      // Preview pages must not hand their private artifact partition to a website.
+      if (page.embedded) {
+        if (/^https?:/i.test(target)) this.open(target);
+        return { action: "deny" };
+      }
+      return {
+        action: "allow",
+        outlivesOpener: true,
+        overrideBrowserWindowOptions: { webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } },
+        createWindow: (nativeOptions) => {
+          // Electron has ALREADY created the guest. Replacing it with create()
+          // breaks its contract and loses opener/POST state. It has no webview2
+          // attachment bridge. Adopt it into a managed View in the tab's bounds;
+          // never create an Electron window for a website popup.
+          const guest = (nativeOptions as BrowserWindowConstructorOptions & { webContents: Webview2 }).webContents;
+          const child = this.register(guest, page.options, new WebContentsView({ webContents: guest }));
+          this.changed(child);
+          page.options.onPopup?.(child.id, page.id);
+          return guest;
+        },
+      };
     });
-    void contents.loadURL(url).catch(() => {});     // a failed load is reported by did-fail-load
-    changed();
-    return this.view(page);
+    return page;
   }
 
   /** One thing done to a page: by its tab, its window, or an agent. */
@@ -100,6 +135,7 @@ export class Pages {
     const page = this.pages.get(id);
     if (!page) throw new Error("this page was closed");
     const { contents, window } = page;
+    if (page.controlling && ["navigate", "back", "forward", "reload", "external"].includes(op)) throw new Error(this.shell.controlText ?? "Agent is operating this page");
     if (op === "navigate") void this.navigate(id, String(arg)).catch(() => {});
     else if (op === "back") contents.navigationHistory.goBack();
     else if (op === "forward") contents.navigationHistory.goForward();
@@ -126,13 +162,116 @@ export class Pages {
     return this.pages.get(id)?.contents;
   }
 
+  /** The trusted renderer gives native popup tabs their viewport. Stale updates from
+   * a former host cannot move a page back after a detach/restore operation.
+   */
+  layout(id: string, sender: WebContents, bounds: Rectangle | null): void {
+    const page = this.pages.get(id);
+    if (!page?.nativeView || sender !== (page.window?.webContents ?? this.host)) return;
+    const owner = BrowserWindow.fromWebContents(sender);
+    if (!owner || owner.isDestroyed()) return;
+    if (!bounds) { page.nativeView.setVisible(false); return; }
+    if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) throw new Error("invalid page bounds");
+    const size = owner.getContentBounds();
+    const x = Math.max(0, Math.min(size.width, Math.round(bounds.x)));
+    const y = Math.max(0, Math.min(size.height, Math.round(bounds.y)));
+    const width = Math.max(0, Math.min(size.width - x, Math.round(bounds.width)));
+    const height = Math.max(0, Math.min(size.height - y, Math.round(bounds.height)));
+    if (page.viewHost !== owner) {
+      this.unmount(page);
+      owner.contentView.addChildView(page.nativeView);
+      page.viewHost = owner;
+    }
+    page.nativeView.setBounds({ x, y, width, height });
+    page.nativeView.setVisible(width > 0 && height > 0);
+    if (page.controlView?.getVisible() && page.controlHost === owner) owner.contentView.addChildView(page.controlView);
+  }
+
+  /** Control follows the actual runtime turn, not the lifetime of a tab or tool call. */
+  setAgentControl(id: string, controlling: boolean): void {
+    const page = this.pages.get(id);
+    if (!page || page.controlling === controlling) return;
+    page.controlling = controlling;
+    controlInput(page.contents, controlling);
+    if (!controlling) this.unmountControl(page);
+    else if (page.controlBounds?.bounds) this.controlLayout(id, page.controlBounds.sender, page.controlBounds.bounds);
+    this.changed(page);
+  }
+
+  controlLayout(id: string, sender: WebContents, bounds: Rectangle | null): void {
+    const page = this.pages.get(id);
+    if (!page || sender !== (page.window?.webContents ?? this.host)) return;
+    page.controlBounds = { sender, bounds };
+    if (!bounds || !page.controlling) { this.unmountControl(page); return; }
+    if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) throw new Error("invalid page bounds");
+    const owner = BrowserWindow.fromWebContents(sender);
+    if (!owner || owner.isDestroyed()) return;
+    if (!page.controlView) {
+      const view = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+      page.controlView = view;
+      view.setBackgroundColor("#00000000");
+      view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      const label = this.shell.controlText ?? "Agent is operating this page";
+      const html = `<!doctype html><html><head><style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;font:13px system-ui;user-select:none;cursor:not-allowed}
+.frame{position:fixed;inset:0;box-sizing:border-box;border:3px solid #f04452;background:rgba(240,68,82,.025);box-shadow:inset 0 0 18px rgba(240,68,82,.55);animation:breathe 1.8s ease-in-out infinite}
+.label{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:7px 14px;border-radius:18px;color:#fff;background:#b92335;white-space:nowrap;box-shadow:0 3px 12px #0003}
+@keyframes breathe{50%{border-color:#ff8790;box-shadow:inset 0 0 34px rgba(240,68,82,.8)}}
+@media(prefers-reduced-motion:reduce){.frame{animation:none}}
+</style></head><body tabindex="0"><div class="frame"><div class="label"></div></div><script>
+document.querySelector('.label').textContent=${JSON.stringify(label)};
+for(const type of ['keydown','keyup','mousedown','mouseup','click','wheel','contextmenu','dragover','drop'])addEventListener(type,e=>e.preventDefault(),{passive:false});
+document.body.focus();</script></body></html>`;
+      void view.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(() => {});
+    }
+    if (page.controlHost !== owner) {
+      this.unmountControl(page);
+      owner.contentView.addChildView(page.controlView);
+      page.controlHost = owner;
+    }
+    const size = owner.getContentBounds();
+    const x = Math.max(0, Math.min(size.width, Math.round(bounds.x))), y = Math.max(0, Math.min(size.height, Math.round(bounds.y)));
+    page.controlView.setBounds({ x, y, width: Math.max(0, Math.min(size.width - x, Math.round(bounds.width))), height: Math.max(0, Math.min(size.height - y, Math.round(bounds.height))) });
+    page.controlView.setVisible(bounds.width > 0 && bounds.height > 0);
+    owner.contentView.addChildView(page.controlView); // Shield stays above any native popup view.
+    page.controlView.webContents.focus();
+  }
+
+  private unmountControl(page: Page): void {
+    page.controlView?.setVisible(false);
+    if (page.controlView && page.controlHost && !page.controlHost.isDestroyed()) page.controlHost.contentView.removeChildView(page.controlView);
+    page.controlHost = undefined;
+  }
+
+  private unmount(page: Page): void {
+    page.nativeView?.setVisible(false);
+    if (page.nativeView && page.viewHost && !page.viewHost.isDestroyed()) page.viewHost.contentView.removeChildView(page.nativeView);
+    page.viewHost = undefined;
+  }
+
+  /** End agent control while leaving its pages and in-flight downloads available to the user. */
+  releaseAgent(id: string): void {
+    const page = this.pages.get(id);
+    if (!page) return;
+    page.agent = false;
+    this.setAgentControl(id, false);
+    page.releaseDownloads?.();
+    page.releaseDownloads = undefined;
+    page.options = {}; // New user popups/downloads no longer belong to the old connection.
+    this.changed(page);
+  }
+
   /** Put the page on screen, for what needs it drawn (a screenshot): its tab becomes the side panel's current one. */
   async reveal(id: string): Promise<void> {
     const page = this.pages.get(id);
     if (!page) throw new Error("this page was closed");
-    if (!page.contents.isAttached()) this.send({ revealPage: id });
-    for (let i = 0; i < 30 && !page.contents.isAttached(); i++) await new Promise((resolve) => setTimeout(resolve, 100));
-    if (!page.contents.isAttached()) throw new Error("the page is not on screen and could not be brought there");
+    if (page.window) {
+      page.window.show();
+    }
+    const shown = (): boolean => page.nativeView ? page.nativeView.getVisible() : page.contents.isAttached();
+    if (!page.window && !shown()) this.send({ revealPage: id });
+    for (let i = 0; i < 30 && !shown(); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    if (!shown()) throw new Error("the page is not on screen and could not be brought there");
   }
 
   /** The page that a window of its own shows, if `contents` is such a window. */
@@ -169,7 +308,10 @@ export class Pages {
       if (page.window === window) this.close(page);
     });
     // The side panel lets go first; a page is shown in one place at a time.
-    page.contents.detach();
+    page.controlBounds = undefined;
+    this.unmountControl(page);
+    if (page.nativeView) this.unmount(page);
+    else page.contents.detach();
     this.changed(page);
     void window.loadURL(this.shell.pageWindowUrl);
   }
@@ -179,7 +321,10 @@ export class Pages {
     const window = page.window;
     if (!window) return;
     page.window = undefined;
-    page.contents.detach();
+    page.controlBounds = undefined;
+    this.unmountControl(page);
+    if (page.nativeView) this.unmount(page);
+    else page.contents.detach();
     window.destroy();
     this.changed(page);
   }
@@ -190,8 +335,12 @@ export class Pages {
     if (!this.pages.delete(page.id)) return;
     const window = page.window;
     page.window = undefined;
+    this.unmountControl(page);
+    this.unmount(page);
     if (window && !window.isDestroyed()) window.destroy();
-    page.contents.destroy();
+    page.releaseDownloads?.();
+    if (!page.contents.isDestroyed()) page.contents.destroy();
+    if (page.controlView && !page.controlView.webContents.isDestroyed()) (page.controlView.webContents as Webview2).destroy();
     if (!page.embedded) this.send({ removedPage: page.id });
   }
 
@@ -207,7 +356,7 @@ export class Pages {
     if (!this.host.isDestroyed()) this.host.send("xsb:event", event);
   }
 
-  private view({ id, contents, window, agent, error }: Page): PageView {
+  private view({ id, contents, window, nativeView, agent, controlling, error }: Page): PageView {
     return {
       id,
       contentsId: contents.id,
@@ -217,8 +366,10 @@ export class Pages {
       canGoBack: contents.navigationHistory.canGoBack(),
       canGoForward: contents.navigationHistory.canGoForward(),
       window: !!window,
+      nativeView: !!nativeView,
       pinned: !!window && window.isAlwaysOnTop(),
       agent,
+      controlling: !!controlling,
       error,
     };
   }

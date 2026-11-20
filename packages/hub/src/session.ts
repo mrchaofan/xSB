@@ -22,6 +22,7 @@ import path from "node:path";
  */
 import { Boundaries, Discarded, OriginExt, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
 import type { Boundary, ContentBlock, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
+import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
@@ -120,6 +121,7 @@ export class LiveSession {
   bridgeToken = newId("tok");
   readonly clients = new Set<Client>();
   current?: Turn;
+  private turnWindows: TurnWindow[] = [];
   /** What `session/new` or `session/resume` of the backend answered: config options, commands. */
   setup: { configOptions?: unknown; availableCommands?: unknown } = {};
   /** MCP servers the creating client asked for, passed on next to the hub's own. */
@@ -164,6 +166,19 @@ export class LiveSession {
 
   get id(): string {
     return this.rec.id;
+  }
+
+  toolContext(): ToolContextState {
+    return { agentId: this.agentId, sessionId: this.id, turnId: this.current?.id ?? null, active: !!this.current && this.acceptsTools, turns: this.turnWindows.map((t) => ({ ...t })) };
+  }
+
+  private turnChanged(): void {
+    const time = Date.now();
+    const last = this.turnWindows.at(-1);
+    if (last && last.endedAt === undefined) last.endedAt = time;
+    if (this.current) this.turnWindows.push({ id: this.current.id, startedAt: time });
+    if (this.turnWindows.length > 128) this.turnWindows.shift();
+    this.hub.kernel.hooks.emit("acp.turn_changed", { agentId: this.agentId, sessionId: this.id });
   }
   get agentId(): string {
     return this.rec.agentId;
@@ -221,7 +236,7 @@ export class LiveSession {
     const params = {
       cwd: agent.workspace,
       // The hub's own tools, then the others the agent has (Hub.toolServers): the system prompt says where each comes from.
-      mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), ...this.hub.toolServers(agent, this.clientMcp).map((t) => t.server)],
+      mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), ...this.hub.toolServers(agent, this.clientMcp).map((t) => this.hub.withToolContext(t.server, this))],
       ...(backend.caps.systemPrompt ? { systemPrompt: { mode: "append", content: [text(instructions)] } } : {}),
       ...(backend.caps.additionalDirectories
         ? { additionalDirectories: [paths.shared, paths.assets, ...(role ? (role.layers ?? [role.dir]) : [])] }
@@ -501,6 +516,7 @@ export class LiveSession {
     const turn: Turn = { id: newId("turn"), protected: [first, ...more].some(users), first, inputs: [first, ...more], order: [first, ...more], held: [...more], inserted: false, items: itemsOf([first, ...more]), started: false, done: deferred() };
     turn.taskIds = this.hub.kernel.openTasks(this.id).filter((t) => !t.stopping).map((t) => t.id);
     this.current = turn;
+    this.turnChanged();
     this.hub.agentChanged(this.agentId);
     this.state("running");
     try {
@@ -686,6 +702,7 @@ export class LiveSession {
       turn.items = itemsOf(turn.inputs);
     }
     this.current = undefined;
+    this.turnChanged();
     if (expiredAppend && !turn.cancelledBy && this.backend) {
       // Normal cancellation has already confirmed idle and settled prompt receipts:
       // keep that conversation and its tools, including image context. An unread
@@ -723,6 +740,7 @@ export class LiveSession {
     const turn: Turn = { id: newId("turn"), protected: inputs.some(users), first: inputs[0], inputs, order: [...inputs], held: [], inserted: false, items: itemsOf(inputs), started: true, done: deferred() };
     turn.taskIds = this.hub.kernel.openTasks(this.id).filter((t) => !t.stopping).map((t) => t.id);
     this.current = turn;
+    this.turnChanged();
     this.ranSince = false;
     this.users(inputs[0]);
     this.hub.agentChanged(this.agentId);
@@ -767,6 +785,7 @@ export class LiveSession {
   beginUserStop(): { pending: string[]; sent: string[]; inserted: string[] } | undefined {
     if (this.userStopping) return undefined;
     this.userStopping = true;
+    this.hub.kernel.hooks.emit("acp.turn_changed", { agentId: this.agentId, sessionId: this.id });
     const inputs = [...this.queue, ...this.carried, ...(this.current?.inputs ?? [])];
     return {
       pending: inputs.filter((i) => !i.in).map((i) => i.messageId),
