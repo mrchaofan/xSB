@@ -163,7 +163,13 @@ export class Client {
     conn.onRequest("session/set_config_option", async (p) => {
       const session = this.own(p.sessionId);
       const backend = await session.ensureBackend();
-      return backend.conn.request("session/set_config_option", { ...p, sessionId: session.rec.backendSessionId });
+      const result = await backend.conn.request("session/set_config_option", { ...p, sessionId: session.rec.backendSessionId });
+      if (typeof p.configId === "string" && typeof p.value === "string") session.save({
+        selectedConfig: { ...session.rec.selectedConfig, [p.configId]: p.value },
+        contextRenewAt: undefined, contextSize: undefined, used: undefined,
+      });
+      session.invalidateUsage();
+      return result;
     });
 
     // ---- agents ------------------------------------------------------------

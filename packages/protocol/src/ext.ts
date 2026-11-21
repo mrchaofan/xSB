@@ -17,6 +17,9 @@ import type { ContentBlock, SessionUpdate } from "./acp.ts";
 /** Namespace of the extensions this project defines itself. */
 export const NS = "dev.xsb";
 
+/** Backend promise: after cancelled work reports idle, no tool call/reply from it can arrive later. */
+export const TurnIsolation = { key: `${NS}/turn-isolation`, version: 1 } as const;
+
 /**
  * Agents: one ACP connection reaches many agents.
  *

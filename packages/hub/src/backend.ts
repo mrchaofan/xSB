@@ -12,7 +12,7 @@
  */
 import spawn from "cross-spawn";
 import type { ChildProcess } from "node:child_process";
-import { Connection, OriginExt, PROTOCOL_VERSION, RpcError, failure, text } from "@xsb/protocol";
+import { Connection, OriginExt, PROTOCOL_VERSION, RpcError, TurnIsolation, failure, text } from "@xsb/protocol";
 import type { ContentBlock, InitializeResponse, OriginMeta, PermissionRequest, PromptResponse } from "@xsb/protocol";
 import { INSTALL_HINT, findCommand } from "./config.ts";
 import type { BackendSpec } from "./config.ts";
@@ -29,6 +29,8 @@ export type BackendCaps = {
    * the agent works is what goes into that work (claude-agent-acp).
    */
   steering: boolean;
+  /** Explicitly guarantees cancellation drains/fences old tool traffic before idle. Absent: rebind after stop. */
+  orderedCancellation?: boolean;
 };
 
 /**
@@ -183,6 +185,8 @@ export class Backend {
       additionalDirectories: session.additionalDirectories != null,
       image: session.prompt?.image != null,
       steering: (init._meta as { steering?: { supported?: boolean } } | null | undefined)?.steering?.supported === true,
+      orderedCancellation: (init._meta?.[TurnIsolation.key] as { version?: number; afterIdle?: boolean } | undefined)?.version === TurnIsolation.version &&
+        (init._meta?.[TurnIsolation.key] as { afterIdle?: boolean } | undefined)?.afterIdle === true,
     };
     backend.authMethods = (init.authMethods ?? []).map((m: any) => m?.name ?? m?.methodId ?? m?.id).filter(Boolean);
     backend.info = init.info ? `${init.info.name} ${init.info.version}` : name;

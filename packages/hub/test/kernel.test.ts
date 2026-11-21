@@ -96,11 +96,11 @@ const settle = () => hooks.settled();
   assert.deepEqual(state.tasks.get(onlyP.id)!.ended, { reason: "cascaded", stopper: agentPrincipal("a"), cause: P.id });
   assert.equal(state.tasks.get(both.id)!.status, "running", "spared: Q still holds it");
   // A policy that has everything go.
-  hooks.decider("cascade.pre_propagate", (p) => ({ ...p, cascade: "force" }));
   const R = handed(give(A, B, "R"));
   const S = handed(give(C, B, "S"));
   const shared = give(B, C, "shared");
   assert.deepEqual([...shared.parents!].sort(), [Q.id, R.id, S.id].sort());
+  hooks.decider("cascade.pre_propagate", (p) => p.root.id === R.id ? { ...p, cascade: "force" } : p);
   const forced = kernel.stop(R, agentPrincipal("a"), { status: "cancelled", reason: "cancelled", result: "" });
   assert.ok(!isVeto(forced) && forced.with.some((t) => t.id === shared.id));
   for (const t of [Q, S]) kernel.complete(state.tasks.get(t.id)!, "completed", "", []);
@@ -157,17 +157,25 @@ const settle = () => hooks.settled();
   busy.add("sc");
   const second = give(A, B, "second");
   assert.equal(state.ledger.get([...state.mail.values()].find((m) => m.taskId === second.id)!.id)!.state, "queued", "an agent's task waits its turn");
+  assert.deepEqual(kernel.replace(second, "turn-sb"), [], "mixed work queues without partially cancelling the turn");
+  assert.equal(state.tasks.get(first.id)!.status, "running");
+  assert.equal(state.tasks.get(theirs.id)!.status, "running");
+  assert.equal(state.tasks.get(child.id)!.status, "running");
+  const removed = kernel.stop(theirs, agentPrincipal("c"), { status: "cancelled", reason: "cancelled", result: "C withdrew its work" });
+  assert.ok(!isVeto(removed));
+  assert.equal(state.tasks.get(child.id)!.status, "running", "A still supports the shared child");
   const replaced = kernel.replace(second, "turn-sb");
   assert.deepEqual(replaced.map((t) => t.id), [first.id], "only the dispatcher's own work");
   busy.clear();
+  hooks.emit("acp.turn_ended", { agentId: "b", sessionId: "sb", turnId: "turn-sb", stopReason: "cancelled", failed: false });
   hooks.emit("acp.turn_ended", { agentId: "c", sessionId: "sc", turnId: "turn-sc", stopReason: "cancelled", failed: false });
   await settle();
   assert.deepEqual(state.tasks.get(first.id)!.ended, { reason: "superseded", stopper: agentPrincipal("a") });
   assert.deepEqual(state.tasks.get(child.id)!.ended, { reason: "cascaded", stopper: agentPrincipal("a"), cause: first.id });
-  assert.equal(state.tasks.get(theirs.id)!.status, "running", "another's work in the session goes on");
+  assert.equal(state.tasks.get(theirs.id)!.ended?.stopper.kind, "agent");
+  assert.deepEqual(state.tasks.get(theirs.id)!.ended?.stopper, agentPrincipal("c"), "replacement did not cancel another initiator's work");
   assert.equal(results(A, first.id).length, 0, "its dispatcher stopped it, and is not told");
   assert.equal(state.tasks.get(second.id)!.status, "queued");
-  kernel.complete(state.tasks.get(theirs.id)!, "completed", "", []);
   kernel.complete(handed(state.tasks.get(second.id)!), "completed", "", []);
   console.log("ok 5b explicit replacement");
 }
@@ -277,5 +285,20 @@ const settle = () => hooks.settled();
   console.log("ok 9 abandon");
 }
 
+// Durable terminal prompts/tasks cannot be routed into new work when the hub resumes.
+{
+  const message = kernel.post({ to: B, from: { kind: "user" }, kind: "message", prompt: [{ type: "text", text: "discarded" }], pref: "wake" }).item;
+  kernel.mark(message.id, "discarded_unseen");
+  const task = handed(give(A, B, "finished before mail acknowledgement"));
+  const taskMail = [...state.mail.values()].find(m => m.taskId === task.id)!;
+  kernel.complete(task, "completed", "done", []);
+  await settle(); // Drain the original, valid routing events before measuring resume events.
+  routed.length = 0;
+  kernel.resume(); await settle();
+  assert.ok(!routed.some(r => r.item.id === message.id || r.item.id === taskMail.id));
+  assert.ok(!state.mail.has(message.id) && !state.mail.has(taskMail.id));
+  assert.equal(state.tasks.get(task.id)!.status, "completed");
+  console.log("ok 10 terminal input is not replayed on resume");
+}
 fs.rmSync(dir, { recursive: true, force: true });
 console.log("kernel: ok");

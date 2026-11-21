@@ -28,6 +28,7 @@ import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
 import { bridgeServer } from "./mcp.ts";
 import { sessionTokens } from "./config.ts";
+import { boundedText, contentTokens, contextOverflow, contextPolicy, contextRef, textTokens } from "./context.ts";
 import { historyUpdate } from "./history.ts";
 import { Paths } from "./paths.ts";
 import { asPreface, handoff } from "./prompts.ts";
@@ -72,6 +73,8 @@ export type Input = Discarded &
     batch?: Input[];
     /** It is in the conversation. */
     in?: boolean;
+    /** The insertion receipt was already published before safe context recovery. */
+    receipted?: boolean;
     /** User input accepted after a replacement committed joins that replacement's new turn. */
     joinsTaskId?: string;
   };
@@ -110,6 +113,12 @@ export type Turn = {
   items: MailItem[];
   /** The backend has been prompted. */
   started: boolean;
+  /** Once work/output is observed, replaying the prompt could repeat side effects. */
+  executed?: boolean;
+  recovering?: boolean;
+  recoveryAttempts?: number;
+  /** Refusal text is shown only if recovery cannot continue, instead of flashing a terminal error on success. */
+  refusalChunks?: SessionUpdate[];
   /** Who stopped it: the user (their client), or the hub, for the work it ran for was stopped (`halt`). */
   cancelledBy?: "user" | "hub";
   done: Deferred<TurnEnd>;
@@ -142,6 +151,7 @@ export class LiveSession {
   private binding?: Promise<void>;
   /** Text to put in front of the next prompt. */
   private prefaces: string[] = [];
+  private handoffPreface?: string;
   /**
    * What the model of this session has been given in full, so that it is not given the same again: asset id ->
    * the version and the task it came with, and memory notes by topic key -> the version (updatedAt) it saw. Only
@@ -150,6 +160,9 @@ export class LiveSession {
   readonly given = { assets: new Map<string, { version: number; taskId?: string }>(), notes: new Map<string, string>() };
   /** Context in use at the end of the backend's last report, in tokens. */
   private used?: number;
+  private contextSize?: number;
+  private estimated = 0;
+  private standingTokens = 0;
   /** The backend's work is idle, as it last said, and why it stopped. */
   private backendIdle = true;
   private lastStop: { stopReason: StopReason; error?: { code: number; message: string; data?: unknown } | null } = { stopReason: "end_turn" };
@@ -162,6 +175,8 @@ export class LiveSession {
   constructor(hub: Hub, rec: SessionRec) {
     this.hub = hub;
     this.rec = rec;
+    this.used = rec.used;
+    this.contextSize = rec.contextSize;
   }
 
   get id(): string {
@@ -188,11 +203,11 @@ export class LiveSession {
   }
 
   get acceptsTools(): boolean {
-    return !this.userStopping && !this.current?.cancelledBy && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id });
+    return !this.userStopping && !this.current?.cancelledBy && !this.current?.recovering && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id });
   }
 
   protect(): void {
-    if (this.current && this.acceptsTools) this.current.protected = true;
+    if (this.current && !this.current.cancelledBy && !this.userStopping && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })) this.current.protected = true;
   }
 
   prioritize(taskId: string, turnId: string): void {
@@ -232,6 +247,10 @@ export class LiveSession {
     const agent = this.hub.agent(this.agentId);
     const role = this.hub.role(agent);
     const instructions = this.hub.systemPromptFor(agent, this.clientMcp);
+    this.standingTokens = backend.caps.systemPrompt ? textTokens(instructions) : 0;
+    if (textTokens(instructions) + contextPolicy(this.hub.paths).reserveTokens > contextPolicy(this.hub.paths).promptTokens) {
+      throw new RpcError(-32602, "The agent's standing instructions exceed the context budget. Shorten the role instructions or memory, or configure limits.promptTokens.", { errorKind: "input_too_large" });
+    }
     const { paths } = this.hub;
     const params = {
       cwd: agent.workspace,
@@ -253,7 +272,18 @@ export class LiveSession {
         // Every ACP v2 agent resumes; the history is not replayed (the hub has it).
         backend.open(prior, this);
         this.setup = await backend.conn.request("session/resume", { sessionId: prior, ...params });
+        for (const [configId, value] of Object.entries(this.rec.selectedConfig ?? {})) {
+          this.setup = { ...this.setup, ...await backend.conn.request("session/set_config_option", { sessionId: prior, configId, value }) };
+        }
         this.backend = backend;
+        this.estimated = this.used ?? this.standingTokens;
+        // A resumed adapter without systemPrompt must also receive updated lifecycle/role instructions.
+        if (!backend.caps.systemPrompt) this.prefaces.push(asPreface(instructions));
+        if (this.rec.contextHandoffPending) {
+          const file = path.join(this.hub.paths.dir, "agents", this.agentId, "context", `${this.rec.contextHandoffPending}.txt`);
+          this.handoffPreface = boundedText(this.hub.paths, this.agentId, fs.readFileSync(file, "utf8"), Math.min(6000, contextPolicy(this.hub.paths).promptTokens / 4));
+          this.prefaces.push(this.handoffPreface);
+        }
         if (!this.rec.backend) this.save({ backend: agent.backend });
         return;
       } catch (e) {
@@ -264,15 +294,28 @@ export class LiveSession {
 
     const created = await backend.conn.request("session/new", params);
     this.setup = created;
+    if (renewal !== "backend_changed") {
+      for (const [configId, value] of Object.entries(this.rec.selectedConfig ?? {})) {
+        const response = await backend.conn.request("session/set_config_option", { sessionId: created.sessionId, configId, value });
+        this.setup = { ...this.setup, ...response };
+      }
+    }
     // Without the system prompt capability the instructions ride on the first prompt.
     if (!backend.caps.systemPrompt) this.prefaces.push(asPreface(instructions));
-    this.save({ backendSessionId: created.sessionId, backend: agent.backend, renew: undefined });
+    const checkpoint = renewal ? this.handoff(renewal) : undefined;
+    const checkpointRef = checkpoint === undefined ? undefined : contextRef(this.hub.paths, this.agentId, checkpoint).ref;
+    this.save({ backendSessionId: created.sessionId, backend: agent.backend, renew: undefined, used: undefined, contextSize: undefined,
+      contextEpoch: (this.rec.contextEpoch ?? 0) + 1,
+      ...(checkpointRef ? { contextCheckpoint: checkpointRef, contextHandoffPending: checkpointRef } : {}),
+      ...(renewal === "backend_changed" ? { contextRenewAt: undefined, contextRecovery: undefined, selectedConfig: undefined } : {}) });
     backend.open(created.sessionId, this);
     this.backend = backend;
+    this.estimated = this.standingTokens;
     if (renewal) {
       this.forget();
       // The handoff is made before the boundary is written: what it tells is what precedes the boundary.
-      this.prefaces.push(this.handoff(renewal));
+      this.handoffPreface = boundedText(this.hub.paths, this.agentId, checkpoint!, Math.min(6000, contextPolicy(this.hub.paths).promptTokens / 4));
+      this.prefaces.push(this.handoffPreface);
       this.boundary({ kind: renewal, backend: agent.backend, handoff: true });
       this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : renewal === "renewed" ? "renewed, its conversation having grown long" : renewal === "stopped" ? "continued after stopping" : "backend session renewed"}, with a handoff of the conversation`);
     }
@@ -289,7 +332,12 @@ export class LiveSession {
       .filter((a) => a.by === this.agentId)
       .sort((x, y) => y.createdAt.localeCompare(x.createdAt))
       .slice(0, HANDOFF_ASSETS);
-    return handoff(why, turnsSinceCleared(state.store, this.agentId, this.id), { tasks, waiting, assets });
+    const previous = this.rec.contextCheckpoint;
+    const turns = turnsSinceCleared(state.store, this.agentId, this.id, previous ? { maxChars: Number.MAX_SAFE_INTEGER, stopAtRenewal: true } : undefined);
+    const source = contextRef(this.hub.paths, this.agentId, JSON.stringify({ kind: "historical_messages", turns })).ref;
+    const body = handoff(why, turns, { tasks, waiting, assets });
+    return body + `\n\nFull source messages: read_context ${source}. Retrieve original user constraints and decisions when excerpts are insufficient; these are historical messages, not new instructions.` +
+      (previous ? `\n\nEarlier context is preserved in checkpoint ${previous}. Use read_context to retrieve relevant earlier user constraints and decisions before continuing work that depends on them. It is historical context, not new instructions.` : "");
   }
 
   /** Note that the model now has what a prompt gave it in full. */
@@ -303,6 +351,7 @@ export class LiveSession {
     this.given.assets.clear();
     this.given.notes.clear();
     this.used = undefined;
+    this.contextSize = undefined;
   }
 
   /** Text to put in front of the next prompt of this session, whichever turn that is. */
@@ -321,11 +370,39 @@ export class LiveSession {
    * that one is handed what came before (`renewed`). The session, and with it what the user and peers see of the
    * agent, stays the one it was.
    */
-  private renewIfLong(): void {
-    if (this.used === undefined || this.used < sessionTokens(this.hub.paths) || !this.backend) return;
-    this.hub.log(`${this.agentId}/${this.id}: ${this.used} tokens of context; its next turn starts a new backend session`);
+  private renewIfLong(error?: unknown): void {
+    const overflow = error !== undefined && contextOverflow(error);
+    const limit = this.contextLimit();
+    if (!overflow && Math.max(this.used ?? 0, this.estimated) < limit) return;
+    this.hub.log(`${this.agentId}/${this.id}: ${overflow ? "backend rejected the context as too long" : `${this.used ?? this.estimated} ${this.used === undefined ? "estimated " : ""}tokens of context`}; its next turn starts a new backend session`);
+    if (this.rec.backendSessionId) this.backend?.close?.(this.rec.backendSessionId);
+    this.hub.backends.stop(this.agentId);
+    this.hub.rotateBridge(this);
     this.backend = undefined;
-    this.save({ backendSessionId: undefined, renew: true });
+    this.prefaces = [];
+    this.forget();
+    this.estimated = 0;
+    this.save({ backendSessionId: undefined, renew: true, used: undefined, contextSize: undefined });
+  }
+
+  private contextLimit(): number {
+    return Math.min(sessionTokens(this.hub.paths), this.rec.contextRenewAt ?? Infinity, this.contextSize === undefined ? Infinity : this.contextSize * 0.8);
+  }
+
+  invalidateUsage(): void {
+    this.used = undefined;
+    this.contextSize = undefined;
+  }
+
+  toolOutput(value: string): void {
+    this.estimated += textTokens(value);
+  }
+
+  observeExecution(): void {
+    const turn = this.current;
+    if (!turn || turn.executed) return;
+    turn.executed = true;
+    this.save({ contextExecution: { messageId: turn.first.messageId } });
   }
 
   /**
@@ -337,7 +414,8 @@ export class LiveSession {
     this.prefaces = [];
     this.forget();
     this.backend = undefined;
-    this.save({ backendSessionId: undefined });
+    this.estimated = 0;
+    this.save({ backendSessionId: undefined, renew: undefined, used: undefined, contextSize: undefined, contextRecovery: undefined, contextCheckpoint: undefined, contextHandoffPending: undefined });
     this.boundary({ kind: "cleared", handoff: false });
   }
 
@@ -361,6 +439,7 @@ export class LiveSession {
   }
 
   onBackendPermission(request: PermissionRequest): Promise<PermissionResponse> {
+    this.observeExecution();
     return this.hub.permissions.request(this, request);
   }
 
@@ -379,6 +458,15 @@ export class LiveSession {
     const origin = update._meta?.[OriginExt.key] as OriginMeta | undefined;
     const turnId = correlation?.id ?? origin?.turnId;
     if (turnId && turnId !== turn?.id) return;
+    if (turn?.recovering) return;
+    const said = update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" ? update.content.text :
+      update.sessionUpdate === "agent_message" && Array.isArray(update.content) ? update.content.map((b: ContentBlock) => b.type === "text" ? b.text ?? "" : "").join("") : "";
+    if (turn && said?.trim() && contextOverflow(said) && !turn.executed) {
+      (turn.refusalChunks ??= []).push(update);
+      return;
+    }
+    if (turn && (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update" || update.sessionUpdate === "agent_message" || update.sessionUpdate === "agent_thought_chunk" ||
+      (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" && update.content.text?.trim() && !contextOverflow(update.content.text)))) this.observeExecution();
     switch (update.sessionUpdate) {
       case "user_message":
       case "user_message_chunk": {
@@ -404,7 +492,13 @@ export class LiveSession {
         if (typeof update.title === "string" && update.title !== this.rec.title) this.save({ title: update.title });
         break;
       case "usage_update":
-        if (typeof update.used === "number") this.used = update.used;
+        if (typeof update.used === "number" && Number.isFinite(update.used) && update.used >= 0) {
+          // Native compaction may have removed formerly-inlined assets/notes.
+          if (this.used !== undefined && update.used < this.used) { this.given.assets.clear(); this.given.notes.clear(); }
+          this.used = update.used;
+          this.estimated = update.used;
+        }
+        if (typeof update.size === "number" && Number.isFinite(update.size) && update.size > 0) this.contextSize = update.size;
         break;
     }
     this.hub.kernel.hooks.emit("acp.session_update", { agentId: this.agentId, sessionId: this.id, update });
@@ -446,6 +540,7 @@ export class LiveSession {
 
   /** Record, and show, that the model never saw this input (see `Discarded` in @xsb/protocol); `why` it did not. */
   private discard(input: Input, why?: unknown): void {
+    if (input.receipted) return; // A failed replacement context cannot invalidate the original insertion receipt.
     const { messageId, origin, content } = input;
     this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: { messageId, origin, content } } } as SessionUpdate);
     this.receipt(input, false, why);
@@ -453,9 +548,11 @@ export class LiveSession {
 
   /** The receipt of an input: it is in the conversation, or it never will be. Its sender learns which. */
   private receipt(input: Input, inserted: boolean, why: unknown = RpcError.cancelled()): void {
+    if (inserted && input.receipted) return;
     const about = { agentId: this.agentId, sessionId: this.id, from: fromOf(input.origin), ...(input.origin.taskId ? { taskId: input.origin.taskId } : {}) };
     this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: input.messageId, about, inserted });
     if (inserted) {
+      input.receipted = true;
       this.show(input);
       input.inserted.resolve();
     } else input.inserted.reject(why);
@@ -492,6 +589,10 @@ export class LiveSession {
    */
   pump(): void {
     if (this.userStopping || this.current || !this.queue.length) return;
+    while (this.queue[0]?.item && this.hub.kernel.settleTerminalInput(this.queue[0].item)) {
+      this.discard(this.queue.shift()!, RpcError.cancelled());
+    }
+    if (!this.queue.length) return;
     if (this.priorityTaskId) {
       const task = this.hub.state.tasks.get(this.priorityTaskId);
       if (!task || task.stopping || isTerminal(task.status)) this.priorityTaskId = undefined;
@@ -514,11 +615,18 @@ export class LiveSession {
 
   private async run(first: Input, more: Input[] = []): Promise<void> {
     const turn: Turn = { id: newId("turn"), protected: [first, ...more].some(users), first, inputs: [first, ...more], order: [first, ...more], held: [...more], inserted: false, items: itemsOf([first, ...more]), started: false, done: deferred() };
+    turn.recoveryAttempts = this.rec.contextRecovery?.messageId === first.messageId ? this.rec.contextRecovery.attempts : 0;
     turn.taskIds = this.hub.kernel.openTasks(this.id).filter((t) => !t.stopping).map((t) => t.id);
     this.current = turn;
     this.turnChanged();
     this.hub.agentChanged(this.agentId);
     this.state("running");
+    if (this.rec.contextExecution?.messageId === first.messageId) {
+      first.receipted = ["inserted", "seen"].includes(this.hub.state.ledger.get(first.messageId)?.state ?? "");
+      first.shown = first.receipted;
+      return this.end({ stopReason: "error", failure: new RpcError(-32603,
+        "This interrupted input had already produced output or invoked tools. Verify its results before continuing; xSB did not replay it.", { errorKind: "execution_uncertain" }) });
+    }
     try {
       await this.ensureBackend();
     } catch (e) {
@@ -531,11 +639,11 @@ export class LiveSession {
     turn.started = true;
     this.ranSince = false;
     // What waited in the inbox comes with this turn, in its first prompt.
-    const digest = this.hub.delivery.digest(this).map((d) => inputOf(d));
+    const digest = this.hub.delivery.digest(this, Math.max(0, contextPolicy(this.hub.paths).promptTokens - this.standingTokens - contextPolicy(this.hub.paths).reserveTokens - contentTokens(first.content) - contentTokens(turn.held.flatMap(i => i.content)) - contentTokens(this.prefaces.map(text)))).map((d) => inputOf(d));
     turn.inputs.splice(1, 0, ...digest);
     turn.order!.splice(1, 0, ...digest);
     turn.items.push(...itemsOf(digest));
-    this.send([first, ...digest]);
+    this.send([first, ...digest, ...turn.held.splice(0)]);
   }
 
   /**
@@ -549,7 +657,36 @@ export class LiveSession {
     const backend = this.backend;
     if (!backend) return this.end({ stopReason: "error", failure: new Error("the agent program is gone") });
     const sessionId = this.rec.backendSessionId!;
-    const content = [...this.prefaces.splice(0).map((p) => text(p)), ...batch.flatMap((i) => i.content)];
+    const policy = contextPolicy(this.hub.paths);
+    if (this.handoffPreface && this.prefaces.includes(this.handoffPreface)) {
+      const left = policy.promptTokens - policy.reserveTokens - this.standingTokens - contentTokens(batch.flatMap((i) => i.content)) -
+        contentTokens(this.prefaces.filter((p) => p !== this.handoffPreface).map(text));
+      if (textTokens(this.handoffPreface) > left && this.rec.contextCheckpoint) {
+        const ref = this.rec.contextCheckpoint;
+        const shorter = left >= 512 ? boundedText(this.hub.paths, this.agentId,
+          fs.readFileSync(path.join(this.hub.paths.dir, "agents", this.agentId, "context", `${ref}.txt`), "utf8"), left) :
+          `[xsb] Handoff ref: ${ref}. Use read_context before relying on earlier work.`;
+        this.prefaces = this.prefaces.map((p) => p === this.handoffPreface ? shorter : p);
+        this.handoffPreface = shorter;
+      }
+    }
+    const content = [...this.prefaces.map((p) => text(p)), ...batch.flatMap((i) => i.content)];
+    const tokens = contentTokens(content);
+    if (tokens + this.standingTokens + policy.reserveTokens > policy.promptTokens) {
+      const error = new RpcError(-32602, "This input exceeds the agent's prompt budget. The original is preserved in the conversation; split the input or use files/assets with references.", { errorKind: "input_too_large" });
+      if (turn.inserted) {
+        for (const input of batch) { this.drop(input); this.discard(input, error); }
+        this.hub.kernel.ack(itemsOf(batch).map((m) => m.id));
+        return;
+      }
+      turn.started = false;
+      return this.end({ stopReason: "error", failure: error });
+    }
+    if (!turn.inserted && !turn.recovering && !this.prefaces.length && (this.used ?? 0) > 0 && this.estimated + tokens + policy.reserveTokens > this.contextLimit()) {
+      return void this.recover(turn, new Error("Context window exceeded before submission"), false);
+    }
+    this.prefaces = [];
+    this.estimated += tokens;
     const prompt = (): Promise<boolean> => {
       if (this.current !== turn || turn.cancelledBy) return Promise.reject(RpcError.cancelled());
       for (const input of batch) input.sent = "prompt";
@@ -564,9 +701,12 @@ export class LiveSession {
       : prompt();
     given.then(
       (answered) => {
+        if (this.backend !== backend || this.rec.backendSessionId !== sessionId) return;
         if (answered) this.landed(batch);
       },
-      (e) => this.refused(batch, e, backend),
+      (e) => {
+        if (this.backend === backend && this.rec.backendSessionId === sessionId) this.refused(batch, e, backend);
+      },
     );
   }
 
@@ -579,6 +719,7 @@ export class LiveSession {
     // In already, or its turn is over: what became of it was settled then.
     if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) return;
     turn.inserted = true;
+    if (this.rec.contextHandoffPending) this.save({ contextHandoffPending: undefined });
     for (const input of batch) {
       input.in = true;
       this.take(input.gives);
@@ -599,6 +740,7 @@ export class LiveSession {
       for (const input of batch) this.leave(input);
       return this.settle();
     }
+    if (contextOverflow(e) && this.canRecover(turn)) return void this.recover(turn, e);
     const failure = this.explain(e, backend);
     if (!turn.inserted) {
       // The turn could not begin: what it was to begin with fails with it, its tasks too (kept in `items`).
@@ -676,6 +818,9 @@ export class LiveSession {
   private end(end: TurnEnd): void {
     const turn = this.current;
     if (!turn) return;
+    if (end.failure && contextOverflow(end.failure) && this.canRecover(turn)) return void this.recover(turn, end.failure);
+    if (!turn.cancelledBy) for (const update of turn.refusalChunks ?? []) this.emit(update);
+    turn.refusalChunks = [];
     // The backend may report idle before the deferred halt hook runs. The committed
     // stop still owns this turn, including its unread input.
     if (!end.failure && !turn.cancelledBy && this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })) {
@@ -703,6 +848,14 @@ export class LiveSession {
     }
     this.current = undefined;
     this.turnChanged();
+    if (turn.cancelledBy && this.backend && !this.backend.caps.orderedCancellation) {
+      // Untagged old MCP requests cannot be distinguished after a new turn begins on the same bridge.
+      // Fence the old transport/token; resume the saved session in a new process to retain backend history.
+      this.backend.close?.(this.rec.backendSessionId!);
+      this.hub.rotateBridge(this);
+      this.hub.backends.stop(this.agentId);
+      this.backend = undefined;
+    }
     if (expiredAppend && !turn.cancelledBy && this.backend) {
       // Normal cancellation has already confirmed idle and settled prompt receipts:
       // keep that conversation and its tools, including image context. An unread
@@ -713,7 +866,7 @@ export class LiveSession {
       this.backend = undefined;
       this.save({ backendSessionId: undefined, renew: "stopped" });
     }
-    if (this.used !== undefined && this.used !== this.rec.used) this.save({ used: this.used });
+    if (this.used !== undefined && (this.used !== this.rec.used || this.contextSize !== this.rec.contextSize)) this.save({ used: this.used, contextSize: this.contextSize });
     // While the hub stops, nothing is acknowledged: the turn runs again on the next start.
     if (!this.hub.stopping) {
       if (end.failure) this.hub.log(`${this.agentId}/${this.id}: turn failed: ${errorMessage(end.failure)}`);
@@ -726,9 +879,75 @@ export class LiveSession {
     this.state("idle", end);
     turn.done.resolve(end);
     this.releaseUserStop(false);
+    if (!end.failure) this.save({ contextRecovery: undefined });
     if (next.length) return this.resume(next);
-    this.renewIfLong();
+    this.renewIfLong(end.failure);
     this.pump();
+  }
+
+  /** Only an explicit refusal with no observed output/tools may replay. No task failure/notification is published yet. */
+  private canRecover(turn: Turn): boolean {
+    return !turn.cancelledBy && !turn.recovering && !turn.executed && !this.hub.stopping && !this.userStopping &&
+      !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id }) &&
+      !turn.inputs.some((i) => i.item?.targetTurnId) && (turn.recoveryAttempts ?? 0) < contextPolicy(this.hub.paths).recoveryAttempts;
+  }
+
+  private async recover(turn: Turn, error: unknown, failed = true): Promise<void> {
+    if (this.current !== turn || turn.recovering) return;
+    turn.recovering = true;
+    turn.refusalChunks = [];
+    turn.started = false;
+    if (failed) turn.recoveryAttempts = (turn.recoveryAttempts ?? 0) + 1;
+    const used = this.used;
+    const oldSessionId = this.rec.backendSessionId;
+    // This is a conservative renewal policy from observed rejection, not a discovered API capacity.
+    const renewAt = failed && used && used > 8192 ? Math.floor(used * 0.7) : this.rec.contextRenewAt;
+    this.save({ backendSessionId: undefined, renew: true, used: undefined, contextSize: undefined, contextRenewAt: renewAt,
+      contextRecovery: { messageId: turn.first.messageId, attempts: turn.recoveryAttempts ?? 0 } });
+    this.hub.log(`${this.agentId}/${this.id}: recovering context (${turn.recoveryAttempts ?? 0}); ${errorMessage(error)}`);
+    if (oldSessionId) this.backend?.close?.(oldSessionId);
+    this.backend = undefined;
+    this.hub.backends.stop(this.agentId);
+    this.hub.rotateBridge(this);
+    this.prefaces = [];
+    this.forget();
+    this.estimated = 0;
+    this.turnChanged();
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        this.ensureBackend(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            if (this.current === turn) this.hub.backends.stop(this.agentId);
+            reject(new Error("Context recovery timed out while opening the backend."));
+          }, 30_000);
+        }),
+      ]);
+      if (this.current !== turn) return;
+      turn.recovering = false;
+      if (turn.cancelledBy || this.userStopping || this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })) return this.end({ stopReason: "cancelled" });
+      // Existing receipts stay valid; only the new backend's insertion is reset. Keep original order and tasks.
+      for (const input of turn.inputs) {
+        if (input.item) {
+          const rendered = this.hub.delivery.render(input.item, this);
+          if (rendered) { input.content = rendered.prompt; input.prompt = rendered.prompt; input.gives = rendered.gives; }
+        }
+        input.in = false; input.sent = undefined; input.batch = undefined;
+      }
+      turn.inserted = false;
+      turn.started = true;
+      this.ranSince = false;
+      this.backendIdle = true;
+      turn.held = [];
+      this.send([...turn.inputs]);
+    } catch (failure) {
+      if (this.current !== turn) return;
+      turn.recovering = false;
+      this.end({ stopReason: "error", failure });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -769,7 +988,9 @@ export class LiveSession {
    */
   steer(req: TurnRequest, targetTurnId?: string): Input | undefined {
     const turn = this.current;
-    if (!turn || !this.acceptsTools || (targetTurnId && targetTurnId !== turn.id)) return undefined;
+    const userDuringRecovery = req.origin.kind === "user" && turn?.recovering && !turn.cancelledBy && !this.userStopping &&
+      !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id });
+    if (!turn || (!this.acceptsTools && !userDuringRecovery) || (targetTurnId && targetTurnId !== turn.id)) return undefined;
     if (req.origin.kind === "user") turn.protected = true;
     const input = inputOf({ ...req, origin: { ...req.origin, steered: true } });
     turn.order ??= [...turn.inputs];
@@ -788,9 +1009,9 @@ export class LiveSession {
     this.hub.kernel.hooks.emit("acp.turn_changed", { agentId: this.agentId, sessionId: this.id });
     const inputs = [...this.queue, ...this.carried, ...(this.current?.inputs ?? [])];
     return {
-      pending: inputs.filter((i) => !i.in).map((i) => i.messageId),
-      sent: inputs.filter((i) => !i.in && i.sent).map((i) => i.messageId),
-      inserted: inputs.filter((i) => i.in).map((i) => i.messageId),
+      pending: inputs.filter((i) => !i.in && !i.receipted).map((i) => i.messageId),
+      sent: inputs.filter((i) => !i.in && !i.receipted && i.sent).map((i) => i.messageId),
+      inserted: inputs.filter((i) => i.in || i.receipted).map((i) => i.messageId),
     };
   }
 

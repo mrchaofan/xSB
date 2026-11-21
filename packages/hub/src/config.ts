@@ -60,7 +60,12 @@ export type ProjectConfig = {
   defaultAgent?: string;
   teams?: string[];
   language?: Language;
-  limits?: { jobsAtOnce?: number; sessionTokens?: number; awaitSeconds?: number };
+  limits?: { jobsAtOnce?: number; sessionTokens?: number; awaitSeconds?: number;
+    /** Total hub prompt budget, tool response budget and headroom (estimated tokens). */
+    promptTokens?: number; toolOutputTokens?: number; contextReserveTokens?: number;
+    /** Retries of a context refusal with no observed execution, per input; 0 disables recovery, maximum 3. */
+    contextRecoveryAttempts?: number;
+  };
   /** Role type (or agent:<id> for a roleless instance) -> destination types/instance keys or "*". */
   permissions?: Record<string, { dispatch?: string[]; message?: string[] }>;
 };

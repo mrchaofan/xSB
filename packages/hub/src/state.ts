@@ -31,6 +31,20 @@ export type SessionRec = {
   renew?: boolean | "stopped";
   /** How much of the backend's context window the conversation used at the end of its last turn, in tokens. */
   used?: number;
+  /** Backend window and conservative renewal point, scoped to this conversation/backend. */
+  contextSize?: number;
+  contextRenewAt?: number;
+  contextEpoch?: number;
+  /** Written before replacing a refused backend. Unacknowledged mail supplies the durable input. */
+  contextRecovery?: { messageId: string; attempts: number };
+  /** Successful user-selected ACP options survive a context renewal on the same backend. */
+  selectedConfig?: Record<string, string>;
+  /** Immutable handoff checkpoint. New checkpoints reference prior epochs instead of reloading all history. */
+  contextCheckpoint?: string;
+  /** Resend the quoted handoff on resume until the new backend confirms its first input. */
+  contextHandoffPending?: string;
+  /** An interrupted input with observed execution must not be blindly replayed after a hub restart. */
+  contextExecution?: { messageId: string };
   title?: string;
   /** Incremented by a user stop: results of earlier work are retained without waking this session. */
   workGeneration?: number;
