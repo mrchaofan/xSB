@@ -31,7 +31,8 @@
  * --auth-required, --protocol <n>.
  */
 import { spawn } from "node:child_process";
-import { Connection, RpcError } from "@xsb/protocol";
+import fs from "node:fs";
+import { Connection, RpcError, TurnIsolation } from "@xsb/protocol";
 
 type Held = { prompt: any[]; resolve: (r: { messageId: string }) => void; reject: (e: unknown) => void };
 
@@ -56,6 +57,7 @@ type Session = {
   images: string[];
   /** The agent message being written, until a tool call. */
   message?: string;
+  model?: string;
 };
 
 const conn = new Connection(process.stdin, process.stdout, "mock");
@@ -64,6 +66,7 @@ const flags = process.argv.slice(2);
 const steering = flags.includes("--steering");
 const steerExt = flags.includes("--steer-ext");
 let counter = 0;
+let rejectedContext = false;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
   const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], steered: [], images: [] };
@@ -128,6 +131,8 @@ async function step(session: Session, line: string): Promise<void> {
       return say(session, `echo: ${session.prompt.replaceAll("\n", " | ")}\n`);
     case "usage":
       return update(session, { sessionUpdate: "usage_update", used: Number(rest), size: 1_000_000 });
+    case "model":
+      return say(session, `model: ${session.model ?? "default"}\n`);
     case "images":
       return say(session, `images: ${JSON.stringify(session.images)}\n`);
     case "servers":
@@ -225,7 +230,7 @@ conn.onRequest("initialize", (p) => ({
       ...(flags.includes("--no-system-prompt") ? {} : { systemPrompt: {} }),
     },
   },
-  ...(steerExt ? { _meta: { steering: { supported: true } } } : {}),
+  _meta: { ...(flags.includes("--no-turn-isolation") ? {} : { [TurnIsolation.key]: { version: TurnIsolation.version, afterIdle: true } }), ...(steerExt ? { steering: { supported: true } } : {}) },
 }));
 conn.onRequest("_session/steering", (p) => {
   const session = sessions.get(p.sessionId);
@@ -235,6 +240,13 @@ conn.onRequest("_session/steering", (p) => {
   return { outcome: "injected" };
 });
 conn.onRequest("session/new", async (p) => ({ sessionId: (await open(`mock_${process.pid}_${++counter}`, p.mcpServers)).id }));
+conn.onRequest("session/set_config_option", (p) => {
+  const session = sessions.get(p.sessionId);
+  if (!session) throw RpcError.notFound("session");
+  if (p.configId !== "model") throw RpcError.invalidParams("unknown config");
+  session.model = p.value;
+  return { configOptions: [{ id: "model", type: "select", name: "Model", currentValue: p.value, options: [{ value: p.value, name: p.value }] }] };
+});
 conn.onRequest("session/resume", async (p) => {
   if (flags.includes("--no-resume")) throw new RpcError(-32002, "no such session");
   await open(p.sessionId, p.mcpServers);
@@ -245,6 +257,13 @@ conn.onRequest("session/prompt", (p) => {
   const session = sessions.get(p.sessionId);
   if (!session) throw new RpcError(-32002, "no such session");
   if (flags.includes("--auth-required")) throw new RpcError(-32000, "Authentication required");
+  const refusalMarker = flags.includes("--context-refusal-file") ? flags[flags.indexOf("--context-refusal-file") + 1] : undefined;
+  if (flags.includes("--context-refusal") && !rejectedContext && (!refusalMarker || !fs.existsSync(refusalMarker))) {
+    rejectedContext = true;
+    if (refusalMarker) fs.writeFileSync(refusalMarker, "refused");
+    throw new RpcError(-32603, "Internal error: Prompt is too long", { errorKind: "invalid_request" });
+  }
+  if (flags.includes("--context-refusal-always")) throw new RpcError(-32603, "Internal error: Prompt is too long");
   return new Promise((resolve, reject) => {
     if (!session.running) {
       insert(session, p.prompt, resolve);

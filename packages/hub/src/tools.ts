@@ -25,6 +25,7 @@
 import { AGENT_ID, Agents, isTerminal } from "@xsb/protocol";
 import type { Addr, Asset, DeliveryPref, Grant, LedgerState, PermissionOption, RoleInput, Task } from "@xsb/protocol";
 import { backends, loadProjectConfig } from "./config.ts";
+import { boundedText, contextPolicy, readContext } from "./context.ts";
 import type { Hub } from "./hub.ts";
 import { isVeto } from "./hooks.ts";
 import type { Veto } from "./hooks.ts";
@@ -667,7 +668,7 @@ export const TOOLS: Tool[] = [
     inputSchema: schema({ id: str("Asset id, e.g. character/lin or character/lin@1.") }, ["id"]),
     run(ctx, args) {
       const found = asset(ctx, need(args, "id"));
-      return renderAsset(found, ctx.hub.assets.text(found));
+      return renderAsset(found, ctx.hub.assets.text(found), true);
     },
   },
   {
@@ -705,6 +706,14 @@ export const TOOLS: Tool[] = [
       const peers: string[] = Array.isArray(args.peers) && args.peers.length ? args.peers : [...known];
       ctx.hub.state.commit([ops.putNote(me, { topic, content, peers, updatedAt: now() })]);
       return `Note "${topic}" saved.`;
+    },
+  },
+  {
+    name: "read_context",
+    description: "Read a page of the original content behind a context_ref in an excerpt. Offsets are UTF-8 bytes; continue at next_offset. References are private to this agent.",
+    inputSchema: schema({ ref: str("The context_ref from the excerpt."), offset: { type: "integer", minimum: 0 }, bytes: { type: "integer", minimum: 1, maximum: 12000 } }, ["ref"]),
+    run(ctx, args) {
+      return readContext(ctx.hub.paths, ctx.session.agentId, need(args, "ref"), args.offset ?? 0, Math.min(args.bytes ?? 3000, Math.max(100, Math.floor(contextPolicy(ctx.hub.paths).outputTokens / 2))));
     },
   },
   {
@@ -746,8 +755,12 @@ export async function callTool(hub: Hub, session: LiveSession, name: string, arg
       if (!session.acceptsTools || hub.kernel.generation(session.id) !== generation || session.current !== turn) throw new Error("This work was stopped; no new work was submitted.");
     };
     assertActive();
-    return { text: await tool.run({ hub, session, caps, assertActive }, args ?? {}), isError: false };
+    session.observeExecution();
+    const result = await tool.run({ hub, session, caps, assertActive }, args ?? {});
+    const answer = boundedText(hub.paths, session.agentId, result, contextPolicy(hub.paths).outputTokens);
+    session.toolOutput(answer);
+    return { text: answer, isError: false };
   } catch (e) {
-    return { text: e instanceof Error ? e.message : String(e), isError: true };
+    return { text: boundedText(hub.paths, session.agentId, e instanceof Error ? e.message : String(e), contextPolicy(hub.paths).outputTokens), isError: true };
   }
 }

@@ -354,13 +354,17 @@ export class Kernel {
    */
   replace(by: Task, targetTurnId?: string): Task[] {
     const r = this.recipient(by.to);
+    const own = new Set(by.parents ?? []);
     const valid = (): boolean => {
       const turn = this.recipient(by.to).turn;
       const task = this.state.tasks.get(by.id);
-      return !!targetTurnId && turn?.id === targetTurnId && !turn.protected && task?.status === "queued" && !task.stopping;
+      return !!targetTurnId && turn?.id === targetTurnId && !turn.protected && task?.status === "queued" && !task.stopping &&
+        turn.taskIds.every((id) => {
+          const work = this.state.tasks.get(id);
+          return !work || isTerminal(work.status) || (!work.stopping && same(work.initiator, by.initiator) && !doom(this.state, work).doomed.some((d) => own.has(d.id)));
+        });
     };
     if (!valid() || !r.turn) return [];
-    const own = new Set(by.parents ?? []);
     const replaced = this.openTasks(by.to.sessionId).filter(
       (t) => t.id !== by.id && !t.stopping && r.turn!.taskIds.includes(t.id) && same(t.initiator, by.initiator) && !doom(this.state, t).doomed.some((d) => own.has(d.id)),
     );
@@ -752,8 +756,24 @@ export class Kernel {
     return mail.map((item) => this.route(item));
   }
 
+  /** Terminal input/task state is authoritative at routing, deferred delivery and dequeue, not just on restart. */
+  settleTerminalInput(item: MailItem): boolean {
+    const task = item.kind === "task" ? this.state.tasks.get(item.taskId!) : undefined;
+    const discarded = this.state.ledger.get(item.id)?.state === "discarded_unseen";
+    if (discarded || (task && isTerminal(task.status))) {
+      // A durable terminal receipt/task cannot become executable again after restart or a deferred route.
+      const remove = [ops.ack(item.id)];
+      if (discarded && task && !isTerminal(task.status) && !task.stopping) {
+        this.finish([{ task, status: "failed", result: "The input was discarded; it was not replayed.", reason: "error", stopper: SYSTEM }], remove);
+      } else this.state.commit(remove);
+      return true;
+    }
+    return false;
+  }
+
   /** The pipeline: decide how mail reaches its session (`message.pre_deliver`), and say so; the effectors act on it. */
   private route(item: MailItem): Route {
+    if (this.settleTerminalInput(item)) return "drop";
     const decided = this.hooks.decide("message.pre_deliver", { to: item.to, from: item.from, item });
     const route: Route = isVeto(decided) ? "drop" : (decided.route ?? "turn");
     const about = { agentId: item.to.agentId, sessionId: item.to.sessionId, from: item.from, ...(item.taskId ? { taskId: item.taskId } : {}) };

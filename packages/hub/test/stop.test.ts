@@ -139,7 +139,7 @@ test("cancelled idle waits for an in-flight prompt's real insertion receipt", as
   pending.batch = [pending];
   const turn = { id: "old", protected: true, first, inputs: [first, pending], held: [], items: [], inserted: true, started: true, done: deferred<any>() };
   session.current = turn;
-  Object.assign(session, { backend: { cancel() {}, caps: { steering: false } }, backendIdle: false });
+  Object.assign(session, { backend: { cancel() {}, caps: { steering: false, orderedCancellation: true } }, backendIdle: false });
   session.beginUserStop();
   session.cancelUserWork();
   session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" });
@@ -181,10 +181,25 @@ test("stop timeout revokes the old tools and closes the backend before unfreezin
 test("an already attached MCP connection is rejected after its bridge is revoked", async (t) => {
   const { serveMcp, BRIDGE_ATTACH } = await import("../src/mcp.ts");
   const handlers = new Map<string, (params: any) => any>();
-  const session = {};
+  const session = { current: { started: true }, acceptsTools: true };
   let valid = true;
   serveMcp({} as any, { onRequest(name: string, handler: (params: any) => any) { handlers.set(name, handler); } } as any, (token) => valid && token === "old" ? session as any : undefined);
   handlers.get(BRIDGE_ATTACH)!({ token: "old" });
   valid = false;
   await assert.rejects(handlers.get("tools/call")!({ name: "dispatch_task", arguments: {} }), /bridge revoked/);
+});
+
+test("an attached but idle/stopped MCP caller cannot detach new work from a stopped turn", async () => {
+  const { serveMcp, BRIDGE_ATTACH } = await import("../src/mcp.ts");
+  const handlers = new Map<string, (params: any) => any>();
+  const session: any = { current: undefined, acceptsTools: true };
+  serveMcp({} as any, { onRequest(name: string, handler: (params: any) => any) { handlers.set(name, handler); } } as any, () => session);
+  handlers.get(BRIDGE_ATTACH)!({ token: "connected" });
+  assert.ok(handlers.get("tools/list")!({}).tools.some((t: any) => t.name === "dispatch_task"), "schema discovery remains available before a turn");
+  await assert.rejects(handlers.get("tools/call")!({ name: "start_job", arguments: {} }), /No active turn/);
+  session.current = { started: false };
+  await assert.rejects(handlers.get("tools/call")!({ name: "dispatch_task", arguments: {} }), /No active turn/);
+  session.current.started = true;
+  session.acceptsTools = false;
+  await assert.rejects(handlers.get("tools/call")!({ name: "dispatch_task", arguments: {} }), /No active turn/);
 });

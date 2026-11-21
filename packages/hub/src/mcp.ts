@@ -93,7 +93,9 @@ export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => 
     return { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
   });
   conn.onRequest("tools/call", async (p) => {
-    const result = await callTool(hub, attached(), p.name, p.arguments);
+    const owner = attached();
+    if (!owner.current?.started || !owner.acceptsTools) throw new RpcError(-32600, "No active turn: stopped or idle work cannot invoke tools.");
+    const result = await callTool(hub, owner, p.name, p.arguments);
     return { content: [{ type: "text", text: result.text }], isError: result.isError };
   });
 }

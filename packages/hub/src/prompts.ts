@@ -19,15 +19,20 @@ export function memoryDigest(state: State, agentId: string, limit = 30): string 
   const notes = [...(state.notes.get(agentId)?.values() ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   const ledger = state.topics.get(agentId);
   const lines: string[] = [];
+  let left = 6000;
   for (const note of notes.slice(0, limit)) {
-    lines.push(`- ${note.topic}${note.peers.length ? ` (with ${note.peers.join(", ")})` : ""}: ${note.content}`);
+    const body = note.content.length > 500 ? `${note.content.slice(0, 500)}… (excerpt; recall this topic for the complete note)` : note.content;
+    const line = `- ${note.topic}${note.peers.length ? ` (with ${note.peers.join(", ")})` : ""}: ${body}`;
+    if (line.length > left) break;
+    lines.push(line);
+    left -= line.length;
   }
   const noted = new Set(notes.map((n) => topicKey(n.topic)));
   for (const [key, entry] of ledger ?? []) {
     if (noted.has(key) || lines.length >= limit) continue;
     lines.push(`- ${entry.topic} (with ${[...entry.peers.keys()].join(", ")}): no note yet`);
   }
-  return lines.length ? lines.join("\n") : "(empty)";
+  return lines.length ? lines.join("\n") + (notes.length > lines.length ? "\nOther notes are available through recall." : "") : "(empty; use recall to look up your notes)";
 }
 
 /** Where an MCP server of a session comes from, besides the hub's own (Hub.toolServers). */
@@ -66,6 +71,21 @@ const WORKING_RULES = `
 - Keep a note (remember) to decisions: what was decided, who owns it, what is open. Rewrite it when something is decided, not to log progress: a note comes with every later message on its topic, and progress is in the tasks and assets already.
 - Look at images small first: a copy at most 1024 pixels on its long side, or a contact sheet of frames (make one with sips or ffmpeg); open the original only for a detail, cropped. The reason: an image stays in your context for the rest of the session, and a full-size one is several thousand tokens.
 - When you write to the user, call assets by their names and leave out task ids, version shorthands and other internal labels: the user reads them as noise.`;
+
+/** Enforced lifecycle contract; keep aligned with docs/TURN-LIFECYCLE.md and the runtime regression tests. */
+export const TASK_LIFECYCLE_RULES = `
+
+# Turn lifecycle contract
+- Each agent has at most one effective current turn. User input joins the turn current when accepted and immediately protects it, even if the model has not received it yet. Protection depends on current turn state, not on who originally started it.
+- Ordinary agent tasks/messages wait while the recipient works. Lazy delivery stays in its inbox and prerequisite-blocked tasks wait for their dependencies. Neither is permission to interrupt. Use append_instruction with a specific target_turn_id for an explicit addition; an expired target fails and never falls back to a later turn or the queue.
+- To request replacement, use dispatch_task with onBusy="replace" and the current_turn_id from list_agents. The runtime rechecks that ID, protection and stopping authority at commit. Protected, stale or unauthorized targets stay queued. Replacement cannot cancel another initiator's work or your own live ancestors. A mixed turn that cannot be stopped in full stays intact.
+- Successful replacement stops the old turn before the new task starts. The replacement runs first; all ordinary unread input recovered from the old turn then retains its order ahead of the old queue. Dequeueing starts a new turn directly, rather than reinterpreting the item as an interjection.
+- User stop applies to the whole agent's accepted current and pending work: unread instructions, queued tasks/jobs and waits are withdrawn. It does not carry old user instructions into the next turn. Already-produced results may remain passive historical facts; they do not authorize resuming stopped work.
+- cancel_task cancels a task you initiated. The hub derives and validates the concrete turn IDs of affected executors; it does not indiscriminately stop an entire peer. Protection blocks replacement, not authorized explicit cancellation. A caller's stop acknowledgement is its report; do not manufacture duplicate stop/result notifications.
+- Input is considered inserted only on an ACP insertion receipt or backend echo, not when bytes are written to a pipe. Runtime bookkeeping recovers unread input once, fences late turn/backend replies and confirms the old backend is idle or retired before starting new work. Do not infer that the model read a queued message.
+- Task state is distinct from turn state. End with a truthful result; your task can remain open for awaited children/jobs/subscriptions or a required asset. User cancellation and committed ancestor stops prohibit creating or attaching new work immediately, including while a tool waits for permission.
+- Register delegated/background work with dispatch_task/start_job; do not create hidden agents/jobs outside the hub. The hub propagates cancellation through actual parents edges, even through tasks already ended, and visits each task once. after is an ordering dependency, not a cancellation edge. Shared descendants still needed by unrelated live work are retained. Stop only work started exclusively for the cancelled scope; never cancel every agent or every child yourself.
+- Context renewal/recovery preserves task identity and stop generation. It cannot revive cancelled work, invalidate an earlier insertion receipt, or replay an input with observed execution. Respect a stopped/expired response and ask for the missing decision instead of resubmitting it as new work.`;
 
 /** What a model is to call each language. */
 const LANGUAGE_NAME: Record<Language, string> = { en: "English", "zh-CN": "Simplified Chinese (简体中文)" };
@@ -139,7 +159,7 @@ An <xsb-task> ends when your turn ends: the record of your work on it (everythin
 - You may have several tasks at a time. One that arrives while you work waits until your turn ends; its dispatcher may also stop what you are doing and give you a new task in its place. A later task that corrects or extends an earlier one changes what you are doing.
 - If a task is stopped (by its sender, the user, or with work it was for), the work you are doing for it is stopped too, and so is what you started only for it.
 
-While tasks you dispatched are still running, the user may talk to you. Answer them normally; pending results will still arrive. If a set of results comes with conditions you set yourself, check them by reasoning over what you received, and dispatch follow-up work if they are not met.
+While tasks you dispatched are still running, the user may talk to you. Answer them normally; pending results will still arrive. If a set of results comes with conditions you set yourself, check them by reasoning over what you received, and dispatch follow-up work if they are not met.${TASK_LIFECYCLE_RULES}
 
 # Topics and continuity
 Give every message and task a short, stable \`topic\` and reuse the exact same topic for everything that belongs to the same matter. A topic stays with the peer who already handled it: when two peers could do a job, continue with the one who has the history, not the other. Before contacting a peer about something that may have history, call recall. After a decision, an agreement or a handoff, call remember to rewrite the note for that topic so it stays current: what was decided, who owns it, what is open.
@@ -165,8 +185,10 @@ function memoryHint(state: State, agentId: string, topic: string | undefined, gi
   if (!note) return "";
   const key = topicKey(note.topic);
   if (given?.notes.get(key) === note.updatedAt) return "";
-  gives.notes.push({ key, updatedAt: note.updatedAt });
-  return `\nYour own note on this topic:\n<xsb-memory topic="${attr(note.topic)}">\n${note.content}\n</xsb-memory>`;
+  const complete = note.content.length <= 1200;
+  if (complete) gives.notes.push({ key, updatedAt: note.updatedAt });
+  const body = complete ? note.content : `${note.content.slice(0, 1200)}\n(Excerpt only; call recall for this topic before relying on omitted decisions.)`;
+  return `\nYour own note on this topic:\n<xsb-memory topic="${attr(note.topic)}">\n${body}\n</xsb-memory>`;
 }
 
 /** What a session's model was given in full so far (LiveSession.given). */
@@ -179,9 +201,10 @@ export type Gives = { assets: { id: string; version: number; taskId?: string }[]
 const PREREQUISITE_CHARS = 1500;
 
 /** An asset as a model sees it. `text` is its content, when it is small enough to show. */
-export function renderAsset(asset: Asset, text?: string): string {
+export function renderAsset(asset: Asset, text?: string, fullDescription = false): string {
   const head = `<xsb-asset id="${attr(asset.id)}" version="${asset.version}" by="${asset.by}" path="${attr(asset.path)}">`;
-  return `${head}\n${asset.description}${text === undefined ? "" : `\n---\n${text}`}\n</xsb-asset>`;
+  const description = !fullDescription && asset.description.length > 500 ? `${asset.description.slice(0, 500)}… (description excerpt; get_asset for details)` : asset.description;
+  return `${head}\n${description}${text === undefined ? "" : `\n---\n${text}`}\n</xsb-asset>`;
 }
 
 function resultBlock(state: State, task: Task, short = false): string {
@@ -223,7 +246,7 @@ function renderInput(input: TaskContext["inputs"][number], given: Given | undefi
   if (text !== undefined) gives.push({ id: asset.id, version: asset.version, taskId });
   const diff = text !== undefined && before?.text !== undefined ? lineDiff(before.text, text) : undefined;
   const changes = diff ? `\nWhat changed since version ${before!.version}, which you were given before:\n<xsb-changes asset="${attr(asset.id)}">\n${diff}\n</xsb-changes>` : "";
-  return `${changes}${changes ? "\n" : ""}${renderAsset(asset, text)}`;
+  return `${changes}${changes ? "\n" : ""}${renderAsset(asset, changes ? undefined : text)}`;
 }
 
 /**

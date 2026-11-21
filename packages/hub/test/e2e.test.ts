@@ -56,6 +56,9 @@ fs.writeFileSync(
       forgetful: { command: node, args: [MOCK, "--no-resume"] },
       crashing: { command: node, args: ["-e", "console.error('license expired'); process.exit(3)"] },
       missing: { command: "xsb-no-such-command" },
+      "context-refusal": { command: node, args: [MOCK, "--context-refusal", "--context-refusal-file", path.join(project, "refused-once")] },
+      "context-refusal-always": { command: node, args: [MOCK, "--context-refusal-always"] },
+      unisolated: { command: node, args: [MOCK, "--no-turn-isolation"] },
     },
   }),
 );
@@ -173,6 +176,16 @@ const prompt = (sessionId: string, text: string) => conn.turn(sessionId, text);
 const newSession = async (agentId: string): Promise<string> =>
   (await conn.request("session/new", { cwd: project, mcpServers: [], _meta: { [Agents.sessionKey]: agentId } })).sessionId;
 const call = (tool: string, args: unknown): string => `!call ${tool} ${JSON.stringify(args)}`;
+const checkpointHistory = (sessionId: string): string => {
+  const session = hub.session(sessionId);
+  let ref = session.rec.contextCheckpoint, history = "";
+  while (ref) {
+    const body = fs.readFileSync(path.join(paths.dir, "agents", session.agentId, "context", `${ref}.txt`), "utf8");
+    history = body + history;
+    ref = /Earlier context is preserved in checkpoint ([a-f0-9]{64})/.exec(body)?.[1];
+  }
+  return history;
+};
 /** What the tools do, called directly: as the session `from`. */
 const addr = (s: LiveSession) => ({ agentId: s.agentId, sessionId: s.id });
 const dispatch = (from: LiveSession, to: string, input: { title: string; topic: string; instructions: string; after: string[] }): Task => {
@@ -413,9 +426,15 @@ const a = await newSession("a");
   const d = await newSession("d");
   await prompt(d, "hi");
   assert.match(said.get(d)!, /echo: \[xsb\] Your standing instructions.*<xsb-instructions> \| # Who you are.*You are d\..*<\/xsb-instructions> \| hi$/m);
+  assert.match(said.get(d)!, /# Turn lifecycle contract/);
+  assert.match(said.get(d)!, /Protection depends on current turn state/);
   said.set(d, "");
   await prompt(d, "again");
   assert.equal(said.get(d), "echo: again\n");
+  await conn.request(Agents.restart, { id: "d" });
+  said.set(d, "");
+  await prompt(d, "after instructions update");
+  assert.match(said.get(d)!, /# Turn lifecycle contract/, "resuming without systemPrompt capability still supplies the contract");
   console.log("ok 10 instructions without capability");
 }
 
@@ -1108,9 +1127,13 @@ const p = await newSession("p1");
   await prompt(s, "and now");
   const again = said.get(s)!;
   assert.match(again, /could not be restored/);
-  assert.match(again, /BETA-REPLY/);
+  assert.match(checkpointHistory(s), /BETA-REPLY/);
   assert.match(again, /GAMMA-REPLY/);
   assert.doesNotMatch(again, /ALPHA-REPLY/);
+  assert.doesNotMatch(checkpointHistory(s), /ALPHA-REPLY/, "checkpoint references cannot cross a user clearing");
+  const sourceRefs = [...checkpointHistory(s).matchAll(/Full source messages: read_context ([a-f0-9]{64})/g)].map(m => m[1]);
+  assert.ok(sourceRefs.length);
+  for (const ref of sourceRefs) assert.doesNotMatch(fs.readFileSync(path.join(paths.dir, "agents", "h1", "context", `${ref}.txt`), "utf8"), /ALPHA-REPLY/);
   assert.deepEqual(boundaries(s).map((b) => b.kind), ["backend_changed", "cleared", "backend_changed", "not_restored"]);
   await conn.request(Agents.put, { agent: { id: "h1", backend: "mock" } });
   console.log("ok 26 context boundaries and handoffs");
@@ -1162,10 +1185,10 @@ const p = await newSession("p1");
   await send("w5", "story room", "!echo\n!done W5-DONE");
   assert.equal(sessionOf("w5"), main);
   assert.notEqual(hub.state.sessions.get(main)!.backendSessionId, before, "a new backend session");
-  assert.ok(!hub.state.sessions.get(main)!.renew);
+  assert.ok(hub.state.sessions.get(main)!.contextCheckpoint, "renewed history is retained in a retrievable checkpoint");
   const handed = hub.state.store.read(Paths.transcript("b", main)).map((r: any) => r.update).filter((u: any) => u.sessionUpdate === "agent_message_chunk").map((u: any) => u.content.text).join("");
   assert.match(handed, /This conversation had grown long, and goes on in a new session of the agent program/);
-  assert.match(handed, /W1-DONE[^]*W4-DONE/);
+  assert.match(checkpointHistory(main), /W1-DONE[^]*W4-DONE/, "prior decisions survive across checkpoint references");
   assert.ok(hub.state.store.read(Paths.transcript("b", main)).some((r: any) => r.update._meta?.[Boundaries.key]?.kind === "renewed"));
   fs.writeFileSync(paths.config, JSON.stringify(config));
 
@@ -1179,7 +1202,8 @@ const p = await newSession("p1");
   assert.match(taskText("i1"), /---\nLINE A\nLINE B\nLINE D/);
   assert.match(taskText("i2"), /Its text is the version you were given with task t_\w+ earlier in this conversation, unchanged: it is not repeated here\./);
   assert.doesNotMatch(taskText("i2"), /LINE B/);
-  assert.match(taskText("i3"), /What changed since version 1, which you were given before:\n<xsb-changes asset="doc\/plan">\n@@ line 2\n\+ LINE C\n- LINE B\n<\/xsb-changes>\n<xsb-asset id="doc\/plan" version="2"[^]*LINE C/);
+  assert.match(taskText("i3"), /What changed since version 1, which you were given before:\n<xsb-changes asset="doc\/plan">\n@@ line 2\n\+ LINE C\n- LINE B\n<\/xsb-changes>\n<xsb-asset id="doc\/plan" version="2"/);
+  assert.doesNotMatch(taskText("i3"), /---\nLINE A\nLINE C/, "a diff does not also re-inject the full asset");
 
   // A long result that a task builds on is told in part; the rest is a get_task away.
   const long = "R".repeat(3000);
@@ -1730,7 +1754,17 @@ const p = await newSession("p1");
   const ok = async (session: LiveSession, name: string, args: unknown) => {
     const result = await invoke(session, name, args);
     assert.equal(result.isError, false, result.text);
-    return JSON.parse(result.text);
+    const envelope = JSON.parse(result.text);
+    if (!envelope.context_ref) return envelope;
+    let offset = 0, original = "";
+    for (;;) {
+      const result = await invoke(session, "read_context", { ref: envelope.context_ref, offset });
+      assert.equal(result.isError, false, result.text);
+      const page = JSON.parse(result.text);
+      original += page.text;
+      if (page.done) return JSON.parse(original);
+      offset = page.next_offset;
+    }
   };
   // Exercise the new tool through the actual backend and MCP bridge, not just the tool entry point.
   await prompt(builder.id, call("create_role", { name: "dynamic-worker", instructions: "DYNAMIC-WORKER", skills: [{ name: "research", content: "---\ndescription: Research\nproduces: research\n---\nRESEARCH-PROCEDURE" }] }));
@@ -1887,6 +1921,77 @@ const p = await newSession("p1");
   await assert.rejects(watcher.request(ToolContext.current), /revoked/);
   watcher.close();
   console.log('ok 41 runtime turn identity is read-only, changes between turns, and never wakes the model');
+}
+
+// 42. A real ACP refusal recovers the same task/receipt; persistent refusals stop after a finite attempt.
+{
+  await conn.request(Agents.put, { agent: { id: "refused", backend: "context-refusal" } });
+  const sessionId = await newSession("refused"), session = hub.session(sessionId);
+  await conn.request("session/set_config_option", { sessionId, configId: "model", value: "chosen" });
+  const end = await prompt(sessionId, "!model\n!say RECOVERED");
+  assert.equal(end.stopReason, "end_turn");
+  assert.match(answered("refused"), /RECOVERED/);
+  assert.match(answered("refused"), /model: chosen/);
+  assert.equal(received("refused").length, 1, "one user-facing insertion receipt despite retry");
+  assert.equal(session.rec.contextEpoch, 2);
+  const own = [...hub.state.tasks.values()].filter(t => t.to.agentId === "refused");
+  assert.equal(own.length, 1);
+  assert.equal(own[0].status, "completed");
+  assert.equal(session.rec.contextRecovery, undefined);
+
+  await conn.request(Agents.put, { agent: { id: "permanent-refusal", backend: "context-refusal-always" } });
+  const permanentId = await newSession("permanent-refusal");
+  await assert.rejects(prompt(permanentId, "!say NEVER"), /Prompt is too long/);
+  await idle("permanent-refusal");
+  const permanent = hub.session(permanentId);
+  assert.equal(permanent.rec.contextEpoch, 2, "initial attempt and one retry only");
+  assert.equal(permanent.rec.contextRecovery?.attempts, 1);
+  assert.equal([...hub.state.tasks.values()].filter(t => t.to.agentId === "permanent-refusal").length, 1);
+  console.log("ok 42 context refusal recovery preserves tasks and limits retries");
+}
+
+// 43. A handoff committed before the first prompt survives a hub crash/restart and is consumed exactly once.
+{
+  const session = hub.mainSession("refused");
+  await prompt(session.id, "!say KEEP-THIS-DECISION");
+  await conn.request(Agents.restart, { id: "refused" });
+  session.save({ backendSessionId: undefined, renew: true });
+  await session.ensureBackend();
+  assert.ok(session.rec.contextHandoffPending);
+  const pending = session.rec.contextHandoffPending;
+  await hub.shutdown(); conn.close();
+  hub = new Hub(project); await hub.start(); conn = await connect();
+  const resumed = await newSession("refused");
+  assert.equal(hub.session(resumed).rec.contextHandoffPending, pending);
+  await prompt(resumed, "!echo\n!model");
+  assert.match(answered("refused"), /KEEP-THIS-DECISION/);
+  assert.match(said.get(resumed)!, /handoff[^]*KEEP-THIS-DECISION/);
+  assert.match(said.get(resumed)!, /model: chosen/);
+  assert.equal(hub.session(resumed).rec.contextHandoffPending, undefined);
+  console.log("ok 43 pending handoffs and selected model survive restart");
+}
+
+// 44. Without an ordering guarantee, even an already-attached old bridge cannot submit into a new turn.
+{
+  await conn.request(Agents.put, { agent: { id: "unisolated", backend: "unisolated" } });
+  const sessionId = await newSession("unisolated"), session = hub.session(sessionId);
+  const originalId = session.rec.backendSessionId, oldToken = session.bridgeToken;
+  const socket = net.connect(paths.socket("mcp")); await new Promise(resolve => socket.once("connect", resolve));
+  const oldBridge = new Connection(socket, socket, "old-turn-tools");
+  await oldBridge.request("_xsb/attach", { token: oldToken });
+  await conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "!sleep 5000\n!say MUST-NOT-RESUME" }] });
+  conn.notify("session/cancel", { sessionId });
+  await idle("unisolated");
+  assert.notEqual(session.bridgeToken, oldToken);
+  assert.equal(session.rec.backendSessionId, originalId);
+  await conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "!say NEW-TURN\n!sleep 500" }] });
+  assert.equal(session.current?.started, true);
+  await assert.rejects(oldBridge.request("tools/call", { name: "start_job", arguments: {} }), /bridge revoked/);
+  oldBridge.close();
+  await idle("unisolated");
+  assert.doesNotMatch(answered("unisolated"), /MUST-NOT-RESUME/);
+  assert.match(answered("unisolated"), /NEW-TURN/);
+  console.log("ok 44 unisolated stop fences old tools before the next turn");
 }
 
 await hub.shutdown();

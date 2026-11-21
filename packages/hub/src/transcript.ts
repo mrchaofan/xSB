@@ -31,10 +31,14 @@ const said = (content: ContentBlock | undefined): string =>
  * The turns of a session since its context was last cleared, oldest first. A turn begins with input that is not
  * steered into a running one; the agent's reply is the text of its last message before the next turn.
  */
-export function turnsSinceCleared(store: Store, agentId: string, sessionId: string): PastTurn[] {
+export function turnsSinceCleared(store: Store, agentId: string, sessionId: string, bounds?: { maxChars: number; stopAtRenewal: boolean }): PastTurn[] {
   const records: { ts: string; update: any }[] = [];
+  let chars = 0;
   for (const rec of store.readBackward(Paths.transcript(agentId, sessionId))) {
-    if (boundaryOf(rec.update)?.kind === "cleared") break;
+    const boundary = boundaryOf(rec.update);
+    if (boundary?.kind === "cleared" || (bounds?.stopAtRenewal && boundary?.handoff)) break;
+    chars += JSON.stringify(rec).length;
+    if (bounds && chars > bounds.maxChars) break;
     records.push(rec as { ts: string; update: any });
   }
   records.reverse();

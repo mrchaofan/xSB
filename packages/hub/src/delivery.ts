@@ -20,6 +20,7 @@ import type { Recipient, Route } from "./kernel.ts";
 import { inboxDigest, renderMail } from "./prompts.ts";
 import type { Gives, TaskContext } from "./prompts.ts";
 import { skillBody } from "./roles.ts";
+import { boundedText, contentTokens, contextPolicy } from "./context.ts";
 import type { LiveSession, Turn, TurnEnd } from "./session.ts";
 import type { MailItem } from "./state.ts";
 import { topicKey } from "./state.ts";
@@ -86,6 +87,7 @@ export class Delivery {
     const waiting = user?.done;
     if (route === "drop") return waiting?.reject(new Error(item.targetTurnId ? "Target turn has ended or changed." : `agent "${item.to.agentId}" no longer exists`));
     if (!this.hub.state.mail.has(item.id)) return waiting?.reject(RpcError.cancelled());
+    if (this.hub.kernel.settleTerminalInput(item)) return waiting?.reject(RpcError.cancelled());
     if (route === "inbox") return waiting?.resolve();
     // A route observation can arrive after a user stop changed the result's receiving generation.
     if (item.results && (item.workGeneration ?? 0) < this.hub.kernel.generation(item.to.sessionId)) {
@@ -110,7 +112,7 @@ export class Delivery {
   }
 
   /** The prompt a mail item becomes (`message.pre_submit` may rewrite it, or veto it: then it is not delivered). */
-  private render(item: MailItem, session: LiveSession): Delivered | undefined {
+  render(item: MailItem, session: LiveSession): Delivered | undefined {
     const { state, kernel } = this.hub;
     const rendered = item.prompt ? { prompt: item.prompt, gives: undefined } : (() => {
       const { text: said, gives } = renderMail(state, item, this.taskContext(item, session), session.given);
@@ -131,7 +133,12 @@ export class Delivery {
       taskId: item.results ? (item.results.mode ? undefined : item.results.taskIds[0]) : item.taskId,
       role: item.kind === "results" ? "task_result" : item.kind,
     };
-    return { origin, prompt: decided.prompt, item, gives: rendered.gives };
+    // User/task instructions remain intact. Results/notices may be excerpts, always with retrievable originals.
+    const prompt = item.from.kind !== "user" && item.kind !== "task"
+      ? decided.prompt.map((b) => b.type === "text" ? text(boundedText(this.hub.paths, session.agentId, b.text ?? "", contextPolicy(this.hub.paths).outputTokens)) : b)
+      : decided.prompt;
+    const excerpted = prompt.some((b, i) => b.type === "text" && decided.prompt[i]?.type === "text" && b.text !== decided.prompt[i].text);
+    return { origin, prompt, item, gives: excerpted ? undefined : rendered.gives };
   }
 
   /** A result handed to the tool call that waits for it: it is in the model's conversation once the call returns. */
@@ -172,8 +179,17 @@ export class Delivery {
   }
 
   /** The inbox of a session, as it comes in front of its next turn. */
-  digest(session: LiveSession): Delivered[] {
-    const delivered = this.hub.kernel.inbox(session.id).map((item) => this.render(item, session)).filter((d): d is Delivered => !!d);
+  digest(session: LiveSession, tokens = contextPolicy(this.hub.paths).promptTokens / 2): Delivered[] {
+    const delivered: Delivered[] = [];
+    let left = Math.max(0, tokens - 100);
+    for (const item of this.hub.kernel.inbox(session.id)) {
+      const next = this.render(item, session);
+      if (!next) continue;
+      const cost = contentTokens(next.prompt);
+      if (cost > left) break; // Retain unselected mail in original order; no receipt and no ack.
+      delivered.push(next);
+      left -= cost;
+    }
     if (delivered.length) delivered[0] = { ...delivered[0], prompt: [text(inboxDigest(delivered.length)), ...delivered[0].prompt] };
     return delivered;
   }
@@ -298,9 +314,14 @@ export class Delivery {
       .map((asset) => {
         const had = session.given.assets.get(asset.id);
         const earlier = had && had.version !== asset.version ? this.hub.assets.get(`${asset.id}@${had.version}`) : undefined;
-        return { asset, text: this.hub.assets.text(asset), ...(earlier ? { before: { version: earlier.version, text: this.hub.assets.text(earlier) } } : {}) };
+        const body = this.hub.assets.text(asset);
+        const budget = Math.min(1500, contextPolicy(this.hub.paths).outputTokens, contextPolicy(this.hub.paths).promptTokens / Math.max(4, (task.inputs?.length ?? 1) * 4));
+        // Overlarge materials remain available via get_asset/read_context; never mark an excerpt as fully seen.
+        return { asset, text: body !== undefined && contentTokens([text(body)]) <= budget ? body : undefined,
+          ...(earlier ? { before: { version: earlier.version, text: this.hub.assets.text(earlier) } } : {}) };
       });
     const skill = this.hub.role(agent)?.skills.find((s) => task.produces && s.produces === task.produces);
-    return { inputs, skill: skill && { ...skill, body: skillBody(skill) } };
+    const body = skill && skillBody(skill);
+    return { inputs, skill: skill && { ...skill, body: boundedText(this.hub.paths, session.agentId, body!, Math.min(2000, contextPolicy(this.hub.paths).outputTokens)) } };
   }
 }

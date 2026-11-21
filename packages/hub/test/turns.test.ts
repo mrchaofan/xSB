@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { text, TurnExt } from "@xsb/protocol";
+import { text, TurnExt, RpcError } from "@xsb/protocol";
 import type { Addr, Task } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Delivery } from "../src/delivery.ts";
@@ -14,6 +14,7 @@ import { LiveSession } from "../src/session.ts";
 import { State, ops } from "../src/state.ts";
 import type { MailItem } from "../src/state.ts";
 import { callTool } from "../src/tools.ts";
+import { contextRef, textTokens } from "../src/context.ts";
 
 function setup(t: test.TestContext) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-turns-"));
@@ -41,7 +42,7 @@ function setup(t: test.TestContext) {
     hub.live.set(to.sessionId, session);
     let generation = 0;
     const backend = {
-      caps: { steering: true },
+      caps: { steering: true, orderedCancellation: true },
       async prompt(_id: string, blocks: any[]) {
         prompts.push(blocks.map((b) => b.text).join("\n"));
         session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
@@ -53,7 +54,7 @@ function setup(t: test.TestContext) {
     (session as any).ensureBackend = async () => {
       if (!(session as any).backend) {
         (session as any).backend = backend;
-        session.save({ backendSessionId: `backend-${to.agentId}-${++generation}` });
+        session.save({ backendSessionId: `backend-${to.agentId}-${++generation}`, renew: undefined, contextEpoch: (session.rec.contextEpoch ?? 0) + 1 });
       }
       return backend;
     };
@@ -90,6 +91,200 @@ function setup(t: test.TestContext) {
   return { dir, paths, state, hooks, kernel, hub, effects, prompts, A, B, C, session, give, settle, stop, idle, unread };
 }
 
+test("context refusal recovers the same task without publishing a terminal result, and records the attempt", async (t) => {
+  const { session, state, hub, A, B, give, settle, effects } = setup(t);
+  const task = give(A, B, "too much context"); await settle();
+  const prior = session.rec.backendSessionId!;
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "Internal error: Prompt is too long", data: { errorKind: "invalid_request" } } });
+  await settle();
+  assert.equal(session.busy, true);
+  assert.notEqual(session.rec.backendSessionId, prior);
+  assert.equal(state.tasks.get(task.id)!.status, "running");
+  assert.equal(session.rec.contextRecovery?.attempts, 1);
+  assert.ok(effects.includes(`close ${prior}`));
+  const reloaded = new State(state.store); reloaded.load();
+  assert.equal(reloaded.sessions.get(B.sessionId)!.contextRecovery?.attempts, 1);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  await settle();
+  assert.equal(state.tasks.get(task.id)!.status, "completed");
+  assert.equal(session.rec.contextRecovery, undefined);
+});
+
+test("a prompt rejection for overflow retires the backend before another turn", async (t) => {
+  const { session, A, B, give, settle } = setup(t);
+  await (session as any).ensureBackend();
+  const backend = (session as any).backend;
+  backend.prompt = async () => { throw new RpcError(-32603, "Internal error: Prompt is too long"); };
+  give(A, B, "rejected prompt"); await settle();
+  assert.equal(session.busy, false);
+  assert.equal(session.rec.backendSessionId, undefined);
+  assert.equal(session.rec.renew, true);
+});
+
+test("reported context windows reserve headroom below the configured token limit", async (t) => {
+  const { session, A, B, give, settle, idle } = setup(t);
+  give(A, B, "small window"); await settle();
+  session.onBackendUpdate({ sessionUpdate: "usage_update", used: 8000, size: 10000 });
+  idle(); await settle();
+  assert.equal(session.rec.backendSessionId, undefined);
+  assert.equal(session.rec.renew, true);
+  assert.equal(session.rec.used, undefined);
+});
+
+test("unrelated backend failures retain the conversation", async (t) => {
+  const { session, A, B, give, settle } = setup(t);
+  give(A, B, "rate limited"); await settle();
+  const prior = session.rec.backendSessionId;
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "Rate limit exceeded" } });
+  await settle();
+  assert.equal(session.rec.backendSessionId, prior);
+  assert.equal(session.rec.renew, undefined);
+});
+
+test("observed execution prevents prompt replay and only publishes the terminal failure", async (t) => {
+  const { session, state, A, B, give, settle, prompts } = setup(t);
+  const task = give(A, B, "external write"); await settle();
+  const count = prompts.length;
+  session.onBackendUpdate({ sessionUpdate: "tool_call_update", toolCallId: "write", title: "Send request", status: "completed" });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "Internal error: Prompt is too long" } });
+  await settle();
+  assert.equal(prompts.length, count);
+  assert.equal(state.tasks.get(task.id)!.status, "failed");
+  assert.equal(session.rec.renew, true);
+});
+
+test("a fresh oversized input fails once without sending or silently dropping the original", async (t) => {
+  const { session, state, kernel, A, B, give, settle, prompts } = setup(t);
+  const task = kernel.dispatch(A, B, { title: "large", topic: "large", instructions: "x".repeat(100000), after: [] });
+  assert.ok(!isVeto(task));
+  await settle();
+  assert.equal(session.busy, false);
+  assert.equal(prompts.length, 0);
+  assert.equal(state.tasks.get(task.id)!.status, "failed");
+  assert.equal(state.tasks.get(task.id)!.instructions.length, 100000);
+  assert.equal(session.rec.contextRecovery, undefined);
+});
+
+test("a task ended before deferred delivery never opens a turn", async (t) => {
+  const { kernel, state, A, B, give, settle, prompts, session } = setup(t);
+  const task = give(A, B, "completed before delivery");
+  kernel.complete(task, "completed", "already done", []);
+  await settle();
+  assert.equal(session.busy, false);
+  assert.equal(prompts.length, 0);
+  assert.equal(state.tasks.get(task.id)!.status, "completed");
+});
+
+test("a queued task completed by its executor is discarded at dequeue instead of run again", async (t) => {
+  const { kernel, state, A, B, give, settle, idle, prompts, session } = setup(t);
+  give(A, B, "current"); await settle();
+  const task = give(A, B, "queued but already completed"); await settle();
+  kernel.complete(task, "completed", "done in the current work", []);
+  idle(); await settle();
+  assert.equal(session.busy, false);
+  assert.ok(!prompts.some(p => p.includes('title="queued but already completed"')));
+  assert.equal(state.tasks.get(task.id)!.status, "completed");
+});
+
+test("inbox admission retains over-budget results without acknowledging them", async (t) => {
+  const { hub, state, kernel, session, B, C } = setup(t);
+  const item: MailItem = { id: "lazy-large", to: B, from: { kind: "agent", ...C }, kind: "message", content: "x".repeat(30000), pref: "lazy", ts: "" };
+  state.commit([ops.enqueue(item)]);
+  kernel.mark(item.id, "inboxed", { agentId: B.agentId, sessionId: B.sessionId, from: item.from });
+  assert.deepEqual(hub.delivery.digest(session, 100), []);
+  assert.ok(state.mail.has(item.id));
+  const admitted = hub.delivery.digest(session, 10000);
+  assert.equal(admitted.length, 1);
+  assert.match(admitted[0].prompt[1].text, /context_ref/);
+  assert.ok(state.mail.has(item.id));
+});
+
+test("user cancellation during binding recovery cannot resume the old task", async (t) => {
+  const { session, kernel, state, A, B, give, settle, hub } = setup(t);
+  const task = give(A, B, "cancel recovery"); await settle();
+  let finish!: () => void;
+  (session as any).ensureBackend = () => new Promise<void>((resolve) => { finish = resolve; });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "Internal error: Prompt is too long" } });
+  assert.equal(session.current!.recovering, true);
+  hub.delivery.userStop(session);
+  await settle();
+  finish(); await settle();
+  assert.equal(state.tasks.get(task.id)!.status, "cancelled");
+  assert.equal(session.busy, false);
+});
+
+test("user input during context recovery protects and joins that turn before backend insertion", async (t) => {
+  const { session, kernel, A, B, give, settle, prompts } = setup(t);
+  const task = give(A, B, "recovering work"); await settle();
+  const bind = (session as any).ensureBackend;
+  let finish!: () => void;
+  (session as any).ensureBackend = async () => { await new Promise<void>(resolve => { finish = resolve; }); return bind(); };
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "Internal error: Prompt is too long" } });
+  assert.equal(session.current!.recovering, true);
+  kernel.post({ to: B, from: { kind: "user" }, kind: "message", prompt: [text("new user constraint")], pref: "wake" });
+  assert.equal(session.current!.protected, true, "protection is synchronous even while tools are disabled");
+  const replacement = give(A, B, "must queue");
+  assert.deepEqual(kernel.replace(replacement, session.current!.id), []);
+  await settle();
+  assert.ok(session.current!.inputs.some(i => i.prompt.some(b => b.type === "text" && b.text === "new user constraint")));
+  finish(); await settle();
+  assert.equal(session.current!.first.item!.taskId, task.id);
+  assert.equal(session.current!.protected, true);
+  assert.match(prompts.at(-1)!, /new user constraint/, "accepted corrections are in the first recovered model request");
+});
+
+test("handoff content yields budget to the new instructions without losing its retrieval reference", async (t) => {
+  const { session, hub, kernel, A, B, settle, prompts } = setup(t);
+  const body = "historical decision\n".repeat(2000);
+  const ref = contextRef(hub.paths, session.agentId, body).ref;
+  session.save({ contextCheckpoint: ref });
+  (session as any).handoffPreface = body;
+  session.preface(body);
+  const task = kernel.dispatch(A, B, { title: "budgeted", topic: "budgeted", instructions: "x".repeat(20000), after: [] });
+  assert.ok(!isVeto(task)); await settle();
+  assert.equal(session.current?.inserted, true);
+  assert.match(prompts[0], new RegExp(ref));
+  assert.ok(textTokens(prompts[0]) + 8192 <= 32000);
+  assert.ok(prompts[0].includes(task.instructions), "new instructions are intact");
+});
+
+test("a late receipt from the refused binding cannot land the replacement's input", async (t) => {
+  const { session, A, B, give, settle } = setup(t);
+  await (session as any).ensureBackend();
+  const replies: (() => void)[] = [];
+  (session as any).backend.prompt = () => {
+    session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+    return new Promise<void>((resolve) => replies.push(resolve));
+  };
+  give(A, B, "late receipt"); await settle();
+  session.onBackendUpdate({ sessionUpdate: "user_message", messageId: "first", content: [text("late receipt")] });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "Internal error: Prompt is too long" } });
+  await settle();
+  assert.equal(replies.length, 2);
+  replies[0](); await settle();
+  assert.equal(session.current!.inserted, false);
+  replies[1](); await settle();
+  assert.equal(session.current!.inserted, true);
+});
+
+test("execution evidence survives restart and prevents an interrupted input being replayed", async (t) => {
+  const { session, state, hub, A, B, give, settle, prompts } = setup(t);
+  const task = give(A, B, "observed write"); await settle();
+  session.onBackendUpdate({ sessionUpdate: "tool_call_update", toolCallId: "write", title: "External write", status: "completed" });
+  const item = [...state.mail.values()].find(m => m.taskId === task.id)!;
+  const reloaded = new State(state.store); reloaded.load();
+  assert.equal(reloaded.sessions.get(B.sessionId)!.contextExecution!.messageId, item.id);
+  const restarted = new LiveSession(hub, reloaded.sessions.get(B.sessionId)!);
+  (restarted as any).ensureBackend = () => { throw new Error("must not replay"); };
+  hub.live.set(B.sessionId, restarted);
+  const count = prompts.length;
+  restarted.enqueue({ item, origin: { ...item.from, messageId: item.id, taskId: task.id, role: "task" }, prompt: [text(task.instructions)] });
+  await settle();
+  assert.equal(prompts.length, count);
+  assert.equal(state.tasks.get(task.id)!.status, "failed");
+  assert.match(state.tasks.get(task.id)!.result!, /did not replay/);
+});
+
 test("user acceptance protects the turn before deferred delivery, even before insertion", async (t) => {
   const { kernel, state, A, B, session, give, settle, effects } = setup(t);
   const old = give(A, B, "old"); await settle();
@@ -123,6 +318,24 @@ test("a blocked replacement does not stop work before its dependencies finish", 
   const old = give(A, B, "old"); await settle();
   const blocked = give(A, B, "blocked", [old.id]);
   assert.deepEqual(kernel.replace(blocked, session.current!.id), []);
+  assert.equal(session.current!.cancelledBy, undefined);
+});
+
+test("replacement of a mixed-owner turn queues without partially cancelling its work", async (t) => {
+  const { kernel, state, A, B, C, session, give, settle, idle } = setup(t);
+  const foreign = give(C, B, "foreign work"); await settle();
+  const child = kernel.dispatch(B, C, { title: "foreign child", topic: "foreign", instructions: "wait", after: [], deliveryPref: "wake" });
+  assert.ok(!isVeto(child)); await settle();
+  idle(); await settle();
+  assert.equal(state.tasks.get(foreign.id)!.status, "running");
+  const own = give(A, B, "own work"); await settle();
+  assert.ok(session.taskIds().includes(foreign.id));
+  const replacement = give(A, B, "replacement");
+  assert.deepEqual(kernel.replace(replacement, session.current!.id), []);
+  await settle();
+  assert.equal(state.tasks.get(own.id)!.status, "running");
+  assert.equal(state.tasks.get(foreign.id)!.status, "running");
+  assert.equal(state.tasks.get(replacement.id)!.status, "queued");
   assert.equal(session.current!.cancelledBy, undefined);
 });
 
@@ -181,6 +394,18 @@ test("confirmed stop preserves the backend while rejecting old turn-tagged updat
   session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("old output"), _meta: { [TurnExt.key]: { id: oldTurn } } }, oldBackend);
   assert.equal(session.current, current);
   assert.equal(state.store.read(Paths.transcript(B.agentId, B.sessionId)).length, before);
+});
+
+test("stopping a backend without a tool-ordering guarantee revokes the old bridge before new work", async (t) => {
+  const { session, give, settle, stop, idle, effects, A, B } = setup(t);
+  const task = give(A, B, "unisolated work"); await settle();
+  (session as any).backend.caps.orderedCancellation = false;
+  const originalId = session.rec.backendSessionId;
+  stop(task); await settle(); idle("cancelled"); await settle();
+  assert.ok(effects.includes("revoke"));
+  assert.ok(effects.includes("stop process"));
+  assert.equal((session as any).backend, undefined);
+  assert.equal(session.rec.backendSessionId, originalId, "the backend can restore its saved conversation");
 });
 
 test("an old turn's confirmation cannot settle a newer pending stop", async (t) => {
