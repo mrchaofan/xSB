@@ -1,4 +1,4 @@
-// 火山方舟：设置 → 后端里的一张卡片。安装 arkcli、登录、让 xSB 中的 Claude Code / Codex 接入套餐或解除接入；
+// 火山方舟：设置 → 后端里的一张卡片。arkcli 随应用内置（ark.ts），这里只登录、让 xSB 中的 Claude Code / Codex 接入套餐或解除接入；
 // 每一步都由主进程弹框确认后才执行（main.ts），这里只选择和呈现。状态更新只改文字和属性，焦点与展开的详情保留。
 import { state } from "./app.js";
 import { refreshBackendControls } from "./backend.js";
@@ -144,11 +144,9 @@ export function arkCard() {
   const primary = h("button", { type: "button" });
   const recheck = h("button", { class: "btn", type: "button", onclick: () => act("checking", () => xsb.arkStatus()) }, t("backend.action.recheck"));
   const buy = h("a", { class: "btn primary", href: PLAN_GUIDE, target: "_blank", rel: "noopener" }, t("ark.plan.buy"));
-  const locate = h("button", { class: "btn backend-quiet", type: "button", onclick: () => { menu.hidePopover(); act("locating", () => xsb.locateProgram("arkcli")); } }, t("backend.locate"));
-  const reinstall = h("button", { class: "btn backend-quiet", type: "button", onclick: () => { menu.hidePopover(); act("installing", () => xsb.arkInstall(), "ark.installed"); } }, t("backend.reinstall"));
   const where = h("code", { class: "backend-path" });
   const menu = h("div", { class: "backend-options", popover: "auto", id: "ark-options", style: "position-anchor: --ark-options" },
-    h("small", {}, t("ark.path")), where, locate, reinstall,
+    h("small", {}, t("ark.path")), where,
     h("a", { class: "backend-guide", href: PLAN_GUIDE, target: "_blank", rel: "noopener" }, t("ark.plan.guide")));
   const more = h("button", { class: "btn backend-more-trigger", type: "button", popovertarget: "ark-options", "aria-label": t("backend.more.label", { name: t("ark.name") }),
     style: "anchor-name: --ark-options" }, t("backend.more"), h("span", { "aria-hidden": "true" }, "⋯"));
@@ -176,30 +174,28 @@ export function arkCard() {
     badge.dataset.tone = p.tone;
     version.textContent = status?.version && !busy ? `v${status.version}` : "";
     description.textContent = error ? t(`ark.failure.${error.kind}`) : t(`ark.detail.${p.state}`);
-    if (status?.issue && !busy && !error) description.textContent += t("sentence.gap") + t(`backend.issue.${status.issue}`);
+    // 程序无法运行时说明里已经讲了怎么办；内置程序的路径不能由用户指定，通用的“检查路径”提示不适用。
+    if (status?.issue && status.issue !== "execution" && !busy && !error) description.textContent += t("sentence.gap") + t(`backend.issue.${status.issue}`);
     plans.replaceChildren(...(s === "ready" || s === "noPlan" ? status.plans : []).map((plan) => h("li", { "data-expired": plan.expired ? "true" : "false" }, planText(plan))));
     plans.hidden = !plans.children.length || !!busy;
     waiting.hidden = busy !== "login";
     loginLink.hidden = !loginUrl;
     if (loginUrl) loginLink.href = loginUrl;
-    const next = busy ? null : error ? { missing: "install", broken: "check", unauthenticated: "login" }[s] ?? "check"
-      : { missing: "install", broken: "check", unauthenticated: "login" }[s];
+    const next = busy ? null : error ? { unauthenticated: "login" }[s] ?? "check"
+      : { broken: "check", unauthenticated: "login" }[s];
     primary.hidden = !next && !(busy && busy !== "login");
     primary.className = `btn primary${busy ? " backend-working" : ""}`;
     primary.setAttribute("aria-disabled", busy ? "true" : "false");
     primary.textContent = busy ? t(`ark.action.${busy}`) : next ? t(`ark.action.${next}`) : "";
     primary.onclick = () => {
       if (busy || !next) return;
-      if (next === "install") act("installing", () => xsb.arkInstall(), "ark.installed");
-      else if (next === "login") act("login", () => xsb.arkLogin(), "ark.login.done");
+      if (next === "login") act("login", () => xsb.arkLogin(), "ark.login.done");
       else act("checking", () => xsb.arkStatus());
     };
     buy.hidden = !!busy || s !== "noPlan";
     recheck.hidden = !!busy || !["noPlan", "ready", "unauthenticated"].includes(s);
     more.hidden = !status;
     where.textContent = status?.path ?? t("ark.path.none");
-    locate.disabled = reinstall.disabled = !!busy;
-    reinstall.hidden = !status?.path;
     const bound = Object.keys(status?.bindings ?? {}).length > 0;
     agentList.hidden = !(s === "ready" || bound);
     for (const row of agents) row.paint();

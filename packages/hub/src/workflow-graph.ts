@@ -178,3 +178,16 @@ export function parseGraph(raw: string, limit = 100000): WorkflowGraph {
   }
   return { nodes: order, edges };
 }
+
+/** A graph in the JSONL a model writes it in, leaving out the fields it can leave out: parsed back, it is the same graph. */
+export function graphJsonl({ nodes, edges }: WorkflowGraph): string {
+  const node = ({ node, kind, prompt, input, model, schema, multi }: NodeDef) => ({
+    node,
+    ...(kind === "end" ? { kind } : { prompt }),
+    ...(Object.keys(input).length > 0 && { input }),
+    ...(model !== undefined && { model }),
+    ...(schema !== undefined && { schema }),
+    ...(multi && { multi }),
+  });
+  return [...nodes.map(node), ...edges].map((v) => JSON.stringify(v)).join("\n");
+}

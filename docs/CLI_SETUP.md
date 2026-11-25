@@ -9,8 +9,28 @@
 | `renderer/backend.js` | 共用控件，呈现操作进度和检测状态，保留安装错误与重试入口 |
 | `preload.cjs` / `main.ts` | 白名单 IPC；主进程确认配置创建并调用系统文件管理器 |
 | `AgentClis` | 提供者配置、模板、官方安装、无模型请求检测；合并同时发生的同类操作 |
-| `Clis` | 查找与记忆程序路径，刷新用户 PATH，生成平台启动器 |
+| `Clis` | 可执行文件的目录布局；查找与记忆程序路径；生成启动器和链接；给出子进程的环境 |
 | Hub | 经 `cross-spawn` 启动后端及 MCP，保持安装业务在桌面端 |
+
+## 可执行文件的布局
+
+内置的程序随应用发布，只读；动态下载的程序和应用生成的文件都放在 `userData/backends`（见 `clis.ts` 文件头）：
+
+| 位置 | 内容 |
+| --- | --- |
+| `<应用>/dist/bin/` | 内置：xSB 自己的程序（JavaScript，由 Electron 作 Node 运行），包括 claude-agent-acp、codex-acp |
+| `<应用>/node_modules/@volcengine/ark-cli-<平台>/` | 内置：arkcli（见 ARK-SETUP.md） |
+| `backends/builtin/bin/` | 内置原生程序按命令名建的链接：`arkcli` |
+| `backends/installed/<名称>/` | 动态下载：应用从官方渠道安装的程序本体，`claude/claude`、`codex/codex`（及其附带程序） |
+| `backends/installed/bin/` | 指向已安装程序的链接 |
+| `backends/bin/` | 启动器：各智能体的 ACP 包装（指明智能体程序的位置，接入方舟时带上方舟环境）；以及用户手动指定的程序的链接 |
+| `backends/paths.json` | 用户手动指定的程序位置 |
+
+链接优先用软链接；Windows 没有创建软链接的权限时改用硬链接，再不行写一个 `.cmd` 转发。每个文件都先写到旁边的临时文件，再原子替换，hub 恰好在启动程序时只会看到旧的或新的。
+
+**子进程的环境（`Clis.env`）。** PATH 依次为 `backends/bin`、`backends/builtin/bin`、`backends/installed/bin`，然后是用户自己的 PATH（取自登录 shell）。另外带上内置插件目录和浏览器 socket，并去掉 `NODE_OPTIONS`。桌面端启动的 hub（`hubSocket` 的 `env` 参数）、检测命令、arkcli 都用这个环境；hub 再把它传给后端和 MCP。桌面端进程自己的 `process.env.PATH` 保持用户的原样。
+
+**同名程序的选用顺序：** 用户手动指定的 → 应用安装的 → 用户 PATH 上的。在应用里重新安装时，会清除手动指定的路径，以新装的为准。内置程序（arkcli）不被手动指定的路径替换：早期版本允许手动指定 arkcli，这类旧记录会被忽略。
 
 提供者描述统一配置目录、文件名、环境变量和认证命令。Codex 的 release 下载与 Claude 官方脚本仅在安装内部有不同实现。未登记的后端不套用 Codex / Claude 的安装或配置逻辑。
 
@@ -22,13 +42,15 @@
 
 ## 安装流程
 
-点击安装 → 锁定该 CLI 的操作按钮 → 官方下载 → 对应平台原生安装 → 记忆绝对路径 → 持久化用户 PATH → 刷新应用 PATH / ACP 启动器 → 运行本地检测 → 显示结果。
+点击安装 → 锁定该 CLI 的操作按钮 → 从官方渠道下载到 `installed/` 旁边的临时目录 → 校验 → 替换 `installed/<名称>/` → 清除手动指定的路径 → 重写链接和启动器 → 运行本地检测 → 显示结果。
 
-- Codex：官方 GitHub API 选择 macOS / Windows / Linux、arm64 / x64 发布包。保留包内辅助程序，无需 npm。安装目录为 `userData/backends/installed/codex`。
-- Claude：下载 `https://claude.ai/install.sh` 或 `install.ps1` 到临时目录后执行。使用官方用户级安装位置 `~/.local/bin`。
-- shell PATH 增量写入用户当前 shell 启动文件，按完整行去重；Windows 更新用户级 PATH。保留已有用户内容，不使用 sudo。
-- 检测与安装不并发返回过期结果。同一 CLI 的安装请求合并，下载失败不登记不存在的文件。临时目录最终清理，超时终止安装进程树。
-- 已运行的应用所启动的 Hub 读取相同启动器文件，启动器携带更新后的 PATH，无需重启或中断当前对话。已有后端进程保留原环境，下一次启动使用新环境。
+- 安装不改动用户的任何东西：不写 shell 启动文件，不改 PATH，不往用户主目录写文件。所以终端里默认找不到 xSB 安装的程序；登录指引给出的命令会写出程序的完整路径（`loginCommand`；Windows 按 PowerShell 的写法）。
+- Codex：通过官方 GitHub API 选择 macOS / Windows / Linux、arm64 / x64 的发布包，解压到 `installed/codex/`，保留包内辅助程序，主程序命名为 `codex[.exe]`。
+- Claude：按官方安装脚本的下载方式（`https://downloads.claude.ai/claude-code-releases`）取得最新版本号和 manifest，下载当前平台的程序，按 manifest 的 sha256 校验后放到 `installed/claude/claude[.exe]`。不运行官方脚本，也不运行程序的 `install` 步骤（那一步会把它装进用户主目录）。
+- 新版本先在临时目录准备好再替换旧版本；下载或校验失败时，旧版本保持原样，也不会留下临时文件。
+- 检测与安装不会并发返回过期结果。同一 CLI 的安装请求会合并，超时会终止安装进程树。
+- 已在运行、由本应用启动的 Hub 读取的是同一批启动器文件，启动器里写着当前的 PATH，所以无需重启或中断当前对话。已在运行的后端进程保留原来的环境，下一次启动时使用新环境。
+- 早期版本用官方脚本把 Claude 装进了 `~/.local/bin`，并把路径记在 `paths.json`。这类记录会继续生效，直到用户在应用里重新安装。
 
 ## 检测契约
 
@@ -46,7 +68,7 @@
 
 ## 验证
 
-自动测试覆盖：环境变量路径覆盖、最小权限模板、配置读检查无副作用、并发创建不覆盖、标准 JSON 与字段说明、版本/认证各状态、重复请求合并、PATH 去重与引号路径、Windows 用户 PATH 命令、超时进程终止、官方 release 选择和包内辅助文件保留、下载失败。
+自动测试覆盖：环境变量路径覆盖、最小权限模板、配置读检查无副作用、并发创建不覆盖、标准 JSON 与字段说明、版本/认证各状态（检测在子进程环境中运行）、重复请求合并、超时进程终止、Codex 官方 release 选择和包内辅助文件保留、Claude 按 manifest 校验（不匹配时保留旧版本）、下载失败不留痕迹、安装不触碰用户主目录、登录命令的路径引用；`clis.test.ts` 覆盖选用顺序、链接与启动器、子进程 PATH 的顺序、内置程序不被替换、`NODE_OPTIONS` 不下传。
 
 安装自动测试使用隔离目录、模拟官方响应和执行器，不安装或修改开发者真实 CLI。需在目标 Windows 机器上完成原生安装与资源管理器聚焦验证；实际安装依赖官方渠道和用户网络环境。
 
@@ -61,4 +83,4 @@
 
 UI 验证使用模拟 CLI，覆盖安装后登录引导、复制反馈、未登录时重复检测、失败恢复、Esc 菜单关闭、检测后的焦点和草稿保留，以及深色和窄窗口布局。
 
-手动指定的有效程序路径优先于 PATH 中的旧版本；指定文件被移除后回退到 PATH。回归测试验证了这一优先级，以及启动器的实际命令执行与 PATH 刷新。
+手动指定的有效程序路径优先于应用安装的版本和 PATH 中的版本；指定的文件被移除后，回退到应用安装的版本，再回退到 PATH。回归测试验证了这一优先级，以及启动器的实际命令执行与 PATH 刷新。

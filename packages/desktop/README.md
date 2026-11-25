@@ -22,7 +22,7 @@ npm start -w @xsb/desktop -- <文件夹>      # 直接打开一个工作区
 
 Electron 用的是带 `<webview2>` 的私有构建：`npm install` 后 [scripts/patch-electron.mjs](scripts/patch-electron.mjs) 给 `electron` 包打补丁（[patches/](patches)），首次运行时它按 [.electron.mirror.mjs](.electron.mirror.mjs) 从私有镜像下载二进制。版本在 `package.json` 里写死为 43.8.1。
 
-代码由 Rolldown 打进 `dist/`（[rolldown.config.js](rolldown.config.js)），`npm start` 会先打包；单独打包用 `npm run build -w @xsb/desktop`。`npm run package -w @xsb/desktop` 用 electron-builder 把 `dist/` 做成应用（[electron-builder.config.mjs](electron-builder.config.mjs)），产物在 `release/`：macOS arm64 与 Windows x64 各一个 zip，不签名（macOS 只做 ad-hoc）。里面的 Electron 同样来自私有镜像；图标在 [build/](build)。
+代码由 Rolldown 打进 `dist/`（[rolldown.config.js](rolldown.config.js)），`npm start` 会先打包；单独打包用 `npm run build -w @xsb/desktop`。`npm run package -w @xsb/desktop` 用 electron-builder 把 `dist/` 做成当前平台的应用（[electron-builder.config.mjs](electron-builder.config.mjs)），产物在 `release/`：macOS arm64 与 Windows x64 各一个 zip，各自在对应平台上打包（CI 按平台分别打包），不签名（macOS 只做 ad-hoc）。随包但不经 Rolldown 打包的只有 `package.json` 的生产依赖：各平台的 arkcli（`optionalDependencies`，npm 只安装当前平台那一个，见 [docs/ARK-SETUP.md](../../docs/ARK-SETUP.md)）。里面的 Electron 同样来自私有镜像；图标在 [build/](build)。
 
 GitHub [Desktop CI](../../.github/workflows/desktop.yml) 在 PR 和推送 `main` 时，先执行所有工作区的测试与类型检查，再分别在 macOS 和 Windows runner 打包。Actions 的 `xsb-mac-arm64`、`xsb-win-x64` 制品保存 30 天，包含应用 zip 和对应的 `.sha256` 校验文件。普通合并只跑 CI，不递增版本、不创建标签、不发布 Release；推送标签也不会触发发布。
 

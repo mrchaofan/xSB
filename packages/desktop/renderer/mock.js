@@ -69,8 +69,8 @@
     { profile: "agent-plan_cn-beijing_personal", name: "Agent Plan Medium", type: "agent-plan", tier: "medium", expiresAt: "2026-12-16T23:59:59+08:00", expired: false },
     { profile: "coding-plan_cn-beijing_personal", name: "Coding Plan Lite", type: "coding-plan", tier: "lite", expiresAt: "2026-10-01T23:59:59+08:00", expired: true },
   ];
-  const arkView = () => structuredClone({ state: ark.state, version: ark.state === "missing" ? undefined : "1.0.65",
-    path: ark.state === "missing" ? undefined : "~/Library/Application Support/xsb/backends/installed/npm/lib/node_modules/@volcengine/ark-cli/bin/arkcli-darwin-arm64",
+  const arkView = () => structuredClone({ state: ark.state, version: ark.state === "broken" ? undefined : "1.0.65", issue: ark.state === "broken" ? "execution" : undefined,
+    path: "/Applications/xsb.app/Contents/Resources/app/node_modules/@volcengine/ark-cli-darwin-arm64/bin/arkcli-darwin-arm64",
     plans: ["ready", "noPlan"].includes(ark.state) ? (ark.state === "ready" ? ARK_PLANS : [ARK_PLANS[1]]) : [], bindings: ark.bindings });
   const BACKENDS = [
     {
@@ -297,14 +297,12 @@
     },
     async locateProgram(command) {
       // Electron：系统的选择文件对话框
-      if (command === "arkcli") { ark.state = ark.state === "missing" ? "unauthenticated" : ark.state; return true; }
       Object.assign(BACKENDS.find((b) => b.name === command) ?? {}, { installed: true, missing: undefined });
       return true;
     },
-    // 火山方舟（Electron：main.ts 先弹系统确认框；预览里一律当作“确认”）。?ark=missing|unauthenticated|noPlan|ready
+    // 火山方舟（Electron：main.ts 先弹系统确认框；预览里一律当作“确认”）。?ark=broken|unauthenticated|noPlan|ready
     arkStatus: async () => { await wait(300); return arkView(); },
     arkModels: async () => { await wait(300); return [{ name: "ark-code-latest" }, { name: "doubao-seed-2.1-pro", context: 1048576 }, { name: "kimi-k3.1-pro" }, { name: "deepseek-v4-pro" }]; },
-    arkInstall: async () => { await wait(800); ark.state = "unauthenticated"; return arkView(); },
     arkLogin: async () => {
       setTimeout(() => emit({ arkLoginUrl: "https://ark.volcengine.com/region:cn-beijing/arkcli/login?preview" }), 300);
       await wait(1500); ark.state = "ready"; return arkView();

@@ -93,10 +93,11 @@ export class Workspace {
    * Open the project's workspace, making the folder a project first if it is none.
    * `language` is the one the user reads, and `say` words an error in it.
    */
-  static async open(paths: Paths, language: Language, say: (e: unknown) => string, emit: Emit, notify: Notify): Promise<Workspace> {
+  static async open(paths: Paths, env: NodeJS.ProcessEnv, language: Language, say: (e: unknown) => string, emit: Emit, notify: Notify): Promise<Workspace> {
     if (!fs.existsSync(paths.dir)) initProject(paths);
-    // The app's own hub: started for this process and stopped with it (a hub an earlier app left is replaced).
-    const socket = await hubSocket(paths, true);
+    // The app's own hub: started for this process and stopped with it (a hub an earlier app left is replaced), with
+    // the environment of the app's child processes (`env`, clis.ts): it finds the agents' programs on its PATH.
+    const socket = await hubSocket(paths, true, env);
     const conn = new Connection(socket, socket, "hub");
     await conn.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,

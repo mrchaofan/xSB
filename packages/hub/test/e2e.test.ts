@@ -614,9 +614,9 @@ let refusedId: string;
     {node:"E",prompt:finish("music",2800)},{node:"end",kind:"end"},
     {from:"A",to:"D"},{from:"D",to:"end"},{from:"E",to:"end"}
   ].map(v => JSON.stringify(v)).join("\n");
-  await prompt(id,call("plan",{version:"film-1",graphJsonl}));
+  await prompt(id,call("plan",{graphJsonl}));
   assert.deepEqual(hub.workflows.get(id).nodes,[]);
-  await prompt(id,call("execute",{version:"film-1"}));
+  await prompt(id,call("execute",{}));
   const instances = () => hub.workflows.read(id).instances;
   await until("D and E have inserted old assignments",() => instances().D.work?.inserted && instances().E.work?.inserted);
   const oldD = instances().D.work!.attempt, music = instances().E.work!.attempt, dSession = instances().D.sessionId;

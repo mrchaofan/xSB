@@ -8,7 +8,7 @@ const METHODS = [
   "load", "pickFolder", "open", "newWindow", "windowColors",
   "history", "send", "resend", "cancel", "clear", "permit",
   "composerState", "setComposerOption", "newSession", "setAvatar", "setBackend", "migrate", "deleteConversation", "cleanUp", "workflowControl", "backends", "locateProgram", "cliConfig", "revealCliConfig", "installCli", "checkCli",
-  "arkStatus", "arkModels", "arkInstall", "arkLogin", "arkCancelLogin", "arkBind",
+  "arkStatus", "arkModels", "arkLogin", "arkCancelLogin", "arkBind",
   "openPage", "page", "pageWindow",
   "limitSettings", "setLimit", "projectLanguage", "setProjectLanguage",
   "plugins", "setPluginEnabled", "approvePlugin", "reloadPlugins", "revealPlugins",

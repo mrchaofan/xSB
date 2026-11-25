@@ -78,13 +78,11 @@ const untilJS = (expr, label) => until(() => js(expr), label);
   await import(pathToFileURL(path.join(root, "packages/desktop/dist/app/main.js")).href);
   win = await until(() => BrowserWindow.getAllWindows()[0], "window");
   await untilJS('document.querySelector("#ws-name")?.textContent==="project"', "workspace");
+  // A new conversation takes the backend of the last one (app.js `defaultBackend`); the first is asked for by name,
+  // so that it is the scripted one, not an agent of the machine.
   const create = async () => {
-    await click("#new-agent");
-    await js(
-      '(()=>{const s=document.querySelector("dialog select");s.value="mock";s.dispatchEvent(new Event("change"))})()',
-    );
-    await click("dialog .primary");
-    await untilJS('!document.querySelector("dialog[open]")', "created session");
+    await js('xsb.newSession("mock")');
+    await untilJS('!!document.querySelector("#lanes .lane")', "created session");
   };
   await create();
   const main = "#lanes .lane",

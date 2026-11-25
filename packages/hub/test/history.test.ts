@@ -68,7 +68,7 @@ test("desktop loads pages over a real hub connection and receives live images as
     const transcriptFile = path.join(paths.dir, Paths.transcript(session.agentId, session.id));
     const originalTranscript = fs.readFileSync(transcriptFile);
     const originalSession = JSON.stringify(session.rec);
-    ws = await Workspace.open(paths, "en", String, () => {}, () => {});
+    ws = await Workspace.open(paths, process.env, "en", String, () => {}, () => {});
     const loaded = await ws.load();
     assert.equal(loaded.transcripts[session.agentId].filter(e => e.kind === "input").length, 10);
     assert.notEqual(loaded.history[session.agentId], null);

@@ -251,13 +251,16 @@ export function backends(): Record<string, BackendSpec> {
   return { ...BUILTIN_BACKENDS, ...loadGlobalConfig().backends };
 }
 
-/** The backends as a client is told of them: each with whether its command is found on this process's PATH. */
-export function describeBackends(): BackendInfo[] {
+/**
+ * The backends as a client is told of them: each with whether its command is found on `searchPath`, the PATH the hub
+ * starts them with (this process's unless given).
+ */
+export function describeBackends(searchPath?: string): BackendInfo[] {
   return Object.entries(backends()).map(([name, spec]) => ({
     name,
     command: spec.command,
     args: spec.args ?? [],
-    installed: findCommand(spec.command) !== null,
+    installed: findCommand(spec.command, searchPath) !== null,
     installHint: INSTALL_HINT[spec.command],
   }));
 }

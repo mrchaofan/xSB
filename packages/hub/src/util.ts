@@ -3,6 +3,19 @@ import pkg from "../package.json" with { type: "json" };
 
 export const VERSION: string = pkg.version;
 
+/**
+ * Variables of the environment that xSB does not hand down to what it starts. `NODE_OPTIONS` would be loaded into
+ * every program that runs on Node or on Electron as Node (the hub, its MCP bridges and plugins, the agents' ACP
+ * wrappers) and into the agents' own programs, whatever the user set it for.
+ */
+export const WITHHELD_ENV = ["NODE_OPTIONS"] as const;
+
+/** `env` without the withheld variables (`WITHHELD_ENV`), changed in place. */
+export function withhold<T extends Record<string, string | undefined>>(env: T): T {
+  for (const name of WITHHELD_ENV) delete env[name];
+  return env;
+}
+
 export const now = (): string => new Date().toISOString();
 
 export const newId = (prefix: string): string => `${prefix}_${randomBytes(6).toString("hex")}`;

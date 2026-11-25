@@ -5,27 +5,32 @@
   "type": "module",
   "private": true,
   "main": "dist/app/main.js",
-  "dependencies": {
-    "@xsb/hub": "0.1.4",
-    "@xsb/protocol": "0.1.4",
-    "cross-spawn": "^7.0.6",
-    "dompurify": "^3.4.18",
-    "marked": "^18.2.0"
+  "optionalDependencies": {
+    "@volcengine/ark-cli-darwin-arm64": "1.0.65",
+    "@volcengine/ark-cli-darwin-x64": "1.0.65",
+    "@volcengine/ark-cli-linux-arm64": "1.0.65",
+    "@volcengine/ark-cli-linux-x64": "1.0.65",
+    "@volcengine/ark-cli-win32-arm64": "1.0.65",
+    "@volcengine/ark-cli-win32-x64": "1.0.65"
   },
   "devDependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.107.0",
     "@agentclientprotocol/codex-acp": "^2.6.0",
     "@types/cross-spawn": "^6.0.6",
+    "@xsb/hub": "0.1.4",
+    "@xsb/protocol": "0.1.4",
+    "cross-spawn": "^7.0.6",
+    "dompurify": "^3.4.18",
     "electron": "43.8.1",
     "electron-builder": "^26.18.0",
-    "npm": "^11.21.3",
+    "marked": "^18.2.0",
     "rolldown": "^1.3.2"
   },
   "scripts": {
     "postinstall": "node scripts/patch-electron.mjs",
     "build": "rolldown -c",
     "start": "rolldown -c && electron .",
-    "package": "rolldown -c && electron-builder --config electron-builder.config.mjs --mac --win",
+    "package": "rolldown -c && electron-builder --config electron-builder.config.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "test:workflow-ui": "npm run build && node test/workflow-window.cjs",
