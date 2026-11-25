@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { DownloadItem, Session, WebContents } from "electron";
+import { Paths } from "@xsb/hub";
 import { errorMessage } from "@xsb/protocol";
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 
@@ -74,7 +75,7 @@ export class BrowserDownloads {
   revision = 0;
 
   constructor(project: string) {
-    this.directory = path.join(project, ".xsb", "downloads");
+    this.directory = new Paths(project).downloads;
     this.manifest = path.join(this.directory, ".records", randomUUID(), "manifest.json");
   }
 

@@ -10,15 +10,16 @@
  */
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
-import { Agents, Assets, Backends, History, Boundaries, Connection, Discarded, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, Roles, RpcError, Tasks, Teams, failure, isTerminal } from "@xsb/protocol";
-import type { TeamSyncPlan, HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, McpServerCheck, OriginMeta, PermissionRequest, PermissionResponse, PresetProblem, RoleDetail, SessionUpdate, Task, TeamInfo } from "@xsb/protocol";
-import type { Activity, AgentDetail, AgentInput, Artifact, BackendView, Entry, Event, Pack, Progress, RoleView, Snapshot } from "./bridge.ts";
+import type { ComposerState, WorkflowView } from "@xsb/protocol";
+import { SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Discarded, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal } from "@xsb/protocol";
+import type { HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
+import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
-import { roleInput, roleView } from "./roles.ts";
 import { artifactPath } from "./artifact-link.ts";
 
 export const ARTIFACT_SCHEME = "xsb-artifact";
@@ -40,8 +41,6 @@ export class Workspace {
   readonly paths: Paths;
   /** Absolute path -> artifact. Only these files are served to the renderer. */
   readonly artifacts = new Map<string, Artifact>();
-  /** Pictures of roles (`avatar` "role") the window may load, by path: only those the hub named. */
-  readonly avatars = new Set<string>();
 
   private conn: Connection;
   private say: (e: unknown) => string;
@@ -52,12 +51,11 @@ export class Workspace {
   private left = false;
   /** No window shows this workspace (`setShown`). */
   private hidden = false;
+  private workflows = new Map<string, WorkflowView>();
   private agents = new Map<string, AgentInfo>();
   private agentVersions = new Map<string, number>();
   private tasks = new Map<string, Task>();
   private taskVersions = new Map<string, number>();
-  /** The roles as last heard of, by name: what a window is shown when it loads. */
-  private roles = new Map<string, RoleView>();
   private transcripts = new Map<string, Entry[]>();
   /** Agent id -> its main session, attached to. Where its transcript comes from and its input goes. */
   private mains = new Map<string, Promise<string>>();
@@ -98,7 +96,7 @@ export class Workspace {
       protocolVersion: PROTOCOL_VERSION,
       info: { name: "xsb-desktop", version: "0.1.0" },
       // An observer of all agents, and a transcript: sent its own input too, when it gets into the conversation.
-      capabilities: { _meta: { [Agents.capability]: {}, [History.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
+      capabilities: { _meta: { [Agents.capability]: {}, [History.capability]: {}, [SessionControls.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
     });
     return new Workspace(paths, conn, say, emit, notify);
   }
@@ -116,17 +114,13 @@ export class Workspace {
     // The hub stopped, or died: the window says so, whatever it is in the middle of. Not when it was this side that left.
     void conn.closed.then(() => this.left || this.onHubGone(emit));
     conn.onNotification("session/update", (p) => this.onUpdate(p.sessionId, p.update));
+    conn.onNotification(SessionControls.update, ({agentId, controls}) => this.emit({agentId, controls}));
     conn.onNotification(Agents.update, (p) => this.onAgent(p.agent));
     conn.onNotification(Agents.removed, (p) => this.onAgentRemoved(p.id));
     conn.onNotification(Assets.update, (p) => this.asset(p.asset));
-    conn.onNotification(Roles.update, (p) => {
-      const role = this.roleView(p.role);
-      this.roles.set(role.name, role);
-      this.emit({ role });
-    });
-    conn.onNotification(Roles.removed, (p) => {
-      this.roles.delete(p.name);
-      this.emit({ removedRole: p.name });
+    conn.onNotification(Workflow.update, ({ workflow }: { workflow: WorkflowView }) => {
+      this.workflows.set(workflow.sessionId,workflow);
+      this.emit({workflow});
     });
     conn.onNotification(Tasks.update, (p) => this.onTask(p.task));
     conn.onNotification(Agents.asks, (p) => {
@@ -192,6 +186,11 @@ export class Workspace {
     this.busy = busy;
   }
 
+  sessionOwner(agentId: string): string | undefined {
+    const agent = this.agents.get(agentId);
+    return agent?.workflowOwner ?? agent?.mainSessionId;
+  }
+
   /** Whether this directory is where one of the workspace's agents works, or is inside the project. */
   worksIn(dir: string): boolean {
     // The same directory can be named in two ways (on macOS, /tmp is /private/tmp).
@@ -209,9 +208,11 @@ export class Workspace {
     const taskVersions = new Map(this.taskVersions);
     const unchanged = (versions: Map<string, number>, before: Map<string, number>, id: string): boolean =>
       (versions.get(id) ?? 0) === (before.get(id) ?? 0);
-    const [, { teams }, , , { assets }] = await Promise.all([
-      this.conn.request<{ roles: RoleDetail[] }>(Roles.list).then(({ roles }) => (this.roles = new Map(roles.map((r) => [r.name, this.roleView(r)])))),
-      this.conn.request<{ teams: TeamInfo[] }>(Teams.list),
+    const priorFlows = new Map(this.workflows);
+    const [, , , { assets }] = await Promise.all([
+      this.conn.request<{ workflows: WorkflowView[] }>(Workflow.list).then(({workflows}) => {
+        for (const flow of workflows) if (priorFlows.get(flow.sessionId) === this.workflows.get(flow.sessionId)) this.workflows.set(flow.sessionId,flow);
+      }),
       this.conn.request<{ agents: AgentInfo[] }>(Agents.list).then(({ agents }) => {
         const ids = new Set(agents.map(agent => agent.id));
         for (const id of this.agents.keys()) if (!ids.has(id) && unchanged(this.agentVersions, agentVersions, id)) this.onAgentRemoved(id);
@@ -222,7 +223,7 @@ export class Workspace {
         for (const [id, task] of this.tasks) if (!unchanged(this.taskVersions, taskVersions, id)) next.set(id, task);
         this.tasks = next;
       }),
-      this.conn.request<{ assets: Asset[] }>(Assets.list, {}),
+      this.conn.request<{ assets: Asset[] }>(Assets.list, { history:true }),
     ]);
     assets.forEach((asset) => this.asset(asset));
     // Attaching to a session replays its history; the snapshot is complete once every replay is.
@@ -234,11 +235,10 @@ export class Workspace {
     this.live = true;
     return {
       workspace: { name: path.basename(this.paths.project), path: this.paths.project },
-      roles: [...this.roles.values()],
       agents: [...this.agents.values()],
       tasks: [...this.tasks.values()],
       artifacts: [...this.artifacts.values()],
-      assetNames: Object.assign({}, ...teams.map((team) => team.assets)),
+      assetNames: {}, workflows:Object.fromEntries(this.workflows),
       transcripts: Object.fromEntries(this.transcripts),
       activities: Object.fromEntries(this.activities),
       history: Object.fromEntries(this.historyCursors),
@@ -307,10 +307,7 @@ export class Workspace {
           return agent.mainSessionId!;
         });
       } else {
-        session = this.conn.request("session/new", { ...setup, _meta: { [Agents.sessionKey]: agent.id } }).then((created) => {
-          this.sessionAgent.set(created.sessionId, agent.id);
-          return created.sessionId;
-        });
+        throw Error("This agent has no started session");
       }
       this.mains.set(agent.id, session);
       session.catch(() => this.mains.delete(agent.id));
@@ -480,10 +477,11 @@ export class Workspace {
       this.settle(agentId);
       const id = `${sessionId}:${update.toolCallId}`;
       const prior = this.transcripts.get(agentId)!.find((e): e is Tool & { id: string } => e.id === id);
-      const file = update.locations?.[0]?.path;
+      const directory = this.agents.get(agentId)?.workspace ?? this.paths.project;
+      const files = (update.locations ?? []).flatMap((location: { path?: string }) => location.path ? [this.artifact(path.resolve(directory, location.path), agentId)] : []);
       const title = update.title ?? prior?.title ?? update.toolCallId;
       const status = TOOL_STATUS[update.status ?? ""] ?? (update.status ? "running" : (prior?.status ?? "running"));
-      this.put(agentId, { id, kind: "tool", title, status, artifactId: (file && this.artifact(file, agentId)?.id) ?? prior?.artifactId });
+      this.put(agentId, { id, kind: "tool", title, status, artifactId: files.find((a: Artifact | undefined) => a)?.id ?? prior?.artifactId });
       // While any tool call is open the agent is running tools; once the last one ends, its model reads the results.
       const open = this.tools.get(agentId) ?? new Set<string>();
       this.tools.set(agentId, open);
@@ -502,10 +500,10 @@ export class Workspace {
    * at once; the hub sends it back under the same id when it has become part
    * of a turn, and that entry takes the place of this one.
    */
-  async send(agentId: string, content: Content): Promise<void> {
+  async send(agentId: string, content: Content, target?: string): Promise<void> {
     const agent = this.agents.get(agentId)!;
     const id = `m_${randomUUID()}`;
-    const entry = { id, kind: "input" as const, origin: { kind: "user" as const }, content };
+    const entry = { id, kind: "input" as const, origin: { kind: "user" as const }, content, pending: true };
     this.pending.add(id);
     this.put(agentId, entry);
     let sessionId: string;
@@ -516,11 +514,18 @@ export class Workspace {
       const text = this.why(e);
       this.put(agentId, { id: this.newId(), kind: "error", text });
       this.notify({ agentId, kind: "failed", detail: text });
-      return;
+      this.drop(agentId, id);
+      throw e;
     }
     // Answered once it is in the conversation. If it never gets there, the transcript says why: it records the
     // message as discarded, and a turn that failed as failed (`TurnFailure`).
-    await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: id } } }).catch(() => this.pending.delete(id));
+    await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: id }, [Workflow.target]:target } }).catch(e => {
+      if (this.pending.delete(id)) {
+        this.drop(agentId,id);
+        this.put(agentId,{ id:this.newId(),kind:"error",text:this.why(e) });
+        throw e;
+      }
+    });
   }
 
   /** Clear the agent's context: its model starts anew and sees nothing of what was said. The transcript keeps it. */
@@ -566,136 +571,36 @@ export class Workspace {
     this.put(asked.agentId, { ...asked.entry, outcome });
   }
 
-  // ---- editing agents and roles -----------------------------------------------
-
-  async putAgent({ instructions, ...spec }: AgentInput): Promise<AgentInfo> {
-    // An empty workspace means the default one; the hub keeps or chooses it.
-    const agent = { ...spec, workspace: spec.workspace || undefined };
-    return (await this.conn.request<{ agent: AgentInfo }>(Agents.put, { agent, instructions })).agent;
+  async newSession(backend?: string, title?: string): Promise<AgentInfo> {
+    const result = await this.conn.request("session/new",{title,_meta:{[Workflow.backend]:backend}});
+    return this.agents.get(result._meta[Agents.sessionKey])!;
   }
 
-  async removeAgent(id: string): Promise<void> {
-    await this.conn.request(Agents.remove, { id });
+  /** The user's tool servers changed: conversations take them by resuming their backend session in a new process. */
+  applyTools(): Promise<{ waiting: number }> {
+    return this.conn.request(ToolServers.apply, {});
   }
 
-  /**
-   * Do the same for several agents, one after the other. What is done stays done, and doing it again does the rest:
-   * so when one fails, the answer says which were done and why it stopped.
-   */
-  private async each<Item extends { id: string }>(agents: Item[], work: (agent: Item) => Promise<unknown>, completed: string[] = []): Promise<Progress> {
-    const done = completed.filter((id) => agents.some((agent) => agent.id === id));
-    for (const agent of agents) {
-      if (done.includes(agent.id)) continue;
-      try {
-        await work(agent);
-        done.push(agent.id);
-      } catch (e) {
-        return { done, failed: agent.id, error: this.why(e) };
-      }
-    }
-    return { done };
+  /** The icon the user chose for a conversation; "" is the default. */
+  async setAvatar(agentId: string, avatar: string): Promise<AgentInfo> {
+    const { agent } = await this.conn.request<{ agent: AgentInfo }>(Agents.set, { agentId, avatar });
+    this.onAgent(agent);
+    return agent;
   }
 
-  private agentsOf(role: string): AgentInfo[] {
-    return [...this.agents.values()].filter((agent) => agent.role === role);
+  async composerState(agentId: string, discover = false): Promise<ComposerState> {
+    const sessionId = await this.session(this.agents.get(agentId)!);
+    return this.conn.request(SessionControls.get, { sessionId, discover });
   }
 
-  /** Stop the backend processes of a role's agents, so that what was edited applies from their next turns on. */
-  applyRole(role: string, completed: string[] = []): Promise<Progress> {
-    return this.each(this.agentsOf(role), (agent) => this.conn.request(Agents.restart, { id: agent.id }), completed);
+  async setComposerOption(agentId: string, configId: string, value: string) {
+    const sessionId = await this.session(this.agents.get(agentId)!);
+    await this.conn.request("session/set_config_option", { sessionId, configId, type: "id", value });
+    return this.conn.request<ComposerState>(SessionControls.get, { sessionId });
   }
 
-  /** Give a role's agents the description and the backend the role now has. */
-  async syncRole(role: string): Promise<Progress> {
-    const { description, backend } = this.roles.get(role) ?? { description: "", backend: "" };
-    return this.each(this.agentsOf(role).filter((agent) => agent.description !== description || (backend && agent.backend !== backend)), async (agent) => {
-      const result = await this.conn.request<{ agent: AgentInfo }>(Agents.put, { agent: { id: agent.id, description, backend: backend || agent.backend } });
-      this.agents.set(result.agent.id, result.agent);
-    });
-  }
-
-  /** Use a team, and give each of its roles that has none an agent, named after the role and run by `backend`. */
-  async buildTeam(id: string, backend: string): Promise<Progress> {
-    await this.useTeam(id);
-    const { teams } = await this.conn.request<{ teams: TeamInfo[] }>(Teams.list);
-    const missing = (teams.find((team) => team.id === id)?.roles ?? []).map(({ name, role }) => ({ id: role.name, name, description: role.description, backend, role: role.name }));
-    const progress = await this.each(missing.filter((agent) => !this.agents.has(agent.id)), async (agent) => {
-      const result = await this.conn.request<{ agent: AgentInfo }>(Agents.put, { agent });
-      this.agents.set(result.agent.id, result.agent);
-    });
-    return progress;
-  }
-
-  async inspectAgent(id: string): Promise<AgentDetail> {
-    const { instructions, systemPrompt } = await this.conn.request(Agents.get, { id });
-    return { instructions, systemPrompt };
-  }
-
-  async putRole(view: RoleView): Promise<RoleView> {
-    const { role } = await this.conn.request<{ role: RoleDetail }>(Roles.put, { role: roleInput(view) });
-    return this.roleView(role);
-  }
-
-  /**
-   * Remove the workspace's own role. Like using or dropping a team, it can change several roles: what became of
-   * them arrives as events, ahead of the answer.
-   */
-  async removeRole(name: string): Promise<void> {
-    await this.conn.request(Roles.remove, { name });
-  }
-
-  // ---- preset teams -------------------------------------------------------------
-
-  /** The teams the hub ships. `missing` says whether a program a role works with cannot be found on this machine. */
-  async teams(missing: (command: string) => boolean): Promise<{ teams: Pack[]; problems: PresetProblem[] }> {
-    const { teams, problems } = await this.conn.request<{ teams: TeamInfo[]; problems: PresetProblem[] }>(Teams.list);
-    return {
-      teams: teams.map((team) => ({
-        ...team,
-        roles: team.roles.map(({ name, role, requires }) => ({ name, role: this.roleView(role), missing: requires.filter((program) => missing(program.command)) })),
-      })),
-      problems,
-    };
-  }
-
-  /** Start a team of the user's that builds on `base`, in their preset folder. */
-  async deriveTeam(id: string, base: string): Promise<string> {
-    const { team } = await this.conn.request<{ team: TeamInfo }>(Teams.derive, { id, base });
-    return team.dir;
-  }
-
-  /** A role as the window shows it; its own picture, if it has one, may be loaded from then on. */
-  private roleView(role: Omit<RoleDetail, "agents">): RoleView {
-    if (role.avatarFile) this.avatars.add(role.avatarFile);
-    return { ...roleView(role), ...(role.avatarFile ? { avatarUrl: `${ARTIFACT_SCHEME}://file/${encodeURIComponent(role.avatarFile)}` } : {}) };
-  }
-
-  /** Use a team's roles in this workspace, or stop. The roles that come and go arrive as events. */
-  async useTeam(id: string): Promise<void> {
-    await this.conn.request(Teams.use, { id });
-  }
-
-  previewTeamSync(id: string): Promise<TeamSyncPlan> {
-    return this.conn.request(Teams.syncPreview, { id });
-  }
-
-  syncTeam(id: string, revision: string): Promise<TeamSyncPlan> {
-    return this.conn.request(Teams.sync, { id, revision, confirm: true });
-  }
-
-  async dropTeam(id: string): Promise<void> {
-    await this.conn.request(Teams.drop, { id });
-  }
-
-  /** Where the files of one of a role's skills are: the role may be the workspace's own, or a preset team's. */
-  async skillDir(role: string, skill: string): Promise<string | undefined> {
-    return (await this.conn.request<{ role: RoleDetail }>(Roles.get, { name: role })).role.skills.find((s) => s.name === skill)?.dir;
-  }
-
-  /** Start one of the role's saved MCP servers and name its tools. */
-  async testMcp(role: string, server: string): Promise<{ tools?: string[]; error?: string }> {
-    const { servers } = await this.conn.request<{ servers: McpServerCheck[] }>(Roles.check, { name: role, server });
-    return { tools: servers[0].tools?.map((t) => t.name), error: servers[0].error };
+  workflowControl(id: string, pause: boolean, nodes?: string[]) {
+    return this.conn.request(pause ? Workflow.pause : Workflow.resume,{sessionId:id,nodes});
   }
 
   // ---- artifacts --------------------------------------------------------------
@@ -719,18 +624,24 @@ export class Workspace {
     if (!stat?.isFile()) return undefined;
     const updatedAt = stat.mtime.toISOString();
     const known = this.artifacts.get(file);
-    if (known?.updatedAt === updatedAt && (!asset || known.assetId === asset.id)) return known;
+    const owner = asset?.sessionId ?? this.sessionOwner(agentId);
+    const sessionIds = new Set(known?.sessionIds);
+    if (owner) sessionIds.add(owner);
+    if (known?.updatedAt === updatedAt && (!asset || known.assetId === asset.id) && sessionIds.size === known.sessionIds?.length) return known;
     const artifact: Artifact = {
       id: file,
-      name,
+      name: asset ? name : known?.name ?? name,
+      sessionIds: [...sessionIds],
+      fileUri: pathToFileURL(file).href,
       kind: KINDS[path.extname(file).toLowerCase()] ?? "text",
-      agentId,
+      agentId: asset ? agentId : known?.agentId ?? agentId,
       path: path.relative(this.paths.project, file),
       // The version in the URL makes the renderer read a changed file again.
       url: `${ARTIFACT_SCHEME}://file/${encodeURIComponent(file)}?v=${stat.mtimeMs}`,
       updatedAt,
-      assetType,
-      ...(asset ? { assetId: asset.id, assetVersion: asset.version, description: asset.description } : {}),
+      assetType: assetType ?? known?.assetType,
+      ...(known?.assetId ? { assetId: known.assetId, assetVersion: known.assetVersion, registeredName: known.registeredName, description: known.description } : {}),
+      ...(asset ? { assetId: asset.id, assetVersion: asset.version, registeredName: asset.name, description: asset.description } : {}),
     };
     this.artifacts.set(file, artifact);
     this.emit({ artifact });
@@ -739,6 +650,6 @@ export class Workspace {
 
   /** A version of an asset of the library: what agents hand to each other. */
   private asset(asset: Asset): void {
-    this.artifact(asset.path, asset.by, `${asset.id}${path.extname(asset.path)}`, asset.type, asset);
+    this.artifact(asset.path, asset.by, `${asset.name}${path.extname(asset.path)}`, asset.type, asset);
   }
 }

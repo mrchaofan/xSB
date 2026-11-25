@@ -20,15 +20,14 @@ import path from "node:path";
  * stopped while the hub still held it. The user's is then kept for the next
  * turn; mail waits for a turn of its own.
  */
-import { Boundaries, Discarded, OriginExt, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
+import { SessionControls, Boundaries, Discarded, OriginExt, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
 import type { Boundary, ContentBlock, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
 import { bridgeServer } from "./mcp.ts";
-import { sessionTokens } from "./config.ts";
-import { boundedText, contentTokens, contextOverflow, contextPolicy, contextRef, textTokens } from "./context.ts";
+import { boundedText, contentTokens, contextOverflow, contextRef, textTokens } from "./context.ts";
 import { historyUpdate } from "./history.ts";
 import { Paths } from "./paths.ts";
 import { asPreface, handoff } from "./prompts.ts";
@@ -40,6 +39,7 @@ import type { Deferred } from "./util.ts";
 import { deferred, newId, now } from "./util.ts";
 
 export type TurnRequest = {
+  interruptionId?: string;
   origin: OriginMeta;
   prompt: ContentBlock[];
   /** What the prompt gives in full (prompts.ts, `renderMail`). */
@@ -57,7 +57,11 @@ const HANDOFF_ASSETS = 30;
 const fromOf = (origin: OriginMeta): Origin => (origin.kind === "agent" ? { kind: "agent", agentId: origin.agentId, sessionId: origin.sessionId } : { kind: origin.kind });
 
 /** Updates of a backend the hub does not pass on: it reports input and the state of its turns itself. */
+const optionId = (option?: { configId?: string; id?: string }) => option?.configId ?? option?.id;
+
 const OWN = new Set(["user_message", "user_message_chunk", "state_update"]);
+/** How much of an input too large to give in full the model is shown before the path of the file it is saved in. */
+const PASTE_EXCERPT_BYTES = 4000;
 
 /** Whether input is the user's: theirs to stop. Everything else (a peer's, xsb's) is mail, which a stop does not drop. */
 const users = (input: Input): boolean => input.origin.kind === "user";
@@ -71,6 +75,8 @@ export type Input = Discarded &
     sent?: "prompt" | "steering";
     /** The inputs it was given with, in one prompt. */
     batch?: Input[];
+    /** What went in front of that prompt (instructions, a handoff, workflow context): owed again if it is refused. */
+    prefaces?: string[];
     /** It is in the conversation. */
     in?: boolean;
     /** The insertion receipt was already published before safe context recovery. */
@@ -97,6 +103,8 @@ export type TurnEnd = { stopReason: StopReason; failure?: unknown };
 export type Turn = {
   id: string;
   protected: boolean;
+  /** The workflow context put in front of this turn's first prompt; a later turn gets its own. */
+  workflowPreface?: string;
   /** Unread inputs are moved together when the turn ends. */
   recovered?: Input[];
   order?: Input[];
@@ -135,6 +143,8 @@ export class LiveSession {
   setup: { configOptions?: unknown; availableCommands?: unknown } = {};
   /** MCP servers the creating client asked for, passed on next to the hub's own. */
   clientMcp: McpServer[] = [];
+  /** The tools and prompt its backend session was last started with (Hub.toolsKeyFor): plugin changes compare to it. */
+  toolsKey?: string;
 
   private hub: Hub;
   /** Input that waits for a turn of its own. */
@@ -161,6 +171,7 @@ export class LiveSession {
   /** Context in use at the end of the backend's last report, in tokens. */
   private used?: number;
   private contextSize?: number;
+  private usageRevision = 0;
   private estimated = 0;
   private standingTokens = 0;
   /** The backend's work is idle, as it last said, and why it stopped. */
@@ -175,6 +186,7 @@ export class LiveSession {
   constructor(hub: Hub, rec: SessionRec) {
     this.hub = hub;
     this.rec = rec;
+    this.clientMcp = rec.clientMcp ?? [];
     this.used = rec.used;
     this.contextSize = rec.contextSize;
   }
@@ -245,20 +257,21 @@ export class LiveSession {
 
   private async bind(backend: Backend): Promise<void> {
     const agent = this.hub.agent(this.agentId);
-    const role = this.hub.role(agent);
+
     const instructions = this.hub.systemPromptFor(agent, this.clientMcp);
     this.standingTokens = backend.caps.systemPrompt ? textTokens(instructions) : 0;
-    if (textTokens(instructions) + contextPolicy(this.hub.paths).reserveTokens > contextPolicy(this.hub.paths).promptTokens) {
+    if (textTokens(instructions) + this.hub.policy(this.agentId).reserveTokens > this.hub.policy(this.agentId).promptTokens) {
       throw new RpcError(-32602, "The agent's standing instructions exceed the context budget. Shorten the role instructions or memory, or configure limits.promptTokens.", { errorKind: "input_too_large" });
     }
     const { paths } = this.hub;
+    this.toolsKey = this.hub.toolsKeyFor(this);
     const params = {
       cwd: agent.workspace,
       // The hub's own tools, then the others the agent has (Hub.toolServers): the system prompt says where each comes from.
       mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), ...this.hub.toolServers(agent, this.clientMcp).map((t) => this.hub.withToolContext(t.server, this))],
       ...(backend.caps.systemPrompt ? { systemPrompt: { mode: "append", content: [text(instructions)] } } : {}),
       ...(backend.caps.additionalDirectories
-        ? { additionalDirectories: [paths.shared, paths.assets, ...(role ? (role.layers ?? [role.dir]) : [])] }
+        ? { additionalDirectories: [paths.shared, paths.assets, ] }
         : {}),
     };
 
@@ -266,24 +279,25 @@ export class LiveSession {
     // A backend session of another backend is not that backend's to restore: the conversation is handed over instead.
     let renewal: Renewal | undefined = prior && this.rec.backend && this.rec.backend !== agent.backend ? "backend_changed" : undefined;
     // A conversation that grew too long goes on in a new backend session, handed what came before (`renew`).
-    if (!prior && this.rec.renew) renewal = this.rec.renew === "stopped" ? "stopped" : "renewed";
+    if (!prior && this.rec.renew) renewal = this.rec.renew === true ? "renewed" : this.rec.renew;
     if (prior && !renewal) {
       try {
         // Every ACP v2 agent resumes; the history is not replayed (the hub has it).
         backend.open(prior, this);
-        this.setup = await backend.conn.request("session/resume", { sessionId: prior, ...params });
-        for (const [configId, value] of Object.entries(this.rec.selectedConfig ?? {})) {
-          this.setup = { ...this.setup, ...await backend.conn.request("session/set_config_option", { sessionId: prior, configId, value }) };
+        try {
+          this.setup = await backend.conn.request("session/resume", { sessionId: prior, ...params });
+        } catch (e) {
+          backend.close(prior);
+          throw e;
         }
+        // Settings the backend no longer offers are dropped (`restoreConfig`); they do not undo the resume.
+        await this.restoreConfig(backend, prior);
         this.backend = backend;
         this.estimated = this.used ?? this.standingTokens;
+        this.notifyControls();
         // A resumed adapter without systemPrompt must also receive updated lifecycle/role instructions.
         if (!backend.caps.systemPrompt) this.prefaces.push(asPreface(instructions));
-        if (this.rec.contextHandoffPending) {
-          const file = path.join(this.hub.paths.dir, "agents", this.agentId, "context", `${this.rec.contextHandoffPending}.txt`);
-          this.handoffPreface = boundedText(this.hub.paths, this.agentId, fs.readFileSync(file, "utf8"), Math.min(6000, contextPolicy(this.hub.paths).promptTokens / 4));
-          this.prefaces.push(this.handoffPreface);
-        }
+        this.pendingHandoff();
         if (!this.rec.backend) this.save({ backend: agent.backend });
         return;
       } catch (e) {
@@ -294,35 +308,45 @@ export class LiveSession {
 
     const created = await backend.conn.request("session/new", params);
     this.setup = created;
-    if (renewal !== "backend_changed") {
-      for (const [configId, value] of Object.entries(this.rec.selectedConfig ?? {})) {
-        const response = await backend.conn.request("session/set_config_option", { sessionId: created.sessionId, configId, value });
-        this.setup = { ...this.setup, ...response };
-      }
-    }
+    if (renewal !== "backend_changed") await this.restoreConfig(backend, created.sessionId);
     // Without the system prompt capability the instructions ride on the first prompt.
     if (!backend.caps.systemPrompt) this.prefaces.push(asPreface(instructions));
-    const checkpoint = renewal ? this.handoff(renewal) : undefined;
+    // A backend session that was given nothing held nothing, and a conversation with nothing in it has nothing to
+    // tell: the new backend session then replaces the old one without a boundary or a handoff.
+    const fresh = !!prior && !!this.rec.backendFresh;
+    const checkpoint = renewal && !fresh ? this.handoff(renewal) : undefined;
     const checkpointRef = checkpoint === undefined ? undefined : contextRef(this.hub.paths, this.agentId, checkpoint).ref;
-    this.save({ backendSessionId: created.sessionId, backend: agent.backend, renew: undefined, used: undefined, contextSize: undefined,
+    this.save({ backendSessionId: created.sessionId, backendFresh: true, backend: agent.backend, renew: undefined, used: undefined, contextSize: undefined,
       contextEpoch: (this.rec.contextEpoch ?? 0) + 1,
       ...(checkpointRef ? { contextCheckpoint: checkpointRef, contextHandoffPending: checkpointRef } : {}),
       ...(renewal === "backend_changed" ? { contextRenewAt: undefined, contextRecovery: undefined, selectedConfig: undefined } : {}) });
     backend.open(created.sessionId, this);
     this.backend = backend;
     this.estimated = this.standingTokens;
-    if (renewal) {
+    if (renewal && checkpoint !== undefined) {
       this.forget();
       // The handoff is made before the boundary is written: what it tells is what precedes the boundary.
-      this.handoffPreface = boundedText(this.hub.paths, this.agentId, checkpoint!, Math.min(6000, contextPolicy(this.hub.paths).promptTokens / 4));
+      this.handoffPreface = boundedText(this.hub.paths, this.agentId, checkpoint!, Math.min(6000, this.hub.policy(this.agentId).promptTokens / 4));
       this.prefaces.push(this.handoffPreface);
       this.boundary({ kind: renewal, backend: agent.backend, handoff: true });
       this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : renewal === "renewed" ? "renewed, its conversation having grown long" : renewal === "stopped" ? "continued after stopping" : "backend session renewed"}, with a handoff of the conversation`);
+    } else {
+      if (renewal) this.hub.log(`${this.id}: backend session replaced; it held nothing to hand over`);
+      this.pendingHandoff();
     }
+    this.notifyControls();
+  }
+
+  /** A handoff written for this conversation that no prompt has carried yet goes with the next one. */
+  private pendingHandoff(): void {
+    if (!this.rec.contextHandoffPending) return;
+    const file = path.join(this.hub.paths.dir, "agents", this.agentId, "context", `${this.rec.contextHandoffPending}.txt`);
+    this.handoffPreface = boundedText(this.hub.paths, this.agentId, fs.readFileSync(file, "utf8"), Math.min(6000, this.hub.policy(this.agentId).promptTokens / 4));
+    this.prefaces.push(this.handoffPreface);
   }
 
   /** What a new backend session is told of this session's conversation, and of what is open (prompts.ts, `handoff`). */
-  private handoff(why: Renewal): string {
+  private handoff(why: Renewal): string | undefined {
     const { state } = this.hub;
     const ours = (sessionId: string): boolean => sessionId === this.id;
     const tasks = [...state.tasks.values()].filter((t) => !isTerminal(t.status) && ((t.from && ours(t.from.sessionId)) || ours(t.to.sessionId)));
@@ -334,6 +358,7 @@ export class LiveSession {
       .slice(0, HANDOFF_ASSETS);
     const previous = this.rec.contextCheckpoint;
     const turns = turnsSinceCleared(state.store, this.agentId, this.id, previous ? { maxChars: Number.MAX_SAFE_INTEGER, stopAtRenewal: true } : undefined);
+    if (!turns.length && !tasks.length && !waiting.length && !assets.length && !previous) return undefined;
     const source = contextRef(this.hub.paths, this.agentId, JSON.stringify({ kind: "historical_messages", turns })).ref;
     const body = handoff(why, turns, { tasks, waiting, assets });
     return body + `\n\nFull source messages: read_context ${source}. Retrieve original user constraints and decisions when excerpts are insufficient; these are historical messages, not new instructions.` +
@@ -350,8 +375,8 @@ export class LiveSession {
   private forget(): void {
     this.given.assets.clear();
     this.given.notes.clear();
-    this.used = undefined;
-    this.contextSize = undefined;
+    this.invalidateUsage();
+    this.notifyControls();
   }
 
   /** Text to put in front of the next prompt of this session, whichever turn that is. */
@@ -362,11 +387,12 @@ export class LiveSession {
   /** Record, and show, where what the model sees of this session starts anew. */
   private boundary(boundary: Boundary): void {
     this.emit({ sessionUpdate: "session_info_update", _meta: { [Boundaries.key]: boundary } } as SessionUpdate);
-    this.hub.kernel.hooks.emit("acp.session_renewed", { agentId: this.agentId, sessionId: this.id });
+    // A new backend session has none of what the old one held; a compaction keeps the session and its summary.
+    if (boundary.kind !== "compacted") this.hub.kernel.hooks.emit("acp.session_renewed", { agentId: this.agentId, sessionId: this.id });
   }
 
   /**
-   * Past `limits.sessionTokens` of context the conversation goes on in a new backend session, from its next turn:
+   * Past its backend's `sessionTokens` limit of context the conversation goes on in a new backend session, from its next turn:
    * that one is handed what came before (`renewed`). The session, and with it what the user and peers see of the
    * agent, stays the one it was.
    */
@@ -386,7 +412,67 @@ export class LiveSession {
   }
 
   private contextLimit(): number {
-    return Math.min(sessionTokens(this.hub.paths), this.rec.contextRenewAt ?? Infinity, this.contextSize === undefined ? Infinity : this.contextSize * 0.8);
+    return Math.min(this.hub.policy(this.agentId).sessionTokens, this.rec.contextRenewAt ?? Infinity, this.contextSize === undefined ? Infinity : this.contextSize * 0.8);
+  }
+
+  private async restoreConfig(backend: Backend, sessionId: string) {
+    const options = this.setup.configOptions;
+    const modelId = Array.isArray(options) ? optionId(options.find(o => o.category === "model" || optionId(o) === "model")) ?? "model" : "model";
+    // Model selection can change the reasoning levels offered by the adapter.
+    const entries = Object.entries(this.rec.selectedConfig ?? {}).sort(([a], [b]) => Number(b === modelId) - Number(a === modelId));
+    const dropped: string[] = [];
+    for (const [configId, value] of entries) {
+      try {
+        const response = await backend.conn.request("session/set_config_option", { sessionId, configId, type: "id", value });
+        this.setup = { ...this.setup, ...response };
+      } catch (e) {
+        // A choice the backend no longer offers (a model gone after an update) falls back to its default.
+        this.hub.log(`${this.id}: setting ${configId}=${value} not restored (${errorMessage(e)})`);
+        dropped.push(configId);
+      }
+    }
+    if (dropped.length) {
+      const selectedConfig = { ...this.rec.selectedConfig };
+      for (const id of dropped) delete selectedConfig[id];
+      this.save({ selectedConfig });
+    }
+  }
+
+  async setConfig(params: { configId: string; type?: string; value: unknown }) {
+    const { configId, value } = params;
+    const backend = await this.ensureBackend();
+    const binding = this.rec.backendSessionId;
+    const revision = this.usageRevision;
+    const previous = Array.isArray(this.setup.configOptions) ? this.setup.configOptions.find(o => optionId(o) === configId)?.currentValue : undefined;
+    const result = await backend.conn.request("session/set_config_option", { type: typeof value === "string" ? "id" : undefined, ...params, sessionId: binding });
+    if (!binding || this.backend !== backend || this.rec.backendSessionId !== binding) throw RpcError.invalidParams("Session changed while applying setting");
+    this.setup = { ...this.setup, ...result };
+    if (typeof configId === "string" && typeof value === "string") {
+      const selectedConfig = { ...this.rec.selectedConfig, [configId]: value };
+      const options = this.setup.configOptions;
+      if (Array.isArray(options)) for (const id of Object.keys(selectedConfig)) {
+        const option = options.find(o => optionId(o) === id);
+        if (typeof option?.currentValue === "string") selectedConfig[id] = option.currentValue;
+        else if (!option) delete selectedConfig[id];
+      }
+      const model = configId === "model" || (Array.isArray(options) && options.some(o => optionId(o) === configId && o.category === "model"));
+      const changedModel = model && previous !== value;
+      if (changedModel && this.usageRevision === revision) this.invalidateUsage();
+      this.save({ selectedConfig, ...(changedModel ? { contextRenewAt: undefined, contextSize: this.contextSize, used: this.used } : {}) });
+    }
+    this.notifyControls();
+    return result;
+  }
+
+  composerState() {
+    return { connected: !!this.backend, configOptions: this.backend ? this.setup.configOptions ?? [] : [],
+      selected: this.rec.selectedConfig ?? {}, used: this.used, size: this.contextSize };
+  }
+
+  notifyControls(): void {
+    for (const client of this.clients) if (client.controls) client.conn.notify(SessionControls.update, {
+      agentId: this.agentId, controls: this.composerState(),
+    });
   }
 
   invalidateUsage(): void {
@@ -394,8 +480,22 @@ export class LiveSession {
     this.contextSize = undefined;
   }
 
+  recordWorkflow(turnId: string, data: Record<string,unknown>): void {
+    this.emit({sessionUpdate:"session_info_update",_meta:{"dev.xsb/workflow-log":{turnId,...data}}} as SessionUpdate);
+  }
+
   toolOutput(value: string): void {
     this.estimated += textTokens(value);
+  }
+
+  /**
+   * After a restart: the turn in which this conversation had taken in `count` inputs was cut short when xsb stopped.
+   * They are not given again (Kernel.resume); the transcript says so, where the user sees it.
+   */
+  interrupted(count: number): void {
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [TurnFailure.key]: {
+      message: `xsb stopped while this conversation was working on ${count === 1 ? "an input" : `${count} inputs`} it had already read. They were not given again, so how far the work got is unknown; check its results before going on.`,
+      data: { errorKind: "execution_uncertain" } } } } as SessionUpdate);
   }
 
   observeExecution(): void {
@@ -412,8 +512,8 @@ export class LiveSession {
   clear(): void {
     if (this.busy) throw failure("session_busy", { agent: this.agentId });
     this.prefaces = [];
-    this.forget();
     this.backend = undefined;
+    this.forget();
     this.estimated = 0;
     this.save({ backendSessionId: undefined, renew: undefined, used: undefined, contextSize: undefined, contextRecovery: undefined, contextCheckpoint: undefined, contextHandoffPending: undefined });
     this.boundary({ kind: "cleared", handoff: false });
@@ -435,6 +535,7 @@ export class LiveSession {
   onBackendGone(backend: Backend, reason: string): void {
     if (this.backend !== backend) return;
     this.backend = undefined;
+    this.notifyControls();
     if (this.current?.started) this.end({ stopReason: "error", failure: new Error(`the agent program ${reason}`) });
   }
 
@@ -491,7 +592,21 @@ export class LiveSession {
       case "session_info_update":
         if (typeof update.title === "string" && update.title !== this.rec.title) this.save({ title: update.title });
         break;
+      case "config_option_update":
+        if (Array.isArray(update.configOptions)) {
+          this.setup.configOptions = update.configOptions;
+          this.notifyControls();
+        }
+        break;
+      case "compaction_update":
+        // The backend compacted the conversation itself: from here the model has its summary of what came before.
+        if (update.status === "completed") {
+          this.forget();
+          this.boundary({ kind: "compacted", backend: this.hub.agent(this.agentId).backend, handoff: false });
+        }
+        break;
       case "usage_update":
+        this.usageRevision++;
         if (typeof update.used === "number" && Number.isFinite(update.used) && update.used >= 0) {
           // Native compaction may have removed formerly-inlined assets/notes.
           if (this.used !== undefined && update.used < this.used) { this.given.assets.clear(); this.given.notes.clear(); }
@@ -499,6 +614,7 @@ export class LiveSession {
           this.estimated = update.used;
         }
         if (typeof update.size === "number" && Number.isFinite(update.size) && update.size > 0) this.contextSize = update.size;
+        this.notifyControls();
         break;
     }
     this.hub.kernel.hooks.emit("acp.session_update", { agentId: this.agentId, sessionId: this.id, update });
@@ -553,6 +669,7 @@ export class LiveSession {
     this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: input.messageId, about, inserted });
     if (inserted) {
       input.receipted = true;
+      this.hub.workflows?.inserted(this,input.messageId);
       this.show(input);
       input.inserted.resolve();
     } else input.inserted.reject(why);
@@ -588,9 +705,21 @@ export class LiveSession {
    * model goes first, as a turn of its own, once something else is to run (docs/DESIGN.md 3.1, 8).
    */
   pump(): void {
-    if (this.userStopping || this.current || !this.queue.length) return;
-    while (this.queue[0]?.item && this.hub.kernel.settleTerminalInput(this.queue[0].item)) {
-      this.discard(this.queue.shift()!, RpcError.cancelled());
+    // While the hub stops, nothing starts: what waits is in the inbox, and runs on the next start.
+    if (this.userStopping || this.current || this.hub.stopping) return;
+    if (this.hub.workflows?.available(this) === false) {
+      for (const input of [...this.queue.splice(0), ...this.carried.splice(0)]) this.discard(input);
+      return;
+    }
+    // Recheck queued workflow effects after the preceding turn has released this session.
+    while (this.queue.length) {
+      const input = this.queue[0];
+      const staleAttempt = input.origin.kind === "system" && input.messageId.startsWith("attempt_") &&
+        this.hub.workflows?.acceptsAttempt(this,input.messageId) === false;
+      const staleNotice = input.item?.workflowNotice && !this.hub.workflows.acceptsNotice(this,input.messageId);
+      if (!staleAttempt && !staleNotice && !(input.item && this.hub.kernel.settleTerminalInput(input.item))) break;
+      if (staleNotice) this.hub.kernel.ack([input.messageId]);
+      this.discard(this.queue.shift()!);
     }
     if (!this.queue.length) return;
     if (this.priorityTaskId) {
@@ -628,7 +757,41 @@ export class LiveSession {
         "This interrupted input had already produced output or invoked tools. Verify its results before continuing; xSB did not replay it.", { errorKind: "execution_uncertain" }) });
     }
     try {
-      await this.ensureBackend();
+      const backend = await this.ensureBackend();
+      if (this.current !== turn || turn.cancelledBy) {
+        if (this.current === turn) this.end({stopReason:"cancelled"});
+        return;
+      }
+      const assignment = this.hub.workflows?.model(this);
+      if (assignment) {
+        const options = this.setup.configOptions;
+        const option = Array.isArray(options) && options.find(o => o.category === "model" || optionId(o) === "model");
+        const configId = this.rec.workflowModel?.configId ?? optionId(option || undefined) ?? "model";
+        const saved = this.rec.selectedConfig?.[configId];
+        const baseline = this.rec.workflowModel ? this.rec.workflowModel.baseline : (saved ?? option?.currentValue);
+        const model = assignment.requested ?? assignment.inherited?.[configId] ?? baseline;
+        if (model && model !== (saved ?? option?.currentValue)) {
+          const response = await backend.conn.request("session/set_config_option",{sessionId:this.rec.backendSessionId,configId,type:"id",value:model});
+          if (this.current !== turn || turn.cancelledBy) {
+            if (this.current === turn) this.end({stopReason:"cancelled"});
+            return;
+          }
+          this.setup = {...this.setup,...response};
+          this.save({selectedConfig:{...this.rec.selectedConfig,[configId]:model}, workflowModel:{configId,baseline}});
+          this.notifyControls();
+        } else if (!model && this.rec.workflowModel) {
+          // An adapter may omit its default. Restore it with a new backend context
+          // and the standard handoff when a revised definition drops its model.
+          const selectedConfig = {...this.rec.selectedConfig};
+          delete selectedConfig[configId];
+          backend.close?.(this.rec.backendSessionId!);
+          this.hub.backends.stop(this.agentId);
+          this.hub.rotateBridge(this);
+          this.backend = undefined;
+          this.save({backendSessionId:undefined,renew:true,workflowModel:undefined,selectedConfig});
+          await this.ensureBackend();
+        }
+      }
     } catch (e) {
       if (this.current === turn) this.end({ stopReason: "error", failure: e });
       return;
@@ -636,14 +799,29 @@ export class LiveSession {
     // Stopped meanwhile: it ended already, or ends now.
     if (this.current !== turn) return;
     if (turn.cancelledBy) return this.end({ stopReason: "cancelled" });
+    if (first.item?.workflowNotice && !this.hub.workflows.acceptsNotice(this, first.messageId)) {
+      turn.cancelledBy = "hub";
+      return this.end({ stopReason: "cancelled" });
+    }
+    this.workflowContext(turn);
     turn.started = true;
     this.ranSince = false;
     // What waited in the inbox comes with this turn, in its first prompt.
-    const digest = this.hub.delivery.digest(this, Math.max(0, contextPolicy(this.hub.paths).promptTokens - this.standingTokens - contextPolicy(this.hub.paths).reserveTokens - contentTokens(first.content) - contentTokens(turn.held.flatMap(i => i.content)) - contentTokens(this.prefaces.map(text)))).map((d) => inputOf(d));
+    const digest = this.hub.delivery.digest(this, Math.max(0, this.hub.policy(this.agentId).promptTokens - this.standingTokens - this.hub.policy(this.agentId).reserveTokens - contentTokens(first.content) - contentTokens(turn.held.flatMap(i => i.content)) - contentTokens(this.prefaces.map(text)))).map((d) => inputOf(d));
     turn.inputs.splice(1, 0, ...digest);
     turn.order!.splice(1, 0, ...digest);
     turn.items.push(...itemsOf(digest));
     this.send([first, ...digest, ...turn.held.splice(0)]);
+  }
+
+  private workflowContext(turn:Turn): void {
+    const workflowContext = this.hub.workflows?.context(this,turn);
+    if (workflowContext) {
+      // Of this turn only: a later turn is given its own, up to date (`refused` does not put it back).
+      turn.workflowPreface = workflowContext;
+      this.preface(workflowContext);
+      void turn.first.inserted.promise.then(() => this.recordWorkflow(turn.id,{ context:workflowContext }),() => {});
+    }
   }
 
   /**
@@ -657,7 +835,7 @@ export class LiveSession {
     const backend = this.backend;
     if (!backend) return this.end({ stopReason: "error", failure: new Error("the agent program is gone") });
     const sessionId = this.rec.backendSessionId!;
-    const policy = contextPolicy(this.hub.paths);
+    const policy = this.hub.policy(this.agentId);
     if (this.handoffPreface && this.prefaces.includes(this.handoffPreface)) {
       const left = policy.promptTokens - policy.reserveTokens - this.standingTokens - contentTokens(batch.flatMap((i) => i.content)) -
         contentTokens(this.prefaces.filter((p) => p !== this.handoffPreface).map(text));
@@ -670,7 +848,12 @@ export class LiveSession {
         this.handoffPreface = shorter;
       }
     }
-    const content = [...this.prefaces.map((p) => text(p)), ...batch.flatMap((i) => i.content)];
+    const content = [...this.prefaces.map((p) => text(p)), ...batch.flatMap(i => {
+      const scope = i !== turn.first && users(i) ? this.hub.workflows?.interruptionContext(this,i.messageId) : undefined;
+      if (scope) void i.inserted.promise.then(()=>this.recordWorkflow(turn.id,{messageId:i.messageId,scope}),()=>{});
+      const given = users(i) ? this.spill(i.content, policy) : i.content;
+      return scope ? [text(scope),...given] : given;
+    })];
     const tokens = contentTokens(content);
     if (tokens + this.standingTokens + policy.reserveTokens > policy.promptTokens) {
       const error = new RpcError(-32602, "This input exceeds the agent's prompt budget. The original is preserved in the conversation; split the input or use files/assets with references.", { errorKind: "input_too_large" });
@@ -685,8 +868,12 @@ export class LiveSession {
     if (!turn.inserted && !turn.recovering && !this.prefaces.length && (this.used ?? 0) > 0 && this.estimated + tokens + policy.reserveTokens > this.contextLimit()) {
       return void this.recover(turn, new Error("Context window exceeded before submission"), false);
     }
+    // They go with this batch; they are spent once it is in (`landed`), and come back if it is not (`refused`).
+    const carried = this.prefaces;
     this.prefaces = [];
+    for (const input of batch) input.prefaces = carried;
     this.estimated += tokens;
+    if (this.rec.backendFresh) this.save({ backendFresh: undefined });
     const prompt = (): Promise<boolean> => {
       if (this.current !== turn || turn.cancelledBy) return Promise.reject(RpcError.cancelled());
       for (const input of batch) input.sent = "prompt";
@@ -737,11 +924,14 @@ export class LiveSession {
     const turn = this.current;
     if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) return;
     if (e instanceof RpcError && e.code === RpcError.CANCELLED) {
+      this.restorePrefaces(batch, turn);
       for (const input of batch) this.leave(input);
       return this.settle();
     }
     if (contextOverflow(e) && this.canRecover(turn)) return void this.recover(turn, e);
     const failure = this.explain(e, backend);
+    // What came in front of it (instructions, a handoff) was not given: it goes in front of the next prompt.
+    this.restorePrefaces(batch, turn);
     if (!turn.inserted) {
       // The turn could not begin: what it was to begin with fails with it, its tasks too (kept in `items`).
       for (const input of batch) {
@@ -756,6 +946,36 @@ export class LiveSession {
       this.discard(input, failure);
     }
     this.hub.kernel.ack(itemsOf(batch).map((m) => m.id));
+  }
+
+  /**
+   * The user's input as the model is given it: a text block too large for the prompt budget (a huge paste) is saved,
+   * whole, to a file in the agent's context folder, and the model gets its beginning and the file's path to read the
+   * rest from. The transcript keeps what the user sent; nothing of it is lost or rejected for its size.
+   */
+  private spill(content: ContentBlock[], policy: ReturnType<Hub["policy"]>): ContentBlock[] {
+    // Room for this input: half of what the prompt budget leaves. Its largest text blocks are saved first, until
+    // what remains fits; one block over the room on its own is always saved.
+    const room = Math.max(2048, Math.floor((policy.promptTokens - policy.reserveTokens - this.standingTokens) / 2));
+    const out = [...content];
+    const largest = out.map((block, i) => ({ i, tokens: block.type === "text" ? textTokens(block.text ?? "") : 0 }))
+      .filter((x) => x.tokens > PASTE_EXCERPT_BYTES / 2).sort((a, b) => b.tokens - a.tokens);
+    for (const { i } of largest) {
+      if (contentTokens(out) <= room) break;
+      const whole = out[i].text ?? "";
+      const { file } = contextRef(this.hub.paths, this.agentId, whole);
+      const head = Buffer.from(whole, "utf8").subarray(0, PASTE_EXCERPT_BYTES).toString("utf8").replace(/\uFFFD$/, "");
+      out[i] = text(`[xsb] The user's input was too large to give in full (${whole.length.toLocaleString("en")} characters). ` +
+        `It is saved whole at ${file}; read that file for all of it. It begins:\n\n${head}\n\n[… continues in ${file}]`);
+    }
+    return out;
+  }
+
+  /** A batch was not taken in: the prefaces it carried are owed still, except this turn's workflow context. */
+  private restorePrefaces(batch: Input[], turn: Turn): void {
+    const owed = (batch[0]?.prefaces ?? []).filter((p) => p !== turn.workflowPreface && !this.prefaces.includes(p));
+    this.prefaces = [...owed, ...this.prefaces];
+    for (const input of batch) input.prefaces = undefined;
   }
 
   /** The backend's work is idle. It ends the turn, unless none of the turn is in the conversation yet. */
@@ -831,6 +1051,15 @@ export class LiveSession {
     const out = turn.inputs.filter((i) => !i.in);
     const order = turn.order ?? [...turn.inputs];
     const expiredAppend = out.some((i) => i.item?.targetTurnId);
+    // Only an append the backend was given can still surface in a later turn; one the hub held never reached it.
+    const expiredAppendSent = out.some((i) => i.item?.targetTurnId && i.sent);
+    // Failed with input given and not answered: the backend may still have it, and run it. It is given again (`again`),
+    // so the old backend is fenced first, as after a stop: one copy only ever reaches the model. (Read before `leave`
+    // forgets what was sent.)
+    const unanswered = !!end.failure && turn.started && out.some((i) => i.sent);
+    // A prompt the turn ends without having in the conversation took prefaces along: they are owed still.
+    const unsent = out.find((i) => i.sent && i.prefaces);
+    if (unsent) this.restorePrefaces(unsent.batch ?? [unsent], turn);
     let next: Input[] = [];
     if (!turn.started && end.failure) {
       // It never reached the backend: nothing else will run what it brought (its tasks fail with it).
@@ -848,15 +1077,20 @@ export class LiveSession {
     }
     this.current = undefined;
     this.turnChanged();
-    if (turn.cancelledBy && this.backend && !this.backend.caps.orderedCancellation) {
-      // Untagged old MCP requests cannot be distinguished after a new turn begins on the same bridge.
+    if (unanswered && this.backend) this.backend.cancel(this.rec.backendSessionId!);
+    // Turn isolation holds once cancelled work reports idle; a failure's unanswered input is not awaited, so it is
+    // fenced whatever the backend promises.
+    if ((unanswered || turn.cancelledBy && !this.backend?.caps.orderedCancellation) && this.backend) {
+      // Untagged old MCP requests of stopped work cannot be distinguished after a new turn begins on the same bridge.
       // Fence the old transport/token; resume the saved session in a new process to retain backend history.
+      // A turn that ended normally has no such requests: its backend reported the end after every tool call returned,
+      // so the process, and its prompt cache, stay.
       this.backend.close?.(this.rec.backendSessionId!);
       this.hub.rotateBridge(this);
       this.hub.backends.stop(this.agentId);
       this.backend = undefined;
     }
-    if (expiredAppend && !turn.cancelledBy && this.backend) {
+    if (expiredAppendSent && !turn.cancelledBy && this.backend) {
       // Normal cancellation has already confirmed idle and settled prompt receipts:
       // keep that conversation and its tools, including image context. An unread
       // targeted append on normal completion still needs isolation before new work.
@@ -864,7 +1098,7 @@ export class LiveSession {
       this.backend.close?.(this.rec.backendSessionId!);
       this.hub.rotateBridge(this);
       this.backend = undefined;
-      this.save({ backendSessionId: undefined, renew: "stopped" });
+      this.save({ backendSessionId: undefined, renew: "isolated" });
     }
     if (this.used !== undefined && (this.used !== this.rec.used || this.contextSize !== this.rec.contextSize)) this.save({ used: this.used, contextSize: this.contextSize });
     // While the hub stops, nothing is acknowledged: the turn runs again on the next start.
@@ -873,6 +1107,7 @@ export class LiveSession {
       // Its failure goes into the transcript, where the user sees it: the prompt that started it may have been answered long ago.
       if (end.failure) this.emit({ sessionUpdate: "session_info_update", _meta: { [TurnFailure.key]: { message: errorMessage(end.failure), data: (end.failure as RpcError).data } } } as SessionUpdate);
       this.hub.kernel.hooks.emit("acp.turn_ended", { agentId: this.agentId, sessionId: this.id, turnId: turn.id, stopReason: end.stopReason, failed: !!end.failure });
+      this.hub.workflows?.ended(this,turn,end);
       this.hub.delivery.turnEnded(this, turn, end);
       this.hub.agentChanged(this.agentId);
     }
@@ -880,7 +1115,7 @@ export class LiveSession {
     turn.done.resolve(end);
     this.releaseUserStop(false);
     if (!end.failure) this.save({ contextRecovery: undefined });
-    if (next.length) return this.resume(next);
+    if (next.length && !this.hub.stopping) return this.resume(next,turn);
     this.renewIfLong(end.failure);
     this.pump();
   }
@@ -889,7 +1124,7 @@ export class LiveSession {
   private canRecover(turn: Turn): boolean {
     return !turn.cancelledBy && !turn.recovering && !turn.executed && !this.hub.stopping && !this.userStopping &&
       !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id }) &&
-      !turn.inputs.some((i) => i.item?.targetTurnId) && (turn.recoveryAttempts ?? 0) < contextPolicy(this.hub.paths).recoveryAttempts;
+      !turn.inputs.some((i) => i.item?.targetTurnId) && (turn.recoveryAttempts ?? 0) < this.hub.policy(this.agentId).recoveryAttempts;
   }
 
   private async recover(turn: Turn, error: unknown, failed = true): Promise<void> {
@@ -940,6 +1175,7 @@ export class LiveSession {
       this.ranSince = false;
       this.backendIdle = true;
       turn.held = [];
+      this.workflowContext(turn);
       this.send([...turn.inputs]);
     } catch (failure) {
       if (this.current !== turn) return;
@@ -955,12 +1191,13 @@ export class LiveSession {
    * in the backend for the work under way), or it dropped it (input given with `_session/steering`), and it is given
    * again, as a prompt.
    */
-  private resume(inputs: Input[]): void {
+  private resume(inputs: Input[], previous: Turn): void {
     const turn: Turn = { id: newId("turn"), protected: inputs.some(users), first: inputs[0], inputs, order: [...inputs], held: [], inserted: false, items: itemsOf(inputs), started: true, done: deferred() };
     turn.taskIds = this.hub.kernel.openTasks(this.id).filter((t) => !t.stopping).map((t) => t.id);
     this.current = turn;
     this.turnChanged();
     this.ranSince = false;
+    this.hub.workflows?.inheritSeen(previous,turn);
     this.users(inputs[0]);
     this.hub.agentChanged(this.agentId);
     this.state("running");
@@ -991,6 +1228,8 @@ export class LiveSession {
     const userDuringRecovery = req.origin.kind === "user" && turn?.recovering && !turn.cancelledBy && !this.userStopping &&
       !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id });
     if (!turn || (!this.acceptsTools && !userDuringRecovery) || (targetTurnId && targetTurnId !== turn.id)) return undefined;
+    // An agent's word goes into an agent's turn only; once the user's (protected), it waits its turn (`enqueue`).
+    if (req.origin.kind === "agent" && !targetTurnId && turn.protected) return undefined;
     if (req.origin.kind === "user") turn.protected = true;
     const input = inputOf({ ...req, origin: { ...req.origin, steered: true } });
     turn.order ??= [...turn.inputs];

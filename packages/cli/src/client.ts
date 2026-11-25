@@ -1,7 +1,7 @@
 /** The CLI's ACP v2 connection to the hub. The CLI is an ACP client like any other. */
 import { hubSocket } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
-import { Agents, Connection, LanguageExt, PROTOCOL_VERSION, RpcError } from "@xsb/protocol";
+import { Agents, Workflow, Connection, LanguageExt, PROTOCOL_VERSION, RpcError } from "@xsb/protocol";
 import type { ContentBlock, SessionUpdate, StopReason } from "@xsb/protocol";
 import pkg from "../package.json" with { type: "json" };
 import { language } from "./text.ts";
@@ -12,7 +12,7 @@ import { language } from "./text.ts";
  */
 export type HubConnection = Connection & {
   onUpdate(listener: (sessionId: string, update: SessionUpdate) => void): void;
-  turn(sessionId: string, prompt: ContentBlock[]): Promise<StopReason>;
+  turn(sessionId: string, prompt: ContentBlock[], target?: string): Promise<StopReason>;
 };
 
 export async function connectHub(paths: Paths, observer: boolean): Promise<HubConnection> {
@@ -27,11 +27,11 @@ export async function connectHub(paths: Paths, observer: boolean): Promise<HubCo
     }
   });
   conn.onUpdate = (listener) => void listeners.push(listener);
-  conn.turn = async (sessionId, prompt) => {
+  conn.turn = async (sessionId, prompt, target) => {
     // Waited for from before it is sent: the answer and the end may arrive together. The user's word goes into the
     // work under way, so the first idle after it is sent is the end of the work it went into.
     const ended = new Promise<{ stopReason: StopReason; error?: any }>((resolve) => idle.set(sessionId, [...(idle.get(sessionId) ?? []), resolve]));
-    await conn.request("session/prompt", { sessionId, prompt });
+    await conn.request("session/prompt", { sessionId, prompt, _meta:{[Workflow.target]:target} });
     const end = await ended;
     if (end.error) throw new RpcError(end.error.code, end.error.message, end.error.data);
     return end.stopReason;

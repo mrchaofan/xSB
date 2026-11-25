@@ -4,7 +4,7 @@ import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { errorMessage } from "@xsb/protocol";
 import type { ContentBlock } from "@xsb/protocol";
-import { loadProjectConfig } from "./config.ts";
+import { backendLimits } from "./config.ts";
 import type { Paths } from "./paths.ts";
 
 export function contextOverflow(error: unknown): boolean {
@@ -19,14 +19,15 @@ export function contentTokens(content: ContentBlock[]): number {
   return content.reduce((sum, block) => sum + (block.type === "image" ? 8192 : block.type === "text" ? textTokens(block.text ?? "") : textTokens(JSON.stringify(block))), 0);
 }
 
-const positive = (value: unknown, fallback: number): number => typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
-export function contextPolicy(paths: Paths) {
-  const limits = loadProjectConfig(paths).limits;
+/** The context limits of a backend (config.ts, `BACKEND_LIMITS`). */
+export function contextPolicy(backend: string) {
+  const limits = backendLimits(backend);
   return {
-    promptTokens: positive(limits?.promptTokens, 32_000),
-    outputTokens: positive(limits?.toolOutputTokens, 4000),
-    reserveTokens: positive(limits?.contextReserveTokens, 8192),
-    recoveryAttempts: typeof limits?.contextRecoveryAttempts === "number" && Number.isSafeInteger(limits.contextRecoveryAttempts) && limits.contextRecoveryAttempts >= 0 ? Math.min(limits.contextRecoveryAttempts, 3) : 1,
+    promptTokens: limits.promptTokens,
+    outputTokens: limits.toolOutputTokens,
+    reserveTokens: limits.contextReserveTokens,
+    recoveryAttempts: limits.contextRecoveryAttempts,
+    sessionTokens: limits.sessionTokens,
   };
 }
 

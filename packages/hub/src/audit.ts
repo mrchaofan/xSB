@@ -1,5 +1,5 @@
 /**
- * AuditHook: every event of the kernel, every veto and every dead letter, appended to `.xsb/audit.jsonl`. It is a
+ * AuditHook: every event of the kernel, every veto and every dead letter, appended to `.xsb2/audit.jsonl`. It is a
  * record for people, not state: nothing reads it back.
  */
 import type { Store } from "@xsb/store";

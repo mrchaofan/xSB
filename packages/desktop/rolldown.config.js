@@ -5,13 +5,13 @@
 //   dist/bin/xsb-hub          the hub daemon, started by main as a process of its own
 //   dist/bin/xsb-mcp-bridge   the MCP bridge, started by the hub for each backend session
 //   dist/bin/claude-agent-acp, codex-acp   the ACP wrappers of the agents that do not speak ACP themselves
-//   dist/bin/xsb-media-mcp    the image and video generation MCP server, for roles to use
-//   dist/bin/xsb-browser-mcp  the way for a role's agents to the browser in the side panel (src/browser.ts)
-//   dist/presets/             the preset teams of @xsb/hub, copied as they are: the hub finds them next to its code
+//   dist/plugins/<name>/      the plugins shipped with the app (plugins/<name>/plugin.json and its server.mjs):
+//                             the same layout as a plugin the user adds (the hub's plugins.ts)
 //   dist/renderer/            the pages, served as app://xsb/…
 //
 // The layout repeats the sources': code in one directory finds the pages in
-// ../renderer and the hub's two programs in ../bin (see daemon.ts and mcp.ts in @xsb/hub).
+// ../renderer, the hub's two programs in ../bin (see daemon.ts and mcp.ts in @xsb/hub) and the shipped plugins in
+// ../plugins: the same in development (packages/desktop/dist) and in the packed app (asar is off).
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -30,10 +30,19 @@ const program = (name, entry) => ({
   output: { file: `dist/bin/${name}`, format: "esm", codeSplitting: false },
 });
 
+/** A shipped plugin: its folder's plugin.json, and its server bundled next to it as server.mjs. */
+const plugin = (name, entry) => ({
+  ...node,
+  input: entry,
+  output: { file: `dist/plugins/${name}/server.mjs`, format: "esm", codeSplitting: false },
+  plugins: [{ name: "manifest", writeBundle: () => fs.copyFileSync(`plugins/${name}/plugin.json`, `dist/plugins/${name}/plugin.json`) }],
+});
+
 /** The pages' files that are not code: copied as they are. mock.js is only loaded outside Electron. */
 const pages = {
   name: "pages",
   writeBundle() {
+    fs.rmSync("dist/presets", { recursive:true,force:true });
     const current = new Set(fs.readdirSync("renderer/avatars"));
     for (const name of fs.readdirSync("dist/renderer/avatars")) {
       if (name.endsWith(".png") && !current.has(name)) fs.unlinkSync(`dist/renderer/avatars/${name}`);
@@ -47,35 +56,15 @@ const pages = {
   },
 };
 
-/**
- * The preset teams are files the hub reads at run time (presets.ts in @xsb/hub), found by one rule: the directory
- * `presets` next to the one the code is in (`shipped` in paths.ts). Checked here, so that a change of this layout
- * does not leave the app without its teams unnoticed.
- */
-const presets = {
-  name: "presets",
-  writeBundle() {
-    fs.rmSync("dist/presets", { recursive: true, force: true });
-    fs.cpSync("../hub/presets", "dist/presets", { recursive: true });
-    for (const code of ["dist/app", "dist/bin"]) {
-      // Later entrypoints create dist/bin; normalize .. before checking presets on a first build.
-      const teams = path.resolve(code, "../presets");
-      if (!fs.existsSync(teams) || !fs.readdirSync(teams).some((team) => fs.existsSync(`${teams}/${team}/en/team.json`))) {
-        throw new Error(`no preset teams next to ${code}: the hub looks for them in ../presets`);
-      }
-    }
-  },
-};
-
 export default defineConfig([
-  { ...node, input: "src/main.ts", output: { file: "dist/app/main.js", format: "esm", codeSplitting: false }, plugins: [presets] },
+  { ...node, input: "src/main.ts", output: { file: "dist/app/main.js", format: "esm", codeSplitting: false } },
   { ...node, input: "src/preload.cjs", output: { file: "dist/app/preload.cjs", format: "cjs" } },
   program("xsb-hub", "../hub/bin/xsb-hub"),
   program("xsb-mcp-bridge", "../hub/bin/xsb-mcp-bridge"),
   program("claude-agent-acp", wrapper("claude-agent-acp")),
   program("codex-acp", wrapper("codex-acp")),
-  program("xsb-media-mcp", "../media-mcp/bin/xsb-media-mcp"),
-  program("xsb-browser-mcp", "src/browser-mcp.ts"),
+  plugin("media", "../media-mcp/bin/xsb-media-mcp"),
+  plugin("browser", "src/browser-mcp.ts"),
   { platform: "browser", input: "renderer/main.js", output: { dir: "dist/renderer", format: "iife", entryFileNames: "main.js" }, plugins: [pages] },
   // The page of a web page's own window.
   { platform: "browser", input: "renderer/page-window.js", output: { dir: "dist/renderer", format: "iife", entryFileNames: "page-window.js" } },

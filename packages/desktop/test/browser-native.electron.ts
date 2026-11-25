@@ -218,7 +218,7 @@ if (initial) { pageWindowId = initial.id; receive({ page: initial }); }
   for (const fn of listeners) fn(context);
   assert.equal(JSON.parse((await invoke('browser_downloads_list')).content[0].text).total, 0);
   assert.equal((await browser.call('browser_downloads_progress', { id: oldId }, new AbortController().signal)).isError, true);
-  await until(() => fs.existsSync(path.join(cwd, '.xsb/downloads/slow.csv')) && fs.readFileSync(path.join(cwd, '.xsb/downloads/slow.csv'), 'utf8') === 'abcdef');
+  await until(() => fs.existsSync(path.join(cwd, '.xsb2/downloads/slow.csv')) && fs.readFileSync(path.join(cwd, '.xsb2/downloads/slow.csv'), 'utf8') === 'abcdef');
   assert.equal(JSON.parse((await invoke('browser_downloads_list')).content[0].text).total, 0);
   context = { ...context, active: false };
   for (const fn of listeners) fn(context);

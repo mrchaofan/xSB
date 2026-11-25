@@ -2,6 +2,8 @@
 
 2026-11-21。规范状态：运行时契约；模型会话说明包含必须遵守的摘要。
 
+本契约约束 Hub 内核的输入、执行与取消。文中的历史工具名标识内核操作。当前主会话与任务会话的模型工具和交付规则见[会话与工作流](WORKFLOWS.md)。
+
 ## 1. 核对结论与证明边界
 
 按事件数归纳证明状态转移安全、按调用路径长度归纳证明停止传播可达，方法成立。xSB 采用这两组不变量约束任务开启和结束，运行时负责强制执行，模型负责使用正确的工具与诚实报告结果。
@@ -23,10 +25,12 @@
 | B 状态 | 投递方 | 请求抢占 | 行为 |
 | --- | --- | --- | --- |
 | 空闲 | 任意 | 任意 | 开新 turn；用户输入使其受保护 |
-| 有 turn | 用户 | 任意 | 插话；接收时立即保护当前 turn |
+| 有 turn | 用户 | 任意 | 插话；接收时立即保护当前 turn（提升为用户级） |
 | 有受保护 turn | Agent | 任意 | 排队 |
-| 有未受保护 turn | Agent | 否 | 排队 |
-| 有未受保护 turn | Agent | 是 | 目标 ID、权限及整体停止范围校验通过后抢占；否则排队 |
+| 有未受保护 turn | Agent | 否 | 插话：任务、消息和结果归入当前 turn，不改变保护状态；`lazy` 投递仍留在收件箱 |
+| 有未受保护 turn | Agent | 是 | 目标 ID、权限及整体停止范围校验通过后抢占；否则按上一行插话 |
+
+**受保护即用户级。** 用户开启或插话过的 turn 属于用户：其他 Agent 的投递只能排队，不能插进去。Agent 发起且用户未插话的 turn 属于 Agent，任何 Agent 的投递都插话。路由时判定一次；插入提交点（`LiveSession.steer`）再次检查保护状态，期间用户已插话则改为排队。
 
 **保护状态属于当前 turn。** 不能用初始发起方替代 `turn.protected`。Agent 发起的 turn 收到用户插话后仍是同一个 turn，但立即受保护，保护不等模型读取后才生效。
 
@@ -34,7 +38,7 @@
 
 抢占使用 `dispatch_task(onBusy="replace", target_turn_id=...)`。模型通过 `list_agents` 获取快照，运行时在提交停止决定前再次检查目标 ID、保护状态、任务是否仍可执行及停止权限。同步 hook 期间到达的用户输入也必须纳入复核。
 
-普通 Agent 发送任务、消息或结果不能冒充用户插话。显式追加使用独立的 `append_instruction(target_turn_id=...)`：仅对该目标有效；已结束、停止、切换或不能接收追加的目标返回失效，不排入后来 turn。系统对当前工作的控制通知与普通 Agent 投递分开。
+Agent 插话不等于用户插话：它不保护 turn，也不能插进受保护的 turn。显式追加使用独立的 `append_instruction(target_turn_id=...)`：仅对该目标有效；已结束、停止、切换或不能接收追加的目标返回失效，不排入后来 turn。系统对当前工作的控制通知与普通 Agent 投递分开。
 
 ### 规范伪代码
 
@@ -95,13 +99,21 @@ xSB 使用可观察的**插入回执**作为运行时边界：ACP `session/promp
 
 每条输入由稳定 messageId 标识。在途输入仍归旧 turn 管理，收到取消/插入结果前不能同时恢复为可执行队列项。恢复时先移除旧归属，再转入后继归属；已有插入回执不能被更新上下文撤销。
 
+重启时，后端已经收进对话的输入（账本为 inserted、seen 或 inserted_unprocessed）不再路由：续接的后端会话里已经有它，再发一次会让模型读两遍、可能执行两遍。它在原地结算，所载任务按“执行结果未知”失败，不重放；对话记录写一条失败说明，告诉用户这一轮在 xSB 停止时被打断、需要核对结果。只有后端还没收进的输入才重新路由。
+
+中枢停止期间（Hub.shutdown 起）不开始任何 turn、不启动任何后端进程：后端退出引起的 turn 结束不再接续下一条，排队的输入留在收件箱，下次启动再执行。
+
 重启路由、延迟投递及出队都必须尊重终态：已丢弃输入、已经结束任务的残留委派邮件只结算并移除，不重新投递执行。若输入已被丢弃而任务尚未终结，运行时记录失败结果，不能让它脱离输入状态继续运行。
 
 有效 turn ID、backendSessionId/上下文代次和工具 bridge token 共同隔离旧执行。停止确认与必要回执仅用于结算旧工作；旧结果不得覆盖新 turn 的状态或重新取得工具权限。隔离旧后端后才开启新执行。
 
 普通 ACP 后端不一定提供 turn 标签。若停止后继续复用同一未标记连接，旧工具请求在新 turn 开始后才抵达时不能单靠正文辨别归属。因此，后端须在 initialize 中明确声明 `_meta["dev.xsb/turn-isolation"] = { version: 1, afterIdle: true }`，保证取消后的 idle 之前已结算/隔离全部旧工具调用与回复，才允许正常停止后复用原连接和完整上下文。
 
-未声明该保证的后端，停止结算后撤销旧 bridge token、关闭旧进程，再用保存的 backendSessionId 在新进程恢复会话；恢复失败则采用带边界的交接。这样旧请求在下一 turn 开始后也无法获权。此声明是协议实现的真实保证，不能仅为性能而虚报。停止确认最多等待 10 秒，超时强制隔离；只有已隔离后才能接续。定向追加在正常结束时仍未被读取，同样要隔离旧执行。
+未声明该保证的后端，停止结算后撤销旧 bridge token、关闭旧进程，再用保存的 backendSessionId 在新进程恢复会话；恢复失败则采用带边界的交接。这样旧请求在下一 turn 开始后也无法获权。此声明是协议实现的真实保证，不能仅为性能而虚报。停止确认最多等待 10 秒，超时强制隔离；只有已隔离后才能接续。定向追加在正常结束时仍未被读取、且已经发给后端，同样要隔离旧执行；中枢扣住、从未发出的追加只需失效，不重建后端会话。正常结束（后端在全部工具调用返回后才报告结束）没有迟到的旧请求，保留原进程与后端会话，以免无谓地让提示词缓存失效。
+
+turn 因非取消原因失败时，已发出但没有插入回执的输入可能仍在后端里。它会被重新投递，所以先取消旧工作；未声明 turn-isolation 的后端同样撤销旧 bridge、在新进程里恢复会话，保证只有一份副本到达模型。
+
+请求前缀（未声明 systemPrompt 时的常驻指令、交接、工作流上下文）随请求一起发出，拿到插入回执才算用掉；请求未被收进时，常驻指令和交接还给下一个请求，本轮的工作流上下文不还（下一轮会重新生成最新的一份）。交接待投递标记同样只在插入后清除。
 
 上下文恢复是同一业务任务的有限尝试。未观察到执行的明确拒绝可以安全恢复；已有工具、权限请求或正常输出的输入不自动重放。取消代次、队列优先级、任务依赖和目标追加约束在恢复期间同样适用。
 
@@ -142,6 +154,7 @@ xSB 使用可观察的**插入回执**作为运行时边界：ACP `session/promp
 | 规则 | 强制执行位置 | 已有/新增验证 |
 | --- | --- | --- |
 | 用户插话立即保护、抢占提交时复核 | `LiveSession.protect`、`Kernel.deliveryPolicy`、`Kernel.replace` | `turns.test.ts`：接收即保护；恢复期间保护及首请求合并；stop hook 中插话；抢占先提交后的用户输入 |
+| Agent 插话只进未受保护的 turn | `Kernel.deliveryPolicy`、`LiveSession.steer` | `kernel.test.ts`：路由；`turns.test.ts`：同伴任务归入 Agent 的 turn，用户插话后同伴排队，提交点拒绝 |
 | 精确目标与独立追加 | `Kernel.replace`、`Delivery.append`、`LiveSession.steer` | 缺失/过期目标排队；显式追加只投递目标，过期不排队 |
 | 整体合法抢占、无部分误取消 | `Kernel.replace.valid`、`stopMany.commitGuard` | 混合所有者 turn 保持完整、新请求 queued |
 | 恢复 FIFO 与抢占优先 | `LiveSession.end`、`pump`、`prioritize` | 全部混合未读输入恢复；原队列为空；抢占者先运行 |
@@ -150,6 +163,8 @@ xSB 使用可观察的**插入回执**作为运行时边界：ACP `session/promp
 | 停止后禁止新挂接 | `serveMcp.tools/call`、`sourceStopped`、`Kernel.create`、`callTool.assertActive` | idle/停止连接不能发起新工作；提交停止后 halt hook 尚未运行仍拒绝；创建 hook 内停止；授权等待期间停止 |
 | 回执、目标与旧后端隔离 | `onBackendUpdate`、`refused`、`confirmed`、bridge token | `stop.test.ts` 与 `turns.test.ts`：真实插入结算；旧确认不能结束新 turn；迟到回执不能落入替换绑定 |
 | 终态输入不因重启复活 | `Kernel.route` | `kernel.test.ts`：已丢弃输入与已结束委派残留邮件不再路由执行 |
+| 重启不重放已收进的输入；停止期间不开新 turn | `Kernel.resume`、`LiveSession.interrupted`、`LiveSession.pump`、`BackendPool.close` | `turns.test.ts`：重启后已读插话不再发出、任务结果未知、记录只显示一次并有说明；停止期间排队任务不开始 |
+| 失败不留副本；被拒请求不丢前缀 | `LiveSession.end`（unanswered 隔离）、`send`/`refused`/`restorePrefaces` | `turns.test.ts`：失败时取消并隔离旧后端；首个请求被拒后交接随下一请求重发 |
 | 任务/turn 区分与有限恢复 | `Kernel.turnEnded`、`LiveSession.recover` | ACP 端到端：同 taskId 恢复；次数耗尽；模型保持；交接重启；执行证据阻止重放 |
 
-模型摘要由 `prompts.ts` 的 `TASK_LIFECYCLE_RULES` 注入所有角色的系统说明；没有 systemPrompt 能力的后端通过第一条 standing-instructions preface 获得同样规则。修改本契约时须同步该摘要与对应场景测试。
+模型摘要由 `prompts.ts` 的 `TASK_LIFECYCLE_RULES` 注入主 Agent 与任务 Agent 的系统说明；没有 systemPrompt 能力的后端通过第一条 standing-instructions preface 获得同样规则。修改本契约时须同步该摘要与对应场景测试。

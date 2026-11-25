@@ -1,4 +1,4 @@
-// 表单与对话框的小工具。agent.js 和 team.js 的界面都由它们拼成。
+// 表单与对话框的小工具。
 import { h } from "./dom.js";
 import { t } from "./i18n.js";
 
@@ -50,4 +50,30 @@ export function confirmDialog(title, content, label) {
     const dialog = openDialog(title, content, [{ label: t("common.cancel") }, { label, primary: true, run: () => resolve(true) }]);
     dialog.addEventListener("close", () => resolve(false));
   });
+}
+
+/**
+ * 浮层（popover）打开时，点它外面只用来关掉它：这一下不会落到下面的按钮、行或链接上。
+ * 对话框由 showModal 自己挡住下面的内容。展开菜单的按钮（aria-haspopup="menu"）本身例外，
+ * 它管自己的浮层。
+ */
+export function shieldPopovers() {
+  let swallow = false;
+  document.addEventListener("pointerdown", (event) => {
+    const open = [...document.querySelectorAll("[popover]")].filter((p) => p.matches(":popover-open"));
+    if (!open.length || open.some((p) => p.contains(event.target))) return;
+    if (event.target.closest?.('[aria-haspopup="menu"][aria-expanded="true"]')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    swallow = true;
+    for (const p of open) p.hidePopover();
+  }, true);
+  document.addEventListener("click", (event) => {
+    if (!swallow) return;
+    swallow = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+  // 拖选或按住后移开时不会有 click：下一次按下前忘掉，免得吞掉无关的点击。
+  document.addEventListener("pointerup", () => setTimeout(() => (swallow = false)), true);
 }

@@ -1,35 +1,37 @@
 // 窗口本身：打开工作区、左栏、对话栏、制品栏。
 // 只通过 window.xsb 取数据和发指令，不知道背后是 mock 还是 Electron 的 preload。
-// Agent 的创建与编辑在 agent.js，角色与产出总览在 team.js。
 // xsb 是全局对象：Electron 里由 preload 注入，浏览器里直接打开时由 mock.js 提供。
-import { avatarImage } from "./avatars.js";
+import { avatarImage, avatarPicker } from "./avatars.js";
+import { backendIcon, backendKind, backendMark } from "./backend-icons.js";
 import { createArtifactBrowser, artifactDetails, artifactLabel, artifactNavigation } from "./artifacts.js";
-import { editAgent } from "./agent.js";
+import { currentFlow, renderWorkflow, showTask, workflowPanelState, restoreWorkflowPanel } from "./workflow.js";
 import { contentView, createEditor, markdownView } from "./content.js";
 import { draftKey, loadDraft, moveDraft, saveDraft } from "./drafts.js";
 import { $, ICON, fill, h } from "./dom.js";
+import { composerSettings } from "./composer-settings.js";
 import { clock, t } from "./i18n.js";
-import { onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
-import { refreshSettings, settingsShell, showSettings } from "./settings.js";
-import { onPreferencesChanged, workspacePreferences } from "./preferences.js";
+import { sessionPages, onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
+import { closeSettings, showSettings } from "./settings.js";
+import { onPreferencesChanged } from "./preferences.js";
 import { bindArtifactResize } from "./resize.js";
-import { showOverview } from "./team.js";
+
 import { showWeb } from "./webview.js";
 
 export const state = {
   workspace: null, recent: [],
-  agents: [], roles: [], backends: [], tasks: [], artifacts: [],
+  workflows: {}, agents: [], backends: [], tasks: [], artifacts: [],
   activities: {},        // 智能体的标识 → 它此刻在做什么（有一轮在进行时）
   assetNames: {},       // 资产类型 -> 显示名
   pages: [],            // 右栏打开的网页；null 表示这个 Electron 显示不了网页
-  tab: null,            // null = 制品目录，否则是制品标签或网页的 id
+  tab: null,            // null = 启动页；"workflow"、"catalog"（资产管理）、制品标签或网页的 id
+  workflowTab: false,   // 工作流、资产管理的标签是否开着
+  catalogTab: false,
+  tabOrder: [],         // 侧栏标签被拖出的顺序（标签 id）
   artifactTabs: [],     // { id, artifactId, mode }：每份打开的制品独立保留查看方式
   history: {},
   transcripts: {},      // agentId -> Entry[]
-  open: [],             // 已打开对话栏的 agentId，按显示顺序。最多两个：第一栏，和分屏出来的第二栏
-  pinned: false,        // 第一栏是否固定：固定后，再点别的智能体是分屏，而不是换掉它
-  settings: null,      // 全局或工作区设置中的当前分类
-  page: null,           // 主区域显示的页面：null = 对话；"overview"；角色名；"+" = 新建角色
+  open: [],             // 当前打开的主会话。任务会话由工作流标签中的节点选择决定
+  settings: null,      // 设置对话框开着时，其中的当前分类
   artifactId: null,     // 右栏正在看的制品
   listing: false,       // 右栏在显示制品列表
   mode: "preview",      // preview | source
@@ -46,15 +48,21 @@ const TASK_GLYPH = { blocked: "idle", queued: "idle", running: "running", comple
 export const OVER = ["completed", "failed", "cancelled", "interrupted"];
 
 export const agentOf = (id) => state.agents.find((a) => a.id === id);
-export const roleOf = (name) => state.roles.find((r) => r.name === name);
 export const nameOf = (agentId) => agentOf(agentId)?.name ?? agentId;      // 已删除的 Agent 只剩 id
 /** 谁起的任务：用户起的没有 from，看 initiator。 */
 export const initiatorOf = (task) => task.initiator.kind === "agent" ? nameOf(task.initiator.agentId) : t(`task.initiator.${task.initiator.kind}`);
-/** 角色给人看的名字：预设团队给它起的显示名，没有就是目录名。 */
-export const roleTitle = (role) => role.preset?.title ?? role.name;
 /** 资产类型给人看的名字。 */
 export const assetName = (type) => state.assetNames[type] ?? type;
 const artifactOf = (id) => state.artifacts.find((a) => a.id === id);
+const windowState = new Map();
+function remember(key, value) {
+  windowState.set(key, structuredClone(value));
+  try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* In-memory switching still works. */ }
+}
+function recall(key) {
+  if (windowState.has(key)) return structuredClone(windowState.get(key));
+  try { return JSON.parse(sessionStorage.getItem(key)); } catch { return null; }
+}
 
 function upsert(list, item, key = "id") {
   const i = list.findIndex((x) => x[key] === item[key]);
@@ -64,132 +72,154 @@ function upsert(list, item, key = "id") {
 // ---------- 没有工作区 ----------
 
 /** candidate：用户刚选的、还不是工作区的文件夹，等待确认是否创建。error：刚才没打开成的原因。 */
+/**
+ * 没有工作区的窗口（新建窗口、或第一次打开）：和主窗口同一块工作面，左边"开始"，右边"最近打开"。
+ * 选好工作区之前窗口不能用；也可以从菜单"文件 › 打开文件夹…"打开（main.ts 的 openFolder）。
+ */
 function renderWelcome(candidate, error) {
   const open = (path) => xsb.open(path).then(start, (e) => renderWelcome(candidate, e.message));
   const pick = async () => {
     const folder = await xsb.pickFolder();
     if (folder?.initialized) open(folder.path); else if (folder) renderWelcome(folder);
   };
-  fill($("#welcome"), 
-    h("h1", {}, t("welcome.title")),
-    h("p", {}, t("welcome.intro")),
+  const mac = /Mac/.test(navigator.platform);
+  const key = (keys) => h("kbd", {}, mac ? keys.replace("Ctrl+Shift+", "⇧⌘").replace("Ctrl+", "⌘") : keys);
+  const action = (icon, label, keys, onclick) => h("button", { class: "welcome-action", onclick },
+    h("span", { class: "welcome-action-icon", html: icon }), h("span", { class: "welcome-action-label" }, label), keys && key(keys));
+  const short = (path) => path.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~");
+  fill($("#welcome"), h("div", { class: "welcome-inner" },
+    h("header", { class: "welcome-head" }, h("h1", {}, t("welcome.title")), h("p", {}, t("welcome.intro"))),
     error && h("div", { class: "notice", role: "status" }, h("span", {}, error)),
-    candidate
-      ? h("div", { class: "notice" },
-          h("span", {}, t("welcome.candidate", { path: candidate.path })),
-          h("button", { class: "btn", onclick: () => renderWelcome() }, t("common.cancel")),
-          h("button", { class: "btn primary", onclick: () => open(candidate.path) }, t("welcome.create")))
-      : h("button", { class: "btn primary", onclick: pick }, t("welcome.pick")),
-    state.recent.length > 0 && h("h2", {}, t("welcome.recent")),
-    ...state.recent.map((w) => h("button", { class: "row", onclick: () => open(w.path) },
-      h("span", { class: "row-text" }, h("strong", {}, w.name), h("small", {}, w.path)))));
+    candidate && h("div", { class: "notice" },
+      h("span", {}, t("welcome.candidate", { path: short(candidate.path) })),
+      h("button", { class: "btn sm", onclick: () => renderWelcome() }, t("common.cancel")),
+      h("button", { class: "btn sm primary", onclick: () => open(candidate.path) }, t("welcome.create"))),
+    h("div", { class: "welcome-grid" },
+      h("section", { class: "welcome-start" }, h("h2", {}, t("welcome.start")),
+        action(ICON.folder, t("welcome.pick"), "Ctrl+O", pick),
+        action(ICON.plus, t("welcome.newWindow"), "Ctrl+Shift+N", () => xsb.newWindow())),
+      h("section", { class: "welcome-recent" }, h("h2", {}, t("welcome.recent")),
+        state.recent.length
+          ? h("div", { class: "welcome-recent-list" }, ...state.recent.map((w) => h("button", { class: "welcome-recent-item", title: w.path, onclick: () => open(w.path) },
+              h("strong", {}, w.name), h("small", {}, short(w.path)))))
+          : h("p", { class: "hint" }, t("welcome.noRecent"))))));
 }
 
 // ---------- 左栏 ----------
 
 export function refreshRail() { renderRail(); }
 
+/** 窗口的风格跟着打开的对话的后端走：codex 黑白，claude 橘黄（styles.css 的 data-provider），其余用默认。 */
+function applyProviderTheme() {
+  const kind = backendKind(agentOf(state.open[0])?.backend);
+  if (kind) document.documentElement.dataset.provider = kind;
+  else delete document.documentElement.dataset.provider;
+}
+
 function renderRail() {
-  const talking = !state.page;
-  fill($("#agents"), ...state.agents.map((a, i) =>
-    h("button", { class: "row", "aria-pressed": String(talking && state.open.includes(a.id)), title: t("rail.agent.open", { n: i + 1 }), onclick: () => focusLane(a.id) },
-      avatarImage(a, roleOf(a.role)),
-      h("span", { class: "row-text" }, h("strong", {}, a.name), h("small", {}, a.description)),
-      h("i", { class: "state", "data-state": a.state, title: STATE_TEXT[a.state] }))));
-
-  $("#agent-count").textContent = state.agents.length;
+  applyProviderTheme();
+  const roots = state.agents.filter(a => !a.workflowOwner);
+  fill($("#agents"), ...roots.map(a =>
+    h("button", { class:"row session-row", "aria-pressed":String(state.open.includes(a.id)),title:a.name,onclick:() => focusLane(a.id) },
+      avatarImage(a),
+      h("span",{class:"row-text"},h("strong",{},a.name)), backendMark(a.backend),
+      h("i",{class:"state","data-state":a.state,title:STATE_TEXT[a.state]}))));
+  $("#agent-count").textContent = roots.length;
   $("#settings").setAttribute("aria-pressed", String(!!state.settings));
-  $("#overview").setAttribute("aria-pressed", String(state.page === "overview"));
-  // 生成花费：已花的估算，有没能计价的生成时一并说出来。只是记账，不限制生成。
-  const showCompleted = workspacePreferences(state.workspace?.path).showCompleted;
-  const visibleTasks = state.tasks.filter((task) => showCompleted || !["completed", "cancelled"].includes(task.status));
+  fill($("#blank"),h("p",{},t("flow.empty")),newSessionTrigger(h("button",{class:"btn primary"},t("flow.new"))));
 
-  fill($("#tasks"), ...visibleTasks.map((task) =>
-    h("button", { class: "row task", "data-over": OVER.includes(task.status), onclick: () => agentOf(task.to.agentId) && focusLane(task.to.agentId) },
-      h("i", { class: "state", "data-state": TASK_GLYPH[task.status] }),
-      h("span", { class: "row-text" },
-        h("strong", {}, task.title),
-        h("small", {}, t("rail.task.meta", { from: initiatorOf(task), to: nameOf(task.to.agentId), status: taskText(task) }))))));
-  if (!visibleTasks.length) $("#tasks").append(h("div", { class: "empty" }, t(state.tasks.length ? "rail.tasks.finished" : "rail.tasks.empty")));
-
-  // 没有打开任何对话栏时，中间显示的内容
-  fill($("#blank"), ...(state.agents.length
-    ? [t("blank.pick")]
-    : [h("p", {}, t("blank.none")), h("button", { class: "btn primary", onclick: () => editAgent() }, t("agent.new.title")), h("small", {}, t("blank.setupHint"))]));
 }
 
-/** 主区域换成一个页面（角色编辑、产出总览）；closePage 回到对话。 */
-export function showPage(key, ...content) {
-  if (key === "overview") state.settings = null;
-  document.body.classList.remove("artifact-focused");
-  state.page = key;
-  fill($("#page"), ...(state.settings ? settingsShell(...content) : content));
-  document.body.classList.toggle("settings-open", !!state.settings);
-  document.body.classList.add("paging");
-  renderRail();
-}
-export function closePage() {
-  state.page = null;
-  state.settings = null;
-  document.body.classList.remove("paging", "settings-open");
-  renderRail();
-}
 
 // ---------- 对话栏 ----------
 
 const laneOf = (agentId) => document.querySelector(`.lane[data-agent="${agentId}"]`);
 
-/**
- * 把一个智能体的对话显示出来并聚焦。对话区最多两栏，规则只有三条：
- *   已经显示着的，不动；
- *   有第二栏时，换的永远是第二栏；
- *   只有一栏时：它固定了，就分屏出第二栏；没固定，就换掉它。
- */
+/** 主会话在中央打开，任务会话在所属工作流的侧栏打开。 */
 export function focusLane(agentId) {
-  closePage();
+  const agent = agentOf(agentId);
+  if (!agent) return;
+  if (agent.workflowOwner) {
+    const root = state.agents.find(a => a.mainSessionId === agent.workflowOwner);
+    if (!root) return;
+    focusLane(root.id);
+    revealArtifacts(); selectTab("workflow"); showTask(agentId);
+    return;
+  }
+  closeSettings();
   if (!state.open.includes(agentId)) {
-    const [first, second] = state.open;
-    if (second) closeLane(second);
-    else if (first && !state.pinned) closeLane(first);
+    for (const id of [...state.open]) closeLane(id, true);
     openLane(agentId);
+    restoreSide();
+    remember("xsb.active:" + state.workspace.path, agentId);
   }
   const lane = laneOf(agentId);
   lane.scrollIntoView({ block: "nearest", inline: "nearest" });
-  lane.querySelector(".editor").focus();
+  const target = state.tab === "workflow" && laneOf(state.referenceAgent);
+  if (target || state.referenceAgent === agentId) (target || lane).editor.el.focus();
 }
 
-function openLane(agentId) {
+const pendingEditors = new Map();
+/** 任务节点的对话，开在工作流标签下方。readonly：只能查看时的说明文字（节点已被新版本删掉，或在看历史版本）。 */
+export const openTaskLane = (id, panel, readonly) => openLane(id, panel, readonly);
+function openLane(agentId, panel, readonly) {
   const send = async () => {
+    if (readonly) return;
+    const node = panel && currentFlow()?.nodes.find(n => n.agentId === agentId);
+    // 默认作用于当前：节点的消息作用于它当前的工作；主会话有正在运行的工作流时，作用于这个工作流（及其中的智能体）。
+    const target = panel ? node?.target : currentFlow()?.version ? "workflow" : undefined;
     try { await editor.ready(); } catch { return; }
     const content = editor.read();
     if (!content.length) return;
+    const sent = editor.snapshot();
     editor.clear();
     // /clear 是 xsb 自己的命令，不交给后端：由中枢换一个新的后端会话，对哪种后端都一样。
     if (content.length === 1 && content[0].type === "text" && content[0].text.trim() === "/clear") return xsb.clear(agentId);
-    xsb.send(agentId, content);
+    try { await xsb.send(agentId, content, target); }
+    catch (e) {
+      const current = laneOf(agentId)?.editor ?? editor;
+      current.restore([...sent, ...(current.el.isConnected ? current.snapshot() : loadDraft(key))]);
+      saveDraft(key, current.snapshot());
+      current.error.textContent = e.message;
+      current.error.hidden = false;
+      syncLane(agentId);
+    }
   };
   // 一个按钮管两件事：输入框里有内容就是发送；没有内容而智能体在工作，就是停止。
-  const press = () => (lane.dataset.action === "stop" ? xsb.cancel(agentId) : send(false));
+  const press = () => (readonly ? undefined : lane.dataset.action === "stop" ? xsb.cancel(agentId) : send());
   let key = draftKey(state.workspace.path, agentOf(agentId));
-  const editor = createEditor(send, () => {
-    saveDraft(key, editor.snapshot());
-    syncLane(agentId);
-  });
-  editor.restore(loadDraft(key));
+  let editor = pendingEditors.get(key);
+  if (!editor) {
+    editor = createEditor(() => editor.el.closest(".lane")?.send(), () => {
+      saveDraft(key, editor.snapshot());
+      if (editor.isReading()) pendingEditors.set(key, editor);
+      else if (pendingEditors.get(key) === editor) pendingEditors.delete(key);
+      syncLane(agentId);
+    });
+    editor.restore(loadDraft(key));
+  }
+  editor.el.onfocus = () => {
+    setReferenceTarget(agentId);
+  };
+  const controls = composerSettings(agentId);
 
-  const lane = h("section", { class: "lane", "data-agent": agentId },
+  const lane = h("section", { class: "lane", "data-agent": agentId, "data-session": agentOf(agentId).mainSessionId },
     h("header", { class: "bar lane-head" },
-      h("span", { class: "lane-avatar" }), h("strong", {}), h("small", {}),
+      panel ? h("span", { class: "lane-avatar" })
+        : h("button", { class: "lane-avatar", type: "button", title: t("lane.icon"), "aria-label": t("lane.icon"), "aria-haspopup": "dialog", onclick: (e) => pickIcon(agentId, e.currentTarget) }),
+      h("strong", {}), h("span", { class: "lane-backend" }),
       h("span", { class: "lane-state" }, h("i", { class: "state" }), h("span", {})),
-      h("button", { class: "icon-btn pin", html: ICON.pin, onclick: () => { state.pinned = !state.pinned; state.open.forEach(syncLane); } }),
-      h("button", { class: "icon-btn", title: t("lane.close"), "aria-label": t("lane.close"), html: ICON.close, onclick: () => closeLane(agentId) })),
+      h("button", { class: "icon-btn", title: t("lane.close"), "aria-label": t("lane.close"), html: ICON.close, hidden:!!panel, onclick: () => {closeLane(agentId); renderSide();} })),
     h("div", { class: "transcript" }, h("button", { class: "btn history-more", hidden: state.history?.[agentId] == null, onclick: () => loadHistory(agentId) }, t("history.more")), h("div", { class: "entries" })),
     h("div", { class: "composer" },
       editor.el, editor.error,
       h("div", { class: "composer-row" },
         h("span", { class: "hint", role: "status" }, h("i", { class: "state" }), h("span", {})),
-        h("button", { class: "send", onclick: press }))));
+        controls.el, controls.usage, h("button", { class: "send", onclick: press }))));
   lane.editor = editor;
+  lane.controls = controls;
+  lane.send = send;
+  lane.saveDraft = () => saveDraft(key, editor.snapshot());
   lane.updateSession = (previous) => {
     const next = draftKey(state.workspace.path, agentOf(agentId));
     if (next === key) return;
@@ -199,13 +229,48 @@ function openLane(agentId) {
     editor.restore(loadDraft(key));
   };
 
-  $("#lanes").append(lane);
-  state.open.push(agentId);
+  // 只能查看：不给输入框和停止按钮，换成一行说明。
+  if (readonly) {
+    lane.dataset.readonly = readonly;
+    lane.querySelector(".composer").after(h("p", { class: "lane-readonly", role: "note" }, h("span", { html: ICON.info }), readonly));
+  }
+  (panel ?? $("#lanes")).append(lane);
+  if (!panel) state.open.push(agentId);
+  else {
+    lane.querySelector(".lane-head").append(h("button",{class:"btn task-control",onclick:() => {
+      const flow = currentFlow(), node = flow?.nodes.find(n => n.agentId === agentId);
+      if (!node) return;
+      if (node.paused || node.status === "suspended") xsb.workflowControl(flow.sessionId,false,[node.name]);
+      else xsb.cancel(agentId);
+    }},t("flow.stop")));
+  }
   lane.querySelector(".entries").append(...state.transcripts[agentId].map((entry) => entryNode(agentId, entry)));
   syncLane(agentId);
   renderRail();
   const scroller = lane.querySelector(".transcript");
   scroller.scrollTop = scroller.scrollHeight;
+}
+
+/** 对话的图标：点栏头的头像，从内置的图里选一个，立即保存到中枢。 */
+function pickIcon(agentId, anchor) {
+  document.querySelector(".icon-menu")?.remove();
+  const agent = agentOf(agentId);
+  const draft = { avatar: agent?.avatar ?? "" };
+  const failure = h("p", { class: "error", role: "alert" });
+  const picker = avatarPicker(draft);
+  const menu = h("div", { class: "icon-menu", popover: "auto", role: "dialog", "aria-label": t("lane.icon") },
+    h("strong", {}, t("lane.icon")), picker, failure);
+  picker.addEventListener("click", async () => {
+    if (draft.avatar === (agentOf(agentId)?.avatar ?? "")) return;
+    try { onAgent(await xsb.setAvatar(agentId, draft.avatar)); menu.hidePopover(); }
+    catch (e) { failure.textContent = t("lane.icon.failed", { error: e.message }); }
+  });
+  menu.addEventListener("toggle", (e) => { if (e.newState === "closed") menu.remove(); });
+  document.body.append(menu);
+  const rect = anchor.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(innerWidth - 340, rect.left)) + "px";
+  menu.style.top = (rect.bottom + 6) + "px";
+  menu.showPopover();
 }
 
 async function loadHistory(agentId) {
@@ -232,11 +297,17 @@ async function loadHistory(agentId) {
   button.textContent = t("history.more");
 }
 
-function closeLane(agentId) {
-  // 第一栏关掉后，第二栏成为第一栏；固定是说给被关掉的那一栏的，不跟着过去
-  if (state.open[0] === agentId) state.pinned = false;
+function closeLane(agentId, switching = false) {
+  if (state.open.includes(agentId)) {
+    rememberSide();
+    $("#task-conversation .lane")?.saveDraft();
+    $("#task-conversation").replaceChildren();
+  }
+  laneOf(agentId)?.saveDraft();
   laneOf(agentId)?.remove();
+  const closingRoot = state.open.includes(agentId);
   state.open = state.open.filter((id) => id !== agentId);
+  if (closingRoot && !switching) restoreSide();
   state.open.forEach(syncLane);
   renderRail();
 }
@@ -247,19 +318,17 @@ function syncLane(agentId) {
   if (!lane) return;
   const { state: s, name, backend } = agentOf(agentId);
   lane.dataset.state = s;
-  fill(lane.querySelector(".lane-avatar"), avatarImage(agentOf(agentId), roleOf(agentOf(agentId).role)));
+  fill(lane.querySelector(".lane-avatar"), avatarImage(agentOf(agentId)));
   lane.querySelector(".lane-head strong").textContent = name;
-  lane.querySelector(".lane-head small").textContent = backend;
+  fill(lane.querySelector(".lane-backend"), backendMark(backend));
   lane.querySelector(".lane-state .state").dataset.state = s;
   lane.querySelector(".lane-state span").textContent = STATE_TEXT[s];
   lane.querySelector(".editor").dataset.placeholder = t(s === "idle" ? "lane.placeholder" : "lane.placeholder.busy", { name });
-  // 只有第一栏能固定
-  const pin = lane.querySelector(".pin");
-  const pinLabel = t(state.pinned ? "lane.unpin" : "lane.pin");
-  pin.hidden = state.open[0] !== agentId;
-  pin.title = pinLabel;
-  pin.setAttribute("aria-label", pinLabel);
-  pin.setAttribute("aria-pressed", String(state.pinned));
+  const control = lane.querySelector(".task-control");
+  if (control) {
+    const node = currentFlow()?.nodes.find(n => n.agentId === agentId);
+    control.textContent = t(node?.paused || node?.status === "suspended" ? "flow.resume" : "flow.stop");
+  }
 
   const action = s !== "idle" && !lane.editor.read().length && !lane.editor.isReading() ? "stop" : "send";
   const label = t(action === "stop" ? "lane.stop" : s === "idle" ? "lane.send" : "lane.send.queue");
@@ -314,12 +383,17 @@ function entryNode(agentId, entry) {
   if (entry.kind === "input") {
     const o = entry.origin;
     // 停止时模型还没看到的输入被丢弃了：照样留在记录里，但标明模型没有看到。
-    const tag = entry.discarded ? t("entry.tag.discarded") : o.steered ? t("entry.tag.interjected") : null;
-    return h("div", { ...base, "data-origin": o.kind, "data-discarded": entry.discarded, title: entry.discarded ? t("entry.tag.discarded.title") : undefined },
-      o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId), roleOf(agentOf(o.agentId)?.role)),
+    // 模型是否看到：已丢弃（不会再送达）、尚未送达（等插入回执）、插话（已进入正在进行的一轮）。
+    const tag = entry.discarded ? t("entry.tag.discarded") : entry.pending ? t("entry.tag.pending") : o.steered ? t("entry.tag.interjected") : null;
+    return h("div", { ...base, "data-origin": o.kind, "data-discarded": entry.discarded, "data-pending": entry.pending,
+      title: entry.discarded ? t("entry.tag.discarded.title") : entry.pending ? t("entry.tag.pending.title") : undefined },
+      o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId)),
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
       o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),
-      h("div", { class: "said" }, contentView(entry.content, openLink)),
+      h("div", { class: "said" }, contentView(entry.content, openLink, { lookupAsset: o.kind === "user" && (ref => {
+        const a = state.artifacts.find(a => a.registeredName === ref.name && "v" + a.assetVersion === ref.version);
+        return a && (() => followContentLink(a.url, laneOf(agentId), agentId));
+      }) })),
       tag && h("span", { class: "tag" }, tag));
   }
 
@@ -346,22 +420,22 @@ function entryNode(agentId, entry) {
 // ---------- 右栏：制品 ----------
 
 async function followContentLink(href, container, agentId, baseFile) {
+  const owner = rootSession();
   container.querySelector(".content-error")?.remove();
   try {
     if (/^https?:\/\//i.test(href)) {
-      await xsb.openPage(href);
+      await xsb.openPage(href, false, owner);
       return;
     }
     const artifact = await xsb.openArtifact(href, agentId, baseFile);
     upsert(state.artifacts, artifact);
-    showArtifact(artifact.id);
+    if (owner === rootSession()) showArtifact(artifact.id);
   } catch (error) {
     container.append(h("div", { class: "content-error", role: "status" }, t("content.openFailed", { error: error.message })));
   }
 }
 
 function showArtifact(id) {
-  if (state.listing) catalogScroll = $("#artifact-body").scrollTop;
   let tab = state.artifactTabs.find((tab) => tab.artifactId === id);
   if (!tab) {
     tab = { id: `artifact:${id}`, artifactId: id, mode: "preview" };
@@ -372,15 +446,20 @@ function showArtifact(id) {
 }
 
 let catalogScroll = 0;
-const artifactBrowser = createArtifactBrowser(showArtifact, nameOf, assetName);
+export function rememberPosition() {
+  if ($("#side-artifacts").hidden) return;
+  const scroll = $("#artifact-body").scrollTop;
+  if (state.tab === "catalog") catalogScroll = scroll;
+  const tab = state.artifactTabs.find(t => t.id === state.tab);
+  if (tab) tab.scroll = scroll;
+}
+const artifactBrowser = createArtifactBrowser(showArtifact, nameOf, assetName, referenceArtifact, referenceTitle);
 let artifactRender = 0;
 let artifactView = null;
 
 function browseArtifacts() {
-  state.listing = true;
-  state.tab = null;
   revealArtifacts();
-  renderSide();
+  selectTab("catalog");
 }
 
 // HTML 制品的预览是一个网页，和右栏的网页一样由主进程持有，只是不进标签栏：它在自己的进程里运行，
@@ -389,7 +468,7 @@ let embedded = null;      // { url, page: Promise<PageView> }
 function embed(url) {
   if (embedded?.url !== url) {
     closeEmbedded();
-    embedded = { url, page: xsb.openPage(url, true) };
+    embedded = { url, page: xsb.openPage(url, true, rootSession()) };
   }
   return embedded.page;
 }
@@ -400,7 +479,11 @@ function closeEmbedded() {
 
 export async function renderArtifact(force = false) {
   const artifact = state.listing ? null : artifactOf(state.artifactId);
-  document.querySelectorAll(".chip").forEach((chip) => chip.setAttribute("aria-pressed", String(chip.dataset.artifact === artifact?.id)));
+  document.querySelectorAll(".chip[data-artifact]").forEach((chip) => chip.setAttribute("aria-pressed", String(chip.dataset.artifact === artifact?.id)));
+  $("#asset-reference").hidden = !artifact || !state.open.length;
+  $("#asset-reference").title = referenceTitle();
+  $("#asset-reference").textContent = t(artifact?.registeredName ? "flow.reference" : "artifact.reference");
+  $(".artifact-toolbar").hidden = !artifact;
   const body = $("#artifact-body");
   const modes = $("#artifact-modes");
   const navigation = $("#artifact-navigation");
@@ -409,14 +492,25 @@ export async function renderArtifact(force = false) {
   $("#artifact-info").hidden = !artifact;
   $("#artifact-details").hidden = !artifact || !state.artifactDetails;
   $("#artifact-info").setAttribute("aria-expanded", String(!!artifact && !!state.artifactDetails));
-  artifactBrowser.update(state.artifacts, state.artifactId);
+  const items = state.artifacts.filter(belongsHere);
+  artifactBrowser.update(items, state.artifactId);
+  const tasks = (currentFlow()?.nodes ?? []).filter(n => n.sessionId && agentOf(n.agentId));
+  const destination = $("#reference-destination");
+  destination.hidden = !items.length || !tasks.length;
+  if (!destination.hidden) {
+    const select = destination.querySelector("select");
+    fill(select, h("option", { value: state.open[0] }, t("artifact.mainComposer")),
+      ...tasks.map(n => h("option", { value: n.agentId }, n.name)));
+    select.value = referenceTarget();
+    select.onchange = () => setReferenceTarget(select.value);
+  }
   if (!(artifact?.kind === "html" && state.mode === "preview")) closeEmbedded();
 
   if (!artifact) {
     artifactView = null;
     ++artifactRender;
     $("#artifact-name").textContent = t("artifact.list.title");
-    $("#artifact-meta").textContent = t("artifact.catalog.count", { count: artifactBrowser.groups().length, files: state.artifacts.length });
+    $("#artifact-meta").textContent = "";
     modes.hidden = true;
     if (artifactBrowser.el.parentElement !== body) {
       fill(body, artifactBrowser.el);
@@ -467,21 +561,20 @@ export async function renderArtifact(force = false) {
     const text = await response.text();
     if (request !== artifactRender) return;
     fill(body, preview
-      ? markdownView(text, (href, container) => followContentLink(href, container, artifact.agentId, artifact.id), "doc md")
+      ? markdownView(text, (href, container) => followContentLink(href, container, state.open[0], artifact.id), "doc md")
       : h("pre", { class: "source" }, ...text.split("\n").map((line) => h("span", {}, line + "\n"))));
   } catch (error) {
     if (request !== artifactRender) return;
     fill(body, h("div", { class: "catalog-empty", role: "status" }, t("content.openFailed", { error: error.message }),
       h("button", { class: "btn", onclick: () => renderArtifact(true) }, t("artifact.retry"))));
   }
-  body.scrollTop = 0;
+  body.scrollTop = state.artifactTabs.find(t => t.id === state.tab)?.scroll ?? 0;
 }
 
 // ---------- 窗口级交互 ----------
 
 $("#ws").onclick = () => showSettings(state.workspace ? "workspace" : "general");
 $("#settings").onclick = $("#title-settings").onclick = () => showSettings();
-$("#overview").onclick = showOverview;
 /** 与中枢的连接是否还在，画成工作区名字旁的圆点。 */
 function showHub(up, why) {
   const dot = $("#hub");
@@ -493,7 +586,116 @@ function showHub(up, why) {
 $("#hub").onclick = () => {
   if ($("#hub").dataset.up === "false") xsb.open(state.workspace.path).then(start, (e) => showHub(false, e.message));
 };
-$("#new-agent").onclick = () => editAgent();
+// 新建会话：悬停或点击加号展开后端列表，点一个就建好并打开，不经过对话框。
+const sessionMenu = h("div", { class: "session-menu", popover: "manual", role: "menu", "aria-label": t("flow.new") });
+let menuAnchor = null, menuTimer = 0;
+function openSessionMenu(anchor) {
+  clearTimeout(menuTimer);
+  if (!state.workspace) return;
+  if (menuAnchor === anchor && sessionMenu.matches(":popover-open")) return;
+  menuAnchor = anchor;
+  const failure = h("p", { class: "error", role: "alert" });
+  const create = async (backend) => {
+    try {
+      const agent = await xsb.newSession(backend);
+      sessionMenu.hidePopover();
+      onAgent(agent);
+      focusLane(agent.id);
+    } catch (e) { failure.textContent = e.message; }
+  };
+  fill(sessionMenu, h("small", {}, t("flow.backend")),
+    ...state.backends.map((b) => h("button", { type: "button", role: "menuitem", class: "session-menu-item", onclick: () => create(b.name) },
+      backendIcon(b.name), h("span", { class: "session-menu-name" }, b.name), !b.installed && h("small", {}, t("flow.backend.missing")))),
+    failure);
+  if (!sessionMenu.isConnected) document.body.append(sessionMenu);
+  sessionMenu.showPopover();
+  const rect = anchor.getBoundingClientRect(), width = sessionMenu.offsetWidth, height = sessionMenu.offsetHeight;
+  sessionMenu.style.left = Math.max(8, Math.min(innerWidth - width - 8, rect.left)) + "px";
+  sessionMenu.style.top = (rect.bottom + height + 12 > innerHeight ? rect.top - height - 6 : rect.bottom + 6) + "px";
+}
+const closeSoon = () => { clearTimeout(menuTimer); menuTimer = setTimeout(() => sessionMenu.hidePopover(), 220); };
+sessionMenu.onmouseenter = () => clearTimeout(menuTimer);
+sessionMenu.onmouseleave = closeSoon;
+sessionMenu.addEventListener("toggle", (e) => {
+  if (e.newState === "closed") { menuAnchor?.setAttribute("aria-expanded", "false"); menuAnchor = null; }
+  else menuAnchor?.setAttribute("aria-expanded", "true");
+});
+// 手动弹层：悬停打开后再点击加号不会被"点外面关闭"抢先关掉；点别处（shieldPopovers）或按 Esc 关闭。
+sessionMenu.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  e.stopPropagation();
+  const anchor = menuAnchor;
+  sessionMenu.hidePopover();
+  anchor?.focus();
+});
+/** 让一个按钮在悬停、点击或键盘激活时展开新建会话的菜单。 */
+function newSessionTrigger(button) {
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  button.onmouseenter = () => openSessionMenu(button);
+  button.onmouseleave = closeSoon;
+  button.onclick = () => { openSessionMenu(button); sessionMenu.querySelector("button")?.focus(); };
+  return button;
+}
+newSessionTrigger($("#new-agent"));
+export const rootSession = () => agentOf(state.open[0])?.mainSessionId;
+function belongsHere(artifact) {
+  const root = rootSession(), agent = agentOf(artifact.agentId);
+  return !!root && (artifact.sessionIds?.includes(root) || (agent?.workflowOwner ?? agent?.mainSessionId) === root);
+}
+function referenceTarget() {
+  return currentFlow()?.nodes.some(n => n.sessionId && n.agentId === state.referenceAgent && agentOf(n.agentId)) ? state.referenceAgent : state.open[0];
+}
+function setReferenceTarget(id) {
+  state.referenceAgent = id;
+  $("#reference-destination select").value = referenceTarget();
+  const title = referenceTitle();
+  $("#asset-reference").title = title;
+  document.querySelectorAll(".reference-action").forEach(b => { b.title = title; b.setAttribute("aria-label", title + " · " + b.dataset.name); });
+}
+function referenceTitle() { return t("artifact.referenceTo", { name: nameOf(referenceTarget()) ?? "" }); }
+function referenceArtifact(artifact) {
+  if (!artifact || !belongsHere(artifact)) return;
+  const id = referenceTarget();
+  if (id !== state.open[0]) { selectTab("workflow"); showTask(id); }
+  else { document.body.classList.remove("artifact-focused", "artifact-expanded"); }
+  laneOf(id)?.editor.insert([artifact.registeredName
+    ? { type: "asset_reference", name: artifact.registeredName, version: "v" + artifact.assetVersion }
+    : { type: "resource_link", name: artifact.name, uri: artifact.fileUri }]);
+}
+$("#asset-reference").onclick = () => referenceArtifact(artifactOf(state.artifactId));
+
+function sideKey() { return "xsb.side:" + JSON.stringify([state.workspace?.path, rootSession()]); }
+function rememberSide() {
+  if (!rootSession()) return;
+  rememberPosition();
+  remember(sideKey(), {
+    tab: state.tab, tabs: state.artifactTabs, workflowTab: state.workflowTab, catalogTab: state.catalogTab, tabOrder: state.tabOrder, details: state.artifactDetails, filters: artifactBrowser.filters,
+    scroll: catalogScroll, target: state.referenceAgent, flow: workflowPanelState(currentFlow()),
+  });
+}
+function restoreSide() {
+  closeEmbedded(); artifactRender++; artifactView = null;
+  const saved = recall(sideKey()) ?? {};
+  state.artifactTabs = (saved.tabs ?? []).filter(tab => { const a = artifactOf(tab.artifactId); return a && belongsHere(a); });
+  state.artifactDetails = !!saved.details;
+  state.referenceAgent = agentOf(saved.target) ? saved.target : state.open[0];
+  restoreWorkflowPanel(currentFlow(), saved.flow);
+  state.artifactId = null; state.listing = true;
+  catalogScroll = saved.scroll ?? 0;
+  artifactBrowser.restore(saved.filters);
+  const hasFlow = !!(currentFlow()?.version || currentFlow()?.candidate);
+  state.workflowTab = saved.workflowTab ?? (saved.tab === undefined && hasFlow);
+  state.catalogTab = !!saved.catalogTab;
+  state.tabOrder = saved.tabOrder ?? [];
+  state.tab = saved.tab === undefined && hasFlow ? "workflow" : saved.tab ?? null;
+  const open = state.tab === "workflow" ? state.workflowTab : state.tab === "catalog" ? state.catalogTab
+    : state.artifactTabs.some(t => t.id === state.tab) || sessionPages().some(p => p.id === state.tab);
+  if (!open) state.tab = null;
+  renderSide();
+  if (state.tab === "catalog") $("#artifact-body").scrollTop = catalogScroll;
+}
+window.addEventListener("pagehide", rememberSide);
 $("#toggle-rail").onclick = () => document.body.classList.toggle("no-rail");
 export function revealArtifacts() {
   document.body.classList.remove("no-artifact");
@@ -535,12 +737,11 @@ bindArtifactResize($("#divider"));
 // ⌘1…⌘9：打开并聚焦第 n 个 Agent 的输入框
 window.onkeydown = (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === ",") { e.preventDefault(); showSettings(); return; }
-  if (e.key === "Escape" && state.settings && !document.querySelector("dialog[open]")) { closePage(); return; }
   if (document.querySelector("dialog[open]")) return;
   if (e.key === "Escape" && state.artifactDetails) { showArtifactDetails(false); return; }
   if (e.key === "Escape" && document.body.classList.contains("artifact-focused")) { document.body.classList.remove("artifact-focused"); renderSide(); return; }
   if (e.key === "Escape" && document.body.classList.contains("artifact-expanded")) { document.body.classList.remove("artifact-expanded"); return; }
-  const agent = (e.metaKey || e.ctrlKey) && state.agents[Number(e.key) - 1];
+  const agent = (e.metaKey || e.ctrlKey) && state.agents.filter(a => !a.workflowOwner)[Number(e.key) - 1];
   if (!agent) return;
   e.preventDefault();
   focusLane(agent.id);
@@ -548,7 +749,7 @@ window.onkeydown = (e) => {
 
 // ---------- 数据 ----------
 
-/** 一个 Agent 新增或改变了。putAgent 的返回值和事件都走这里。 */
+/** 一个 会话从快照、创建回执或订阅中更新。 */
 export function onAgent(agent) {
   const previous = agentOf(agent.id);
   upsert(state.agents, agent);
@@ -559,35 +760,42 @@ export function onAgent(agent) {
   }
   state.transcripts[agent.id] ??= [];
   renderRail();
-  refreshSettings();
   syncLane(agent.id);
 }
-export function onRole(role) {
-  upsert(state.roles, role, "name");
-  renderRail();
-  refreshSettings();
-  state.open.forEach(syncLane);
-}
-
 xsb.on((event) => {
-  if (event.agent) onAgent(event.agent);
+  if (event.controls) laneOf(event.agentId)?.controls.update(event.controls);
+  else if (event.workflow) {
+    const flow = event.workflow, prior = state.workflows[flow.sessionId];
+    state.workflows[flow.sessionId] = flow;
+    if (currentFlow() === flow) {
+      if ((!prior?.version && !prior?.candidate) && (flow.version || flow.candidate)) { revealArtifacts(); selectTab("workflow"); }
+      else renderSide();
+      if (state.open[0]) syncLane(state.open[0]);
+      for (const n of flow.nodes) if (n.agentId) syncLane(n.agentId);
+    }
+  } else if (event.agent) onAgent(event.agent);
   else if (event.removedAgent) {
     state.agents = state.agents.filter((a) => a.id !== event.removedAgent);
     closeLane(event.removedAgent);
-    refreshSettings();
   }
-  else if (event.role) onRole(event.role);
-  else if (event.removedRole) { state.roles = state.roles.filter((r) => r.name !== event.removedRole); renderRail(); refreshSettings(); state.open.forEach(syncLane); }
   else if (event.task) { upsert(state.tasks, event.task); renderRail(); }
   else if (event.artifact) {
     upsert(state.artifacts, event.artifact);
-    if (state.listing || !state.artifactId || state.artifactId === event.artifact.id) renderArtifact();
+    if (belongsHere(event.artifact) && (state.tab === "catalog" || state.artifactId === event.artifact.id)) renderArtifact();
   }
   else if (event.page) onPage(event.page);
   else if (event.removedPage) onPageRemoved(event.removedPage);
   else if (event.hub === "down") showHub(false);
-  else if (event.revealPage) { revealArtifacts(); selectTab(event.revealPage); }
+  else if (event.revealPage) {
+    const page = state.pages?.find(p => p.id === event.revealPage);
+    const owner = page && state.agents.find(a => a.mainSessionId === page.sessionId);
+    if (owner && !sessionPages().includes(page)) focusLane(owner.id);
+    if (page && sessionPages().includes(page)) { revealArtifacts(); selectTab(page.id); }
+  }
   else if (event.showAgent) { if (agentOf(event.showAgent)) focusLane(event.showAgent); }
+  // 应用菜单：设置；文件 › 打开文件夹… 换了这个窗口的工作区。
+  else if (event.openSettings) showSettings();
+  else if (event.workspaceChanged) { closeSettings(); start(); }
   else if ("activity" in event) {
     if (event.activity) state.activities[event.agentId] = event.activity; else delete state.activities[event.agentId];
     syncActivity(event.agentId);
@@ -601,26 +809,28 @@ xsb.on((event) => {
 
 /** 读一次快照并画出整个窗口。打开工作区之后再调用一次。 */
 export async function start() {
-  Object.assign(state, { activities: {} }, await xsb.load(), { open: [], pinned: false, page: null, settings: null, listing: true, tab: null, artifactTabs: [], artifactDetails: false });
+  rememberSide();
+  Object.assign(state, { activities: {}, workflows:{} }, await xsb.load(), { open: [], settings: null, listing: true, tab: null, workflowTab: false, catalogTab: false, tabOrder: [], artifactTabs: [], artifactDetails: false });
   catalogScroll = 0;
   $("#artifact-body").scrollTop = 0;
   artifactBrowser.reset();
   document.body.classList.toggle("no-workspace", !state.workspace);
-  document.body.classList.remove("paging", "settings-open");
   $("#ws-name").textContent = document.title = state.workspace?.name ?? t("app.title");
   $("#ws-path").textContent = state.workspace?.path ?? "";
   if (!state.workspace) return renderWelcome();
 
   showHub(true);
   $("#lanes").replaceChildren();
-  if (state.agents[0]) openLane(state.agents[0].id);
-  state.artifactId = state.artifacts[0]?.id ?? null;
+  const activeId = recall("xsb.active:" + state.workspace.path);
+  const first = state.agents.find(a => !a.workflowOwner && a.id === activeId) ?? state.agents.find(a => !a.workflowOwner);
+  $("#task-conversation").replaceChildren();
+  if (first) openLane(first.id);
+  restoreSide();
   renderRail();
-  renderSide();
 }
 
 // Other workspace windows share global appearance and update immediately.
 onPreferencesChanged(() => {
   refreshRail();
-  if (state.page === "settings") showSettings(state.settings);
+  if (state.settings) showSettings(state.settings);
 });

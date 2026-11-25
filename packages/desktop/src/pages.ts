@@ -33,8 +33,8 @@ const WEB_PARTITION = "persist:xsb-web";
 /** Previews of the HTML files agents wrote: the only pages that can read `xsb-artifact://`, and no website is among them. */
 export const PREVIEW_PARTITION = "xsb-preview";
 
-export type PageOptions = { embedded?: boolean; agent?: boolean; downloads?: BrowserDownloads; onPopup?: (id: string, openerId: string) => void };
-type Page = { id: string; contents: Webview2; embedded: boolean; agent: boolean; controlling?: boolean; controlBounds?: { sender: WebContents; bounds: Rectangle | null }; controlView?: WebContentsView; controlHost?: BrowserWindow; window?: BrowserWindow; nativeView?: WebContentsView; viewHost?: BrowserWindow; error?: string; releaseDownloads?: () => void; options: PageOptions };
+export type PageOptions = { sessionId?: string; embedded?: boolean; agent?: boolean; downloads?: BrowserDownloads; onPopup?: (id: string, openerId: string) => void };
+type Page = { id: string; contents: Webview2; embedded: boolean; agent: boolean; controlling?: boolean; controlBounds?: { sender: WebContents; bounds: Rectangle | null }; controlView?: WebContentsView; controlHost?: BrowserWindow; window?: BrowserWindow; nativeView?: WebContentsView; viewHost?: BrowserWindow; error?: string; favicon?: string; releaseDownloads?: () => void; options: PageOptions };
 /** Where the app's own files are, for a page's window. */
 type Shell = { preload: string; pageWindowUrl: string; controlText?: string };
 
@@ -97,6 +97,12 @@ export class Pages {
     contents.on("did-start-navigation", (details) => {
       if (details.isMainFrame && !details.isSameDocument) page.error = undefined;
     });
+    // The tab shows the site's icon. Only web and inline images: nothing that reaches the app's own files.
+    contents.on("did-navigate", () => { page.favicon = undefined; });
+    contents.on("page-favicon-updated", (_event, favicons) => {
+      page.favicon = favicons.find((url) => /^(https?:|data:image\/)/i.test(url));
+      changed();
+    });
     contents.on("did-fail-load", (_event, code, description, _url, isMainFrame) => {
       if (!isMainFrame || code === -3) return;      // -3: the load was aborted, by another one
       page.error = description;
@@ -107,7 +113,7 @@ export class Pages {
       if (!/^https?:/i.test(target) && target !== "about:blank" && !target.startsWith("blob:")) return { action: "deny" };
       // Preview pages must not hand their private artifact partition to a website.
       if (page.embedded) {
-        if (/^https?:/i.test(target)) this.open(target);
+        if (/^https?:/i.test(target)) this.open(target, { sessionId: page.options.sessionId });
         return { action: "deny" };
       }
       return {
@@ -257,7 +263,7 @@ document.body.focus();</script></body></html>`;
     this.setAgentControl(id, false);
     page.releaseDownloads?.();
     page.releaseDownloads = undefined;
-    page.options = {}; // New user popups/downloads no longer belong to the old connection.
+    page.options = { sessionId: page.options.sessionId }; // New user popups/downloads no longer belong to the old connection.
     this.changed(page);
   }
 
@@ -356,10 +362,11 @@ document.body.focus();</script></body></html>`;
     if (!this.host.isDestroyed()) this.host.send("xsb:event", event);
   }
 
-  private view({ id, contents, window, nativeView, agent, controlling, error }: Page): PageView {
+  private view({ id, options, contents, window, nativeView, agent, controlling, error, favicon }: Page): PageView {
     return {
       id,
       contentsId: contents.id,
+      sessionId: options.sessionId,
       url: contents.getURL(),
       title: contents.getTitle(),
       loading: contents.isLoading(),
@@ -371,6 +378,7 @@ document.body.focus();</script></body></html>`;
       agent,
       controlling: !!controlling,
       error,
+      favicon,
     };
   }
 }

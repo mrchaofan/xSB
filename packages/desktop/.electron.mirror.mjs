@@ -8,7 +8,7 @@ export default function electronMirrorConfig() {
   const version = devDependencies.electron;
   return {
     version,
-    mirror: `https://mimocode-cdn.xiaomimimo.com/mimocode/mimo_electron/v${version}-1106`,
+    mirror: `https://mimocode-cdn.xiaomimimo.com/mimocode/mimo_electron/v${version}_11241`,
     platforms: {
       darwin: ["arm64", "x64"],
       win32: ["ia32", "x64"],

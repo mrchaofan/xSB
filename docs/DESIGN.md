@@ -1,5 +1,7 @@
 # xsb 设计说明
 
+> 历史设计记录。当前版本的编排接口、会话和交付约定见[工作流指南](WORKFLOWS.md)。
+
 xsb 是一个多主 Agent 协作系统。每个 Agent 是一个长期存在、有自己工作区和记忆的"主 Agent"；用户可以和任何一个直接对话，Agent 之间也可以直接对话、派发任务。系统里没有任何角色的概念，"编剧 / 导演 / 灯光师"只是 `xsb agent add` 时写进去的名字、描述和说明文字。
 
 ## 1. 总体结构
@@ -9,7 +11,7 @@ xsb 是一个多主 Agent 协作系统。每个 Agent 是一个长期存在、�
  xsb chat / send / watch ───────────────────┤  ACP v2 + 扩展
                                             ▼
                                    ┌─────────────────┐
-                                   │    Hub 守护进程   │  .xsb/ 下的 jsonl + wal
+                                   │    Hub 守护进程   │  .xsb2/ 下的 jsonl + wal
                                    │  会话 · 邮箱 · 任务 │
                                    └──┬───────────▲──┘
                          ACP v2 + 扩展 │           │ MCP（协作工具 team）
@@ -46,7 +48,7 @@ xsb 是一个多主 Agent 协作系统。每个 Agent 是一个长期存在、�
 | [@xsb/adapter](../packages/adapter) | 三方 agent 的唯一封装：`AgentAdapter` → stdio 上的 ACP | 不补能力；缺的由 Hub 统一补 |
 | [@xsb/hub](../packages/hub) | 系统的全部行为 | 不实现 agent loop；不依赖 CLI |
 | [@xsb/desktop](../packages/desktop) | 窗口里的交互（[GUI.md](GUI.md)） | 与 CLI 相同；也不依赖 CLI |
-| [@xsb/cli](../packages/cli) | 终端上的交互 | 不读写 `.xsb/` 下的状态，一切经 ACP |
+| [@xsb/cli](../packages/cli) | 终端上的交互 | 不读写 `.xsb2/` 下的状态，一切经 ACP |
 
 约束：下层不引用上层。Hub 需要另起进程的两处（守护进程自身、给后端用的 MCP 桥）都是 `@xsb/hub` 自己的入口（`xsb-hub`、`xsb-mcp-bridge`），不经过 CLI。CLI 与 Hub 之间共享的数据形状（`AgentInfo`、`Task`）定义在 `@xsb/protocol`，因为它们是 ACP 扩展的一部分。
 
@@ -61,7 +63,7 @@ Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src
 | `kernel.ts` / `hooks.ts` / `task-graph.ts` / `ledger.ts` | 任务调度框架，与后端无关：任务、撤销与传染、汇合、收件箱、通知、台账，以及挂载一切横切行为的 Hooks（[KERNEL.md](KERNEL.md)） |
 | `delivery.ts` / `jobs.ts` / `audit.ts` | 挂在 Hooks 上的 Effector：投进会话、跑后台任务、审计 |
 | `roles.ts` | 角色：按名字查找（项目自己的优先，再找所用的预设团队），读取说明、MCP 配置和 skills |
-| `presets.ts` | 预设团队：应用自带的（`presets/<团队>/<语言>/`）和用户自己的（`~/.xsb/presets/`），组织相同；继承（`extends`）与叠加、冲突与问题、检查。写法见 [PRESETS.md](PRESETS.md) |
+| `presets.ts` | 预设团队：应用自带的（`presets/<团队>/<语言>/`）和用户自己的（`~/.xsb2_global/presets/`），组织相同；继承（`extends`）与叠加、冲突与问题、检查。写法见 [PRESETS.md](PRESETS.md) |
 | `assets.ts` | 资产库：登记、版本、查找 |
 | `mcp-client.ts` | 调用一次 stdio MCP server 的一个工具（后台任务用） |
 | `permissions.ts` | 把后端的权限请求转给人 |
@@ -69,19 +71,24 @@ Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src
 | `prompts.ts` | Hub 对模型说的所有文字 |
 | `state.ts` | 内存状态 = 对事件日志的折叠 |
 | `daemon.ts` | 后台进程：独占一个项目、启动、停止 |
-| `config.ts` / `paths.ts` | 两个配置文件 / `.xsb/` 的布局 |
+| `config.ts` / `paths.ts` | 两个配置文件 / `.xsb2/` 的布局 |
 
 ## 2. 接入后端
 
-### 2.1 配置：两个文件，没有共同字段
+### 2.1 配置：两个文件
 
 | 文件 | 字段 | 含义 |
 | - | - | - |
-| `~/.xsb/config.json`（这台机器） | `backends.<名称>.command` | 启动该后端的可执行文件，按 PATH 查找 |
+| `~/.xsb2_global/config.json`（这台机器） | `backends.<名称>.command` | 启动该后端的可执行文件，按 PATH 查找 |
 | | `backends.<名称>.args` | 启动参数 |
-| `<项目>/.xsb/config.json`（这个项目） | `defaultAgent` | 普通 ACP 客户端不指定时连到哪个 Agent |
+| | `plugins.<名称>.enabled` | 在这台机器上停用某个插件（见下） |
+| | `approvedPlugins` | 这台机器确认过的工作区插件的指纹 |
+| `<项目>/.xsb2/config.json`（这个项目） | `defaultAgent` | 普通 ACP 客户端不指定时连到哪个 Agent |
 | | `teams` | 项目使用的预设团队 |
 | | `language` | Agent 的工作语言（`en` 或 `zh-CN`），见 3.4 |
+| | `plugins.<名称>.enabled` | 在这个项目里停用某个插件 |
+
+**插件（工具服务，MCP）**（[plugins.ts](../packages/hub/src/plugins.ts)）：每个插件一个文件夹，三处位置结构相同——应用自带 `<应用>/plugins/<名称>/`（随代码放在 `dist/plugins`，开发与发布时相对位置一致，不在 asar 内）、这台机器 `~/.xsb2_global/plugins/<名称>/`、项目 `.xsb2/plugins/<名称>/`，后面的同名代替前面的。文件夹里的 `plugin.json` 写 `{ description?, command, args?, env? }`（stdio）或 `{ type: "http", url, headers? }`，字符串里可用 `${pluginDir}`、`${node}`（应用自带的 Node）、`${env:变量名}`；以 `./` 开头的命令在插件文件夹里。内置的 browser、media 也是这样的文件夹。添加插件就是放入文件夹，重启桌面端或调用 `_dev.xsb/tools/apply`；中枢在启动后端时读取，按名称排序，工具与提示词不变的会话不会被重启。项目插件随项目走，要在这台机器上确认（按项目路径、名称和清单内容算指纹）后才启动。文件夹缺失或被删、清单缺失或格式错误、配置文件损坏，都只让那个插件标为"无法使用"并跳过，不影响会话和桌面端。
 
 两个文件各有一个 `version`，只表示该文件自身的格式。后端只在全局定义，项目不能覆盖；Agent 用后端的**名称**引用它（`agents.jsonl` 的 `backend`）。两个文件都是每次使用时读取，修改后不必重启 Hub。
 
@@ -113,7 +120,7 @@ Hub ── Backend ──ACP──▶ claude-agent-acp / codex-acp / …        
 ```
 
 - **一个**通用封装，不按 agent 各写一个：[@xsb/adapter](../packages/adapter) 的 `serveAdapter` 在 stdio 上提供 ACP v2（插入回执、工作状态、工作中来的 prompt 扣住或插入、取消时以 -32800 回应未插入的），把请求映射到 `AgentAdapter`（`newSession`、`prompt`、`cancel`，可选的 `resume`、`steer`，和一组能力声明）。agent 之间的差别放在这个接口的实现和它的配置里。
-- 封装出来的程序在 `~/.xsb/config.json` 里登记为一个普通后端（`command`、`args`）。
+- 封装出来的程序在 `~/.xsb2_global/config.json` 里登记为一个普通后端（`command`、`args`）。
 - Hub 不知道它是封装。对 Hub 来说后端只有一个契约："一条在 stdio 上说 ACP 的命令"。官方入口和封装由同一份代码启动、调度、报错（[backend.ts](../packages/hub/src/backend.ts)），配置里也没有区分两者的字段。
 - 封装不补能力：适配器没声明的能力不通告，Hub 按 2.2 的表同样补齐。所以"补能力"的代码只有一份，对官方 agent 和三方 agent 都生效。
 
@@ -239,7 +246,7 @@ Hub 不知道读报错的人用什么语言，所以它不负责措辞。凡是�
 | | 是什么 | 由谁决定 |
 | - | - | - |
 | 界面语言 | 窗口、命令输出、报错用什么语言 | 每个客户端自己：桌面应用取系统语言，CLI 取终端的 `LC_ALL` / `LC_MESSAGES` / `LANG`。没有对应文字表的语言用英文 |
-| 工作语言 | Agent 对用户说话、互相派任务、写交付物用什么语言；预设团队读哪一份 | 项目：`.xsb/config.json` 的 `language` |
+| 工作语言 | Agent 对用户说话、互相派任务、写交付物用什么语言；预设团队读哪一份 | 项目：`.xsb2/config.json` 的 `language` |
 
 ```
 声明   clientCapabilities._meta["dev.xsb/language"] = "zh-CN"
@@ -340,7 +347,7 @@ job 不是新机制，它就是"执行者是工具而不是 Agent 的任务"（`
 
 角色形象、画风、场景、剧本、镜头表、成片，凡是团队要达成一致的东西，都是**资产**：一个有 id 的文件，id 为 `<类型>/<名称>`（如 `character/lin`）。
 
-- `put_asset` 把文件（或一段文本）**复制**进 `.xsb/assets/<类型>/<名称>/v<n>`，库里的文件不再被改写。对已有 id 再登记是新增一个版本，旧版本保留，可用 `character/lin@1` 引用。
+- `put_asset` 把文件（或一段文本）**复制**进 `.xsb2/assets/<类型>/<名称>/v<n>`，库里的文件不再被改写。对已有 id 再登记是新增一个版本，旧版本保留，可用 `character/lin@1` 引用。
 - 索引是事件日志 `assets.jsonl`，与其他状态一样重启后重建。
 - Agent 之间传 id，不传各自工作目录里的路径。
 
@@ -361,13 +368,13 @@ job 不是新机制，它就是"执行者是工具而不是 Agent 的任务"（`
 | - | - | - | - |
 | 系统 | Agent 之间怎么协作 | 协作工具、资产机制、通用约定 | `prompts.ts`，只此一份 |
 | 团队 | 这类工作怎么流转 | 每种资产由谁产出、依据什么 | 不存储：由各角色的契约推导（`Hub.team`） |
-| 角色 | 这个岗位贡献什么 | 产出契约、工具、职责 | `.xsb/roles/<角色>/` |
+| 角色 | 这个岗位贡献什么 | 产出契约、工具、职责 | `.xsb2/roles/<角色>/` |
 | Agent | 谁来做 | 后端、工作目录、记忆 | `AgentSpec` |
 
 角色是用户写的一个目录，Agent 是角色的实例（`xsb agent add gaffer1 --role gaffer`），多个 Agent 可以共用一个角色：
 
 ```
-.xsb/roles/<角色>/
+.xsb2/roles/<角色>/
   role.json                 { "description", "backend", "mcpServers": { 名称: { command, args, env } } }
   instructions.md           这个角色是谁、怎么工作
   skills/<名称>/SKILL.md     做某一类工作的步骤；旁边可以放它引用的文件
@@ -384,10 +391,10 @@ job 不是新机制，它就是"执行者是工具而不是 Agent 的任务"（`
 
 角色可以直接改文件，也可以经 `dev.xsb/roles` 扩展读写（`xsb role ...` 用的就是它）。`put` 里没给的字段保持不变；`mcpServers` 和 `skills` 给了就是全集，不在其中的被删除。有 Agent 在用的角色不能删除。`check` 启动角色的 MCP server 并列出各自的工具，配置错误在这里暴露，而不是等到模型"不会用工具"。
 
-**预设团队：项目快照与显式同步。** xsb 自带几支团队（`packages/hub/presets/<团队>/`：`team.json` 加上若干角色目录，格式与项目自己的完全相同）。首次使用时，团队角色和继承内容复制到 `.xsb/templates/<团队>/`，项目配置 `teams` 记录使用关系。角色按名字查找，只在 `loadRole` 一处：
+**预设团队：项目快照与显式同步。** xsb 自带几支团队（`packages/hub/presets/<团队>/`：`team.json` 加上若干角色目录，格式与项目自己的完全相同）。首次使用时，团队角色和继承内容复制到 `.xsb2/templates/<团队>/`，项目配置 `teams` 记录使用关系。角色按名字查找，只在 `loadRole` 一处：
 
-1. 项目自己的 `.xsb/roles/<角色>/`；
-2. 项目所用各团队在 `.xsb/templates/<团队>/roles/` 中的同名角色。
+1. 项目自己的 `.xsb2/roles/<角色>/`；
+2. 项目所用各团队在 `.xsb2/templates/<团队>/roles/` 中的同名角色。
 
 副本与覆盖版本的行为：
 
@@ -445,11 +452,11 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
 
 ## 7. 存储
 
-全部在 `.xsb/` 下，都是只追加的 JSONL 事件日志，内存状态是对日志的折叠（[state.ts](../packages/hub/src/state.ts)）：
+全部在 `.xsb2/` 下，都是只追加的 JSONL 事件日志，内存状态是对日志的折叠（[state.ts](../packages/hub/src/state.ts)）：
 
 ```
-.xsb/
-  config.json                       项目设置（机器设置在 ~/.xsb/config.json）
+.xsb2/
+  config.json                       项目设置（机器设置在 ~/.xsb2_global/config.json）
   agents.jsonl                      Agent 及其 workspace
   sessions.jsonl                    会话 ↔ 后端会话
   tasks.jsonl  gates.jsonl          任务、汇合门
@@ -497,9 +504,9 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
 ## 9. 已知取舍
 
 - Hub 对后端不提供 `fs/*` 和 `terminal/*`，Agent 用自己的文件和命令工具。
-- 项目的工作语言定下后不随客户端变化；换语言要手改 `.xsb/config.json`，并重启 Agent 才对已有会话生效。用户直接写的角色和说明不翻译，写的是什么语言就是什么语言。
+- 项目的工作语言定下后不随客户端变化；换语言要手改 `.xsb2/config.json`，并重启 Agent 才对已有会话生效。用户直接写的角色和说明不翻译，写的是什么语言就是什么语言。
 - CLI 的语言取自终端的环境变量，可能与系统语言不同（不少终端固定为 `en_US.UTF-8`）。
-- Agent 默认都在项目目录（`.xsb/` 的父目录）里工作，能直接用用户放在项目里的材料，也互相看得见对方的改动；同一目录里还有谁，写在各自的系统说明里。草稿和中间文件放在自己的 `agents/<id>/scratch/`，记忆、会话记录和资产由 Hub 经工具写进 `.xsb/`，与工作目录无关。对外 `session/new` 的 `cwd` 不改变 Agent 的工作目录。
+- Agent 默认都在项目目录（`.xsb2/` 的父目录）里工作，能直接用用户放在项目里的材料，也互相看得见对方的改动；同一目录里还有谁，写在各自的系统说明里。草稿和中间文件放在自己的 `agents/<id>/scratch/`，记忆、会话记录和资产由 Hub 经工具写进 `.xsb2/`，与工作目录无关。对外 `session/new` 的 `cwd` 不改变 Agent 的工作目录。
 - Hub 面向本机单用户：能连上 socket 的客户端可以操作任何会话。
 - 后端扣住的消息（codex）要等它当前的工作结束才进入；用户的话也一样，只是排在扣着的其余消息之前。
 - 工具隔离只到 xsb 这一层：角色决定给哪些 MCP server，但后端自带的 shell / 文件工具和用户级配置（如 `~/.claude` 里登记的 MCP）对同后端的所有 Agent 都生效。要真正隔离，生成能力必须只能经角色的 MCP server 到达。

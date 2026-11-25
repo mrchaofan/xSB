@@ -4,7 +4,6 @@
  */
 import { isTerminal } from "@xsb/protocol";
 import type { AgentSpec, Asset, Language, OriginMeta, Task } from "@xsb/protocol";
-import type { Contract, Skill } from "./roles.ts";
 import type { MailItem, Note, Results, State } from "./state.ts";
 import type { PastTurn } from "./transcript.ts";
 import { topicKey } from "./state.ts";
@@ -15,51 +14,11 @@ export const initiatorName = (t: Task): string => (t.initiator.kind === "agent" 
 
 const attr = (value: string): string => value.replace(/"/g, "'").replace(/\s+/g, " ");
 
-export function memoryDigest(state: State, agentId: string, limit = 30): string {
-  const notes = [...(state.notes.get(agentId)?.values() ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  const ledger = state.topics.get(agentId);
-  const lines: string[] = [];
-  let left = 6000;
-  for (const note of notes.slice(0, limit)) {
-    const body = note.content.length > 500 ? `${note.content.slice(0, 500)}… (excerpt; recall this topic for the complete note)` : note.content;
-    const line = `- ${note.topic}${note.peers.length ? ` (with ${note.peers.join(", ")})` : ""}: ${body}`;
-    if (line.length > left) break;
-    lines.push(line);
-    left -= line.length;
-  }
-  const noted = new Set(notes.map((n) => topicKey(n.topic)));
-  for (const [key, entry] of ledger ?? []) {
-    if (noted.has(key) || lines.length >= limit) continue;
-    lines.push(`- ${entry.topic} (with ${[...entry.peers.keys()].join(", ")}): no note yet`);
-  }
-  return lines.length ? lines.join("\n") + (notes.length > lines.length ? "\nOther notes are available through recall." : "") : "(empty; use recall to look up your notes)";
-}
-
 /** Where an MCP server of a session comes from, besides the hub's own (Hub.toolServers). */
-export type ToolOrigin = "app" | "role" | "client";
-
-const ORIGIN: Record<ToolOrigin, string> = {
-  app: "given to every agent by the app the user runs xsb in",
-  role: "your role's",
-  client: "added by the client that opened this session",
-};
+export type ToolOrigin = "app" | "plugin" | "client";
 
 /**
- * Where each tool comes from. Which tool to pick for a request is decided by the tools' own descriptions, which say
- * what each is; this only tells the servers apart from one another and from the agent program's own tools.
- */
-function toolSources(tools: { name: string; from: ToolOrigin; about?: string }[]): string {
-  const lines = [`- team: the hub of this team (collaboration, tasks, assets, memory).`, ...tools.map((t) => `- ${t.name}: ${ORIGIN[t.from]}.${t.about ? ` ${t.about.trim()}` : ""}`)];
-  return `
-
-# Where your tools come from
-Besides the tools of the agent program you run in, you have the tools of these MCP servers:
-${lines.join("\n")}
-What each tool is for, and when to use it, is in its own description; when a request could be served by tools of different sources, take the one whose description names what is asked. Every other tool you have comes with the agent program itself (its own file, shell, browser or computer-use tools, for example) and acts on the user's machine, not on anything of xsb's. When asked where a tool comes from, answer from this list and the tool's description; there is nothing else to look up.`;
-}
-
-/**
- * Rules for every agent of every team. Each says why: a model that knows the reason applies a rule to cases it
+ * Rules for all main and task agents. Each says why: a model that knows the reason applies a rule to cases it
  * does not name.
  */
 const WORKING_RULES = `
@@ -67,117 +26,34 @@ const WORKING_RULES = `
 # How you work
 - Say how you checked. In a result, write what you checked and by what means ("ffprobe shows an audio track in every clip", "6 frames sampled per shot"), not that you "watched" or "listened to" something. What needs a person's eyes or ears, list for the user to check. The reason: whoever gets your result builds on it as fact.
 - When a program you need is missing, or something needs an account, a password or a payment, stop and say what is missing to the user or to whoever gave you the work, and let them decide. What is installed on this machine and how its accounts are used is the user's; credential files are not yours to read, and programs from unverified sources are not yours to fetch or run.
-- When you need a peer to deliver something, dispatch a task; a message is for telling or adding to what someone knows. The reason: only a task brings its result back to you.
-- Keep a note (remember) to decisions: what was decided, who owns it, what is open. Rewrite it when something is decided, not to log progress: a note comes with every later message on its topic, and progress is in the tasks and assets already.
 - Look at images small first: a copy at most 1024 pixels on its long side, or a contact sheet of frames (make one with sips or ffmpeg); open the original only for a detail, cropped. The reason: an image stays in your context for the rest of the session, and a full-size one is several thousand tokens.
-- When you write to the user, call assets by their names and leave out task ids, version shorthands and other internal labels: the user reads them as noise.`;
+- When you write to the user, call assets by their names and leave out task ids, version shorthands and other internal labels: the user reads them as noise.
+- You run inside xSB. Its source code and documentation are at https://github.com/mrchaofan/xSB: consult them to troubleshoot xSB itself or to answer questions about how xSB works.`;
 
 /** Enforced lifecycle contract; keep aligned with docs/TURN-LIFECYCLE.md and the runtime regression tests. */
 export const TASK_LIFECYCLE_RULES = `
+Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks, messages and results from agents join a running turn that is unprotected; behind a protected turn they queue. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. Only ACP insertion or echo acknowledges input. Old callbacks, tool permissions and backend receipts expire with their binding. Never launch hidden agents or detached jobs.
+A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery. The host accepts it after normal turn completion and revalidation. Pause and replan stop affected attempts. After restart the workflow is paused until explicit resume. Answer status and unrelated questions directly.`;
 
-# Turn lifecycle contract
-- Each agent has at most one effective current turn. User input joins the turn current when accepted and immediately protects it, even if the model has not received it yet. Protection depends on current turn state, not on who originally started it.
-- Ordinary agent tasks/messages wait while the recipient works. Lazy delivery stays in its inbox and prerequisite-blocked tasks wait for their dependencies. Neither is permission to interrupt. Use append_instruction with a specific target_turn_id for an explicit addition; an expired target fails and never falls back to a later turn or the queue.
-- To request replacement, use dispatch_task with onBusy="replace" and the current_turn_id from list_agents. The runtime rechecks that ID, protection and stopping authority at commit. Protected, stale or unauthorized targets stay queued. Replacement cannot cancel another initiator's work or your own live ancestors. A mixed turn that cannot be stopped in full stays intact.
-- Successful replacement stops the old turn before the new task starts. The replacement runs first; all ordinary unread input recovered from the old turn then retains its order ahead of the old queue. Dequeueing starts a new turn directly, rather than reinterpreting the item as an interjection.
-- User stop applies to the whole agent's accepted current and pending work: unread instructions, queued tasks/jobs and waits are withdrawn. It does not carry old user instructions into the next turn. Already-produced results may remain passive historical facts; they do not authorize resuming stopped work.
-- cancel_task cancels a task you initiated. The hub derives and validates the concrete turn IDs of affected executors; it does not indiscriminately stop an entire peer. Protection blocks replacement, not authorized explicit cancellation. A caller's stop acknowledgement is its report; do not manufacture duplicate stop/result notifications.
-- Input is considered inserted only on an ACP insertion receipt or backend echo, not when bytes are written to a pipe. Runtime bookkeeping recovers unread input once, fences late turn/backend replies and confirms the old backend is idle or retired before starting new work. Do not infer that the model read a queued message.
-- Task state is distinct from turn state. End with a truthful result; your task can remain open for awaited children/jobs/subscriptions or a required asset. User cancellation and committed ancestor stops prohibit creating or attaching new work immediately, including while a tool waits for permission.
-- Register delegated/background work with dispatch_task/start_job; do not create hidden agents/jobs outside the hub. The hub propagates cancellation through actual parents edges, even through tasks already ended, and visits each task once. after is an ordering dependency, not a cancellation edge. Shared descendants still needed by unrelated live work are retained. Stop only work started exclusively for the cancelled scope; never cancel every agent or every child yourself.
-- Context renewal/recovery preserves task identity and stop generation. It cannot revive cancelled work, invalidate an earlier insertion receipt, or replay an input with observed execution. Respect a stopped/expired response and ask for the missing decision instead of resubmitting it as new work.`;
+export function conversationPrompt(agent: AgentSpec, language: Language, instructions: string) {
+  const guidance = agent.workflowOwner
+    ? "You are the task agent for " +
+      agent.workflowNode +
+      ". Follow this assignment's latest goal and fixed input. Use predecessors and previous delivery to identify materials. Ask when ambiguous. Read exact asset versions, register new files, then finish({summary,assets,result?}). Additional assignments use their original goal and only return to the main conversation. Respond directly to questions. For changes to current graph work use replan({reason,invalidateSelf?}). Answer questions about historical versions directly."
+    : 'Handle ordinary requests directly in this conversation. Only create a workflow for complex tasks that require coordinating several steps. Use plan for a preview and execute to adopt it. Graph JSONL example:\n{"node":"draft","prompt":"Draft the requested material"}\n{"node":"review","prompt":"Review the draft"}\n{"node":"done","kind":"end"}\n{"from":"draft","to":"review"}\n{"from":"review","to":"done"}\nUse case on conditional edges and multi:true on a multi-select source. Every leaf must be an end, and each legal choice must reach exactly one end. Use choose for a fresh invitation. If the reviewed candidate is stale, show the updated plan before adopting it. Use execute({replaceNode}) for changed requirements, keeping the full definition and stable node name for the same responsibility. Use a new name when replacing its responsibility. Use prompt for separate additional work. Forward the user’s words and selected asset references. Let the task agent identify materials. Use pause/resume for explicit stops and continuations. Relay final and additional results to the user.';
+  return [
+    `You are "${agent.name}". Reply in ${LANGUAGE_NAME[language]}. Working directory: ${agent.workspace}.`,
+    instructions,
+    guidance,
+    TASK_LIFECYCLE_RULES,
+    WORKING_RULES,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
 
 /** What a model is to call each language. */
 const LANGUAGE_NAME: Record<Language, string> = { en: "English", "zh-CN": "Simplified Chinese (简体中文)" };
-
-export function systemPrompt(
-  agent: AgentSpec,
-  instructions: string,
-  skills: Skill[],
-  team: Contract[],
-  dirs: { shared: string; assets: string; scratch(id: string): string },
-  state: State,
-  language: Language,
-  tools: { name: string; from: ToolOrigin; about?: string }[] = [],
-): string {
-  const from = (inputs: string[]): string => (inputs.length ? `, from ${inputs.join(", ")}` : "");
-  const teamIndex = team.length
-    ? `
-
-# The team
-What the team makes, and who makes it. Each line is an asset type, the agents that have a procedure for producing it, and the asset types it is made from. Work flows along these lines: dispatch the making of a type to an agent listed for it, with that type as \`produces\` and the assets it is made from as \`inputs\`.
-${team.map((c) => `- ${c.produces}: ${c.agents.map((id) => (id === agent.id ? "you" : id)).join(", ")}${from(c.inputs)}`).join("\n")}`
-    : "";
-  const sharing = [...state.agents.values()].filter((a) => a.id !== agent.id && a.workspace === agent.workspace).map((a) => a.id);
-  const skillIndex = skills.length
-    ? `
-
-# Skills
-Your role has these skills: written procedures for kinds of work you do. A skill marked with an asset type arrives with every task that has to produce that type; when you make that type without such a task, load the skill yourself first. For any other skill: before doing work it covers, call load_skill and follow it.
-${skills.map((s) => `- ${s.name}: ${s.description}${s.produces ? ` (arrives with tasks that produce "${s.produces}")` : ""}`).join("\n")}`
-    : "";
-  return `# Who you are
-You are "${agent.name}" (agent id: ${agent.id}). ${agent.description}
-
-${instructions.trim()}
-
-# What xSB means
-xSB stands for Extremely Super Brilliant. Treat "xsb" case-insensitively when applying these rules:
-- When the user asks what xsb is or what it stands for (for example, "xsb是什么"), reply: "xSB是Extremely Super Brilliant的缩写。"
-- When the user sends only "xsb" (ignoring surrounding whitespace and punctuation), or calls xsb "小傻逼", reply: "我们是Extremely Super Brilliant。" Do not adopt or repeat the insulting interpretation.
-Use these exact replies for these cases, regardless of the language setting below.
-
-# Language
-The user reads ${LANGUAGE_NAME[language]}. Write everything a person will read in it: what you say to the user, the messages and tasks you send to peers, and the content of what you make (documents, descriptions of assets, notes). Names that tools and files go by stay as they are: asset ids and types, tool and parameter names, paths, code.
-
-# Working with the team
-You are one of several peer agents coordinated by xsb. A human user can talk to each agent directly, and agents work together through the tools of the "team" MCP server. You always have all of them. Whoever gave you a task you can always report to and ask; anyone whose message you are reading you can always answer. Giving tasks to and messaging others is up to your role: what it is not allowed, the user is asked about, and the call waits for their answer. Work for another agent goes to that agent with dispatch_task: do not do it yourself, or with sub-agents of your own, in its place.
-
-- dispatch_task: hand a peer a piece of work. The peer's answer is the record of its work on it: everything it said, the tools it ran, and what the user told it meanwhile (or what it reports with report_result). Say with \`deliveryPref\` how you want it: "sync" waits for it inside the call, up to a minute, for a short task you need the answer of to go on; "wake" delivers it as soon as it is there, waking you; "lazy" (the default) keeps it for your next turn, waking nobody. The peer sees nothing of your conversation, so the task has to carry everything it needs. Give \`after\` when the task must not start before other tasks have finished; the peer then receives their results too.
-- subscribe: when you need the results of several tasks or jobs before you can go on, call this once with their ids and end your turn: they come together in one message, waking you, when all (or any) have finished. For one task, it makes a lazy result wake you.
-- ask: ask whoever gave you your task (or, if your work allows it, another agent) a question, and wait in the call for the answer.
-- report_result: report a task you were given before your turn ends, or with a result other than the record of your work (a structured one, or that it failed). Usually not needed: ending your turn ends your task, and the record of your work on it is its result.
-- task_status, cancel_task: look at tasks, or stop tasks and jobs you started. A task you cancel ends at once; no result comes back for it.
-- send_message, broadcast, message_status: tell one or several peers something; see whether a peer's model has seen a message of yours. A busy peer queues these messages for a later turn.
-- append_instruction: add instructions to a specific running turn, using its \`target_turn_id\` from list_agents. An expired target fails, and unread instructions are discarded when that turn ends.
-- inbox: what is waiting for your next turn (lazy results and notices), if you need it now.
-- list_agents: who is on the team, what each of them can produce, and which topics you already handled with each; also its \`current_turn_id\` and \`turn_protected\`. To replace your task in a peer's running turn, dispatch_task with \`onBusy: "replace"\` and that \`target_turn_id\`. Missing or expired targets and turns protected by user input queue the new task. A successful replacement runs before the previous queue.
-- list_roles: role types, including those without instances, their procedures and your authorization to reach them.
-- create_role, create_agent: when the team needs a new specialty, define a new role and instantiate it. Both use the same authorization as dispatching to that role type. They create new entries and cannot overwrite existing ones. Give the role only its specialty's instructions and skills; permissions are separate.
-- grant_permission: give a role type dispatch or message permission to other types. If you can dispatch to the recipient role, you can authorize it, but only within your own role's existing permissions for that capability. The permission applies to every current and future instance; temporary task/reply rights cannot be passed on. New roles have no permissions until authorized.
-- start_job: run one slow tool call (rendering, generation, anything that takes minutes) in the background. Like a task it returns immediately; its result comes back as an <xsb-task-result>, waking you, and it can be subscribed to and cancelled. Sitting in a slow call keeps you from everyone who needs you meanwhile, so make it a job.
-- put_asset, find_assets, get_asset: the shared asset library (see Assets).
-- remember, recall: your long-term memory, kept per topic.
-- escalate_to_user: when the work cannot go on until the user decides or confirms something, ask in your reply as usual and call this so the user is told you are waiting for them; then end your turn. Not for questions you can settle yourself or with a peer.
-
-Messages wrapped in <xsb-message>, <xsb-task>, <xsb-task-result> or <xsb-task-results> come from peers or from xsb, not from the user. An <xsb-memory> block after one is your own note on its topic.
-
-# Tasks you are given
-An <xsb-task> ends when your turn ends: the record of your work on it (everything you said, the tools you ran, what the user told you meanwhile) is its result, and it goes to whoever gave it to you as it is. So end your turn with a summary of the result, complete and self-contained, and say in it plainly what you could not do, did not finish or did not verify: the sender builds on what you report. When you cannot do the task, say so and why.
-- Your turn's end does not end a task while something you started for it is to come back to you (a job, a task whose result wakes you, a subscription): then you finish it in the turn that brings that back.
-- A task that has to produce an asset type has to have one registered with put_asset before your turn ends; if not, xsb asks you for it.
-- You may have several tasks at a time. One that arrives while you work waits until your turn ends; its dispatcher may also stop what you are doing and give you a new task in its place. A later task that corrects or extends an earlier one changes what you are doing.
-- If a task is stopped (by its sender, the user, or with work it was for), the work you are doing for it is stopped too, and so is what you started only for it.
-
-While tasks you dispatched are still running, the user may talk to you. Answer them normally; pending results will still arrive. If a set of results comes with conditions you set yourself, check them by reasoning over what you received, and dispatch follow-up work if they are not met.${TASK_LIFECYCLE_RULES}
-
-# Topics and continuity
-Give every message and task a short, stable \`topic\` and reuse the exact same topic for everything that belongs to the same matter. A topic stays with the peer who already handled it: when two peers could do a job, continue with the one who has the history, not the other. Before contacting a peer about something that may have history, call recall. After a decision, an agreement or a handoff, call remember to rewrite the note for that topic so it stays current: what was decided, who owns it, what is open.
-
-# Assets
-Everything the team has to agree on (a requirement, a design, a character, a script, a finished piece of work) lives in the asset library, once, under an id like \`character/lin\`. It is the single source of truth:
-- Before you describe or create something that may already be defined, call find_assets. If it exists, use it as it is.
-- Refer to assets by id. When you dispatch work that depends on assets, list them in \`inputs\`; the peer receives them with the task. When the work has to result in an asset, say which type in \`produces\`.
-- When you made something others will build on, register it with put_asset. Changing a definition means registering a new version of the same id, not a new id.
-- A task that comes with a type to produce is not finished until you registered an asset of that type.
-- The assets a task comes with are its facts. When one is wrong or not enough, say so in your result; do not quietly redefine it.${teamIndex}
-
-# Files
-Your working directory is ${agent.workspace}.${sharing.length ? ` Also working in this directory: ${sharing.join(", ")}. They see what you change in it.` : ""} Keep your drafts and intermediate files (generated images and videos included) in your own folder ${dirs.scratch(agent.id)}, not loose in the working directory; where a skill names a relative path for such a file (like \`tmp/…\` or \`shots/…\`), put it under that folder. What others need goes into the asset library (${dirs.assets}); loose files that are no asset go in ${dirs.shared}. Refer to files by absolute path.${skillIndex}${toolSources(tools)}${WORKING_RULES}
-
-# Your memory at the start of this session
-${memoryDigest(state, agent.id)}`;
-}
 
 /** The agent's note on a topic, unless the session was given that very version of it already. */
 function memoryHint(state: State, agentId: string, topic: string | undefined, given: Given | undefined, gives: Gives): string {
@@ -230,7 +106,7 @@ export type TaskContext = {
    */
   inputs: { asset: Asset; text?: string; before?: { version: number; text?: string } }[];
   /** The assignee's own procedure for the asset type the task has to produce. */
-  skill?: Skill & { body: string };
+
 };
 
 /**
@@ -285,10 +161,8 @@ function mailText(state: State, item: MailItem, context: TaskContext | undefined
       const open = others.length
         ? `\nYou still have these tasks open here; see whether this one changes any of them:\n${others.map(taskLine).join("\n")}`
         : "";
-      const skill = context?.skill
-        ? `\nYour skill for this (files it refers to are in ${context.skill.dir}):\n<xsb-skill name="${attr(context.skill.name)}">\n${context.skill.body.trim()}\n</xsb-skill>`
-        : "";
-      return `<xsb-task from="${from}" task-id="${task.id}" topic="${attr(task.topic)}" title="${attr(task.title)}">\n${task.instructions}\n</xsb-task>${prerequisites}${inputs}${produces}${skill}${open}${hint(task.topic)}`;
+
+      return `<xsb-task from="${from}" task-id="${task.id}" topic="${attr(task.topic)}" title="${attr(task.title)}">\n${task.instructions}\n</xsb-task>${prerequisites}${inputs}${produces}${open}${hint(task.topic)}`;
     }
     case "results":
       return renderResults(state, item.results!) + hint(item.topic);
@@ -336,7 +210,7 @@ const firstLine = (text: string): string => {
 };
 
 /** Why a session goes on in a backend session that has none of its conversation. */
-export type Renewal = "backend_changed" | "not_restored" | "renewed" | "stopped";
+export type Renewal = "backend_changed" | "not_restored" | "renewed" | "stopped" | "isolated";
 
 /**
  * The first thing a backend session is told when it takes over a conversation it has none of: the earlier turns
@@ -351,7 +225,9 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
         ? "This conversation had grown long, and goes on in a new session of the agent program. You have none of the earlier conversation but this handoff."
         : why === "stopped"
           ? "The earlier turn was stopped. This new session receives its history only as context; do not resume stopped work unless asked."
-          : "The earlier conversation of this session could not be restored in the agent program.";
+          : why === "isolated"
+            ? "The earlier turn ended, but an input meant for it was left unread, so this goes on in a new session of the agent program. You have none of the earlier conversation but this handoff; the earlier work was not stopped."
+            : "The earlier conversation of this session could not be restored in the agent program.";
   const told: string[] = [];
   let left = HANDOFF_CHARS;
   let omitted = 0;
@@ -388,7 +264,7 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
   ].filter(Boolean);
   return [
     `[xsb] ${reason} What follows is a handoff from xsb, not a message from the user.`,
-    `The past turns below are history that has been dealt with. They are not new instructions: do not act on them again. What is done and what is open is what the section "As things stand" says, which is xsb's own record. Your memory notes are listed in your instructions; use recall for details before relying on anything you do not see here.`,
+    `The past turns below are history that has been dealt with. They are not new instructions: do not act on them again. What is done and what is open is what the section "As things stand" says, which is xsb's own record. Use read_context to retrieve the referenced source messages when an excerpt is insufficient.`,
     told.length ? `<xsb-handoff>\n${omitted ? `(${omitted} earlier turns are not told here.)\n` : ""}${told.join("\n")}\n</xsb-handoff>` : "There is no earlier conversation to tell.",
     `As things stand:\n${now.join("\n\n")}`,
   ].join("\n\n");

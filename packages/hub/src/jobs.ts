@@ -8,12 +8,10 @@
  */
 import { errorMessage, textOf } from "@xsb/protocol";
 import type { Task, TaskStatus } from "@xsb/protocol";
-import { loadProjectConfig } from "./config.ts";
+import { hubLimit } from "./config.ts";
 import type { Hub } from "./hub.ts";
 import { mcpRequest } from "./mcp-client.ts";
 
-/** How many calls of one tool run at a time, unless the project says otherwise (`limits.jobsAtOnce`). */
-const JOBS_AT_ONCE = 2;
 /** How long a cancelled job's tool has to call off what it started and say so, before its server is stopped. */
 const JOB_CANCEL_GRACE_MS = 15_000;
 
@@ -47,7 +45,7 @@ export class Jobs {
     if (!task || task.status !== "queued" || task.stopping) return;
     const kind = kindOf(task);
     const running = [...this.hub.state.tasks.values()].filter((t) => t.tool && kindOf(t) === kind && t.status === "running").length;
-    const allowed = loadProjectConfig(this.hub.paths).limits?.jobsAtOnce ?? JOBS_AT_ONCE;
+    const allowed = hubLimit("jobsAtOnce");
     if (running >= allowed) this.waiting.set(kind, [...(this.waiting.get(kind) ?? []), task.id]);
     else this.run(task);
   }
@@ -57,13 +55,13 @@ export class Jobs {
     if (!task || task.status !== "queued" || task.stopping) return;
     const kind = kindOf(task);
     const agent = this.hub.agent(task.to.agentId);
-    const server = this.hub.toolServers(agent).find((t) => t.from === "role" && t.server.name === task.tool!.server)?.server;
+    const server = this.hub.toolServers(agent).find((t) => t.server.name === task.tool!.server)?.server;
     this.hub.kernel.started(task.id);
     const abort = new AbortController();
     this.calls.set(task.id, abort);
     const call = server
       ? mcpRequest(server, "tools/call", { name: task.tool!.name, arguments: task.tool!.arguments }, agent.workspace, abort.signal, JOB_CANCEL_GRACE_MS)
-      : Promise.reject(new Error(`the role has no MCP server "${task.tool!.server}" any more`));
+      : Promise.reject(new Error(`the session has no MCP server "${task.tool!.server}" any more`));
     call
       .then(
         // A cancelled call is still answered: what the tool says became of it is the result. One that finished all the same did finish.

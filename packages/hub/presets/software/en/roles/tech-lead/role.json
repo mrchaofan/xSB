@@ -1,9 +1,0 @@
-{
-  "description": "Runs delivery: breaks requirements into tasks for the right people, enforces the quality gates, and reports to the user",
-  "grants": [
-    "dispatch",
-    "message"
-  ],
-  "mcpServers": {},
-  "avatar": "person-steve-jobs"
-}

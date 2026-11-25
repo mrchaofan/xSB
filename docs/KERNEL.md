@@ -118,7 +118,7 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 
 - **裁决**：按注册顺序成链，每个处理者拿到前一个的结果，原样或改写后返回，或者否决；处理者抛异常也算否决（fail-closed）。否决写进审计。Kernel 自己的策略最先注册，后注册的看得到它的答案，可以推翻。
 - **观察**：在变化提交之后异步扇出，按发出的顺序，但不在发出它的那次调用之内。每个处理者都拿到每个事件；失败的重试两次，仍失败就记为死信（写进审计）；一个失败不影响其他。
-- **内置 Hooks**：NotificationHook（第 7 节）、CascadeHook（第 9 节）、ResultExtractionHook 与 QualityGateHook（第 4 节）、LedgerHook（第 10 节）、AuditHook（`.xsb/audit.jsonl`）、UserFeedHook（推给客户端）。
+- **内置 Hooks**：NotificationHook（第 7 节）、CascadeHook（第 9 节）、ResultExtractionHook 与 QualityGateHook（第 4 节）、LedgerHook（第 10 节）、AuditHook（`.xsb2/audit.jsonl`）、UserFeedHook（推给客户端）。
 - **通知在事务里，投递在事务外**：谁被通知在 `finish` 的同一个 WAL 事务里写定，崩溃不会丢；怎么投递是提交之后的裁决与 Effector。
 
 ## 6. 唯一的投递管线：被通知 ≠ 调用后端
@@ -143,9 +143,11 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 | `wake` | 一轮：收件方空闲就唤醒它，在工作就排在这一轮之后 | 一次投递 |
 | `lazy` | 任务结果的默认档：随下一轮附上 | 零 |
 
-**只有用户能插话。** Agent 发来的任何东西（任务、聊天、结果）都不插进别人正在进行的工作，哪怕它正是这份工作的派发方：对方忙就排队，排队期间对方的模型看不到它。派发方要改变对方正在做的事，只能停止它：
+**插话看当前 turn 属于谁。** 用户开启或插话过的 turn 受保护，属于用户；其余属于 Agent。
 
-- **排队（默认）**：`dispatch_task` 的 `onBusy` 为 `queue`。对方正在做派发方的另一件事时，新任务排在后面，两件都会做完；回执里写明对方正在做哪件、新任务排在其后，以及要取代时该怎么做。
+- **用户**：对方忙时总是插话，并立即把这一轮提升为用户级（受保护）。
+- **Agent**：对方这一轮属于 Agent 时，任务、聊天和结果都插进这一轮，不改变保护状态（`lazy` 的仍留在收件箱）；这一轮属于用户时排队，排队期间对方的模型看不到它。路由时判定一次，插入提交点（`LiveSession.steer`）再判定一次，期间用户插话了就改为排队。
+- **显式改派**：派发方要停止对方正在做的事，而不是追加，才用下面的改派。
 - **显式改派**：`onBusy: "replace"` 并携带 `list_agents` 返回的 `current_turn_id` 作为 `target_turn_id`。目标已切换、缺少 ID 或当前 turn 已受用户插话保护时，新任务排队。这个会话里正在做的、由同一派发方发起的任务被停下（`Kernel.replace`），结束原因记为 `superseded`，停止方是派发方，所以照第 7 节不通知它；为它而起的活照常沿任务图传染（第 9 节）；对方停下后接着做新任务。派发方自己手上的工作若正是为那件任务而起的，那件不取代，否则会连自己一起停掉。
 
 改派由派发方声明，中枢不从"是不是同一个发起方"去推断：同一派发方连派两件事，可能是想换一件，也可能是想两件都做，猜错就会误杀。
@@ -169,7 +171,7 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 | 来源 | 写在哪 | 说明 |
 | - | - | - |
 | 角色定义的默认值 | `role.json` 的 `grants: ["dispatch", "message"]` | 能联系所有人；预设团队里导演、技术负责人有 |
-| 项目配置 | `.xsb/config.json` 的 `permissions: { "<角色>": { "dispatch": ["<角色>" 或 "*"], "message": [...] } }` | 用户运行时选"始终允许"时写入 |
+| 项目配置 | `.xsb2/config.json` 的 `permissions: { "<角色>": { "dispatch": ["<角色>" 或 "*"], "message": [...] } }` | 用户运行时选"始终允许"时写入 |
 
 **没有这些权限时，运行时问用户**：`dispatch_task`、`send_message`、`broadcast`、`ask`（问发起方以外的人）调用时，中枢经权限请求（`session/request_permission`）问用户，选项是"允许一次 / 始终允许 / 拒绝"；调用一直等到用户回答。"始终允许"写进项目配置，之后不再问。拒绝时调用返回原因。
 
@@ -201,7 +203,7 @@ discarded_unseen ◄────────────────────
 inboxed ──随下一轮──► inserted …
 ```
 
-信号都是 v2 的：`inserted` 是 `session/prompt` 的应答，`discarded_unseen` 是 -32800 或停下时还在中枢里，`seen` 是之后后端报告了任何输出、或这一轮正常结束。台账只向前走，写在 `.xsb/ledger.jsonl`，推给观察者（`_dev.xsb/messages/update`）；Agent 用 `message_status` 查自己发出的消息，`task_status` 里也有承接者是否已看到任务。用户的消息不会是 `queued`（规则 0）。
+信号都是 v2 的：`inserted` 是 `session/prompt` 的应答，`discarded_unseen` 是 -32800 或停下时还在中枢里，`seen` 是之后后端报告了任何输出、或这一轮正常结束。台账只向前走，写在 `.xsb2/ledger.jsonl`，推给观察者（`_dev.xsb/messages/update`）；Agent 用 `message_status` 查自己发出的消息，`task_status` 里也有承接者是否已看到任务。用户的消息不会是 `queued`（规则 0）。
 
 ## 11. 与方案不同之处
 
@@ -227,7 +229,7 @@ inboxed ──随下一轮──► inserted …
 | initiator、stopper 可审计；统一收口；停止方即发起方时不通知 | `Task.initiator`、`Task.ended`、`finish`；`audit.jsonl` | kernel 1、e2e 14、34、35 |
 | 通知完成与调用后端解耦，只有一条投递管线 | 写进收件箱即 `notify.delivered`；去向由 `message.pre_deliver` 决定 | kernel 4、e2e 2、35 |
 | 用户的消息不会 `queued` | 规则 0；用户的输入进会话队列的最前 | kernel 5、e2e 20 |
-| 只有用户能插话；Agent 之间要么排队、要么由派发方显式改派 | `deliveryPolicy` 只让用户的话和中枢的话插话；`Kernel.replace` | kernel 5、5b、e2e 7、33 |
+| 用户总能插话并保护这一轮；Agent 只插进未受保护的一轮，否则排队；停止对方工作要显式改派 | `deliveryPolicy`、`LiveSession.steer`、`Kernel.replace` | kernel 5、5b、turns（同伴归入 Agent 的 turn） |
 | 停止只沿起因边传染，根因唯一；确认后落账 | `doom`；`ended.cause`；等 `acp.turn_ended` | kernel 3、e2e 14、32、34 |
 | Kernel 零 ACP/UI 依赖 | kernel.ts 只引用 protocol 与 store 的类型、hooks、ledger、state、task-graph、prompts（措辞）、util | kernel.test.ts |
 | 后端无感知 | 后端只收到标准的 v2 请求 | 全部 e2e（mock 后端说 v2） |

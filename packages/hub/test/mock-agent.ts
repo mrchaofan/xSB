@@ -4,7 +4,7 @@
  *   !say <text>           emit text (one agent message, until the next tool call)
  *   !sleep <ms>           wait (a cancel ends the work here)
  *   !busy <ms>            wait, and finish waiting even if cancelled (a tool call that has to run out)
- *   !call <tool> <json>   call a tool of the "team" MCP server and emit its result;
+ *   !call <tool> <json>   call a tool of the "workflow" MCP server and emit its result;
  *                         "$last" in the JSON is the id of the task or job started last,
  *                         "$task" the id of the <xsb-task> it stands in, or else of the one
  *                         the session was given last (left as it is without one: it may be
@@ -58,6 +58,7 @@ type Session = {
   /** The agent message being written, until a tool call. */
   message?: string;
   model?: string;
+  effort?: string;
 };
 
 const conn = new Connection(process.stdin, process.stdout, "mock");
@@ -70,7 +71,7 @@ let rejectedContext = false;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
   const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], steered: [], images: [] };
-  const server = mcpServers.find((s) => s.name === "team");
+  const server = mcpServers.find((s) => s.name === "workflow");
   if (server) {
     const env = Object.fromEntries(server.env.map((e: any) => [e.name, e.value]));
     const proc = spawn(server.command, server.args, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "inherit"] });
@@ -92,7 +93,7 @@ const say = (session: Session, text: string): void => {
 async function tool(session: Session, name: string, args: unknown): Promise<string> {
   const toolCallId = `call_${++counter}`;
   session.message = undefined;
-  update(session, { sessionUpdate: "tool_call_update", toolCallId, title: name, name: `mcp__team__${name}`, status: "in_progress" });
+  update(session, { sessionUpdate: "tool_call_update", toolCallId, title: name, name: `mcp__workflow__${name}`, status: "in_progress" });
   const result = await session.mcp!.request("tools/call", { name, arguments: args });
   update(session, { sessionUpdate: "tool_call_update", toolCallId, status: result.isError ? "failed" : "completed" });
   return result.content[0].text;
@@ -239,19 +240,32 @@ conn.onRequest("_session/steering", (p) => {
   session.steered.push(p.prompt);
   return { outcome: "injected" };
 });
-conn.onRequest("session/new", async (p) => ({ sessionId: (await open(`mock_${process.pid}_${++counter}`, p.mcpServers)).id }));
+function config(session: Session) {
+  const values = (values: string[]) => values.map(value => ({ value, name: value }));
+  const model = session.model ?? "default";
+  return { configOptions: [
+    { configId: "model", category: "model", type: "select", name: "Model", currentValue: model, options: values([...new Set(["default", "studio", model])]) },
+    { configId: "effort", category: "thought_level", type: "select", name: "Reasoning", currentValue: session.effort ?? "medium", options: values(["low", "medium", "high"]) },
+  ] };
+}
+conn.onRequest("session/new", async (p) => {
+  const session = await open("mock_" + process.pid + "_" + ++counter, p.mcpServers);
+  return { sessionId: session.id, ...config(session) };
+});
 conn.onRequest("session/set_config_option", (p) => {
   const session = sessions.get(p.sessionId);
   if (!session) throw RpcError.notFound("session");
-  if (p.configId !== "model") throw RpcError.invalidParams("unknown config");
-  session.model = p.value;
-  return { configOptions: [{ id: "model", type: "select", name: "Model", currentValue: p.value, options: [{ value: p.value, name: p.value }] }] };
+  if (p.type !== "id") throw RpcError.invalidParams("ACP v2 select requires type=id");
+  if (p.configId === "model") session.model = p.value;
+  else if (p.configId === "effort" && ["low", "medium", "high"].includes(p.value)) session.effort = p.value;
+  else throw RpcError.invalidParams("unknown config");
+  return config(session);
 });
 conn.onRequest("session/resume", async (p) => {
   if (flags.includes("--no-resume")) throw new RpcError(-32002, "no such session");
   await open(p.sessionId, p.mcpServers);
   update(sessions.get(p.sessionId)!, { sessionUpdate: "state_update", state: "idle" });
-  return {};
+  return config(sessions.get(p.sessionId)!);
 });
 conn.onRequest("session/prompt", (p) => {
   const session = sessions.get(p.sessionId);

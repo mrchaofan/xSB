@@ -18,33 +18,32 @@
  */
 import fs from "node:fs";
 import net from "node:net";
-import { AGENT_ID, Agents, Connection, Ledger, Roles, RpcError, Tasks, failure } from "@xsb/protocol";
-import type { AgentInfo, AgentSpec, McpServer, RoleDetail, RoleInput } from "@xsb/protocol";
+import { Agents, Connection, Ledger, RpcError, Tasks, failure } from "@xsb/protocol";
+import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
+import type { Op } from "@xsb/store";
+import { Workflows } from "./workflows.ts";
 import { Store } from "@xsb/store";
 import { Client } from "./acp-server.ts";
 import { Assets } from "./assets.ts";
-import { migratePermissions } from "./capabilities.ts";
 import { auditHook, auditReports } from "./audit.ts";
 import { BackendPool } from "./backends.ts";
-import { DEFAULT_BACKEND, loadProjectConfig, migrateProjectConfig, projectLanguage } from "./config.ts";
+import { DEFAULT_BACKEND, projectLanguage } from "./config.ts";
+import { contextPolicy } from "./context.ts";
 
 import { Delivery } from "./delivery.ts";
 import { Hooks } from "./hooks.ts";
 import { Jobs } from "./jobs.ts";
 import { Kernel } from "./kernel.ts";
 import type { KernelHooks } from "./kernel.ts";
-import { commonServers, serveMcp } from "./mcp.ts";
+import { serveMcp } from "./mcp.ts";
+import { activePlugins, toolsKey } from "./plugins.ts";
 import { contextServer } from "./tool-context.ts";
 import type { ContextOwner } from "./tool-context.ts";
 import { randomBytes } from "node:crypto";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
-import { systemPrompt } from "./prompts.ts";
+import { conversationPrompt } from "./prompts.ts";
 import type { ToolOrigin } from "./prompts.ts";
-import { catalog } from "./presets.ts";
-import { copyTemplate } from "./templates.ts";
-import { describeRole, loadRole, saveRole } from "./roles.ts";
-import type { Contract, Role } from "./roles.ts";
 import { LiveSession } from "./session.ts";
 import type { MailItem, SessionRec } from "./state.ts";
 import { State, ops, topicKey } from "./state.ts";
@@ -61,6 +60,7 @@ export class Hub {
   readonly jobs: Jobs;
   readonly permissions: Permissions;
   readonly assets: Assets;
+  readonly workflows: Workflows;
   /** Set by `shutdown`: turns that die with it stay unacknowledged and run again on the next start. */
   stopping = false;
 
@@ -83,8 +83,13 @@ export class Hub {
     // UserFeedHook: what the clients are shown of tasks and of the ledger.
     hooks.on("task.changed", (task) => this.broadcast(Tasks.update, { task }));
     hooks.on("message.ledger", (entry) => this.broadcast(Ledger.update, { entry }));
+    // A conversation that was working when its tool servers changed takes them when that work is over.
+    hooks.on("acp.turn_ended", ({ agentId }) => {
+      if (this.toolsPending.has(agentId)) setImmediate(() => this.retool(agentId));
+    });
     this.permissions = new Permissions(this);
     this.assets = new Assets(this);
+    this.workflows = new Workflows(this);
     // One conversation per agent (docs/DESIGN.md): sessions a client once opened besides it are history, not live.
     for (const rec of this.state.sessions.values()) if (rec.main) this.track(new LiveSession(this, rec));
   }
@@ -99,14 +104,7 @@ export class Hub {
     fs.mkdirSync(this.paths.run, { recursive: true });
     fs.mkdirSync(this.paths.shared, { recursive: true });
     fs.mkdirSync(this.paths.assets, { recursive: true });
-    const migrated = migrateProjectConfig(this.paths);
-    if (migrated) this.log(migrated);
-    const sources = catalog(projectLanguage(this.paths));
-    for (const id of loadProjectConfig(this.paths).teams ?? []) {
-      try { copyTemplate(this.paths, sources, id); }
-      catch (e) { this.log(`template snapshot ${id}: ${(e as Error).message}`); }
-    }
-    migratePermissions(this);
+    this.workflows.restart();
     await this.listen(this.paths.socket("acp"), (socket) => {
       const client = new Client(this, new Connection(socket, socket, "client"));
       this.clients.add(client);
@@ -116,7 +114,12 @@ export class Hub {
       const conn = new Connection(socket, socket, "mcp");
       this.mcpClients.add(conn);
       void conn.closed.then(() => this.mcpClients.delete(conn));
-      serveMcp(this, conn, (token) => this.bridgeTokens.get(token), (token) => this.contextTokens.get(token));
+      serveMcp(
+        this,
+        conn,
+        (token) => this.bridgeTokens.get(token),
+        (token) => this.contextTokens.get(token),
+      );
     });
     // Whoever stopped the last hub may have said that its unfinished work is not to be taken up again.
     if (fs.existsSync(this.paths.abandonMark)) {
@@ -125,7 +128,8 @@ export class Hub {
       this.log(`gave up what the last stop left unfinished, as asked: ${mail} mail items, ${tasks} tasks`);
     }
     const pending = this.state.mail.size;
-    this.kernel.resume();
+    // What a conversation had taken in when xsb stopped is not given again: its turn was cut short, and it says so.
+    for (const [sessionId, items] of this.kernel.resume()) this.live.get(sessionId)?.interrupted(items.length);
     this.log(`hub up: ${this.state.agents.size} agents, ${pending} mail items pending`);
   }
 
@@ -143,12 +147,14 @@ export class Hub {
   }
 
   async shutdown(): Promise<void> {
+    // From here no turn starts and no backend is started (LiveSession.pump, BackendPool.for): what waits, waits for
+    // the next start.
     this.stopping = true;
     this.contextTokens.clear();
     for (const conn of this.mcpClients) conn.close();
     for (const server of this.servers) server.close();
     for (const client of this.clients) client.conn.close();
-    await this.backends.stopAll();
+    await this.backends.close();
     fs.rmSync(this.paths.socket("acp"), { force: true });
     fs.rmSync(this.paths.socket("mcp"), { force: true });
   }
@@ -162,52 +168,18 @@ export class Hub {
   }
 
   agentInfo(agent: AgentSpec): AgentInfo {
-    const busy = [...this.live.values()].some((s) => s.agentId === agent.id && s.busy);
-    const state = this.permissions.waitingOn(agent.id) ? "requires_action" : busy ? "running" : "idle";
-    const turn = this.live.get(this.state.mainSession(agent.id)?.id ?? "")?.current;
-    return { ...agent, state, mainSessionId: this.state.mainSession(agent.id)?.id, ...(turn ? { currentTurnId: turn.id, turnProtected: turn.protected } : {}) };
-  }
-
-  /** The agent a client reaches when it names none. Read on every use, like the backend table. */
-  defaultAgent(): string | undefined {
-    return loadProjectConfig(this.paths).defaultAgent ?? this.state.agents.keys().next().value;
-  }
-
-  putAgent(input: Partial<AgentSpec> & { id: string }, instructions?: string): AgentInfo {
-    if (!AGENT_ID.test(input.id ?? "")) throw failure("agent_id_invalid");
-    if (input.avatar !== undefined && (typeof input.avatar !== "string" || (input.avatar !== "" && !/^[a-z][a-z0-9-]{0,63}$/.test(input.avatar)))) throw RpcError.invalidParams("avatar must be a bundled avatar ID or empty");
-    const prior = this.state.agents.get(input.id);
-    const roleName = input.role ?? prior?.role;
-    const role = roleName ? loadRole(this.paths, roleName) : undefined; // refuse a role that does not exist
-    const agent: AgentSpec = {
-      id: input.id,
-      avatar: input.avatar ?? prior?.avatar,
-      name: input.name ?? prior?.name ?? input.id,
-      description: input.description ?? prior?.description ?? role?.description ?? "",
-      backend: input.backend ?? prior?.backend ?? role?.backend ?? DEFAULT_BACKEND,
-      workspace: input.workspace ?? prior?.workspace ?? this.paths.project,
-      ...(roleName ? { role: roleName } : {}),
-      createdAt: prior?.createdAt ?? now(),
+    const rec = this.state.mainSession(agent.id);
+    const session = rec && this.live.get(rec.id);
+    const state = this.permissions.waitingOn(agent.id) ? "requires_action" : session?.busy ? "running" : "idle";
+    const turn = session?.current;
+    return {
+      ...agent,
+      ...(rec?.title && !agent.workflowOwner && { name: rec.title }),
+      state,
+      mainSessionId: rec?.id,
+      ...(turn ? { currentTurnId: turn.id, turnProtected: turn.protected } : {}),
+      ...(agent.workflowOwner && this.workflows.retired(agent.id) ? { retired: true } : {}),
     };
-    this.backends.spec(agent); // refuse a backend this machine does not have
-    fs.mkdirSync(agent.workspace, { recursive: true });
-    fs.mkdirSync(this.paths.scratch(agent.id), { recursive: true });
-    if (instructions !== undefined || !fs.existsSync(this.paths.instructions(agent.id))) {
-      fs.writeFileSync(this.paths.instructions(agent.id), instructions ?? "");
-    }
-    this.state.commit([ops.putAgent(agent)]);
-    // A changed backend, workspace or role needs a new process.
-    const restart = prior && (prior.backend !== agent.backend || prior.workspace !== agent.workspace || prior.role !== agent.role);
-    if (restart) this.backends.stop(agent.id);
-    this.agentChanged(agent.id);
-    return this.agentInfo(agent);
-  }
-
-  removeAgent(id: string): void {
-    this.agent(id);
-    this.backends.stop(id);
-    this.state.commit([ops.removeAgent(id)]);
-    this.broadcast(Agents.removed, { id });
   }
 
   /** The agent's own instructions, as its file says right now. */
@@ -216,63 +188,113 @@ export class Hub {
     return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
   }
 
-  /** The agent's role as its files say right now, if it has one. */
-  role(agent: AgentSpec): Role | undefined {
-    return agent.role ? loadRole(this.paths, agent.role) : undefined;
-  }
-
-  /** Shared role mutation for human ACP clients and the team's dynamic-role tools. */
-  putRole(input: RoleInput): RoleDetail {
-    saveRole(this.paths, input);
-    const role = this.roleDetail(input.name);
-    this.broadcast(Roles.update, { role });
-    return role;
-  }
-
-  roleDetail(name: string): RoleDetail {
-    return { ...describeRole(loadRole(this.paths, name)), agents: [...this.state.agents.values()].filter((a) => a.role === name).map((a) => a.id) };
-  }
-
   /**
-   * The team: what its agents can make, as their roles declare it right now.
-   * Nothing stores it; it is the contracts of the roles that have agents.
+   * The tool servers a conversation gets besides the hub's own: the plugins (plugins.ts, read from their folders on
+   * every use) and those of the client that made it. A name taken earlier is not repeated.
    */
-  team(): Contract[] {
-    const agents = [...this.state.agents.values()];
-    return [...new Set(agents.flatMap((a) => a.role ?? []))].flatMap((name) => {
-      const members = agents.filter((a) => a.role === name).map((a) => a.id);
-      return loadRole(this.paths, name)
-        .skills.filter((s) => s.produces)
-        .map((s) => ({ produces: s.produces!, inputs: s.inputs, agents: members }));
-    });
-  }
-
-  /**
-   * The MCP servers a session of the agent gets besides the hub's own: those every agent has (what the client that
-   * started the hub gives them, such as the desktop app's browser), the role's (one of the same name takes the place
-   * of a common one), and those the client that created the session asked for. Each with where it comes from.
-   */
-  toolServers(agent: AgentSpec, clientMcp: McpServer[] = []): { server: McpServer; from: ToolOrigin; about?: string }[] {
-    const role = this.role(agent);
-    const own = role?.mcpServers ?? [];
-    const common = commonServers().filter(({ server }) => !own.some((s) => s.name === server.name));
-    return [
-      ...common.map(({ server, about }) => ({ server, from: "app" as const, about })),
-      ...own.map((server) => ({ server, from: "role" as const, about: role?.servers[server.name]?.about })),
+  toolServers(
+    agent: AgentSpec,
+    clientMcp: McpServer[] = [],
+  ): { server: McpServer; from: ToolOrigin; about?: string }[] {
+    const all = [
+      ...activePlugins(this.paths).map((t) => ({ ...t, from: "plugin" as const })),
       ...clientMcp.map((server) => ({ server, from: "client" as const })),
     ];
+    const seen = new Set<string>();
+    return all.filter((t) => !seen.has(t.server.name) && seen.add(t.server.name));
   }
 
-  /** The role's instructions, then the agent's own; and where the tools a session of it gets come from. */
+  /** The context limits of an agent's backend (config.ts, `BACKEND_LIMITS`): set per backend on this machine. */
+  policy(agentId: string) {
+    return contextPolicy(this.agent(agentId).backend);
+  }
+
+  /** What a conversation's backend session is started with that a plugin change can alter: its tools and prompt. */
+  toolsKeyFor(session: LiveSession): string {
+    const agent = this.agent(session.agentId);
+    return toolsKey(this.toolServers(agent, session.clientMcp)) + this.systemPromptFor(agent, session.clientMcp);
+  }
+
+  /** Agents whose conversation was working when the tool servers changed (`applyTools`). */
+  private toolsPending = new Set<string>();
+
+  /**
+   * The plugins may have changed: a conversation whose backend runs with other tools or another prompt than it would
+   * now takes them by resuming its backend session in a new process, which keeps what the model saw. An idle one
+   * now, a working one once its work is over; one with nothing changed is left alone (its prompt cache with it).
+   * Returns how many wait for their work to end.
+   */
+  applyTools(): number {
+    for (const session of this.live.values()) {
+      if (!session.rec.main || !this.state.agents.has(session.agentId) || !session.toolsKey) continue;
+      if (session.toolsKey === this.toolsKeyFor(session)) continue;
+      this.toolsPending.add(session.agentId);
+      this.retool(session.agentId);
+    }
+    return this.toolsPending.size;
+  }
+
+  private retool(agentId: string): void {
+    const rec = this.state.mainSession(agentId);
+    const session = rec && this.live.get(rec.id);
+    if (!session) return void this.toolsPending.delete(agentId);
+    if (session.busy) return;
+    this.toolsPending.delete(agentId);
+    this.backends.stop(agentId);
+  }
+
   systemPromptFor(agent: AgentSpec, clientMcp: McpServer[] = []): string {
-    const role = this.role(agent);
-    const instructions = [role?.instructions, this.instructions(agent.id)].filter((t) => t?.trim()).join("\n\n");
-    const tools = this.toolServers(agent, clientMcp).map(({ server, from, about }) => ({ name: server.name, from, about }));
-    return systemPrompt(agent, instructions, role?.skills ?? [], this.team(), this.paths, this.state, projectLanguage(this.paths), tools);
+    const tools = this.toolServers(agent, clientMcp)
+      .map((t) => [t.server.name, t.about].filter(Boolean).join(" — "))
+      .join("\n");
+    return conversationPrompt(
+      agent,
+      projectLanguage(this.paths),
+      [this.instructions(agent.id), tools].filter(Boolean).join("\n"),
+    );
+  }
+
+  createConversation(
+    backend = DEFAULT_BACKEND,
+    title?: string,
+    task?: { owner: string; node: string; bind(agentId: string, sessionId: string): Op },
+    clientMcp?: McpServer[],
+  ): LiveSession {
+    const id = newId(task ? "node" : "chat"),
+      sessionId = newId("ses");
+    const spec: AgentSpec = {
+      id,
+      conversation: true,
+      name: title?.trim() || (projectLanguage(this.paths) === "zh-CN" ? "新会话" : "New session"),
+      description: "",
+      backend,
+      workspace: this.paths.project,
+      createdAt: now(),
+      ...(task && { workflowOwner: task.owner, workflowNode: task.node }),
+    };
+    this.backends.spec(spec);
+    const rec: SessionRec = {
+      id: sessionId,
+      agentId: id,
+      main: true,
+      clientMcp: task ? this.session(task.owner).clientMcp : clientMcp,
+      title: title?.trim() || undefined,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    this.state.commit([ops.putAgent(spec), ops.putSession(rec), ...(task ? [task.bind(id, sessionId)] : [])]);
+    const session = this.track(new LiveSession(this, rec));
+    this.agentChanged(id);
+    return session;
   }
 
   agentChanged(agentId: string): void {
     const agent = this.state.agents.get(agentId);
+    if (
+      agent?.workflowOwner &&
+      this.workflows.read(agent.workflowOwner).instances[agent.workflowNode!]?.agentId !== agent.id
+    )
+      return;
     if (agent) this.broadcast(Agents.update, { agent: this.agentInfo(agent) });
   }
 
@@ -314,7 +336,8 @@ export class Hub {
 
   /** Revoke an unresponsive backend's existing tool bridges before accepting a new run. */
   rotateBridge(session: LiveSession): void {
-    for (const [token, owner] of this.contextTokens) if (owner.session === session) this.contextTokens.delete(token);
+    for (const [token, owner] of this.contextTokens)
+      if (owner.session === session) this.contextTokens.delete(token);
     this.bridgeTokens.delete(session.bridgeToken);
     session.bridgeToken = newId("tok");
     this.bridgeTokens.set(session.bridgeToken, session);
@@ -323,7 +346,9 @@ export class Hub {
   /** Every stdio tool receives read-only runtime identity, never messaging rights. */
   withToolContext(server: McpServer, session: LiveSession): McpServer {
     if (server.type !== "stdio") return server;
-    for (const [token, owner] of this.contextTokens) if (owner.session === session && owner.server === server.name) return contextServer(server, this.paths.socket("mcp"), token);
+    for (const [token, owner] of this.contextTokens)
+      if (owner.session === session && owner.server === server.name)
+        return contextServer(server, this.paths.socket("mcp"), token);
     const token = randomBytes(32).toString("hex");
     this.contextTokens.set(token, { session, server: server.name });
     return contextServer(server, this.paths.socket("mcp"), token);

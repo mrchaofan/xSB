@@ -7,15 +7,14 @@
  *
  * The hub and the agents it starts find a program as a command on PATH, and
  * know nothing of this module: it puts a directory of launchers first on the
- * PATH the hub is started with. With it the hub is told that every agent has
- * the app's browser, whatever its role (`COMMON_SERVERS_ENV`).
+ * PATH the hub is started with. It also tells the hub where the plugins shipped
+ * with the app are (`PLUGINS_ENV`, ../plugins next to this code) and where the
+ * app's browser listens, for the browser plugin to be told (`SOCKET_ENV`).
  *
  *   <dir>/bin/claude-agent-acp   the ACP wrapper shipped in the app, told where the claude program is
  *   <dir>/bin/codex-acp          the same for codex
  *   <dir>/bin/ffmpeg, …          a program the user pointed to
- *   <dir>/bin/xsb-media-mcp      an MCP server shipped in the app, for a role to name by its command
- *   <dir>/bin/xsb-browser-mcp    the same: the way to the browser in the app's side panel (browser.ts)
- *   <dir>/browser.sock           where that browser listens
+ *   <dir>/browser.sock           where the app's browser listens (browser.ts)
  *   <dir>/paths.json             command name -> where the user said the program is
  *
  * A launcher exists exactly while its program does, so "is it installed"
@@ -34,8 +33,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { COMMON_SERVERS_ENV, findCommand } from "@xsb/hub";
-import { BROWSER_INSTRUCTIONS, SOCKET_ENV } from "./browser.ts";
+import { PLUGINS_ENV, findCommand } from "@xsb/hub";
+import { SOCKET_ENV } from "./browser.ts";
 
 /** The hub's built-in backends: each is named after the program of the user's machine it is, or is built around. */
 export const AGENTS = new Set(["claude", "codex"]);
@@ -45,19 +44,10 @@ const WRAPPERS: Record<string, { command: string; env: string }> = {
   claude: { command: "claude-agent-acp", env: "CLAUDE_CODE_EXECUTABLE" },
   codex: { command: "codex-acp", env: "CODEX_PATH" },
 };
-const BROWSER_TOOL = "xsb-browser-mcp";
-/**
- * What agents are told of the browser, next to its name in their system prompt. Agent programs may come with
- * browsers of their own (Codex's computer use opens one it calls "IAB"); in xsb those cannot reach the side panel,
- * and a request for "the browser" means this one.
- */
-const BROWSER_ABOUT =
-  `${BROWSER_INSTRUCTIONS} The user can watch; page input is locked during active Agent control and released when the turn ends. Use these tools for the xsb browser: a browser or computer-use tool of your agent program cannot reach it. Use another browser only when the user names that application.`;
-/** MCP servers shipped in the app. A role names one by its command; the browser every agent has. */
-const TOOLS = ["xsb-media-mcp", BROWSER_TOOL];
-
 /** Where the app's own programs are bundled (rolldown.config.js). */
 const SHIPPED = fileURLToPath(new URL("../bin/", import.meta.url));
+/** The plugins shipped with the app: beside the code, outside any archive, in development as when packed. */
+const PLUGINS = fileURLToPath(new URL("../plugins/", import.meta.url));
 const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 /** A shell line that runs a JavaScript program shipped in the app: Electron's own binary is the Node. */
 const node = (program: string): string => `ELECTRON_RUN_AS_NODE=1 exec ${quote(process.execPath)} ${quote(path.join(SHIPPED, program))} "$@"`;
@@ -90,7 +80,7 @@ async function refreshedPath(): Promise<string> {
 export const wrapped = (command: string): string | undefined => Object.keys(WRAPPERS).find((program) => WRAPPERS[program].command === command);
 
 export class Clis {
-  /** Where the app's browser listens for agents; `xsb-browser-mcp` is told by its launcher. */
+  /** Where the app's browser listens for agents; the browser plugin is told through `SOCKET_ENV`. */
   readonly browserSocket: string;
   private bin: string;
   private file: string;
@@ -113,8 +103,9 @@ export class Clis {
       // No file yet, or one that cannot be read: the user locates the programs again.
     }
     process.env.PATH = `${this.bin}${path.delimiter}${this.userPath}`;
-    // The browser is the app's, not a role's: every agent has it.
-    process.env[COMMON_SERVERS_ENV] = JSON.stringify({ browser: { command: BROWSER_TOOL, about: BROWSER_ABOUT } });
+    // The hubs this app starts inherit these: the shipped plugins, and where their browser plugin connects.
+    process.env[PLUGINS_ENV] = PLUGINS;
+    process.env[SOCKET_ENV] = this.browserSocket;
     this.sync();
   }
 
@@ -165,8 +156,7 @@ export class Clis {
   /** Make the launchers say what is true now. */
   private sync(): void {
     if (process.platform === "win32") return this.syncWindows();
-    // The browser's tool is told where the app listens for it.
-    const launchers = new Map<string, string>(TOOLS.map((tool) => [tool, `${tool === BROWSER_TOOL ? `${SOCKET_ENV}=${quote(this.browserSocket)} ` : ""}${node(tool)}`]));
+    const launchers = new Map<string, string>();
     for (const command of new Set([...Object.keys(WRAPPERS), ...Object.keys(this.paths)])) {
       const found = this.locate(command);
       if (!found) continue;
@@ -183,7 +173,7 @@ export class Clis {
     const cmdQuote = (s: string): string => `"${s.replaceAll("%", "%%")}"`;
     const set = (key: string, value: string): string => `set ${cmdQuote(`${key}=${value}`)}\r\n`;
     const node = (program: string): string => `${set("ELECTRON_RUN_AS_NODE", "1")}${cmdQuote(process.execPath)} ${cmdQuote(path.join(SHIPPED, program))} %*`;
-    const launchers = new Map(TOOLS.map((tool) => [`${tool}.cmd`, `${tool === BROWSER_TOOL ? set(SOCKET_ENV, this.browserSocket) : ""}${node(tool)}`]));
+    const launchers = new Map<string, string>();
     for (const command of new Set([...Object.keys(WRAPPERS), ...Object.keys(this.paths)])) {
       const found = this.locate(command);
       if (!found) continue;

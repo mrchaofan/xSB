@@ -58,22 +58,21 @@ test("desktop loads pages over a real hub connection and receives live images as
   const hub = new Hub(dir);
   let ws: Workspace | undefined;
   try {
-    hub.putAgent({ id: "a", backend: "codex" });
-    const session = hub.mainSession("a");
+    const session = hub.createConversation("codex");
     session.save({ backend: "codex", backendSessionId: "existing-backend-session" });
     for (let i = 0; i < 15; i++) {
       session.emit({ sessionUpdate: "user_message_chunk", messageId: `m${i}`, content: { type: "text", text: `input ${i}` } });
       session.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `output ${i}` } });
     }
     await hub.start();
-    const transcriptFile = path.join(paths.dir, Paths.transcript("a", session.id));
+    const transcriptFile = path.join(paths.dir, Paths.transcript(session.agentId, session.id));
     const originalTranscript = fs.readFileSync(transcriptFile);
     const originalSession = JSON.stringify(session.rec);
     ws = await Workspace.open(paths, "en", String, () => {}, () => {});
     const loaded = await ws.load();
-    assert.equal(loaded.transcripts.a.filter(e => e.kind === "input").length, 10);
-    assert.notEqual(loaded.history.a, null);
-    const older = await ws.history("a");
+    assert.equal(loaded.transcripts[session.agentId].filter(e => e.kind === "input").length, 10);
+    assert.notEqual(loaded.history[session.agentId], null);
+    const older = await ws.history(session.agentId);
     assert.equal(older.entries.filter(e => e.kind === "input").length, 15);
     assert.equal(older.cursor, null);
     assert.deepEqual(fs.readFileSync(transcriptFile), originalTranscript, "display paging never rewrites the model's transcript");
@@ -84,7 +83,7 @@ test("desktop loads pages over a real hub connection and receives live images as
     session.emit({ sessionUpdate: "user_message_chunk", messageId: "image", content: image });
     // A request/response on the same connection follows the live notification.
     await ws.backends();
-    const page = await ws.history("a");
+    const page = await ws.history(session.agentId);
     const entry = page.entries.find(e => e.kind === "input" && e.content[0].type === "image");
     assert.ok(entry?.kind === "input");
     assert.equal(entry.content[0].data, "");

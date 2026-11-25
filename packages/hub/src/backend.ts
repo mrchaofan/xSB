@@ -44,6 +44,9 @@ export type BackendEvents = {
   log(line: string): void;
 };
 
+/** How long a stopped backend may take to exit before it is killed. */
+const STOP_GRACE_MS = 3000;
+
 export class Backend {
   readonly conn: Connection;
   caps: BackendCaps = { systemPrompt: false, additionalDirectories: false, image: false, steering: false };
@@ -51,12 +54,19 @@ export class Backend {
   /** Names of the ways this agent can be signed in, as it reported them. */
   authMethods: string[] = [];
   private proc: ChildProcess;
+  /** Settles once the process is gone (or never started): only then is what it held, such as session locks, free. */
+  private ended: Promise<void>;
   /** Backend session id -> the hub session that has it open. */
   private sessions = new Map<string, LiveSession>();
 
   private constructor(proc: ChildProcess, conn: Connection) {
     this.proc = proc;
     this.conn = conn;
+    this.ended = new Promise((resolve) => {
+      if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+      proc.once("exit", () => resolve());
+      proc.once("error", () => resolve());
+    });
   }
 
   /** Route what the process says about one of its sessions to `session`. */
@@ -167,7 +177,8 @@ export class Backend {
       .request<InitializeResponse>("initialize", {
         protocolVersion: PROTOCOL_VERSION,
         info: { name: "xsb", title: "xsb hub", version: VERSION },
-        capabilities: {},
+        // Reports of the backend's own compaction (`compaction_update`), for the transcript to mark where it cut.
+        capabilities: { session: { compaction: {} } },
       })
       .catch(async (e) => {
         // A process that died during startup is the real story, not the closed pipe.
@@ -176,7 +187,7 @@ export class Backend {
         throw failure("backend_start_failed", { ...about, exit: exitReason, stderr: stderrTail });
       });
     if (init.protocolVersion !== PROTOCOL_VERSION) {
-      backend.stop();
+      void backend.stop();
       throw failure("backend_incompatible", { ...about, backendVersion: init.protocolVersion, hubVersion: PROTOCOL_VERSION });
     }
     const session = init.capabilities?.session ?? {};
@@ -193,8 +204,15 @@ export class Backend {
     return backend;
   }
 
-  stop(): void {
+  /** End the process: asked first, forced after a grace period. Resolves when it has exited. */
+  stop(): Promise<void> {
     this.conn.close();
-    this.proc.kill();
+    if (this.proc.exitCode === null && this.proc.signalCode === null) {
+      this.proc.kill();
+      const force = setTimeout(() => this.proc.kill("SIGKILL"), STOP_GRACE_MS);
+      force.unref();
+      void this.ended.then(() => clearTimeout(force));
+    }
+    return this.ended;
   }
 }

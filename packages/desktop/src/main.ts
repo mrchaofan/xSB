@@ -14,12 +14,13 @@
  * first; what is then cut short is given up, not taken up again on the next start.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, net, protocol, session, shell, webContents } from "electron";
 import type { WebPreferences } from "electron";
-import { Paths, describeBackends, presetRoots, stopHub } from "@xsb/hub";
+import { Paths, approvePlugin, describeBackends, ensurePluginRoot, limitSettings, listPlugins, projectLanguageSetting, setLimit, setPluginEnabled, setProjectLanguage, stopHub } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
@@ -67,6 +68,11 @@ type Words = {
   notice: (n: Notice) => { title: string; body: string };
   /** Asking before a quit that cuts agents short: `names` are theirs. */
   quit: (names: string[]) => { message: string; detail: string; quit: string; stay: string };
+  /** The application menu. */
+  menu: { settings: string; file: string; newWindow: string; openFolder: string; openRecent: string; clearRecent: string; noRecent: string;
+    closeWindow: string; edit: string; view: string; window: string; help: string; reload: string; devTools: string };
+  /** Asking before a folder that is not a workspace yet becomes one. */
+  makeWorkspace: (folder: string) => { message: string; detail: string; create: string; cancel: string };
 };
 
 const TEXT: Record<Language, Words> = {
@@ -89,6 +95,9 @@ const TEXT: Record<Language, Words> = {
       quit: "Quit anyway",
       stay: "Keep working",
     }),
+    menu: { settings: "Settings…", file: "File", newWindow: "New Window", openFolder: "Open Folder…", openRecent: "Open Recent", clearRecent: "Clear Recently Opened",
+      noRecent: "No Recent Folders", closeWindow: "Close Window", edit: "Edit", view: "View", window: "Window", help: "Help", reload: "Reload", devTools: "Developer Tools" },
+    makeWorkspace: (folder) => ({ message: `Make ${path.basename(folder)} a workspace?`, detail: `xsb keeps its conversations, workflows and assets in a .xsb2 folder inside:\n${folder}`, create: "Make Workspace", cancel: "Cancel" }),
   },
   "zh-CN": {
     locate: (command) => `选择 ${command} 程序`,
@@ -109,6 +118,9 @@ const TEXT: Record<Language, Words> = {
       quit: "仍然退出",
       stay: "继续工作",
     }),
+    menu: { settings: "设置…", file: "文件", newWindow: "新建窗口", openFolder: "打开文件夹…", openRecent: "打开最近的工作区", clearRecent: "清除最近打开记录",
+      noRecent: "没有最近打开的工作区", closeWindow: "关闭窗口", edit: "编辑", view: "视图", window: "窗口", help: "帮助", reload: "重新加载", devTools: "开发者工具" },
+    makeWorkspace: (folder) => ({ message: `把“${path.basename(folder)}”设为工作区？`, detail: `xsb 会在这个文件夹里新建 .xsb2 目录，保存会话、工作流和资产：\n${folder}`, create: "设为工作区", cancel: "取消" }),
   },
 };
 
@@ -163,6 +175,13 @@ const connecting = new Map<string, Promise<Workspace>>();
 
 const workspaceOf = (id: number): Workspace | undefined => projects.get(windows.get(id) ?? "");
 
+/** The user's tool servers changed: the hubs they reach let their conversations take them. Answers the new list. */
+async function toolsChanged(scope: "global" | "project", workspace: Workspace | undefined) {
+  const reached = scope === "global" ? [...projects.values()] : workspace ? [workspace] : [];
+  await Promise.all(reached.map((w) => w.applyTools().catch(() => undefined)));
+  return listPlugins(workspace?.paths);
+}
+
 /** Tell a project's workspace whether a window shows it: with none, nobody is there to answer its agents' questions. */
 const showing = (project: string): void => projects.get(project)?.setShown([...windows.values()].includes(project));
 /** The user asked the app to quit: from then on a window that closes is closed. */
@@ -190,11 +209,115 @@ function recent(): Recent[] {
 function remember(project: string): void {
   const list = [{ name: path.basename(project), path: project }, ...recent().filter((r) => r.path !== project)].slice(0, 10);
   fs.writeFileSync(recentFile(), JSON.stringify(list, null, 2));
+  buildMenu();
+}
+
+// ---- the application menu ---------------------------------------------------
+
+/** The app's window in front, if any. */
+const focusedAppWindow = (): BrowserWindow | undefined => {
+  const win = BrowserWindow.getFocusedWindow();
+  return win && panels.has(win.webContents.id) ? win : undefined;
+};
+
+/**
+ * Open a folder as the workspace of a window, as VS Code does: in the window in front, replacing what it showed (its
+ * hub and agents go on), or in a new window when there is none. A folder that is not a workspace yet is asked about.
+ */
+async function openFolder(project?: string): Promise<void> {
+  const win = focusedAppWindow();
+  let folder = project;
+  if (!folder) {
+    const picked = win ? await pickFolder(win) : await pickFolderFree();
+    if (!picked) return;
+    if (!picked.initialized) {
+      const words = TEXT[language()].makeWorkspace(picked.path);
+      const options = { type: "question" as const, message: words.message, detail: words.detail, buttons: [words.cancel, words.create], defaultId: 1, cancelId: 0 };
+      const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+      if (response !== 1) return;
+    }
+    folder = picked.path;
+  }
+  if (!win) return createWindow(folder);
+  try {
+    if (await openWorkspace(win, folder)) win.webContents.send("xsb:event", { workspaceChanged: true } satisfies Event);
+  } catch (e) {
+    dialog.showErrorBox("xsb", say(e));
+  }
+}
+
+async function pickFolderFree(): Promise<{ path: string; initialized: boolean } | null> {
+  const { filePaths } = await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
+  if (!filePaths[0]) return null;
+  return { path: filePaths[0], initialized: fs.existsSync(new Paths(filePaths[0]).dir) };
+}
+
+/** Built again when the recent folders change. */
+function buildMenu(): void {
+  const words = TEXT[language()].menu;
+  const mac = process.platform === "darwin";
+  const settings: Electron.MenuItemConstructorOptions = { label: words.settings, accelerator: "CmdOrCtrl+,",
+    click: () => focusedAppWindow()?.webContents.send("xsb:event", { openSettings: true } satisfies Event) };
+  const recents = recent();
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(mac ? [{ role: "appMenu" as const, submenu: [{ role: "about" as const }, { type: "separator" as const }, settings, { type: "separator" as const },
+      { role: "services" as const }, { type: "separator" as const }, { role: "hide" as const }, { role: "hideOthers" as const }, { role: "unhide" as const },
+      { type: "separator" as const }, { role: "quit" as const }] }] : []),
+    { label: words.file, submenu: [
+      { label: words.newWindow, accelerator: "CmdOrCtrl+Shift+N", click: () => void createWindow() },
+      { type: "separator" },
+      { label: words.openFolder, accelerator: "CmdOrCtrl+O", click: () => void openFolder() },
+      { label: words.openRecent, submenu: recents.length
+        ? [...recents.map((r) => ({ label: r.path.replace(os.homedir(), "~"), click: () => void openFolder(r.path) })),
+           { type: "separator" as const }, { label: words.clearRecent, click: () => { fs.writeFileSync(recentFile(), "[]"); buildMenu(); } }]
+        : [{ label: words.noRecent, enabled: false }] },
+      { type: "separator" },
+      ...(mac ? [] : [settings, { type: "separator" as const }]),
+      { label: words.closeWindow, accelerator: "CmdOrCtrl+W", role: "close" },
+      ...(mac ? [] : [{ role: "quit" as const }]),
+    ] },
+    { label: words.edit, role: "editMenu" },
+    { label: words.view, submenu: [
+      { label: words.reload, role: "reload" }, { label: words.devTools, role: "toggleDevTools" }, { type: "separator" },
+      { role: "resetZoom" }, { role: "zoomIn" }, { role: "zoomOut" }, { type: "separator" }, { role: "togglefullscreen" },
+    ] },
+    { label: words.window, role: "windowMenu" },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 // ---- windows ----------------------------------------------------------------
 
+// ---- one window per workspace -----------------------------------------------
+
+/** A folder as one name: absolute, with links resolved, so two spellings of it are the same workspace. */
+function canonical(folder: string): string {
+  const resolved = path.resolve(folder);
+  try { return fs.realpathSync.native(resolved); } catch { return resolved; }
+}
+
+/** The window that shows a workspace, if one does (`except`: not this one). Windows on their way out do not count. */
+function windowShowing(project: string, except?: BrowserWindow): BrowserWindow | undefined {
+  for (const [id, shown] of windows) {
+    if (shown !== project || leaving.has(id) || id === except?.webContents.id) continue;
+    const contents = webContents.fromId(id);
+    const win = contents && BrowserWindow.fromWebContents(contents);
+    if (win && !win.isDestroyed()) return win;
+  }
+  return undefined;
+}
+
+/** Bring a window to the front, the hidden last one included. */
+function bringForward(win: BrowserWindow): void {
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+/** A workspace is open in one window at most: opening it again brings that window forward instead. */
 async function createWindow(project?: string): Promise<void> {
+  const existing = project && windowShowing(canonical(project));
+  if (existing) return bringForward(existing);
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -274,8 +397,17 @@ function connect(paths: Paths): Promise<Workspace> {
   return pending;
 }
 
-async function openWorkspace(win: BrowserWindow, project: string): Promise<void> {
-  const paths = new Paths(project);
+/**
+ * Show a workspace in a window. When another window shows it already, that one comes forward and this one stays as it
+ * was: the answer is false.
+ */
+async function openWorkspace(win: BrowserWindow, project: string): Promise<boolean> {
+  const other = windowShowing(canonical(project), win);
+  if (other) {
+    bringForward(other);
+    return false;
+  }
+  const paths = new Paths(canonical(project));
   await connect(paths);
   if (!win.isDestroyed()) {
     const previous = windows.get(win.webContents.id);
@@ -284,6 +416,7 @@ async function openWorkspace(win: BrowserWindow, project: string): Promise<void>
     remember(paths.project);
   }
   showing(paths.project);
+  return true;
 }
 
 async function pickFolder(win: BrowserWindow): Promise<{ path: string; initialized: boolean } | null> {
@@ -295,7 +428,7 @@ async function pickFolder(win: BrowserWindow): Promise<{ path: string; initializ
 // ---- window.xsb -------------------------------------------------------------
 
 /** The calls that are a method of the window's workspace, arguments and all. */
-const WORKSPACE_CALLS = new Set(["history", "send", "cancel", "clear", "permit", "deriveTeam", "putAgent", "removeAgent", "inspectAgent", "putRole", "removeRole", "syncRole", "applyRole", "testMcp", "useTeam", "dropTeam", "previewTeamSync", "syncTeam", "buildTeam"]);
+const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","setAvatar","workflowControl","history","send","cancel","clear","permit"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();
@@ -341,7 +474,7 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       if (!workspace) throw new Error("this window has no workspace open");
       return workspace.openArtifact(args[0], args[1], args[2]);
     case "openPage":
-      if (Pages.supported) return pages.open(args[0], { embedded: args[1] === true });
+      if (Pages.supported) return pages.open(args[0], { embedded: args[1] === true, sessionId: args[2] });
       if (args[1] !== true && /^https?:\/\//i.test(args[0])) return shell.openExternal(args[0]);
       return null;
     case "page":
@@ -376,19 +509,34 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       return agentClis.check(agentCli(args[0]));
     case "newWindow":
       return createWindow();
+    // Plugins (hub's plugins.ts): folders the user puts in place. The machine's reach every open project.
+    case "plugins":
+      return listPlugins(workspace?.paths);
+    case "setPluginEnabled":
+      setPluginEnabled(args[0], args[1], args[2] === true, workspace?.paths);
+      return toolsChanged(args[0], workspace);
+    case "approvePlugin":
+      if (!workspace) throw new Error("this window has no workspace open");
+      approvePlugin(workspace.paths, args[0]);
+      return toolsChanged("project", workspace);
+    // Limits are the machine's (~/.xsb2_global/config.json): per backend, and the hub's. The hub reads them on every use.
+    case "limitSettings":
+      return limitSettings();
+    case "setLimit":
+      return setLimit(args[0] ?? null, args[1], args[2]);
+    // The workspace's working language (.xsb2/config.json).
+    case "projectLanguage":
+      if (!workspace) throw new Error("this window has no workspace open");
+      return projectLanguageSetting(workspace.paths) ?? null;
+    case "setProjectLanguage":
+      if (!workspace) throw new Error("this window has no workspace open");
+      return setProjectLanguage(workspace.paths, args[0]);
+    case "reloadPlugins":
+      return toolsChanged("global", workspace);
+    case "revealPlugins":
+      return shell.openPath(ensurePluginRoot(args[0], workspace?.paths));
   }
   if (!workspace) throw new Error("this window has no workspace open");
-  if (method === "presets") return workspace.teams((command) => clis.missing(command));
-  if (method === "openFolder") {
-    // Only folders of preset teams: the user's own preset folder when none is named (made if there is none yet).
-    const roots = presetRoots();
-    const user = roots.find((root) => root.source === "user")!.dir;
-    const dir = typeof args[0] === "string" ? args[0] : user;
-    if (!roots.some((root) => !path.relative(root.dir, dir).startsWith(".."))) throw new Error("not a folder of preset teams");
-    fs.mkdirSync(dir, { recursive: true });
-    return shell.openPath(dir);
-  }
-  if (method === "revealSkill") return workspace.skillDir(args[0], args[1]).then((dir) => dir && shell.openPath(dir));
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);
   throw new Error(`unknown method ${method}`);
 }
@@ -439,9 +587,7 @@ const folderOf = (argv: string[], cwd: string): string | undefined => {
 function reveal(): void {
   const win = BrowserWindow.getAllWindows().find((w) => panels.has(w.webContents.id));
   if (!win) return void createWindow();
-  if (win.isMinimized()) win.restore();
-  win.show();
-  win.focus();
+  bringForward(win);
 }
 
 // One app. A second start hands over the folder it was asked to open and goes away. The folder travels as data:
@@ -457,6 +603,7 @@ app.on("second-instance", (_event, _argv, _cwd, asked) => {
 void app.whenReady().then(() => {
   if (!first) return;
   setUpNotices();
+  buildMenu();
   clis = new Clis(path.join(app.getPath("userData"), "backends"));
   agentClis = new AgentClis(clis, path.join(app.getPath("userData"), "backends", "installed"));
   protocol.handle(APP_SCHEME, (request) => {
@@ -477,7 +624,7 @@ void app.whenReady().then(() => {
         } catch { return new Response(null, { status: 404 }); }
       }
       const file = decodeURIComponent(new URL(request.url).pathname.slice(1));
-      const shown = [...projects.values()].some((w) => w.artifacts.has(file) || w.avatars.has(file));
+      const shown = [...projects.values()].some((w) => w.artifacts.has(file));
       return shown ? serveFile(file, request) : new Response(null, { status: 404 });
     });
   }
@@ -485,7 +632,7 @@ void app.whenReady().then(() => {
   const browser = serveBrowser(clis.browserSocket, (cwd) => {
     const [id, project] = [...windows].find(([, project]) => projects.get(project)?.worksIn(cwd)) ?? [];
     const pages = id === undefined ? undefined : panels.get(id);
-    return pages && project ? { pages, project } : undefined;
+    return pages && project ? { pages, project, sessionOf: agentId => projects.get(project)?.sessionOwner(agentId) } : undefined;
   });
   app.on("will-quit", () => browser.close());
   void createWindow(folderOf(process.argv, process.cwd()));

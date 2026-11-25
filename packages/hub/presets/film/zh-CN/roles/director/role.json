@@ -1,9 +1,0 @@
-{
-  "description": "统筹全片：定创作方向，把工作派给各部门，在关键处请用户确认，审片并决定通过或重拍",
-  "grants": [
-    "dispatch",
-    "message"
-  ],
-  "mcpServers": {},
-  "avatar": "person-larry-page"
-}

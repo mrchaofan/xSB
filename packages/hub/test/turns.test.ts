@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { text, TurnExt, RpcError } from "@xsb/protocol";
+import { text, TurnExt, TurnFailure, RpcError } from "@xsb/protocol";
 import type { Addr, Task } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Delivery } from "../src/delivery.ts";
@@ -13,15 +13,16 @@ import { Paths } from "../src/paths.ts";
 import { LiveSession } from "../src/session.ts";
 import { State, ops } from "../src/state.ts";
 import type { MailItem } from "../src/state.ts";
-import { callTool } from "../src/tools.ts";
-import { contextRef, textTokens } from "../src/context.ts";
+import { Workflows } from "../src/workflows.ts";
+import { contextPolicy, contextRef, textTokens } from "../src/context.ts";
 
-function setup(t: test.TestContext) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-turns-"));
+/** A hub over a fresh directory, or, given `reopen`, over one a previous hub left (a restart). */
+function setup(t: test.TestContext, reopen?: string) {
+  const dir = reopen ?? fs.mkdtempSync(path.join(os.tmpdir(), "xsb-turns-"));
   const paths = new Paths(dir), state = new State(new Store(paths.dir));
   state.load();
   const A = { agentId: "a", sessionId: "sa" }, B = { agentId: "b", sessionId: "sb" }, C = { agentId: "c", sessionId: "sc" };
-  for (const to of [A, B, C]) state.commit([
+  if (!reopen) for (const to of [A, B, C]) state.commit([
     ops.putAgent({ id: to.agentId, name: to.agentId, description: "", backend: "mock", workspace: dir, createdAt: "" }),
     ops.putSession({ id: to.sessionId, agentId: to.agentId, main: true, createdAt: "", updatedAt: "" }),
   ]);
@@ -29,7 +30,7 @@ function setup(t: test.TestContext) {
   const effects: string[] = [], prompts: string[] = [];
   const hub: any = {
     state, paths, live: new Map(), stopping: false,
-    agentChanged() {}, log() {}, permissions: { cancel() {} },
+    agentChanged() {}, log() {}, permissions: { cancel() {} }, policy: () => contextPolicy("mock"),
     agent: (id: string) => state.agents.get(id), role: () => ({ grants: ["dispatch", "message"], skills: [] }),
     toolServers: () => [{ from: "role", server: { name: "render" } }],
     rotateBridge() { effects.push("revoke"); }, backends: { stop() { effects.push("stop process"); } },
@@ -86,7 +87,7 @@ function setup(t: test.TestContext) {
     await hooks.settled();
     for (const pending of (kernel as any).pendingStops) clearTimeout(pending.timer);
     for (const live of hub.live.values()) live.releaseUserStop(false);
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (!reopen) fs.rmSync(dir, { recursive: true, force: true });
   });
   return { dir, paths, state, hooks, kernel, hub, effects, prompts, A, B, C, session, give, settle, stop, idle, unread };
 }
@@ -176,10 +177,14 @@ test("a task ended before deferred delivery never opens a turn", async (t) => {
 });
 
 test("a queued task completed by its executor is discarded at dequeue instead of run again", async (t) => {
-  const { kernel, state, A, B, give, settle, idle, prompts, session } = setup(t);
+  const { kernel, state, A, B, give, settle, idle, prompts, session, unread } = setup(t);
   give(A, B, "current"); await settle();
+  // The user spoke into it: the turn is the user's, and an agent's task waits its turn.
+  unread("the user", true);
   const task = give(A, B, "queued but already completed"); await settle();
   kernel.complete(task, "completed", "done in the current work", []);
+  idle(); await settle();
+  // The user's word was not read in that turn: it is carried into the next, then the queue is reached.
   idle(); await settle();
   assert.equal(session.busy, false);
   assert.ok(!prompts.some(p => p.includes('title="queued but already completed"')));
@@ -335,7 +340,9 @@ test("replacement of a mixed-owner turn queues without partially cancelling its 
   await settle();
   assert.equal(state.tasks.get(own.id)!.status, "running");
   assert.equal(state.tasks.get(foreign.id)!.status, "running");
-  assert.equal(state.tasks.get(replacement.id)!.status, "queued");
+  // An agent's turn takes a peer's task in (interjection); nothing of the mixed work was cancelled.
+  assert.equal(state.tasks.get(replacement.id)!.status, "running");
+  assert.ok(session.taskIds().includes(replacement.id));
   assert.equal(session.current!.cancelledBy, undefined);
 });
 
@@ -360,12 +367,14 @@ test("replacement runs first, then unread prompts retain FIFO order ahead of the
 test("explicit stop recovers mixed unread prompts in order, including when the queue was empty", async (t) => {
   const { A, B, session, give, settle, stop, idle, unread } = setup(t);
   const old = give(A, B, "old"); await settle();
-  unread("agent one"); unread("user", true); unread("agent two");
+  // Agents interject while the turn is an agent's; once the user spoke into it, an agent's word waits its turn.
+  unread("agent one"); unread("agent two"); unread("user", true);
+  assert.equal(session.steer({ item: undefined as any, origin: { kind: "agent", ...A, messageId: "late" }, prompt: [text("late")] }), undefined);
   stop(old); await settle(); idle("cancelled"); await settle();
   assert.equal(session.current!.first.messageId, "agent one");
+  idle(); await settle(); assert.equal(session.current!.first.messageId, "agent two");
   idle(); await settle(); assert.equal(session.current!.first.messageId, "user");
   assert.equal(session.current!.protected, true);
-  idle(); await settle(); assert.equal(session.current!.first.messageId, "agent two");
 });
 
 test("committed stops reject jobs and dispatch before the halt observer runs", async (t) => {
@@ -376,8 +385,7 @@ test("committed stops reject jobs and dispatch before the halt observer runs", a
   assert.equal(session.acceptsTools, false);
   assert.ok(isVeto(kernel.createJob(B, { title: "late", topic: "late", tool: { server: "render", name: "render", arguments: {} } })));
   assert.ok(isVeto(kernel.dispatch(B, C, { title: "late", topic: "late", instructions: "late", after: [] })));
-  const result = await callTool(hub, session, "start_job", { server: "render", tool: "render", title: "late" });
-  assert.equal(result.isError, true);
+  assert.throws(() => new Workflows(hub).call(session,"execute",{},"late"),/No active turn/);
   assert.ok(![...state.tasks.values()].some((task) => task.title === "late"));
 });
 
@@ -576,4 +584,135 @@ test("idle before the deferred halt still cancels the stopped turn and preserves
   assert.ok(!effects.some((e) => e.startsWith("close") || e === "revoke"));
   assert.equal(session.current!.first.item!.taskId, next.id);
   assert.equal(session.rec.backendSessionId, oldBackend);
+});
+
+test("a peer's work goes into an agent's turn; once the user spoke into it, the turn is the user's and peers wait", async (t) => {
+  const { state, A, B, C, session, give, settle, idle, unread } = setup(t);
+  const current = give(A, B, "current"); await settle();
+  const turn = session.current!;
+  assert.equal(turn.protected, false);
+  const peer = give(C, B, "from a peer"); await settle();
+  assert.equal(session.current, turn, "no new turn: it went into the running one");
+  assert.ok(session.taskIds().includes(peer.id));
+  assert.equal(state.tasks.get(peer.id)!.status, "running");
+  unread("the user", true);
+  assert.equal(turn.protected, true, "the user's word makes the turn the user's at once");
+  const later = give(C, B, "after the user"); await settle();
+  assert.equal(session.current, turn);
+  assert.ok(!session.taskIds().includes(later.id));
+  assert.equal(state.tasks.get(later.id)!.status, "queued");
+  idle(); await settle();
+  assert.equal(state.tasks.get(current.id)!.status, "completed");
+  assert.equal(state.tasks.get(peer.id)!.status, "completed");
+});
+
+test("a workflow node's turn that ends normally keeps its backend process: no restart, its prompt cache with it", async (t) => {
+  const { state, session, give, settle, idle, effects, A, B } = setup(t);
+  const spec = state.agents.get(B.agentId)!;
+  state.commit([ops.putAgent({ ...spec, workflowOwner: A.sessionId, workflowNode: "n" })]);
+  give(A, B, "node work"); await settle();
+  const backendId = session.rec.backendSessionId;
+  (session as any).backend.caps.orderedCancellation = false;
+  idle(); await settle();
+  assert.ok(!effects.includes("stop process"), "ended normally: nothing late to fence off");
+  assert.ok(!effects.includes("revoke"));
+  assert.ok((session as any).backend, "the same process serves the next turn");
+  assert.equal(session.rec.backendSessionId, backendId, "and the same backend session");
+});
+
+test("after a restart, what the backend had already taken in is not given again; the conversation says its turn was cut short", async (t) => {
+  const first = setup(t);
+  const task = first.give(first.A, first.B, "do the task"); await first.settle();
+  // The user speaks into the running turn; the backend takes it in, works on it, and xsb is killed before the turn ends.
+  const spoken = first.kernel.post({ to: first.B, from: { kind: "user" }, kind: "message", prompt: [text("also delete old files")], pref: "wake" }).item;
+  await first.settle();
+  first.session.onBackendUpdate({ sessionUpdate: "user_message", messageId: "echo", content: [text("also delete old files")] });
+  first.session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("deleting…") });
+  await first.settle();
+  assert.equal(first.state.ledger.get(spoken.id)?.state, "seen");
+  const before = first.prompts.length;
+
+  const second = setup(t, first.dir);
+  const taken = second.kernel.resume();
+  for (const [sessionId, items] of taken) second.hub.live.get(sessionId)?.interrupted(items.length);
+  await second.settle();
+  assert.deepEqual(first.prompts.slice(before).concat(second.prompts), [], "nothing is given to the model again");
+  assert.ok(!second.state.mail.has(spoken.id), "settled where it stands");
+  assert.equal(second.state.tasks.get(task.id)!.status, "failed", "its task's outcome is unknown, not replayed");
+  const records = second.state.store.read(Paths.transcript(second.B.agentId, second.B.sessionId)).map((r: any) => r.update);
+  const said = records.filter((u: any) => u.sessionUpdate === "user_message_chunk").map((u: any) => u.content.text);
+  assert.equal(said.filter((x: string) => x === "also delete old files").length, 1, "shown once");
+  assert.ok(records.some((u: any) => u._meta?.[TurnFailure.key]?.data?.errorKind === "execution_uncertain"), "the user is told");
+});
+
+test("while the hub stops, no turn starts: what waits runs on the next start", async (t) => {
+  const { hub, session, give, settle, prompts, A, B, state } = setup(t);
+  give(A, B, "one"); await settle();
+  const second = give(A, B, "two"); await settle();
+  const sent = prompts.length;
+  hub.stopping = true;
+  session.onBackendGone((session as any).backend, "exited (SIGTERM)");
+  await settle();
+  assert.equal(prompts.length, sent, "the queued task is not given to the model");
+  assert.equal(session.current, undefined, "no turn runs");
+  assert.ok([...state.mail.values()].some((m) => m.taskId === second.id), "it stays in the inbox for the next start");
+});
+
+test("a first prompt the backend refuses for another reason than a stop keeps its handoff for the next prompt", async (t) => {
+  const { session, give, settle, prompts, A, B } = setup(t);
+  (session as any).prefaces = ["[handoff] what came before"];
+  const backend = await (session as any).ensureBackend();
+  const realPrompt = backend.prompt;
+  let refuse = true;
+  backend.prompt = async (id: string, blocks: any[]) => {
+    if (refuse) { refuse = false; prompts.push(blocks.map((b: any) => b.text).join("\n")); throw new RpcError(-32603, "rate limited"); }
+    return realPrompt(id, blocks);
+  };
+  give(A, B, "first"); await settle();
+  give(A, B, "second"); await settle();
+  assert.match(prompts[0], /\[handoff\]/, "the refused prompt carried it");
+  assert.match(prompts.at(-1)!, /\[handoff\] what came before/, "and the next one carries it again");
+});
+
+test("the backend's own compaction leaves a boundary in the transcript: what is above, the model has only as its summary", async (t) => {
+  const { session, state, give, settle, A, B } = setup(t);
+  give(A, B, "work"); await settle();
+  session.onBackendUpdate({ sessionUpdate: "compaction_update", compactionId: "c1", status: "in_progress" } as any);
+  session.onBackendUpdate({ sessionUpdate: "compaction_update", compactionId: "c1", status: "completed" } as any);
+  const marks = state.store.read(Paths.transcript(B.agentId, B.sessionId)).map((r: any) => r.update?._meta?.["dev.xsb/boundary"]).filter(Boolean);
+  assert.deepEqual(marks.map((m: any) => [m.kind, m.handoff]), [["compacted", false]], "one boundary, once it completed");
+});
+
+test("a turn that fails with input given and unanswered fences the backend before the input is given again", async (t) => {
+  const { session, effects, unread, give, settle, A, B } = setup(t);
+  give(A, B, "work"); await settle();
+  const backend = (session as any).backend;
+  backend.caps.steering = false;
+  backend.caps.orderedCancellation = false;
+  let answer: () => void = () => {};
+  backend.prompt = (_id: string) => new Promise<string>((resolve) => { answer = () => resolve("late receipt"); });
+  const spoken = unread("change it to blue", true);
+  await settle();
+  assert.equal(spoken.sent, "prompt", "given to the backend, and not answered");
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "rate limited" } });
+  await settle();
+  assert.ok(effects.includes("cancel"), "the old work is called off");
+  assert.ok(effects.includes("stop process") && effects.includes("revoke"), "and fenced: a new process resumes the session");
+  answer();
+});
+
+test("a huge paste is saved whole to a file the agent can read, not rejected; the transcript keeps what the user sent", async (t) => {
+  const { session, state, settle, prompts, B } = setup(t);
+  const huge = "line of a pasted log\n".repeat(20_000);
+  (session as any).hub.delivery.fromUser(session, [text(huge)], { kind: "user", messageId: "m_paste" }, undefined).catch(() => {});
+  await settle();
+  const given = prompts.at(-1)!;
+  assert.ok(given.length < 10_000, "the model is given an excerpt");
+  const file = /saved whole at (\S+);/.exec(given)?.[1];
+  assert.ok(file && fs.readFileSync(file, "utf8") === huge, "and the path of a file with all of it");
+  const records = state.store.read(Paths.transcript(B.agentId, B.sessionId)).map((r: any) => r.update);
+  const shown = records.filter((u: any) => u.sessionUpdate === "user_message_chunk" && u.messageId === "m_paste");
+  assert.equal(shown.map((u: any) => u.content.text).join(""), huge, "the user sees what they sent");
+  assert.ok(!records.some((u: any) => u._meta?.["dev.xsb/discarded"]), "nothing is discarded for its size");
 });

@@ -4,11 +4,11 @@ import path from "node:path";
 import readline from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Paths, describeBackends, findProject, globalConfigPath, hubSocket, initProject, readHubInfo, stopHub } from "@xsb/hub";
-import { Agents, Assets, Backends, Boundaries, Roles, Tasks, Teams, exitCode, explain, isTerminal, text } from "@xsb/protocol";
-import type { AgentInfo, Asset, BackendInfo, McpServerCheck, RoleDetail, Connection, PermissionRequest, PermissionResponse, Task, TeamInfo, TeamSyncPlan, PresetProblem, Language } from "@xsb/protocol";
+import { Agents, Assets, Backends, Workflow, Tasks, exitCode, explain, isTerminal, text } from "@xsb/protocol";
+import type { AgentInfo, Asset, BackendInfo, Connection, PermissionRequest, PermissionResponse, Task, Language } from "@xsb/protocol";
 import { connectHub } from "./client.ts";
 import type { HubConnection } from "./client.ts";
-import { evaluate, scenariosOf } from "./eval.ts";
+import type { WorkflowView } from "@xsb/protocol";
 import { Printer } from "./printer.ts";
 import { language, t } from "./text.ts";
 import type { Shown } from "./text.ts";
@@ -19,7 +19,7 @@ const why = (e: unknown): string => explain(e, language);
 type Args = { _: string[]; [flag: string]: string | boolean | string[] };
 
 /** Flags that take no value: what follows them is the next argument, not theirs. */
-const SWITCHES = new Set(["new", "history", "help", "keep", "yes", "preview"]);
+const SWITCHES = new Set(["new", "history", "help", "keep", "history-only", "workflow-target"]);
 
 function parse(argv: string[]): Args {
   const args: Args = { _: [] };
@@ -36,10 +36,9 @@ function parse(argv: string[]): Args {
 const flag = (args: Args, name: string): string | undefined =>
   typeof args[name] === "string" ? (args[name] as string) : undefined;
 
-/** A flag whose value is text, or `@file` for the content of a file. */
-function textFlag(args: Args, name: string): string | undefined {
-  const value = flag(args, name);
-  return value?.startsWith("@") ? fs.readFileSync(value.slice(1), "utf8") : value;
+function messageScope(args: Args) {
+  if (args["history-only"] && args["workflow-target"]) throw Error("Choose one message target");
+  return args["history-only"] ? "history" : args["workflow-target"] ? "workflow" : undefined;
 }
 
 function project(args: Args): Paths {
@@ -59,15 +58,29 @@ export async function main(argv: string[]): Promise<void> {
 
 async function run(args: Args): Promise<void> {
   const [command, ...rest] = args._;
+  if (args.help) { process.stdout.write(t.help); return; }
   switch (command) {
     case "init":
       return init(args);
-    case "agent":
-      return agent(args, rest);
-    case "role":
-      return role(args, rest);
-    case "team":
-      return team(args, rest);
+    case "session":
+      if (rest[0] === "new") {
+        const conn = await connectHub(project(args),false);
+        try { console.log(await openSession(conn,undefined,flag(args,"backend"),false,rest.slice(1).join(" "))); }
+        finally { conn.close(); }
+        return;
+      }
+      if (rest[0] === "list" || rest.length === 0) return report(args,"sessions");
+      throw Error("xsb session new [title] [--backend NAME] | list");
+    case "workflow": {
+      const [action,id,...nodes] = rest;
+      if (!id || !["show","pause","resume"].includes(action)) throw Error("xsb workflow show|pause|resume SESSION [NODE ...]");
+      const conn = await connectHub(project(args),false);
+      try {
+        const graph = await conn.request<WorkflowView>(action === "show" ? Workflow.get : action === "pause" ? Workflow.pause : Workflow.resume,{sessionId:id,...(nodes.length ? {nodes} : {})});
+        console.log(JSON.stringify(graph,null,2));
+      } finally { conn.close(); }
+      return;
+    }
     case "backends":
       return listBackends(args);
     case "chat":
@@ -88,6 +101,7 @@ async function run(args: Args): Promise<void> {
     case "acp":
       return acpStdio(args);
     default:
+      if (command && command !== "help") throw Error(`Unknown command: ${command}`);
       process.stdout.write(t.help);
   }
 }
@@ -119,160 +133,34 @@ async function listBackends(args: Args): Promise<void> {
   console.log(t.backendsDefined(globalConfigPath()));
 }
 
-async function agent(args: Args, [action, id]: string[]): Promise<void> {
-  const paths = project(args);
-  const conn = await connectHub(paths, false);
-  try {
-    if (action === "add") {
-      if (!id) throw new Error(t.usage("xsb agent add <id> [options]"));
-      const instructions = textFlag(args, "instructions");
-      const workspace = flag(args, "workspace");
-      const spec = {
-        id,
-        name: flag(args, "name"),
-        description: flag(args, "desc"),
-        backend: flag(args, "backend"),
-        role: flag(args, "role"),
-        workspace: workspace ? path.resolve(workspace) : undefined,
-      };
-      const { agent: saved } = await conn.request<{ agent: AgentInfo }>(Agents.put, { agent: spec, instructions });
-      console.log(t.agentSaved(saved.id, saved.role, saved.backend, saved.workspace));
-      console.log(t.instructionsAt(paths.instructions(saved.id)));
-    } else if (action === "remove") {
-      await conn.request(Agents.remove, { id });
-      console.log(t.removed(id));
-    } else if (action === "show") {
-      console.log((await conn.request<{ systemPrompt: string }>(Agents.get, { id })).systemPrompt);
-    } else if (action === "restart") {
-      await conn.request(Agents.restart, { id });
-      console.log(t.restarted(id));
-    } else {
-      printAgents((await conn.request<{ agents: AgentInfo[] }>(Agents.list)).agents);
-    }
-  } finally {
-    conn.close();
-  }
-}
-
-async function role(args: Args, [action, name]: string[]): Promise<void> {
-  const paths = project(args);
-  const conn = await connectHub(paths, false);
-  try {
-    if (action === "add") {
-      const input = { name, description: flag(args, "desc"), backend: flag(args, "backend"), instructions: textFlag(args, "instructions") };
-      const { role: saved } = await conn.request<{ role: RoleDetail }>(Roles.put, { role: input });
-      console.log(t.roleSaved(saved.name, paths.roleDir(saved.name)));
-    } else if (action === "remove") {
-      await conn.request(Roles.remove, { name });
-      console.log(t.removed(name));
-    } else if (action === "show") {
-      const { role: r } = await conn.request<{ role: RoleDetail }>(Roles.get, { name });
-      console.log(`${r.name}: ${r.description ?? ""}\n${r.preset ? `${t.roleTeam(r.preset.team, r.preset.own)}\n` : ""}${t.roleFacts(r.backend, r.agents)}`);
-      for (const [server, spec] of Object.entries(r.mcpServers)) console.log(t.roleServer(server, [spec.command, ...(spec.args ?? [])].join(" ")));
-      for (const s of r.skills) console.log(t.roleSkill(s.name, s.produces, s.inputs, s.description));
-      if (r.instructions.trim()) console.log(`\n${r.instructions.trim()}`);
-    } else if (action === "check") {
-      const { servers } = await conn.request<{ servers: McpServerCheck[] }>(Roles.check, { name });
-      for (const s of servers) console.log(s.tools ? t.serverOk(s.server, s.tools.map((tool) => tool.name)) : t.serverFailed(s.server, s.error ?? ""));
-      if (servers.some((s) => s.error)) process.exitCode = 1;
-    } else {
-      const { roles } = await conn.request<{ roles: RoleDetail[] }>(Roles.list);
-      if (roles.length === 0) console.log(t.noRoles);
-      for (const r of roles) {
-        const has = `${r.preset ? `${r.preset.team}${r.preset.own ? "*" : ""}, ` : ""}${t.roleHas(Object.keys(r.mcpServers).length, r.skills.length, r.agents)}`;
-        console.log(`${r.name.padEnd(18)} ${has}${r.description ? `  ${r.description}` : ""}`);
-      }
-    }
-  } finally {
-    conn.close();
-  }
-}
-
-async function team(args: Args, [action, id]: string[]): Promise<void> {
-  // Scenarios run in projects of their own: no project, and no hub of one, is needed here.
-  if (action === "eval") return evalTeam(args, id);
-  const conn = await connectHub(project(args), false);
-  try {
-    if (action === "use" || action === "drop") {
-      await conn.request(Teams[action], { id });
-      console.log(action === "use" ? t.teamUsed(id) : t.teamDropped(id));
-    } else if (action === "sync") {
-      const plan = await conn.request<TeamSyncPlan>(Teams.syncPreview, { id });
-      console.log(t.teamSyncRisk(id, plan.roles, plan.overwritten, plan.removed));
-      if (args.preview === true) return;
-      if (args.yes !== true) {
-        if (!process.stdin.isTTY) throw new Error(t.teamSyncNeedsYes);
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        let answer: string;
-        try { answer = await new Promise((resolve) => rl.question(t.teamSyncAsk, resolve)); }
-        finally { rl.close(); }
-        if (!/^(y|yes)$/i.test(answer.trim())) { console.log(t.teamSyncCancelled); return; }
-      }
-      await conn.request(Teams.sync, { id, revision: plan.revision, confirm: true });
-      console.log(t.teamSynced(id));
-    } else if (action === "new") {
-      const { team } = await conn.request<{ team: TeamInfo }>(Teams.derive, { id, base: flag(args, "extends") });
-      console.log(t.teamMade(team.dir));
-    } else {
-      const { teams, problems } = await conn.request<{ teams: TeamInfo[]; problems: PresetProblem[] }>(Teams.list);
-      const say = (p: PresetProblem): string => `  ${t.problem(p.severity)}: ${p.detail} (${p.path})`;
-      if (action === "check") {
-        const found = [...(id ? [] : problems), ...teams.filter((team) => !id || team.id === id).flatMap((team) => team.problems)];
-        console.log(found.length ? found.map(say).join("\n") : t.noProblems);
-        if (found.some((p) => p.severity === "error")) process.exitCode = 1;
-        return;
-      }
-      for (const team of teams) {
-        const about = [t.teamSource(team.source), ...(team.extends ? [t.teamExtends(team.extends)] : [])].join(", ");
-        console.log(`${team.id.padEnd(12)} ${t.used(team.used)}  ${team.title} (${about}): ${team.roles.map((r) => r.name).join(", ")}${team.problems.length ? `  [${team.problems.length}]` : ""}`);
-      }
-      for (const p of problems) console.log(say(p));
-    }
-  } finally {
-    conn.close();
-  }
-}
-
-/** `xsb team eval <team>`: how often each scenario of the team passes, run on a real backend (eval.ts). */
-async function evalTeam(args: Args, id: string): Promise<void> {
-  if (!id) throw new Error(t.evalUsage);
-  const lang = (flag(args, "language") ?? language) as Language;
-  const only = flag(args, "only")?.split(",");
-  const scenarios = scenariosOf(lang, id).filter((s) => !only || only.includes(s.id));
-  if (!scenarios.length) return console.log(t.noScenarios(id));
-  const options = { team: id, backend: flag(args, "backend") ?? "claude", runs: Number(flag(args, "runs") ?? 3), language: lang, timeoutMs: Number(flag(args, "timeout") ?? 300) * 1000, keep: args.keep === true };
-  console.log(t.evalStart(scenarios.length, options.runs, options.backend));
-  const outcomes = await evaluate(scenarios, options, ({ scenario, runs }) => {
-    const passed = runs.filter((r) => r.passed).length;
-    console.log(`${scenario.id.padEnd(5)} ${passed}/${runs.length}  ${scenario.title}`);
-    for (const failure of [...new Set(runs.flatMap((r) => r.failures))]) console.log(`      ${failure}`);
-    for (const run of runs) if (run.dir) console.log(`      ${run.dir}`);
-  });
-  const passed = outcomes.reduce((n, o) => n + o.runs.filter((r) => r.passed).length, 0);
-  const total = outcomes.reduce((n, o) => n + o.runs.length, 0);
-  console.log(t.evalTotal(passed, total));
-}
-
 function printAgents(agents: AgentInfo[]): void {
   if (agents.length === 0) return console.log(t.noAgents);
   for (const a of agents) {
-    const role = a.role ? ` (${a.role})` : "";
-    console.log(`${a.id.padEnd(14)} ${t.state[a.state].padEnd(16)} ${a.backend.padEnd(8)} ${a.name}${role}${a.description ? `: ${a.description}` : ""}`);
+    console.log(`${a.id.padEnd(14)} ${t.state[a.state].padEnd(16)} ${a.backend.padEnd(8)} ${a.name}${a.description ? `: ${a.description}` : ""}`);
   }
 }
 
 // ---- talking ----------------------------------------------------------------
 
-/** Open the agent's conversation (it has one). `fresh`: its context is cleared first, so the model starts anew. */
-async function openSession(conn: HubConnection, agentId: string, fresh: boolean, history: boolean): Promise<string> {
-  const meta = { [Agents.sessionKey]: agentId };
-  const { sessions } = await conn.request("session/list", { _meta: meta });
-  const main = sessions.find((s: any) => s._meta?.[Agents.mainKey]);
-  const sessionId: string = main
-    ? (await conn.request("session/resume", { sessionId: main.sessionId, cwd: main.cwd, mcpServers: [], ...(history ? { replayFrom: { type: "start" } } : {}) }), main.sessionId)
-    : (await conn.request("session/new", { cwd: process.cwd(), mcpServers: [], _meta: meta })).sessionId;
-  if (fresh) await conn.request(Boundaries.clear, { sessionId });
-  return sessionId;
+async function openSession(
+  conn: HubConnection,
+  id?: string,
+  backend?: string,
+  history = false,
+  title?: string,
+): Promise<string> {
+  if (id) {
+    await conn.request("session/resume", { sessionId: id, ...(history && { replayFrom: { type: "start" } }) });
+    return id;
+  }
+  return (
+    await conn.request("session/new", {
+      cwd: process.cwd(),
+      title,
+      mcpServers: [],
+      _meta: { [Workflow.backend]: backend },
+    })
+  ).sessionId;
 }
 
 /**
@@ -296,7 +184,7 @@ function servePermissions(conn: HubConnection, printer: Printer, ask: (question:
 }
 
 async function chat(args: Args, agentId: string | undefined): Promise<void> {
-  if (!agentId) throw new Error(t.usage("xsb chat <agent>"));
+
   const paths = project(args);
   const conn = await connectHub(paths, true);
   const printer = new Printer();
@@ -305,9 +193,9 @@ async function chat(args: Args, agentId: string | undefined): Promise<void> {
 
   conn.onUpdate((sessionId, update) => printer.update(sessionId, update));
   servePermissions(conn, printer, ask);
-  const sessionId = await openSession(conn, agentId, args.new === true, args.history === true);
-  printer.labels.set(sessionId, agentId);
-  printer.line(t.talking(agentId));
+  const sessionId = await openSession(conn, args.new ? undefined : agentId, flag(args,"backend"), args.history === true);
+  printer.labels.set(sessionId, sessionId);
+  printer.line(t.talking(sessionId));
 
   let running = 0;
   rl.setPrompt("> ");
@@ -321,7 +209,7 @@ async function chat(args: Args, agentId: string | undefined): Promise<void> {
       if (running > 0) printer.line(t.interjecting);
       running++;
       conn
-        .turn(sessionId, [text(input)])
+        .turn(sessionId, [text(input)],messageScope(args))
         .then((stopReason) => stopReason !== "end_turn" && printer.line(t.stopped(stopReason)), (e) => printer.line(t.failed(why(e))))
         .finally(() => {
           running--;
@@ -337,7 +225,7 @@ async function chat(args: Args, agentId: string | undefined): Promise<void> {
 }
 
 async function send(args: Args, agentId: string | undefined, message: string): Promise<void> {
-  if (!agentId || !message) throw new Error(t.usage("xsb send <agent> <message>"));
+  if (!agentId || !message) throw new Error(t.usage("xsb send <session> <message>"));
   const paths = project(args);
   const conn = await connectHub(paths, process.stdin.isTTY === true);
   const printer = new Printer();
@@ -349,11 +237,11 @@ async function send(args: Args, agentId: string | undefined, message: string): P
       return new Promise((resolve) => rl!.question(q, resolve));
     });
   }
-  const sessionId = await openSession(conn, agentId, args.new === true, false);
-  printer.labels.set(sessionId, agentId);
+  const sessionId = await openSession(conn, agentId);
+  printer.labels.set(sessionId, sessionId);
   try {
     // To an agent at work, it goes into the running turn, and this follows that turn to its end.
-    const stopReason = await conn.turn(sessionId, [text(message)]);
+    const stopReason = await conn.turn(sessionId, [text(message)],messageScope(args));
     if (stopReason !== "end_turn") printer.line(t.stopped(stopReason));
   } finally {
     printer.endLine();
@@ -413,7 +301,7 @@ async function report(args: Args, what: string): Promise<void> {
       for (const task of shown) console.log(`${task.id}  ${t.taskStatus[shownStatus(task)].padEnd(10)} ${initiatorOf(task)} -> ${doer(task)}  [${task.topic}] ${task.title}`);
     }
     if (what === "assets") {
-      const { assets } = await conn.request<{ assets: Asset[] }>(Assets.list, { type: flag(args, "type") });
+      const { assets } = await conn.request<{ assets: Asset[] }>(Assets.list, { type: flag(args, "type"), history:args.history === true });
       for (const a of assets) console.log(`${a.id.padEnd(28)} v${a.version}  ${a.by.padEnd(12)} ${a.description}\n${" ".repeat(28)} ${a.path}`);
     }
     if (what === "sessions") {
@@ -458,28 +346,10 @@ async function hub(args: Args, action: string | undefined): Promise<void> {
   }
 }
 
-/**
- * ACP on stdio for editors and other ACP clients: a pipe to the hub. With
- * `--agent`, sessions the client creates go to that agent, which is how a
- * client that knows nothing of xsb gets one entry per agent.
- */
+/** Serve the workspace hub over ACP stdio. */
 async function acpStdio(args: Args): Promise<void> {
   const socket = await hubSocket(project(args));
-  const agentId = flag(args, "agent");
   socket.pipe(process.stdout);
   socket.on("close", () => process.exit(0));
-  process.stdin.on("end", () => socket.end());
-  if (!agentId) return void process.stdin.pipe(socket);
-  readline.createInterface({ input: process.stdin }).on("line", (line) => {
-    try {
-      const message = JSON.parse(line);
-      if (message.method === "session/new") {
-        message.params = { ...message.params, _meta: { [Agents.sessionKey]: agentId, ...message.params?._meta } };
-        line = JSON.stringify(message);
-      }
-    } catch {
-      /* not ours to judge; the hub answers a parse error */
-    }
-    socket.write(line + "\n");
-  });
+  process.stdin.pipe(socket);
 }

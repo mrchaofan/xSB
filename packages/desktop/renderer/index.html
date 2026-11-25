@@ -28,19 +28,14 @@
 <main class="main">
   <nav class="rail" data-t-aria-label="rail.label">
     <div class="rail-scroll">
-    <h2><span data-t="rail.agents"></span> <span class="count" id="agent-count"></span> <button class="icon-btn" id="new-agent" data-t-title="agent.new.title" data-t-aria-label="agent.new.title"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></button></h2>
+    <h2><span data-t="flow.sessions"></span> <span class="count" id="agent-count"></span> <button class="icon-btn" id="new-agent" data-t-title="flow.new" data-t-aria-label="flow.new"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></button></h2>
     <div id="agents"></div>
-    <h2 data-t="rail.tasks"></h2>
-    <div id="tasks"></div>
+
     </div>
     <div class="rail-footer">
-      <button class="row utility-row" id="overview"><svg viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg><span data-t="rail.outputs"></span></button>
       <button class="row utility-row" id="settings"><svg viewBox="0 0 16 16"><path d="M6 2h4l.5 2 2 .7 1.5 2.6-1.5 1.5.3 2.1-3 1.7L8 12l-1.8.6-3-1.7.3-2.1L2 7.3l1.5-2.6 2-.7z"/><circle cx="8" cy="7.5" r="2"/></svg><span data-t="settings.title"></span><small>⌘ ,</small></button>
     </div>
   </nav>
-
-  <!-- 角色编辑、产出总览：打开时占用对话栏和制品栏的位置 -->
-  <section class="page form" id="page"></section>
 
   <div class="blank" id="blank"></div>
   <div class="lanes" id="lanes"></div>
@@ -51,13 +46,22 @@
     <!-- 标签：制品，以及打开的每个网页（pages.js） -->
     <nav class="tabs" id="tabs" data-t-aria-label="side.label"></nav>
 
+    <!-- 启动页：没有当前标签时显示，从这里在新标签中打开网页、资产管理或工作流（pages.js） -->
+    <section class="side" id="side-launcher" hidden></section>
+    <section class="side" id="side-workflow" hidden>
+      <header class="bar" id="flow-heading"></header>
+      <div id="flow-map"></div>
+      <div id="task-conversation"></div>
+    </section>
     <section class="side" id="side-artifacts">
     <header class="bar artifact-toolbar">
       <button class="icon-btn" id="artifact-list" data-t-title="artifact.list.all" data-t-aria-label="artifact.list.all"><svg viewBox="0 0 16 16"><path d="M10 3L5 8l5 5"/></svg></button>
       <div class="artifact-title"><strong id="artifact-name"></strong><small id="artifact-meta"></small></div>
+      <button class="btn" id="asset-reference" hidden data-t="flow.reference"></button>
       <div id="artifact-navigation" hidden></div>
       <button class="icon-btn" id="artifact-info" hidden aria-expanded="false" aria-controls="artifact-details" data-t-title="artifact.details" data-t-aria-label="artifact.details"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 7v4M8 4.5v.5"/></svg></button>
     </header>
+    <label id="reference-destination" hidden><span data-t="artifact.destination"></span><select></select></label>
     <div class="artifact-stage">
       <div class="artifact-body" id="artifact-body"></div>
       <aside class="artifact-details" id="artifact-details" hidden data-t-aria-label="artifact.details">
