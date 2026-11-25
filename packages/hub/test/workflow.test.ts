@@ -3,9 +3,10 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { text } from "@xsb/protocol";
+import { Question, text } from "@xsb/protocol";
 import type { NodeDef } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
+import { Paths } from "../src/paths.ts";
 import { ops } from "../src/state.ts";
 import { deferred, newId } from "../src/util.ts";
 import type { LiveSession, Turn } from "../src/session.ts";
@@ -624,4 +625,100 @@ test("a settled workflow reached an end and has nothing left to do", () => {
   assert.equal(settled(f), true);
   additional(f, "B", "one more pass");
   assert.equal(settled(f), false, "queued additional work is still to happen");
+});
+
+test("ask: questions are shown, and the user's next message answers, skips or replaces them", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-ask-"));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const root = hub.createConversation();
+  turnFor(root, "trip");
+  const before = hub.agentInfo(hub.agent(root.agentId)).state;
+  const questions = (): any[] => fs.readFileSync(path.join(hub.paths.dir, Paths.transcript(root.agentId, root.id)), "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line).update?._meta?.[Question.key]).filter(Boolean);
+  const budget = { question: "预算？", kind: "single", options: ["5000 以内", "不限"], other: true };
+  const scenery = { question: "想看哪些风景？", kind: "multi", options: ["海边", "雪山", "草原"] };
+  const city = { question: "出发城市？", kind: "text" };
+
+  for (const bad of [[], [budget, budget, budget, budget, budget], [{ question: "x", kind: "single", options: ["a"] }],
+    [{ question: "x", kind: "text", options: ["a", "b"] }], [{ question: "x", kind: "multi", options: ["a", "a"] }], [{ question: " ", kind: "text" }]])
+    assert.throws(() => hub.questions.ask(root, bad as never), /ask takes|question \d/);
+  assert.match(hub.questions.ask(root, [budget, scenery, city] as never), /End your turn/);
+  const open = questions().at(-1);
+  assert.equal(open.state, "open");
+  assert.deepEqual(open.questions.map((q: any) => q.kind), ["single", "multi", "text"]);
+  assert.equal(hub.agentInfo(hub.agent(root.agentId)).asking, true, "the agent waits for the user");
+  assert.equal(hub.agentInfo(hub.agent(root.agentId)).state, before, "its work state is unchanged");
+
+  hub.questions.reply(root, "m1", { questionId: open.id, answers: ["不限", ["海边", "雪山"], "杭州"] });
+  assert.deepEqual(questions().at(-1), { id: open.id, state: "answered", answers: ["不限", ["海边", "雪山"], "杭州"], reply: "m1" });
+  assert.match(hub.questions.scope("m1")!, /answers to the questions you asked/);
+  assert.equal(hub.agentInfo(hub.agent(root.agentId)).asking, undefined);
+  hub.questions.reply(root, "m2");
+  assert.equal(hub.questions.scope("m2"), undefined, "with no question open a message is just a message");
+
+  hub.questions.ask(root, [city] as never);
+  const first = questions().at(-1).id;
+  hub.questions.ask(root, [budget] as never);
+  assert.deepEqual(questions().slice(-2).map((q) => q.state), ["superseded", "open"], "a new question replaces the open one");
+  hub.questions.reply(root, "m3", { questionId: first, answers: ["杭州"] });
+  assert.equal(questions().at(-1).state, "superseded", "an answer to a replaced question is other words");
+  assert.match(hub.questions.scope("m3")!, /did not answer/);
+  hub.questions.ask(root, [budget] as never);
+  hub.questions.reply(root, "m4", { questionId: questions().at(-1).id, skipped: true });
+  assert.equal(questions().at(-1).state, "skipped");
+  assert.match(hub.questions.scope("m4")!, /skipped/);
+  hub.questions.given("m4");
+  assert.equal(hub.questions.scope("m4"), undefined, "told once");
+});
+
+test("ask in a task: the work waits for the reply, which continues it as the same work", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-ask-task-"));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const root = hub.createConversation(),
+    runtime = hub.workflows;
+  turnFor(root, "request");
+  runtime.call(root, "execute", { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, newId("call"));
+  const f = structuredClone(runtime.read(root.id)), w = claim(f, "A")!;
+  const worker = hub.createConversation("claude", "A", { owner: root.id, node: "A", bind: (agentId, sessionId) => {
+    Object.assign(f.instances.A, { agentId, sessionId });
+    return ops.workflow(f);
+  } });
+  const asking = turnFor(worker, w.attempt!);
+  hub.questions.ask(worker, [{ question: "横版还是竖版？", kind: "single", options: ["横版", "竖版"] }] as never);
+  assert.ok(runtime.read(root.id).instances.A.work!.asking);
+  const outbox = runtime.read(root.id).outbox.length;
+  worker.current = undefined;
+  runtime.ended(worker, asking, { stopReason: "end_turn" });
+  const waiting = runtime.read(root.id).instances.A.work!;
+  assert.equal(waiting.state, "running", "not suspended for ending without finish");
+  assert.equal(runtime.read(root.id).outbox.length, outbox, "the main agent is not told of a failure");
+
+  // The reply, with the agent idle: it becomes the work's attempt, not an interruption of it.
+  const question = worker.rec.question!;
+  hub.questions.reply(worker, "reply", { questionId: question, answers: ["竖版"] });
+  runtime.input(worker, "reply", [text("竖版")]);
+  const continued = runtime.read(root.id).instances.A;
+  assert.equal(continued.work!.attempt, "reply");
+  assert.equal(continued.work!.asking, undefined);
+  assert.equal(continued.interruptions.length, 0);
+  const turn = turnFor(worker, "reply");
+  runtime.call(worker, "finish", { summary: "竖版海报", assets: [] }, newId("call"));
+  runtime.ended(worker, turn, { stopReason: "end_turn" });
+  assert.equal(runtime.read(root.id).instances.A.last?.summary, "竖版海报", "the delivery of the continued work is accepted");
+
+  // A turn that asked and was then answered within it, yet ended without finish, is unfinished as before.
+  const g = structuredClone(runtime.read(root.id));
+  additional(g, "A", "再出一版");
+  hub.state.commit([ops.workflow(g)]);
+  const h = structuredClone(runtime.read(root.id)), extra = claim(h, "A")!;
+  hub.state.commit([ops.workflow(h)]);
+  const again = turnFor(worker, extra.attempt!);
+  hub.questions.ask(worker, [{ question: "颜色？", kind: "text" }] as never);
+  hub.questions.reply(worker, "inside", { questionId: worker.rec.question!, answers: ["蓝"] });
+  runtime.ended(worker, again, { stopReason: "end_turn" });
+  assert.equal(runtime.read(root.id).instances.A.work?.state, "suspended");
 });

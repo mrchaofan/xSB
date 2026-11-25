@@ -4,7 +4,7 @@
  * Each new ACP session starts an independent main conversation. Extensions expose
  * its workflow, active task conversations, workspace assets and installed backends.
  */
-import { SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, LANGUAGES, LanguageExt, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
+import { Answer, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, LANGUAGES, LanguageExt, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
 import type { Connection, HistoryImage, OriginMeta } from "@xsb/protocol";
 import { describeBackends, loadProjectConfig, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
@@ -140,6 +140,8 @@ export class Client {
       origin.messageId ??= newId("m");
       // The same message sent again (its answer was lost): no second copy, and no second workflow interruption.
       if (hub.delivery.known(origin.messageId)) return hub.delivery.fromUser(session, p.prompt, origin, this);
+      // A message to an agent that asked the user something replies to it: answers, a skip, or other words instead.
+      hub.questions.reply(session, origin.messageId, p._meta?.[Answer.key]);
       hub.workflows.input(session,origin.messageId,p.prompt,p._meta?.[Workflow.target]);
       if (!session.rec.title && !hub.agent(session.agentId).workflowOwner) {
         const first = p.prompt.find((b: any) => b.type === "text")?.text?.trim();

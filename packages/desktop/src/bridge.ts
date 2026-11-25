@@ -12,7 +12,7 @@ import type { ComposerState, WorkflowView } from "@xsb/protocol";
  * for each (../renderer/text.js). Main hands it facts, and errors already
  * worded in that language, since only main can tell what an error is about.
  */
-import type { AgentInfo, Boundary, DeliveredAs, DiscardReason, OriginMeta, Task } from "@xsb/protocol";
+import type { AgentInfo, Boundary, DeliveredAs, DiscardReason, OriginMeta, QuestionAnswer, QuestionItem, QuestionState, Task } from "@xsb/protocol";
 import type { Content } from "./content.ts";
 import type { WebAnnotation } from "./page-annotations.ts";
 
@@ -28,10 +28,14 @@ export type Entry = { id: string } & (
       /** Owed: given to the model with the user's next message. `redelivered`: it was. `resentAs`: the user sent it again. */
       owed?: boolean; redelivered?: boolean; resentAs?: string;
       /** How the model was given it, where that differs (images it cannot see, text saved to a file, a note in front). */
-      deliveredAs?: DeliveredAs }
+      deliveredAs?: DeliveredAs;
+      /** It answers or skips a question: the question's card shows it. */
+      reply?: boolean }
   | { kind: "output"; content: Content; streaming?: boolean }
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
+  /** What the agent asked the user (the `ask` tool) and what became of it. Its reply's own message is not shown apart. */
+  | { kind: "question"; questionId: string; questions: QuestionItem[]; state: QuestionState; answers?: QuestionAnswer[] }
   | { kind: "error"; text: string }
   /** Where what the model sees starts anew: before it, the model sees nothing (`cleared`) or only a handoff. */
   | { kind: "boundary"; boundary: Boundary }
@@ -48,13 +52,12 @@ export type Activity = { kind: "waiting" | "thinking" | "writing" | "tool"; deta
 export type Artifact = { sessionIds?: string[]; fileUri?: string; id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string; assetId?: string; assetVersion?: number; registeredName?: string; description?: string };
 
 /**
- * A web page of the side panel (pages.ts). `nativeView` popup guests are mounted by main;
- * other pages are shown by `<webview2 web-contents-id>` using `contentsId`.
+ * A web page of the side panel (pages.ts), shown by `<webview2 web-contents-id>` using `contentsId`.
  * `window`: it is shown in a window of its own, `pinned` on top of the others. `agent`: an agent opened it and drives it.
  * `favicon`: the site's icon (http(s) or data: image), once the page named one.
  * `annotating`: the user is annotating it; `annotations`: the notes embedded in its current document.
  */
-export type PageView = { sessionId?: string; id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; nativeView?: boolean; pinned: boolean; agent: boolean; controlling?: boolean; annotating?: boolean; annotations?: number; tone?: "claude" | "default"; error?: string; favicon?: string };
+export type PageView = { sessionId?: string; id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; pinned: boolean; agent: boolean; controlling?: boolean; annotating?: boolean; annotations?: number; tone?: "claude" | "default"; error?: string; favicon?: string };
 
 /**
  * `missing` is set when the backend is one of the known agents and its

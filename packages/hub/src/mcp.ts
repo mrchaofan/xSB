@@ -14,7 +14,7 @@ import type { Hub } from "./hub.ts";
 import { shipped } from "./paths.ts";
 
 import type { LiveSession } from "./session.ts";
-import { workflowTools } from "./workflow-tools.ts";
+import { checkArguments, workflowTools } from "./workflow-tools.ts";
 import { WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT } from "./prompts.ts";
 import { boundedText } from "./context.ts";
 import { newId, VERSION } from "./util.ts";
@@ -102,7 +102,12 @@ export function serveMcp(
       arguments: boundedText(hub.paths, owner.agentId, JSON.stringify(args), budget),
     };
     try {
-      const result = hub.workflows.call(owner, p.name, args, receipt);
+      let result: unknown;
+      if (p.name === "ask") {
+        hub.workflows.accessible(owner);
+        checkArguments(p.name, args);
+        result = hub.questions.ask(owner, args.questions);
+      } else result = hub.workflows.call(owner, p.name, args, receipt);
       const answer = boundedText(
         hub.paths,
         owner.agentId,

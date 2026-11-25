@@ -10,7 +10,6 @@ import { openContextMenu } from "./menu.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { t } from "./i18n.js";
 import { showWeb } from "./webview.js";
-import { clearControl } from "./page-control.js";
 import { annotateButton, clearAnnotations } from "./annotate.js";
 
 function ownerOf(page) {
@@ -194,7 +193,7 @@ export function renderSide() {
   const launching = state.tab === null;
   $("#side-workflow").hidden = !workflow;
   if (workflow || !hasWorkflow) renderWorkflow(hasWorkflow ? flow : null);
-  if (!page || page.window) { clearControl(); clearAnnotations(); }
+  if (!page || page.window) clearAnnotations();
   $("#side-launcher").hidden = !launching;
   if (launching) fill($("#side-launcher"), launcher(hasWorkflow));
   $("#side-artifacts").hidden = !!page || workflow || launching;

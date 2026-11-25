@@ -33,7 +33,7 @@ const WORKING_RULES = `
 /** Enforced lifecycle contract; keep aligned with docs/TURN-LIFECYCLE.md and the runtime regression tests. */
 export const TASK_LIFECYCLE_RULES = `
 Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks and messages from agents join a running turn that is unprotected; behind a protected turn they queue. Task results never join a running turn. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. Only ACP insertion or echo acknowledges input. A user message that failed to reach you (not one the user stopped) is given to you once, marked "[xsb] … did not reach you", in front of the user's next message: treat it as said before that message, and do not act on it twice. Old callbacks, tool permissions and backend receipts expire with their binding. Never launch hidden agents or detached jobs.
-A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery. The host accepts it after normal turn completion and revalidation. Pause and an escalation with pauseSelf stop affected attempts. After restart the workflow is paused until explicit resume. A workflow context may list work a user stop cancelled; it will not come back. An assignment may say earlier assignments were withdrawn; do not continue those. Answer status and unrelated questions directly.`;
+A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery. The host accepts it after normal turn completion and revalidation. Pause and an escalation with pauseSelf stop affected attempts. After restart the workflow is paused until explicit resume. If an assignment needs the user's choice, ask and end the turn: the work waits, and the user's reply continues it in a turn of its own, where you finish. A workflow context may list work a user stop cancelled; it will not come back. An assignment may say earlier assignments were withdrawn; do not continue those. Answer status and unrelated questions directly.`;
 
 /**
  * What the built-in tools are, said where a model looks first: the system prompt, and the MCP server's own instructions
@@ -44,10 +44,12 @@ const WORKFLOW_TOOLS_NAMED =
   'When the user asks about workflows, DAGs, orchestration, splitting work into tasks, or "the workflow skill/tool" (工作流、编排、拆分任务、workflow 技能), these tools are what they mean: say you have them, and use them.';
 export const WORKFLOW_MAIN_ABOUT =
   "xSB's built-in workflow tools for this conversation: plan, execute, choose, prompt, pause, resume (a workflow is a DAG of task nodes, each run by a task agent of its own), " +
-  "asset_list, asset_get, asset_version_get, asset_put, asset_version_put (versioned files shared with those agents), read_context and previous_conversation. " + WORKFLOW_TOOLS_NAMED;
+  "asset_list, asset_get, asset_version_get, asset_put, asset_version_put (versioned files shared with those agents), read_context and previous_conversation, " +
+  "and ask (ask the user 1 to 4 single-choice, multiple-choice or free-text questions; their reply comes as their next message). " + WORKFLOW_TOOLS_NAMED;
 export const WORKFLOW_TASK_ABOUT =
   "xSB's built-in workflow tools for this task agent: finish (stage your delivery), escalate (hand something to the main agent; pauseSelf when your own assignment must change), " +
-  "and the asset tools (asset_list, asset_get, asset_version_get, asset_put, asset_version_put) and read_context. " + WORKFLOW_TOOLS_NAMED;
+  "the asset tools (asset_list, asset_get, asset_version_get, asset_put, asset_version_put), read_context, " +
+  "and ask (ask the user 1 to 4 single-choice, multiple-choice or free-text questions; their reply comes as their next message). " + WORKFLOW_TOOLS_NAMED;
 
 /**
  * A task agent's part, and how it sorts what the user says to it directly: its own assignment is its own to handle
@@ -219,6 +221,12 @@ const taskLine = (t: Task): string =>
 /** What a session is told when its turn ended without what its task has to deliver (kernel.ts, QualityGateHook). */
 export const contractReminder = (task: Task, why: string): string =>
   `Your turn ended, but your task "${task.title}" (${task.id}) is not done: ${why} Register it with put_asset now, then end your turn with the result. If it cannot be done, call report_result with failed and say why.`;
+
+/**
+ * Whether a title an agent program gave its session is of xsb's own words: many name a session after how its first
+ * prompt begins, which in a renewed session is the handoff, and elsewhere a preface, a task or a message.
+ */
+export const isXsbText = (title: string): boolean => /^\s*(\{"excerpt":")?(\[xsb\b|<xsb-)/i.test(title);
 
 export const STEER_CONTINUATION =
   "[xsb] A new message arrived while you were working and your turn was paused for it. Take it into account, then carry on with whatever you had not finished.";

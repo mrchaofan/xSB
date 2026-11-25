@@ -389,7 +389,12 @@ export class Workflows {
       const i = instance(f, spec.workflowNode!);
       const current = (i.work?.kind === "graph" ? i.work.id : undefined) ?? (i.last?.valid ? i.last.id : undefined);
       if (target && target !== "history" && target !== current) throw Error("This workflow target has expired");
-      if (target !== "history" && current && !i.interruptions.some((p) => p.id === id))
+      // The user's reply to what the work asked (questions.ts) continues the work, in a turn of its own: that turn is
+      // the work's attempt. A reply that joins the asking turn still running is part of it already.
+      if (i.work?.asking && i.work.state === "running" && !s.busy) {
+        i.work.attempt = id;
+        delete i.work.asking;
+      } else if (target !== "history" && current && !i.interruptions.some((p) => p.id === id))
         i.interruptions.push({ id, target: current, prompt: blocks });
       if (i.work && target !== "history") i.work.grants.push(...named);
     }
@@ -398,6 +403,16 @@ export class Workflows {
       f.interruptions.push({ id, target: f.active, prompt: blocks });
     s.protect();
     if (named.length || spec.workflowOwner || target === "workflow") this.save(f);
+  }
+  /** A task agent asked the user something (questions.ts) in its work: the work waits for the reply, not ending unfinished. */
+  asking(s: LiveSession, question: string) {
+    const spec = this.hub.agent(s.agentId);
+    if (!spec.workflowOwner) return;
+    const f = structuredClone(this.read(spec.workflowOwner)),
+      w = f.instances[spec.workflowNode!]?.work;
+    if (!w || w.state !== "running" || w.attempt !== s.current?.first.messageId) return;
+    w.asking = question;
+    this.save(f);
   }
 
   private observe(f: Flow, turn: Turn) {
@@ -537,6 +552,9 @@ export class Workflows {
       if (normal && i.work.staged) {
         i.work.state = "ended";
         delete i.work.attempt;
+        delete i.work.asking;
+      } else if (normal && i.work.asking && i.work.asking === s.rec.question) {
+        // It asked the user and waits for the reply, which continues it (`input`).
       } else {
         suspend(i.work, "failure");
         notice(

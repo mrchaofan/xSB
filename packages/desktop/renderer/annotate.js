@@ -40,17 +40,17 @@ textarea.onkeydown = (e) => {
 };
 layer.onkeydown = (e) => { if (e.key === "Escape" && e.target !== textarea) op("annotate", false); };
 
-/** 工具栏上的"批注"开关：智能体正在操作、或是弹出的原生网页时不能用。 */
+/** 工具栏上的"批注"开关：智能体正在操作时不能用。 */
 export function annotateButton(button, page) {
   button.setAttribute("aria-pressed", String(!!page.annotating));
-  button.disabled = !page.annotating && (!!page.controlling || !!page.nativeView || !!page.error || page.window && button.dataset.panel === "true");
-  button.title = t(page.annotating ? "web.annotate.done" : page.nativeView ? "web.annotate.unavailable" : "web.annotate");
+  button.disabled = !page.annotating && (!!page.controlling || !!page.error || page.window && button.dataset.panel === "true");
+  button.title = t(page.annotating ? "web.annotate.done" : "web.annotate");
   button.onclick = () => xsb.page(page.id, "annotate", !page.annotating).catch((e) => { error = e.message; render(); });
 }
 
 /** 在 container 里给 page 叠上批注界面；网页不在批注时撤掉。showWeb 每次显示网页后调用。 */
 export function showAnnotations(container, page) {
-  if (!page.annotating || page.nativeView || page.error) return clearAnnotations(page.id);
+  if (!page.annotating || page.error) return clearAnnotations(page.id);
   shown = { page, container };
   layer.dataset.tone = page.tone ?? "default";
   if (layer.parentElement !== container) container.append(layer);

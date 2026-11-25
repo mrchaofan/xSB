@@ -1,0 +1,89 @@
+// Run after building the desktop app (window-harness.cjs): an agent asks the user with the ask tool. The card shows in
+// the conversation, the agent waits for the answer, and the user answers, skips, or writes something else instead.
+// The scripted backend echoes what it is given, so the test sees what the model got. XSB_SCREENSHOTS=<folder> saves pictures.
+const fs = require("node:fs");
+const path = require("node:path");
+const assert = require("node:assert/strict");
+const { pathToFileURL } = require("node:url");
+
+require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, click, send, has, until, untilJS, root }) => {
+  const text = (await import(pathToFileURL(path.join(root, "packages/desktop/renderer/text.js")).href)).TEXT[await js("xsb.language")];
+  const shots = process.env.XSB_SCREENSHOTS;
+  const shoot = async (name) => {
+    if (!shots) return;
+    await js("new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))");
+    fs.writeFileSync(path.join(shots, name + ".png"), (await win.capturePage()).toPNG());
+  };
+  const lane = "#lanes .lane";
+  const card = (state) => lane + ` .entry.question[data-state="${state}"]`;
+  const rowOf = async (agent) => "#agents .row:nth-child(" + ((await js("xsb.load().then(s=>s.agents.filter(a=>!a.workflowOwner).map(a=>a.id))")).indexOf(agent) + 1) + ")";
+  const ask = (questions) => "!call ask " + JSON.stringify({ questions });
+  const echoed = (words) => untilJS(q(lane + " .entries") + ".innerText.includes(" + JSON.stringify(words) + ")", "echo " + words);
+  win.show();
+
+  await until(() => has(lane), "first conversation");
+  const agent = await js('xsb.newSession("mock")');
+  await untilJS('document.querySelectorAll("#agents .row").length>=2', "listed");
+  await click(await rowOf(agent.id));
+  const row = await rowOf(agent.id);
+
+  // Three kinds in one call.
+  await send(lane, ask([
+    { question: "预算多少？", kind: "single", options: ["5000 以内", "5000–10000", "不限"], other: true },
+    { question: "想看哪些风景？", kind: "multi", options: ["海边", "雪山", "草原", "古镇"] },
+    { question: "从哪里出发？", kind: "text" },
+  ]));
+  const panel = lane + " .ask-panel";
+  await until(() => has(panel), "question panel above the composer");
+  await untilJS(q(row + " .state") + ".dataset.state==='asking'", "the row says it waits for the answer");
+  assert.equal(await js(q(lane + " .lane-state span") + ".textContent"), text["state.asking"]);
+  assert.equal(await js(q(panel + " .ask-head small") + ".textContent"), "1/3");
+  assert.equal(await js(q(panel + " .ask-next") + ".disabled"), true, "nothing goes on before the question has an answer");
+  assert.equal(await js("document.querySelectorAll(" + JSON.stringify(panel + " .ask-row") + ").length"), 4, "three options and one of your own");
+  await shoot("ask-open");
+
+  // 1/3: an answer of one's own.
+  await click(panel + " .ask-row:last-child");
+  await js("(()=>{const o=document.querySelector(" + JSON.stringify(panel + " .ask-other-input") + ");o.value='8000 左右';o.dispatchEvent(new InputEvent('input',{bubbles:true}));})()");
+  assert.equal(await js(q(panel + " .ask-row:last-child") + ".getAttribute('aria-checked')"), "true");
+  await click(panel + " .ask-next");
+  // 2/3: two sceneries, by number keys.
+  await untilJS(q(panel + " .ask-head small") + ".textContent.includes('2/3')", "second page");
+  await js(q(panel) + ".focus()");
+  for (const key of ["1", "2"]) win.webContents.sendInputEvent({ type: "keyDown", keyCode: key });
+  await untilJS("[...document.querySelectorAll(" + JSON.stringify(panel + " .ask-row[aria-checked=true]") + ")].length===2", "picked by keys");
+  await shoot("ask-multi");
+  win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Return" });
+  // 3/3: a city, then Enter submits.
+  await untilJS(q(panel + " .ask-head small") + "?.textContent.includes('3/3')", "third page");
+  await js("(()=>{const t=document.querySelector(" + JSON.stringify(panel + " .ask-text") + ");t.value='杭州';t.dispatchEvent(new InputEvent('input',{bubbles:true}));t.focus();})()");
+  assert.equal(await js(q(panel + " .ask-next") + ".textContent"), text["ask.submit"]);
+  win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Return" });
+  await until(() => has(card("answered")), "answered");
+  assert.equal(await has(panel), false, "the panel goes once answered");
+  assert.equal(await js(q(card("answered") + " .ask-answers") + ".innerText.includes('8000 左右')"), true);
+  assert.equal(await js(q(card("answered") + " .ask-answers") + ".innerText.includes('海边、雪山')"), true);
+  await echoed("[xSB] The user's answers to the questions you asked (ask).");
+  await echoed("杭州");
+  assert.equal(await js("[...document.querySelectorAll(" + JSON.stringify(lane + " .entry.input[data-origin=user]") + ")].filter(e=>!e.hidden).some(e=>e.textContent.includes('杭州'))"), false,
+    "the answer is shown by the record, not as a message of its own");
+  await untilJS(q(row + " .state") + ".dataset.state==='idle'", "no longer waiting");
+  await shoot("ask-answered");
+
+  // Skipped.
+  await send(lane, ask([{ question: "要不要住民宿？", kind: "single", options: ["要", "不要"] }]));
+  await until(() => has(lane + " .ask-panel"), "second question");
+  await click(lane + " .ask-foot .btn:not(.primary)");
+  await until(() => has(card("skipped")), "skipped");
+  await echoed("[xSB] The user skipped the questions you asked (ask).");
+
+  // A message instead of an answer.
+  await send(lane, ask([{ question: "几天？", kind: "text" }]));
+  await until(() => has(lane + " .ask-panel"), "third question");
+  await send(lane, "先看看天气再说");
+  await until(() => has(card("superseded")), "superseded");
+  await echoed("[xSB] The user did not answer the questions you asked (ask) and wrote this instead.");
+  assert.equal(await js(q(card("superseded") + " .ask-record-head small") + ".textContent"), text["ask.state.superseded"]);
+  assert.equal(await has(lane + " .ask-panel"), false);
+  console.log("Electron + real Hub/ACP: ask card with single, multi and text questions; answered, skipped and superseded replies passed");
+});

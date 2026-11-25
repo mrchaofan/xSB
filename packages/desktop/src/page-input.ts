@@ -1,6 +1,7 @@
 /** Native user events are blocked during Agent control. Mouse events from CDP are
  * allowed only while an owned Input.dispatchMouseEvent command is in flight.
- * A native shield above the page prevents physical user input in that interval.
+ * A shield above the page, in the document that shows it (renderer/page-control.js),
+ * takes physical mouse input in that interval.
  *
  * While the user annotates a page, its keyboard is blocked too; the mouse goes
  * on to the page, where the debugger's node selection takes clicks and hovers
