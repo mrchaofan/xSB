@@ -14,6 +14,8 @@ Object.assign(globalThis, {
   },
   document: { documentElement: { dataset, classList: { toggle: (key: string, on: boolean) => on ? classes.add(key) : classes.delete(key) } } },
   window: { addEventListener: (_: string, listener: typeof storageListener) => { storageListener = listener; } },
+  // Windows/Linux read the theme's colors for the window buttons (syncWindowColors); the test runs on every platform.
+  getComputedStyle: () => ({ getPropertyValue: () => "" }),
 });
 const prefs = await import("../renderer/preferences.js");
 beforeEach(() => { values.clear(); classes.clear(); failWrites = false; prefs.applyPreferences(); });
