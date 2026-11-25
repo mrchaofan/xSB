@@ -207,8 +207,10 @@ export class Kernel {
     if (results && (item.workGeneration ?? 0) < this.generation(to.sessionId)) return "inbox";
     if (results && !results.mode && r.awaits(results.taskIds[0])) return "return";
     if (r.busy && (from.kind === "user" || item.steer)) return "interject";
-    // Rechecked where it is put in (LiveSession.steer): the user may have spoken into the turn since.
-    if (from.kind === "agent" && r.turn && !r.turn.protected && item.pref !== "lazy") return "interject";
+    // An agent's task or message goes into an agent's turn (rechecked where it is put in, LiveSession.steer: the user
+    // may have spoken into the turn since). A task's result does not: it is a fact of the work that asked for it, given
+    // with its own turn, and kept as one if that work is stopped.
+    if (from.kind === "agent" && !results && r.turn && !r.turn.protected && item.pref !== "lazy") return "interject";
     return item.pref === "lazy" ? "inbox" : "turn";
   }
 
