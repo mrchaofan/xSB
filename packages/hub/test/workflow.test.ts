@@ -10,7 +10,8 @@ import { ops } from "../src/state.ts";
 import { deferred, newId } from "../src/util.ts";
 import type { LiveSession, Turn } from "../src/session.ts";
 import { canonical, graphJsonl, validateResult, parseGraph } from "../src/workflow-graph.ts";
-import { additional, adopt, claim, control, empty, normalize, view } from "../src/workflow-state.ts";
+import { additional, adopt, claim, control, empty, normalize, settled, view } from "../src/workflow-state.ts";
+import { WORKFLOW_REFRESH_TURNS } from "../src/workflows.ts";
 import type { Flow } from "../src/workflow-state.ts";
 
 const graph = (...rows: unknown[]) => rows.map((v) => JSON.stringify(v)).join("\n");
@@ -577,12 +578,50 @@ test("versions are xSB's: the model plans and executes by graph, and a fresh con
   assert.equal(second.candidate.graphJsonl, graphJsonl(parseGraph(jsonl)));
   assert.deepEqual(call("execute", {}), { version: "plan-1" }, "execute adopts the candidate this turn was shown");
 
-  const third = await shown("t3");
-  assert.equal(third.version, "plan-1");
-  assert.equal(third.graphJsonl, undefined, "a context that has the graph gets what changed");
-  assert.ok(third.graphRef);
+  // The model adopted it itself: the next turns are not told again, until WORKFLOW_REFRESH_TURNS have passed.
+  for (let n = 1; n < WORKFLOW_REFRESH_TURNS; n++) assert.equal(await shown(`quiet-${n}`), undefined, `turn ${n} after being told`);
+  const refreshed = await shown("refresh");
+  assert.equal(refreshed.version, "plan-1");
+  assert.equal(refreshed.graphJsonl, undefined, "a context that has the graph gets what changed");
+  assert.ok(refreshed.graphRef);
+  assert.equal(await shown("after-refresh"), undefined);
 
+  // What it cannot learn otherwise is told at once: here, the user paused the workflow.
+  runtime.clientControl(root.id, true);
+  assert.equal((await shown("paused")).paused, true);
+  assert.equal(await shown("still-paused"), undefined);
+  runtime.clientControl(root.id, false);
+  assert.equal((await shown("resumed")).paused, false);
+
+  // The backend compacted the conversation: the graph is shown whole again; so is it to a renewed context.
+  root.onBackendUpdate({ sessionUpdate: "compaction_update", status: "completed" } as never);
+  assert.equal((await shown("compacted")).graphJsonl, graphJsonl(parseGraph(jsonl)), "a compacted context is shown the graph whole");
+  assert.equal(await shown("after-compaction"), undefined);
   root.rec.contextEpoch = (root.rec.contextEpoch ?? 0) + 1;
-  const renewed = await shown("t4");
+  const renewed = await shown("renewed");
   assert.equal(renewed.graphJsonl, graphJsonl(parseGraph(jsonl)), "a renewed context is shown the graph whole");
+
+  // Once it has settled, the model keeps it in mind itself: no refresh, and the main conversation's messages are its own,
+  // not interruptions of the workflow. A compaction still brings it back whole.
+  const done = structuredClone(runtime.read(root.id));
+  deliver(done, "A");
+  hub.state.commit([ops.workflow(done)]);
+  assert.ok(settled(runtime.read(root.id)));
+  for (let n = 0; n < WORKFLOW_REFRESH_TURNS * 2; n++) assert.equal(await shown(`settled-${n}`), undefined, `settled turn ${n}`);
+  const message = newId("m");
+  runtime.input(root, message, [text("plan a road trip")], "workflow");
+  assert.equal(runtime.interruptionContext(root, message), undefined, "a message after the workflow is not an interruption of it");
+  root.onBackendUpdate({ sessionUpdate: "compaction_update", status: "completed" } as never);
+  assert.equal((await shown("settled-compacted")).graphJsonl, graphJsonl(parseGraph(jsonl)));
+});
+
+test("a settled workflow reached an end and has nothing left to do", () => {
+  const f = build(graph(task("A"), task("B"), end(), edge("A", "B"), edge("B", "end")));
+  assert.equal(settled(f), false);
+  deliver(f, "A");
+  assert.equal(settled(f), false, "B still has to run");
+  deliver(f, "B");
+  assert.equal(settled(f), true);
+  additional(f, "B", "one more pass");
+  assert.equal(settled(f), false, "queued additional work is still to happen");
 });

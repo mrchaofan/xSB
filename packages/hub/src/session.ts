@@ -34,6 +34,7 @@ import { asPreface, handoff } from "./prompts.ts";
 import type { Gives, Renewal } from "./prompts.ts";
 import { turnsSinceCleared } from "./transcript.ts";
 import type { MailItem, SessionRec } from "./state.ts";
+import type { WorkflowTold } from "./workflow-state.ts";
 import { ops } from "./state.ts";
 import type { Deferred } from "./util.ts";
 import { deferred, newId, now } from "./util.ts";
@@ -190,9 +191,11 @@ export class LiveSession {
   /**
    * What the model of this session has been given in full, so that it is not given the same again: asset id ->
    * the version and the task it came with, and memory notes by topic key -> the version (updatedAt) it saw. Only
-   * for as long as the backend session has it: a boundary empties both, and so does a restart of the hub.
+   * for as long as the backend session has it: a boundary empties both, and so does a restart of the hub. Likewise
+   * what a main conversation was told of its workflow (workflows.ts `context`).
    */
-  readonly given = { assets: new Map<string, { version: number; taskId?: string }>(), notes: new Map<string, string>() };
+  readonly given: { assets: Map<string, { version: number; taskId?: string }>; notes: Map<string, string>; workflow?: WorkflowTold } =
+    { assets: new Map(), notes: new Map() };
   /** Context in use at the end of the backend's last report, in tokens. */
   private used?: number;
   private contextSize?: number;
@@ -400,10 +403,16 @@ export class LiveSession {
 
   /** The model starts anew: it has nothing it was given before. */
   private forget(): void {
-    this.given.assets.clear();
-    this.given.notes.clear();
+    this.forgetGiven();
     this.invalidateUsage();
     this.notifyControls();
+  }
+
+  /** What the model was given is gone from its context (a boundary, or a compaction the backend reports only by usage). */
+  private forgetGiven(): void {
+    this.given.assets.clear();
+    this.given.notes.clear();
+    this.given.workflow = undefined;
   }
 
   /** Text to put in front of the next prompt of this session, whichever turn that is. */
@@ -644,7 +653,7 @@ export class LiveSession {
         this.usageRevision++;
         if (typeof update.used === "number" && Number.isFinite(update.used) && update.used >= 0) {
           // Native compaction may have removed formerly-inlined assets/notes.
-          if (this.used !== undefined && update.used < this.used) { this.given.assets.clear(); this.given.notes.clear(); }
+          if (this.used !== undefined && update.used < this.used) this.forgetGiven();
           this.used = update.used;
           this.estimated = update.used;
         }

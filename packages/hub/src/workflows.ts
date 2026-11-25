@@ -22,6 +22,7 @@ import {
   normalize,
   notice,
   refs,
+  settled,
   suspend,
   view,
 } from "./workflow-state.ts";
@@ -29,17 +30,14 @@ import { checkArguments } from "./workflow-tools.ts";
 import type { Flow } from "./workflow-state.ts";
 
 type Seen = { active?: string; invites: Record<string, string>; candidate?: string };
+/** While its work is under way, a main conversation is reminded of its workflow at least this often, in turns. */
+export const WORKFLOW_REFRESH_TURNS = 10;
 /** How many times a workflow notice the model never got is posted again on its own (then it waits for a resume or restart). */
 const NOTICE_RETRIES = 3;
 
 export class Workflows {
   private hub: Hub;
   private scheduled = new Set<string>();
-  /** What a main conversation was told of its workflow in its current context: the active definitions and the candidate. */
-  private known = new WeakMap<
-    LiveSession,
-    { epoch?: number; definitions: Map<string, NodeDef>; candidate?: string }
-  >();
   private redirected = new WeakSet<Turn>();
   private seen = new WeakMap<Turn, Seen>();
   constructor(hub: Hub) {
@@ -395,7 +393,8 @@ export class Workflows {
         i.interruptions.push({ id, target: current, prompt: blocks });
       if (i.work && target !== "history") i.work.grants.push(...named);
     }
-    if (!spec.workflowOwner && target === "workflow" && f.active)
+    // A settled workflow has nothing to interrupt: the message is the main conversation's own.
+    if (!spec.workflowOwner && target === "workflow" && f.active && !settled(f))
       f.interruptions.push({ id, target: f.active, prompt: blocks });
     s.protect();
     if (named.length || spec.workflowOwner || target === "workflow") this.save(f);
@@ -452,12 +451,22 @@ export class Workflows {
     const f = this.read(s.id);
     this.observe(f, turn);
     if (!f.active && !f.candidate) return;
-    const graph = graphOf(f),
-      prior = this.known.get(s);
-    const epoch = s.rec.contextEpoch;
+    const epoch = s.rec.contextEpoch,
+      before = s.given.workflow,
+      prior = before?.epoch === epoch ? before : undefined;
+    // When the model is told of its workflow (docs/WORKFLOWS.md): whole, in a context that does not have it (its first
+    // turn, after a compaction or a renewal); at once, what it cannot learn otherwise (a pause, an error, work the user's
+    // stop dropped); and while work is under way, every WORKFLOW_REFRESH_TURNS turns. Completions, choices and
+    // escalations come as notices of their own, and changes it made it knows; a settled workflow it keeps in mind itself.
+    const state = canonical({ paused: f.paused, error: f.error ?? null });
+    if (prior && !f.cancelled?.length && prior.state === state && (settled(f) || prior.turns + 1 < WORKFLOW_REFRESH_TURNS)) {
+      prior.turns++;
+      return;
+    }
+    const graph = graphOf(f);
     const definitions = new Map(graph?.nodes.map((n) => [n.node, n]));
     const changed = graph?.nodes.flatMap((n) => {
-      const old = prior?.epoch === epoch ? prior?.definitions.get(n.node) : undefined;
+      const old = prior?.definitions.get(n.node);
       if (!old) return [n];
       const entries = (["kind", "prompt", "input", "schema", "multi", "model"] as const)
         .filter((key) => canonical(old[key]) !== canonical(n[key]))
@@ -466,7 +475,7 @@ export class Workflows {
     });
     // A context that has not had them (a first turn, a compacted or renewed one) gets the graphs whole, in the JSONL the
     // model writes them in; later turns get what changed. Versions are named for reading: execute takes none.
-    const fresh = !prior || prior.epoch !== epoch;
+    const fresh = !prior;
     const { candidate, edges, ...active } = view(f);
     const candidateJsonl = candidate && graphJsonl(candidate.graph);
     const details = {
@@ -487,7 +496,7 @@ export class Workflows {
     const told = f.cancelled;
     void turn.first.inserted.promise.then(
       () => {
-        if (this.known.get(s) === prior) this.known.set(s, { epoch, definitions, candidate: f.candidate?.version });
+        if (s.given.workflow === before) s.given.workflow = { epoch, definitions, candidate: f.candidate?.version, state, turns: 0 };
         // Told once it is in the conversation; a context that never got there tells it again.
         if (told?.length) {
           const now = structuredClone(this.read(s.id));

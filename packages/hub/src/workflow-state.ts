@@ -75,6 +75,17 @@ export function empty(owner: string): Flow {
 }
 const fresh = (): Instance => ({ id: newId("instance"), goals: [], extras: [], paused: false, interruptions: [] });
 export const graphOf = (f: Flow) => (f.active ? f.versions[f.active] : undefined);
+/**
+ * Nothing of the workflow is left to happen: an end was reached (as `view` counts it), no node has work, more work
+ * queued or a choice open, and no candidate waits to be adopted. The main conversation then talks of other things.
+ */
+export function settled(f: Flow): boolean {
+  const graph = graphOf(f);
+  return !!graph && !f.candidate && graph.nodes.some((n) => n.kind === "end" && f.instances[n.node]?.last?.valid) &&
+    Object.values(f.instances).every((i) => !i.work && !i.extras.length && !i.invitation);
+}
+/** What a main conversation's model was last told of its workflow, in its current context (`LiveSession.given`). */
+export type WorkflowTold = { epoch?: number; definitions: Map<string, NodeDef>; candidate?: string; state: string; turns: number };
 export function instance(f: Flow, name: string): Instance {
   if (!Object.hasOwn(f.instances, name)) throw Error(`Unknown active node: ${name}`);
   return f.instances[name];
