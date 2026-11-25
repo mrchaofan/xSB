@@ -29,7 +29,8 @@ export const TurnIsolation = { key: `${NS}/turn-isolation`, version: 1 } as cons
  *   address    SessionInfo._meta["dev.xsb/agent"] identifies the conversation's agent.
  *   request    _dev.xsb/agents/list returns main agents and started, active workflow instances.
  *   notify     _dev.xsb/agents/update and _dev.xsb/agents/removed update that directory.
- *   change     _dev.xsb/agents/set { agentId, avatar } sets a main conversation's icon; answers the updated AgentInfo.
+ *   change     _dev.xsb/agents/set { agentId, avatar?, backend? } sets a main conversation's icon, or its backend (idle
+ *              only: the next turn starts a session of the new backend, handed the conversation); answers the AgentInfo.
  *
  * A client that opted in is an observer: it also receives permission requests
  * of sessions nobody is attached to, so an unattended agent is never stuck.

@@ -195,6 +195,13 @@
     approvePlugin: async (name) => { plugins.find((p) => p.name === name).approved = true; return pluginViews(); },
     reloadPlugins: async () => pluginViews(),
     revealPlugins: async () => true,
+    setBackend: async (id, backend) => {
+      const a = get(id);
+      if (data.transcripts[id].some((e) => e.kind === "input")) put(id, { id: "m" + ++sequence, kind: "boundary", boundary: { kind: "backend_changed", backend, handoff: true } });
+      a.backend = backend;
+      emit({ agent: a });
+      return structuredClone(a);
+    },
     setAvatar: async (id, avatar) => {
       const a = get(id);
       if (avatar) a.avatar = avatar; else delete a.avatar;

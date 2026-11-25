@@ -90,7 +90,8 @@ export class Workspace {
    */
   static async open(paths: Paths, language: Language, say: (e: unknown) => string, emit: Emit, notify: Notify): Promise<Workspace> {
     if (!fs.existsSync(paths.dir)) initProject(paths);
-    const socket = await hubSocket(paths);
+    // The app's own hub: started for this process and stopped with it (a hub an earlier app left is replaced).
+    const socket = await hubSocket(paths, true);
     const conn = new Connection(socket, socket, "hub");
     await conn.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
@@ -584,6 +585,13 @@ export class Workspace {
   /** The icon the user chose for a conversation; "" is the default. */
   async setAvatar(agentId: string, avatar: string): Promise<AgentInfo> {
     const { agent } = await this.conn.request<{ agent: AgentInfo }>(Agents.set, { agentId, avatar });
+    this.onAgent(agent);
+    return agent;
+  }
+
+  /** Move a conversation to another backend; its next turn is handed the conversation (`backend_changed`). */
+  async setBackend(agentId: string, backend: string): Promise<AgentInfo> {
+    const { agent } = await this.conn.request<{ agent: AgentInfo }>(Agents.set, { agentId, backend });
     this.onAgent(agent);
     return agent;
   }
