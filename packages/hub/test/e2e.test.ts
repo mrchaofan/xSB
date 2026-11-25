@@ -178,6 +178,25 @@ await prompt(a,"hello");
 assert.match(said.get(a)!, /echo: hello/);
 assert.equal(hub.state.workflows.size,0);
 await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/Method not found/);
+// Switching a conversation's backend: with nothing said yet, it simply runs on the other; with history, the next turn
+// starts a session of the new backend, handed the conversation, and the transcript marks where.
+{
+  const empty = await create("mock");
+  await conn.request(Agents.set, { agentId: empty.agentId, backend: "steerable" });
+  await prompt(empty.id, "!say ON-STEERABLE");
+  assert.match(said.get(empty.id)!, /ON-STEERABLE/);
+  const marks = (sid: string, agentId: string) => hub.state.store.read(Paths.transcript(agentId, sid)).map((r: any) => r.update?._meta?.["dev.xsb/boundary"]?.kind).filter(Boolean);
+  assert.deepEqual(marks(empty.id, empty.agentId), [], "nothing to hand over: no boundary");
+
+  const talked = await create("mock");
+  await prompt(talked.id, "!say REMEMBER-THE-RED-COAT");
+  await conn.request(Agents.set, { agentId: talked.agentId, backend: "steerable" });
+  await prompt(talked.id, "!echo");
+  assert.deepEqual(marks(talked.id, talked.agentId), ["backend_changed"]);
+  assert.match(said.get(talked.id)!, /REMEMBER-THE-RED-COAT[^]*handoff[^]*REMEMBER-THE-RED-COAT/, "the new backend is handed the conversation");
+  await assert.rejects(conn.request(Agents.set, { agentId: talked.agentId, backend: "no-such-backend" }), /backend/);
+  console.log("ok backend switch");
+}
 // A conversation's icon is the user's to choose, kept with the agent and told to every observer.
 {
   const updated: any[] = [];

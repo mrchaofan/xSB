@@ -22,7 +22,11 @@ import { now } from "./util.ts";
 
 const BIN = path.join(shipped("bin"), "xsb-hub");
 
-export type HubInfo = { pid: number; startedAt: string };
+/** `owner`: the process the hub lives as long as (the desktop app), if one started it so (`hubSocket`). */
+export type HubInfo = { pid: number; startedAt: string; owner?: number };
+
+/** Names the owner a hub is started for; the hub watches the pipe it is given on stdin and stops when it closes. */
+const OWNER_ENV = "XSB_HUB_OWNER";
 
 /** How long a starting hub waits for the lock: long enough for one that was just told to stop to be gone. */
 const CLAIM_WAIT_MS = 3000;
@@ -62,7 +66,8 @@ export function stopHub(paths: Paths, abandon = false): boolean {
 function claim(paths: Paths): () => void {
   const unlock = lockFile(paths.hubLock, CLAIM_WAIT_MS);
   if (!unlock) throw new Error(`a hub is already running for ${paths.project}${fs.existsSync(paths.hubInfo) ? ` (${fs.readFileSync(paths.hubInfo, "utf8")})` : ""}`);
-  const info: HubInfo = { pid: process.pid, startedAt: now() };
+  const owner = Number(process.env[OWNER_ENV]) || undefined;
+  const info: HubInfo = { pid: process.pid, startedAt: now(), ...(owner ? { owner } : {}) };
   fs.writeFileSync(paths.hubInfo, JSON.stringify(info));
   return () => {
     fs.rmSync(paths.hubInfo, { force: true });
@@ -93,6 +98,13 @@ async function runHub(project: string): Promise<void> {
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
+  // Started for an owner: its end is the hub's, however it ends (quit, Ctrl-C, a crash). The pipe on stdin closes
+  // when the owner's process is gone, whatever killed it.
+  if (process.env[OWNER_ENV]) {
+    process.stdin.on("end", stop);
+    process.stdin.on("close", stop);
+    process.stdin.resume();
+  }
   process.on("uncaughtException", (e) => hub.log(`uncaught: ${e.stack ?? e}`));
   process.on("unhandledRejection", (e) => hub.log(`unhandled: ${e instanceof Error ? e.stack : e}`));
 }
@@ -105,15 +117,29 @@ function tryConnect(path: string): Promise<net.Socket | null> {
   });
 }
 
-/** A socket to the project's hub, for a client to speak ACP on. Starts the hub in the background if there is none. */
-export async function hubSocket(paths: Paths): Promise<net.Socket> {
+/**
+ * A socket to the project's hub, for a client to speak ACP on. Starts the hub in the background if there is none.
+ *
+ * With `owned`, the hub is this process's: it lives as long as this process does (the desktop app). A hub that runs
+ * for the project already and is not this process's (left by an earlier app, or started by the command line) is
+ * stopped first, so that the app always talks to a hub of its own code and its own lifetime.
+ */
+export async function hubSocket(paths: Paths, owned = false): Promise<net.Socket> {
   if (!fs.existsSync(paths.dir)) throw failure("not_a_project", { project: paths.project });
   const path = paths.socket("acp");
+  if (owned) {
+    const info = readHubInfo(paths);
+    if (info && info.owner !== process.pid) {
+      stopHub(paths);
+      // It stops in its own time (its agents' processes first): wait for its lock, a little past its grace.
+      for (let i = 0; i < 100 && isLocked(paths.hubLock); i++) await sleep(100);
+    }
+  }
   // A socket that answers is a hub that lives. One started here while another is starting loses the claim and goes away.
   let socket = await tryConnect(path);
   if (socket) return socket;
 
-  spawnHub(paths);
+  spawnHub(paths, owned);
   for (let i = 0; i < 100; i++) {
     await sleep(100);
     if ((socket = await tryConnect(path))) return socket;
@@ -122,12 +148,15 @@ export async function hubSocket(paths: Paths): Promise<net.Socket> {
 }
 
 /** Start a hub for the project in the background, logging to `.xsb2/run/hub.log`. */
-function spawnHub(paths: Paths): void {
+function spawnHub(paths: Paths, owned = false): void {
   fs.mkdirSync(paths.run, { recursive: true });
   const log = fs.openSync(paths.hubLog, "a");
   // A client that is an Electron app has Electron's binary as its execPath; this makes it run as Node. Node ignores it.
-  const env = { ...process.env, ELECTRON_RUN_AS_NODE: "1" };
-  spawn(process.execPath, [BIN, paths.project], { detached: true, stdio: ["ignore", log, log], env }).unref();
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: "1", ...(owned ? { [OWNER_ENV]: String(process.pid) } : {}) };
+  // Owned: its stdin is a pipe this process holds open, and nothing else; it closes when this process ends.
+  const child = spawn(process.execPath, [BIN, paths.project], { detached: true, stdio: [owned ? "pipe" : "ignore", log, log], env });
+  child.unref();
+  if (owned) (child.stdin as unknown as { unref?: () => void })?.unref?.();
   fs.closeSync(log);
 }
 

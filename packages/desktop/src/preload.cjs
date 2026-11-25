@@ -7,7 +7,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const METHODS = [
   "load", "pickFolder", "open", "newWindow",
   "history", "send", "cancel", "clear", "permit",
-  "composerState", "setComposerOption", "newSession", "setAvatar", "workflowControl", "backends", "locateProgram", "cliConfig", "revealCliConfig", "installCli", "checkCli",
+  "composerState", "setComposerOption", "newSession", "setAvatar", "setBackend", "workflowControl", "backends", "locateProgram", "cliConfig", "revealCliConfig", "installCli", "checkCli",
   "openPage", "page", "pageWindow",
   "limitSettings", "setLimit", "projectLanguage", "setProjectLanguage",
   "plugins", "setPluginEnabled", "approvePlugin", "reloadPlugins", "revealPlugins",

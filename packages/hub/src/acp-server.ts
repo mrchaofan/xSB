@@ -173,12 +173,27 @@ export class Client {
     conn.onRequest(ToolServers.apply, () => ({ waiting: hub.applyTools() }));
 
     // The user's choice of icon for a main conversation. Only bundled IDs reach here; "" goes back to the default.
+    // The user's choices for a main conversation: its icon (bundled IDs only; "" is the default) and its backend.
     conn.onRequest(Agents.set, (p) => {
       const agent = hub.state.agents.get(p?.agentId);
       if (!agent || agent.workflowOwner) throw RpcError.notFound(`agent ${p?.agentId}`);
-      if (typeof p.avatar !== "string" || p.avatar.length > 64 || !/^[a-z0-9-]*$/.test(p.avatar)) throw RpcError.invalidParams("avatar must be a bundled avatar id");
-      const { avatar: _, ...rest } = agent;
-      hub.state.commit([ops.putAgent(p.avatar ? { ...rest, avatar: p.avatar } : rest)]);
+      let next = agent;
+      if (p.avatar !== undefined) {
+        if (typeof p.avatar !== "string" || p.avatar.length > 64 || !/^[a-z0-9-]*$/.test(p.avatar)) throw RpcError.invalidParams("avatar must be a bundled avatar id");
+        const { avatar: _, ...rest } = next;
+        next = p.avatar ? { ...rest, avatar: p.avatar } : rest;
+      }
+      if (p.backend !== undefined && p.backend !== agent.backend) {
+        if (typeof p.backend !== "string") throw RpcError.invalidParams("backend must be a name");
+        hub.backends.spec({ ...agent, backend: p.backend });
+        const session = hub.mainSession(agent.id);
+        if (session.busy) throw RpcError.invalidParams("The conversation is working; switch its backend once it is idle.");
+        next = { ...next, backend: p.backend };
+        // Its next turn binds the new backend: a new backend session, handed what came before within the new
+        // backend's own limits (LiveSession.bind, `backend_changed`). The old process has no part in it any more.
+        hub.backends.stop(agent.id);
+      }
+      hub.state.commit([ops.putAgent(next)]);
       hub.agentChanged(agent.id);
       return { agent: hub.agentInfo(hub.agent(agent.id)) };
     });

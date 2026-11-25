@@ -9,6 +9,7 @@ import { contentView, createEditor, markdownView } from "./content.js";
 import { draftKey, loadDraft, moveDraft, saveDraft } from "./drafts.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { composerSettings } from "./composer-settings.js";
+import { backendPicker } from "./backend-picker.js";
 import { clock, t } from "./i18n.js";
 import { sessionPages, onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
 import { closeSettings, showSettings } from "./settings.js";
@@ -126,7 +127,7 @@ function renderRail() {
       h("i",{class:"state","data-state":a.state,title:STATE_TEXT[a.state]}))));
   $("#agent-count").textContent = roots.length;
   $("#settings").setAttribute("aria-pressed", String(!!state.settings));
-  fill($("#blank"),h("p",{},t("flow.empty")),newSessionTrigger(h("button",{class:"btn primary"},t("flow.new"))));
+  fill($("#blank"),h("p",{},t("flow.empty")),h("button",{class:"btn primary",onclick:() => newSession()},t("flow.new")));
 
 }
 
@@ -202,6 +203,8 @@ function openLane(agentId, panel, readonly) {
     setReferenceTarget(agentId);
   };
   const controls = composerSettings(agentId);
+  // 主会话可以换后端（任务节点的后端由工作流决定）。
+  const picker = panel ? null : backendPicker(agentId);
 
   const lane = h("section", { class: "lane", "data-agent": agentId, "data-session": agentOf(agentId).mainSessionId },
     h("header", { class: "bar lane-head" },
@@ -215,7 +218,8 @@ function openLane(agentId, panel, readonly) {
       editor.el, editor.error,
       h("div", { class: "composer-row" },
         h("span", { class: "hint", role: "status" }, h("i", { class: "state" }), h("span", {})),
-        controls.el, controls.usage, h("button", { class: "send", onclick: press }))));
+        picker?.el, controls.el, controls.usage, h("button", { class: "send", onclick: press }))));
+  lane.picker = picker;
   lane.editor = editor;
   lane.controls = controls;
   lane.send = send;
@@ -318,6 +322,7 @@ function syncLane(agentId) {
   if (!lane) return;
   const { state: s, name, backend } = agentOf(agentId);
   lane.dataset.state = s;
+  lane.picker?.update();
   fill(lane.querySelector(".lane-avatar"), avatarImage(agentOf(agentId)));
   lane.querySelector(".lane-head strong").textContent = name;
   fill(lane.querySelector(".lane-backend"), backendMark(backend));
@@ -586,58 +591,23 @@ function showHub(up, why) {
 $("#hub").onclick = () => {
   if ($("#hub").dataset.up === "false") xsb.open(state.workspace.path).then(start, (e) => showHub(false, e.message));
 };
-// 新建会话：悬停或点击加号展开后端列表，点一个就建好并打开，不经过对话框。
-const sessionMenu = h("div", { class: "session-menu", popover: "manual", role: "menu", "aria-label": t("flow.new") });
-let menuAnchor = null, menuTimer = 0;
-function openSessionMenu(anchor) {
-  clearTimeout(menuTimer);
+/**
+ * 新建会话：不选后端，用默认的那个（最近一个会话的后端，否则第一个已安装的）；要换就在输入框里换。
+ * 已经有一个还没说过话的会话时，直接打开它，不再新建。
+ */
+const defaultBackend = () => {
+  const last = [...state.agents].filter((a) => !a.workflowOwner).sort((x, y) => (y.createdAt ?? "").localeCompare(x.createdAt ?? ""))[0];
+  return last?.backend ?? state.backends.find((b) => b.installed)?.name ?? state.backends[0]?.name;
+};
+async function newSession() {
   if (!state.workspace) return;
-  if (menuAnchor === anchor && sessionMenu.matches(":popover-open")) return;
-  menuAnchor = anchor;
-  const failure = h("p", { class: "error", role: "alert" });
-  const create = async (backend) => {
-    try {
-      const agent = await xsb.newSession(backend);
-      sessionMenu.hidePopover();
-      onAgent(agent);
-      focusLane(agent.id);
-    } catch (e) { failure.textContent = e.message; }
-  };
-  fill(sessionMenu, h("small", {}, t("flow.backend")),
-    ...state.backends.map((b) => h("button", { type: "button", role: "menuitem", class: "session-menu-item", onclick: () => create(b.name) },
-      backendIcon(b.name), h("span", { class: "session-menu-name" }, b.name), !b.installed && h("small", {}, t("flow.backend.missing")))),
-    failure);
-  if (!sessionMenu.isConnected) document.body.append(sessionMenu);
-  sessionMenu.showPopover();
-  const rect = anchor.getBoundingClientRect(), width = sessionMenu.offsetWidth, height = sessionMenu.offsetHeight;
-  sessionMenu.style.left = Math.max(8, Math.min(innerWidth - width - 8, rect.left)) + "px";
-  sessionMenu.style.top = (rect.bottom + height + 12 > innerHeight ? rect.top - height - 6 : rect.bottom + 6) + "px";
+  const unused = state.agents.find((a) => !a.workflowOwner && !(state.transcripts[a.id] ?? []).length);
+  if (unused) return focusLane(unused.id);
+  const agent = await xsb.newSession(defaultBackend());
+  onAgent(agent);
+  focusLane(agent.id);
 }
-const closeSoon = () => { clearTimeout(menuTimer); menuTimer = setTimeout(() => sessionMenu.hidePopover(), 220); };
-sessionMenu.onmouseenter = () => clearTimeout(menuTimer);
-sessionMenu.onmouseleave = closeSoon;
-sessionMenu.addEventListener("toggle", (e) => {
-  if (e.newState === "closed") { menuAnchor?.setAttribute("aria-expanded", "false"); menuAnchor = null; }
-  else menuAnchor?.setAttribute("aria-expanded", "true");
-});
-// 手动弹层：悬停打开后再点击加号不会被"点外面关闭"抢先关掉；点别处（shieldPopovers）或按 Esc 关闭。
-sessionMenu.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape") return;
-  e.stopPropagation();
-  const anchor = menuAnchor;
-  sessionMenu.hidePopover();
-  anchor?.focus();
-});
-/** 让一个按钮在悬停、点击或键盘激活时展开新建会话的菜单。 */
-function newSessionTrigger(button) {
-  button.setAttribute("aria-haspopup", "menu");
-  button.setAttribute("aria-expanded", "false");
-  button.onmouseenter = () => openSessionMenu(button);
-  button.onmouseleave = closeSoon;
-  button.onclick = () => { openSessionMenu(button); sessionMenu.querySelector("button")?.focus(); };
-  return button;
-}
-newSessionTrigger($("#new-agent"));
+$("#new-agent").onclick = () => newSession().catch((e) => fill($("#blank"), h("p", { class: "error" }, e.message)));
 export const rootSession = () => agentOf(state.open[0])?.mainSessionId;
 function belongsHere(artifact) {
   const root = rootSession(), agent = agentOf(artifact.agentId);
@@ -825,6 +795,8 @@ export async function start() {
   const first = state.agents.find(a => !a.workflowOwner && a.id === activeId) ?? state.agents.find(a => !a.workflowOwner);
   $("#task-conversation").replaceChildren();
   if (first) openLane(first.id);
+  // 首次使用：直接给一个可以说话的会话，不用先新建。
+  else void newSession().catch(() => {});
   restoreSide();
   renderRail();
 }

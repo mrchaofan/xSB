@@ -933,3 +933,25 @@ dialog.settings-dialog::backdrop { background: var(--backdrop); backdrop-filter:
 .backend-limits > .hint { margin-bottom: var(--space-1); }
 /* 用户消息还没进入模型的对话：气泡变淡，直到插入回执到达 */
 .input[data-pending] .said { opacity: .6; }
+
+/* ---------- 统一：控件两档、菜单行一档、容器圆角三档 ----------
+   栏头、工具条、卡片里的次要操作都用紧凑档（24px）；页面级的主操作和对话框按钮用常规档（30px）。
+   同一行里不混用两档。菜单项、导航项、左栏的行一律 30px。卡片、面板、弹层、输入框 12px 圆角，对话框 16px。 */
+.bar .btn, .settings-section-intro .btn, .tool-group-head .btn, #flow-heading .btn, .lane-head .btn {
+  height: var(--control-sm); padding: 0 var(--space-2); border-radius: var(--radius-sm); font-size: var(--text-sm);
+}
+.session-menu-item, .cascade-item, .settings-nav-item, .utility-row { height: var(--control-md); }
+.session-menu > small { padding: var(--space-1) var(--space-2) 2px; }
+.composer { border-radius: var(--radius); }
+#task-conversation .transcript { padding: var(--space-4) var(--space-5); }
+.flow-agent { height: var(--control-sm); padding: 0 var(--space-2) 0 2px; border-radius: var(--radius-sm); }
+.flow-agent .avatar { width: 18px; height: 18px; border-radius: 4px; }
+.catalog-advanced { font-size: var(--text-sm); }
+.artifact-toolbar { height: var(--bar); }
+.welcome-action, .welcome-recent-item { height: var(--control-md); min-height: 0; padding: 0 var(--space-2); align-items: center; }
+/* 输入框里的后端切换：只显示后端图标 */
+.backend-picker { flex: none; display: grid; place-items: center; width: var(--control-sm); height: var(--control-sm); border-radius: var(--radius-sm); }
+.backend-picker:hover:not(:disabled), .backend-picker[aria-expanded="true"] { background: var(--wash); }
+.backend-picker:disabled { cursor: default; opacity: .5; }
+.backend-picker .backend-icon { width: 16px; height: 16px; padding: 1px; }
+.backend-menu .session-menu-item .cascade-check { margin-left: auto; }
