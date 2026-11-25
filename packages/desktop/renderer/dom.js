@@ -43,6 +43,9 @@ export const ICON = {
   forward: '<svg viewBox="0 0 16 16"><path d="M6 3l5 5-5 5"/></svg>',
   play: '<svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 5l5 3-5 3z"/></svg>',
 
+  reload: '<svg viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.5-3.5M13 2.5v3h-3"/></svg>',
+  external: '<svg viewBox="0 0 16 16"><path d="M9 3h4v4M13 3L7.5 8.5M11 9.5V13H3V5h3.5"/></svg>',
+  detach: '<svg viewBox="0 0 16 16"><rect x="1.5" y="4.5" width="9" height="9" rx="1.5"/><path d="M5.5 4.5v-2h9v9h-4"/></svg>',
   globe: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c-2 2-2 10 0 12M8 2c2 2 2 10 0 12"/></svg>',
   flow: '<svg viewBox="0 0 16 16"><rect x="5.5" y="1.5" width="5" height="3.5" rx="1"/><rect x="1.5" y="11" width="5" height="3.5" rx="1"/><rect x="9.5" y="11" width="5" height="3.5" rx="1"/><path d="M8 5v3M4 11V8h8v3"/></svg>',
   plug: '<svg viewBox="0 0 16 16"><path d="M6 1.5v3M10 1.5v3M4 4.5h8v3a4 4 0 0 1-8 0zM8 11.5v3"/></svg>',

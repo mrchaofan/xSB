@@ -5,11 +5,16 @@ import { $ } from "./dom.js";
 import "./i18n.js";      // 换上 page.html 里的静态文字
 import { showWeb } from "./webview.js";
 import { annotateButton } from "./annotate.js";
+import { syncWindowColors } from "./preferences.js";
 
 let id;
 function sync(page) {
   id = page.id;
   $("#title").textContent = document.title = page.title || page.url;
+  // 配色跟着网页所属对话的后端走，和主窗口一样（styles.css 的 data-provider）
+  if (page.tone === "claude") document.documentElement.dataset.provider = "claude";
+  else delete document.documentElement.dataset.provider;
+  syncWindowColors();
   $("#pin").setAttribute("aria-pressed", String(page.pinned));
   annotateButton($("#annotate"), page);
   showWeb($("#web-body"), page);

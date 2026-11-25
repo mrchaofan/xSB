@@ -6,6 +6,7 @@ import { currentFlow, renderWorkflow } from "./workflow.js";
 import { artifactLabel } from "./artifacts.js";
 import { fileIcon } from "./file-icons.js";
 import { openDialog } from "./form.js";
+import { openContextMenu } from "./menu.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { t } from "./i18n.js";
 import { showWeb } from "./webview.js";
@@ -112,6 +113,35 @@ function closeTab(id) {
   renderSide();
 }
 
+/** 一次关掉几个标签；当前标签在其中时，改选 keep。 */
+function closeTabs(ids, keep) {
+  if (ids.includes(state.tab)) { rememberPosition(); state.tab = keep; }
+  for (const id of ids) {
+    if (pageOf(id)) void xsb.page(id, "close").catch(() => {});
+    else closeTab(id);
+  }
+  renderSide();
+}
+
+/** 标签的右键菜单：网页标签先是对这个网页的操作（同地址栏的按钮），然后是关闭标签的几种方式。 */
+function tabMenu(event, id) {
+  const ids = tabIds(), page = pageOf(id), others = ids.filter((other) => other !== id), right = ids.slice(ids.indexOf(id) + 1);
+  const blank = !page?.url || page.url === "about:blank";
+  const op = (name) => () => void xsb.page(id, name).catch(() => {});
+  openContextMenu(event, [
+    ...(page ? [
+      { label: t("web.reload"), icon: "reload", disabled: page.controlling, run: op("reload") },
+      { label: t("tabs.copyUrl"), icon: "copy", disabled: blank, run: () => void xsb.copyText(page.url).catch(() => {}) },
+      { label: t("web.external"), icon: "external", disabled: blank || page.controlling, run: op("external") },
+      page.window ? { label: t("web.restore"), icon: "collapse", run: op("restore") } : { label: t("web.detach"), icon: "detach", run: op("detach") },
+      null,
+    ] : []),
+    { label: t("tabs.close"), icon: "close", run: () => (page ? op("close")() : closeTab(id)) },
+    { label: t("tabs.closeOthers"), disabled: !others.length, run: () => closeTabs(others, id) },
+    { label: t("tabs.closeRight"), disabled: !right.length, run: () => closeTabs(right, id) },
+  ], t("tabs.menu"));
+}
+
 /**
  * 启动页：竖排可以在新标签中打开的东西。网页、资产和工作流都属于一个会话：没有打开的会话时全部不可用，
  * 上方说明要先新建或打开一个会话。
@@ -132,6 +162,25 @@ function launcher(hasWorkflow) {
 // 鼠标离开标签栏后再恢复随数量伸缩。键盘关闭不冻结。
 let frozenWidth = null;
 
+/**
+ * 把标签栏改成 next 列出的标签。已有的标签元素留着、换上新的内容和属性，不重新创建：
+ * 宽度的缓动是 CSS 过渡（styles.css 的 .tab），元素一换就接不上。
+ */
+function syncTabs(list, next) {
+  const kept = new Map([...list.children].map((el) => [el.dataset.id, el]));
+  const els = next.map((fresh) => {
+    const el = kept.get(fresh.dataset.id);
+    if (!el) return fresh;
+    for (const { name } of [...el.attributes]) if (!fresh.hasAttribute(name)) el.removeAttribute(name);
+    for (const { name, value } of [...fresh.attributes]) if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+    el.oncontextmenu = fresh.oncontextmenu;
+    el.replaceChildren(...fresh.childNodes);
+    return el;
+  });
+  for (const el of kept.values()) if (!els.includes(el)) el.remove();
+  els.forEach((el, i) => { if (list.children[i] !== el) list.insertBefore(el, list.children[i] ?? null); });
+}
+
 /** 按 state.tab 和 state.pages 画出标签栏和当前的网页。 */
 export function renderSide() {
   const flow = currentFlow();
@@ -151,17 +200,20 @@ export function renderSide() {
   $("#side-artifacts").hidden = !!page || workflow || launching;
   $("#side-web").hidden = !page;
   $("#tabs").hidden = false;      // 没有 webview2 时仍然可以打开制品标签
-  const tabList = h("div", { class: "tab-list" });
-  if (frozenWidth) { tabList.classList.add("frozen"); tabList.style.setProperty("--tab-frozen", frozenWidth + "px"); }
+  // 标签栏本身也留着（见 syncTabs）；它后面的按钮每次重画。
+  const tabList = $("#tabs .tab-list") ?? h("div", { class: "tab-list" });
+  tabList.classList.toggle("frozen", !!frozenWidth);
+  if (frozenWidth) tabList.style.setProperty("--tab-frozen", frozenWidth + "px");
   $("#tabs").onpointerleave = () => {
     if (!frozenWidth) return;
     frozenWidth = null;
-    $("#tabs .tab-list")?.classList.remove("frozen");
+    tabList.classList.remove("frozen");
   };
   const closeButton = (onclick) => h("button", { class: "icon-btn", title: t("tabs.close"), "aria-label": t("tabs.close"), html: ICON.close,
     onclick: (e) => { if (e.detail > 0) frozenWidth ??= e.currentTarget.closest(".tab").getBoundingClientRect().width; onclick(); } });
   // 标签像 Chromium 的标签条一样随数量变窄（styles.css 的 .tab 容器查询）：先藏起非当前标签的关闭按钮，再只留图标。
-  const tab = (id, icon, label, title, close, extra = {}) => h("div", { class: "tab", "data-id": id, "aria-current": String(state.tab === id), title, ...extra },
+  const tab = (id, icon, label, title, close, extra = {}) => h("div", { class: "tab", "data-id": id, "aria-current": String(state.tab === id), title,
+    oncontextmenu: (e) => tabMenu(e, id), ...extra },
     h("button", { class: "tab-main", onclick: () => selectTab(id) }, icon, h("span", { class: "tab-title" }, label)),
     closeButton(close));
   const fixed = (id, icon, label) => tab(id, h("span", { class: "tab-icon", "aria-hidden": "true", html: icon }), label, label, () => closeTab(id));
@@ -178,14 +230,17 @@ export function renderSide() {
       () => xsb.page(p.id, "close"), { "data-agent": p.agent ? "true" : null })),
   ].filter(Boolean);
   const byId = new Map(tabs.map((el) => [el.dataset.id, el]));
-  fill(tabList, ...ordered([...byId.keys()]).map((id) => byId.get(id)));
+  syncTabs(tabList, ordered([...byId.keys()]).map((id) => byId.get(id)));
+  tabList.style.setProperty("--tabs", String(Math.max(1, byId.size)));
   dragToReorder(tabList);
-  fill($("#tabs"),
-    tabList,
+  if (tabList.parentElement !== $("#tabs")) $("#tabs").prepend(tabList);
+  while (tabList.nextSibling) tabList.nextSibling.remove();
+  tabList.after(...[
     (pages.length + state.artifactTabs.length > 0) && h("button", { class: "icon-btn", title: t("tabs.opened"), "aria-label": t("tabs.opened"), html: ICON.list, onclick: openedTabs }),
     h("button", { class: "icon-btn", title: t("tabs.new"), "aria-label": t("tabs.new"), "aria-pressed": String(launching), html: ICON.plus, onclick: () => selectTab(null) }),
     h("button", { class: "icon-btn", title: t(document.body.classList.contains("artifact-focused") ? "artifact.restore" : "artifact.focus"), "aria-label": t(document.body.classList.contains("artifact-focused") ? "artifact.restore" : "artifact.focus"), html: document.body.classList.contains("artifact-focused") ? ICON.collapse : ICON.expand, onclick: () => { document.body.classList.toggle("artifact-focused"); renderSide(); } }),
-    h("button", { class: "icon-btn side-close", title: t("side.close"), "aria-label": t("side.close"), html: ICON.close, onclick: () => { document.body.classList.remove("artifact-focused", "artifact-expanded"); renderSide(); } }));
+    h("button", { class: "icon-btn side-close", title: t("side.close"), "aria-label": t("side.close"), html: ICON.close, onclick: () => { document.body.classList.remove("artifact-focused", "artifact-expanded"); renderSide(); } }),
+  ].filter(Boolean));
   tabList.querySelector('.tab[aria-current="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
   if (workflow) return fill($("#web-body"));
   if (launching) {

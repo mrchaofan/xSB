@@ -21,7 +21,9 @@ export const globalPreferences = () => read(GLOBAL_KEY, GLOBAL_DEFAULTS);
 export const workspacePreferences = (path) => read(workspaceKey(path), WORKSPACE_DEFAULTS);
 export function saveGlobalPreferences(patch) {
   localStorage.setItem(GLOBAL_KEY, JSON.stringify({ ...globalPreferences(), ...patch }));
-  applyPreferences();
+  // 系统的窗口按钮在哪（styles.css 按它让位）：macOS 在左上，其余在右上。主窗口和网页窗口都从这里加载。
+document.documentElement.dataset.platform = /Mac/.test(navigator.platform) ? "mac" : "other";
+applyPreferences();
 }
 export function saveWorkspacePreferences(path, patch) {
   localStorage.setItem(workspaceKey(path), JSON.stringify({ ...workspacePreferences(path), ...patch }));
@@ -48,4 +50,6 @@ export function onPreferencesChanged(listener) {
     }
   });
 }
+// 系统的窗口按钮在哪（styles.css 按它让位）：macOS 在左上，其余在右上。主窗口和网页窗口都从这里加载。
+document.documentElement.dataset.platform = /Mac/.test(navigator.platform) ? "mac" : "other";
 applyPreferences();

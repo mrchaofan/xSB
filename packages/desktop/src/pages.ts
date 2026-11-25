@@ -360,6 +360,7 @@ for(const type of ['keydown','keyup','mousedown','mouseup','click','wheel','cont
       minWidth: 400,
       minHeight: 240,
       titleBarStyle: "hiddenInset",
+      trafficLightPosition: { x: 18, y: 20 },
       title: page.contents.getTitle(),
       webPreferences: { preload: this.shell.preload, webview2Tag: true } as WebPreferences,
     });
@@ -440,7 +441,7 @@ for(const type of ['keydown','keyup','mousedown','mouseup','click','wheel','cont
       controlling: !!controlling,
       annotating: !!annotator?.active,
       annotations: annotator?.count ?? 0,
-      annotationTone: annotator?.tone ?? "default",
+      tone: this.shell.toneOf?.(options.sessionId) ?? "default",
       error,
       favicon,
     };
