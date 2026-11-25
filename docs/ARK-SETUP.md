@@ -1,26 +1,25 @@
 # 火山方舟接入（仅 xSB）
 
-在“设置 → 模型后端”的“火山方舟”卡片里完成：安装 arkcli → 登录 → 选套餐 → 让 xSB 中的 Claude Code / Codex 使用方舟模型，或解除接入。每一步都由主进程先弹出系统确认框（`main.ts`），用户确认后才执行。不做工作区级接入。
+在“设置 → 模型后端”的“火山方舟”卡片里完成：登录 → 选套餐 → 让 xSB 中的 Claude Code / Codex 使用方舟模型，或解除接入。arkcli 随应用内置，不需要安装。每一步都由主进程先弹出系统确认框（`main.ts`），用户确认后才执行。不做工作区级接入。
 
 ## 分层
 
 | 层 | 职责 |
 | --- | --- |
-| `renderer/ark.js` | 卡片：状态、下一步操作、套餐列表、每个智能体的接入状态；选择套餐和模型的对话框 |
-| `renderer/backend.js` | 后端卡片注明“通过火山方舟接入 · 模型” |
-| `preload.cjs` / `main.ts` | 白名单 IPC：`arkStatus`、`arkModels`、`arkInstall`、`arkLogin`、`arkCancelLogin`、`arkBind`；安装、登录、接入、解除的确认框 |
-| `src/ark.ts` | 调用 arkcli 的唯一位置；npm 安装；记录接入（`ark.json`）；生成启动器片段 `arkLaunch` |
+| `renderer/ark.js` | 卡片：状态、下一步操作（重新检测或登录）、套餐列表、每个智能体的接入状态；选择套餐和模型的对话框 |
+| `renderer/backend.js` | 后端卡片注明“通过火山方舟接入 · 模型”；方舟不可用时说明原因（退出登录、套餐不可用、无法确认） |
+| `preload.cjs` / `main.ts` | 白名单 IPC：`arkStatus`、`arkModels`、`arkLogin`、`arkCancelLogin`、`arkBind`；登录、接入、解除的确认框；把内置 arkcli 交给 `Clis` 链接到 `builtin/bin` |
+| `src/ark.ts` | 调用 arkcli 的唯一位置；定位内置程序（`shippedArkcli`）；记录接入（`ark.json`）；生成启动器片段 `arkLaunch`；接入后的智能体检测（`agentCheck`） |
 | `src/clis.ts` | 后端 ACP 包装的启动器：构造时就带上 `arkLaunch` 的片段，所以第一次生成的启动器已包含方舟设置 |
 
-## 安装
+## 内置的 arkcli
 
-1. 确认框写明用哪个 npm、装到哪里，以及不会给智能体添加 arkcli 的技能。
-2. 有用户自己的 `npm` 时运行 `npm install --global --include=optional @volcengine/ark-cli@latest`；如果全局目录无写权限（EACCES/EPERM），改为 `--prefix <userData>/backends/installed/npm` 再装一次。
-3. 没有 npm 时，用随应用打包的 npm（`dist/npm`，由 `rolldown.config.js` 从依赖 `npm` 复制），以 Electron 作为 Node 运行（`ELECTRON_RUN_AS_NODE=1`），安装到应用自己的前缀。同时在 PATH 最前面放一个临时的 `node` 转发脚本，让 arkcli 的 postinstall（`node scripts/postinstall.js`）也能运行。
-4. 设置 `ARKCLI_SKIP_SKILLS=1`：否则 arkcli 的 postinstall 会执行 `+connect --refresh`，把技能装进本机所有智能体。
-5. 用 `npm root --global` 找到包，记录**原生二进制**的路径（`bin/arkcli-<os>-<arch>`，或平台子包里的同名文件）到 `paths.json`（`Clis.setPath`）。之后不依赖 PATH，也不依赖 node；Hub 的 PATH 里还会有一个同名启动器，媒体插件也能找到它。
-
-已验证：在临时前缀中用打包后的 npm、Electron 作 Node、PATH 中没有 node 的情况下，9 秒装好 1.0.65，记录到原生二进制，`~/.claude/skills` 没有新增内容。
+- `packages/desktop/package.json` 的 `optionalDependencies` 精确锁定各平台的 `@volcengine/ark-cli-<platform>-<arch>`（目前是 1.0.65）。npm 只安装与当前平台匹配的那一个。它们是生产依赖，不经 rolldown 打包，由 electron-builder 按发布时的原样复制到应用的 `node_modules`，运行时按路径执行（`shippedArkcli`：`bin/arkcli-<os>-<cpu>[.exe]`）。
+- 不依赖包装包 `@volcengine/ark-cli`：它的 postinstall 会从 CDN 下载二进制，并调用 `+connect --refresh` 把 arkcli 的技能装进本机所有智能体。平台包只含程序本身和技能文档，没有安装脚本。
+- 各平台的应用在各自的平台上打包（`.github/workflows/desktop.yml`）。`electron-builder.config.mjs` 的 `afterPack` 会检查应用里有目标平台的 arkcli；跨平台打包时缺少这个程序，打包直接失败。
+- xSB 只使用内置的 arkcli，不在 PATH 中查找，也不使用用户自己装的 arkcli。方舟卡片和启动器按绝对路径调用它；它还以 `arkcli` 为名链接到 `backends/builtin/bin`（见 CLI_SETUP.md 的“可执行文件的布局”），这个目录排在子进程 PATH 中用户 PATH 的前面，所以媒体插件按命令名找到的也是它（除非用户显式设置了 `ARKCLI`）。登录凭据由 arkcli 保存在 `~/.arkcli`，和用户自己的 arkcli 共用。
+- 内置程序缺失或无法运行时，卡片显示“程序异常”，只提供重新检测；需要重新安装 xSB。
+- 升级 arkcli：改 `optionalDependencies` 中的六个版本号，重新运行 `npm install`，再按下文核对输出格式。
 
 ## 登录
 
@@ -44,17 +43,19 @@
 
 **Claude 的用户设置优先于环境变量。** 真实应用中实测发现：用户 `~/.claude/settings.json` 的 `env` 里设置的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` 会盖过进程环境，请求仍然发往用户自己的服务。所以在 macOS/Linux 上，xSB 写入 `<userData>/backends/ark/claude`（一个转发脚本）和 `ark/claude-settings.json`（地址、模型，并把 `ANTHROPIC_API_KEY`、`CLAUDE_CODE_USE_*` 置空；不含 Key）。启动器把 `CLAUDE_CODE_EXECUTABLE` 指向这个转发脚本，由它运行 `claude --settings <文件> …`。命令行设置的优先级高于用户设置；Key 仍只通过 `ANTHROPIC_AUTH_TOKEN` 环境变量传递。Windows 上 Node 不能不经 shell 启动 `.cmd`，所以只设环境变量，确认框会列出会胜出的用户设置项。另一种做法——用 `apiKeyHelper` 取 Key——实测返回 401，没有采用。
 
-Claude、Codex 的配置文件都不改；终端里的 claude/codex 不受影响。接入后，`AgentClis.check` 只检查程序版本，状态报告为 `ready (via ark)`，不再检查它们自己的登录。设置下次启动会话时生效，正在进行的会话不受影响。如果 Claude 自己的 `settings.json` 里设置了 `ANTHROPIC_*` 或 `apiKeyHelper`，它们会优先于进程环境，确认框会提示这一点。
+Claude、Codex 的配置文件都不改；终端里的 claude/codex 不受影响。接入后，`AgentClis.check` 不再检查智能体自己的登录，而是调用 `Ark.agentCheck`：只在本地询问 arkcli，不发送模型请求。arkcli 已登录且所接入的套餐有效时为 `ready`；退出登录（`signedOut`）或套餐到期、已不在账号下（`planGone`）时为 `unauthenticated`；arkcli 无法运行或没有回应（`unavailable`）时为 `unknown`。
 
-已验证（干净环境，真实 arkcli 1.0.50 与 Agent Plan Medium）：经 codex-acp 2.6.0 和 claude-agent-acp 各发一条最小提示，都以 `end_turn` 结束并回复 OK。
+**生效时机。** 每个对话的智能体程序是一个进程，由启动器启动一次，之后跨 turn 复用（hub 的 `backends.ts`）。接入或解除只改写启动器和 `ark.json`，不会重启已在运行的进程。所以新建的对话立即生效，已打开的对话在重启应用后生效。确认框和完成提示都按这个说法（`main.ts` 的 `effect`）。已打开的对话如果在此之前因停止超时、续上下文或工具变更而重启了后端，也会提前生效。如果 Claude 自己的 `settings.json` 里设置了 `ANTHROPIC_*` 或 `apiKeyHelper`，它们会优先于进程环境，确认框会提示这一点。
+
+已验证（干净环境，真实 arkcli 1.0.50 与 Agent Plan Medium；内置的 1.0.65 另外核对过 `auth status`、`profile show`、`plans model-list` 的解析结果和 `profile apikey get --transform api_key`）：经 codex-acp 2.6.0 和 claude-agent-acp 各发一条最小提示，都以 `end_turn` 结束并回复 OK。
 
 ## 已知问题
 
 - Codex 会在回复前提示找不到所选模型的元数据（arkcli 自己的配置用 `model_catalog_json` 补上了这一项）。不影响使用；以后可以按 `model-list` 生成模型目录。
 - Claude 在自动模式下会附带一条网关不兼容分类器计费的提示。
 - Windows 启动器（`for /f` 取 Key）只有单元测试，没有在 Windows 上实际运行过。
-- 真实应用验证（隔离的 userData/工作区，你本机的 arkcli、claude、codex；系统确认框由驱动脚本记录后代为确认）：卡片检测到已登录和 Agent Plan Medium → 依次接入 Claude、Codex（确认框原文核对无误）→ 后端卡片显示"通过火山方舟接入" → Claude 会话 4 秒回复 OK（在用户 settings.json 指向其他服务的情况下）→ 切到 Codex 的新会话 4 秒回复 OK → 解除 Claude 接入后启动器恢复原样，Codex 不受影响。安装和登录这两步没有在真实应用里重跑：安装另外在临时前缀中实测过，登录会改动现有凭据。
+- 真实应用验证（隔离的 userData/工作区，你本机的 arkcli、claude、codex；系统确认框由驱动脚本记录后代为确认）：卡片检测到已登录和 Agent Plan Medium → 依次接入 Claude、Codex（确认框原文核对无误）→ 后端卡片显示"通过火山方舟接入" → Claude 会话 4 秒回复 OK（在用户 settings.json 指向其他服务的情况下）→ 切到 Codex 的新会话 4 秒回复 OK → 解除 Claude 接入后启动器恢复原样，Codex 不受影响。登录这一步没有在真实应用里重跑，因为它会改动现有凭据。（这次验证用的是当时由 npm 安装的 arkcli；改为内置之后，接入流程本身没有变化。）
 
 ## 测试
 
-`test/ark.test.ts`：JSON 与错误信封解析、各种 npm 布局下的原生程序定位、状态映射、模型列表、两种安装路径（EACCES 回退、内置 npm + node 转发脚本）、接入记录不含 Key 且拒绝不安全的名字、启动器在 sh 中实际运行（Key、环境变量、清除项、取不到 Key 时的报错）、Windows 片段、Clis 第一次生成的启动器就带有接入设置，以及解除后移除。
+`test/ark.test.ts`：JSON 与错误信封解析、内置程序的定位、状态映射（含程序缺失）、接入后的智能体检测、模型列表、每次接入变化都会重写启动器、接入记录不含 Key 且拒绝不安全的名字、启动器在 sh 中实际运行（Key、环境变量、清除项、取不到 Key 时的报错）、Windows 片段、Clis 第一次生成的启动器就带有接入设置，以及解除后移除。

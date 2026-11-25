@@ -9,7 +9,7 @@ import { Hub } from "../src/hub.ts";
 import { ops } from "../src/state.ts";
 import { deferred, newId } from "../src/util.ts";
 import type { LiveSession, Turn } from "../src/session.ts";
-import { validateResult, parseGraph } from "../src/workflow-graph.ts";
+import { canonical, graphJsonl, validateResult, parseGraph } from "../src/workflow-graph.ts";
 import { additional, adopt, claim, control, empty, normalize, view } from "../src/workflow-state.ts";
 import type { Flow } from "../src/workflow-state.ts";
 
@@ -86,7 +86,6 @@ test("adoption invalidates in-flight consumers before redispatch, keeps siblings
   adopt(
     f,
     {
-      version: "second",
       graphJsonl: graph(
         ...f.versions[oldVersion].nodes.map((n) => (n.node === "A" ? task("A", "slimmer") : n)),
         ...f.versions[oldVersion].edges,
@@ -96,7 +95,7 @@ test("adoption invalidates in-flight consumers before redispatch, keeps siblings
     true,
   );
   assert.equal(f.instances.D.work, firstD);
-  adopt(f, { version: "second" }, 100000, false);
+  adopt(f, {}, 100000, false);
   normalize(f);
   assert.equal(f.instances.A.id, a);
   assert.equal(f.instances.D.work, undefined);
@@ -199,7 +198,7 @@ test("pause sources stack; edits clear only a superseded redirection; extra goal
   additional(f, "A", "again");
   f.instances.A.replan = "redirect";
   control(f, true, ["A", "B"]);
-  adopt(f, { version: f.active }, 100000, false);
+  adopt(f, { graphJsonl: graphJsonl(f.versions[f.active!]) }, 100000, false);
   normalize(f);
   assert.ok(f.instances.A.replan);
   replace(f, "A", "half body");
@@ -221,10 +220,15 @@ test("incoming edge change reuses a node, candidate adoption and version names a
   const second = graph(task("D"), task("B"), task("A"), end(), edge("B", "D"), edge("D", "end"), edge("A", "end"));
   const f = build(first),
     id = f.instances.D.id;
-  adopt(f, { version: "preview", graphJsonl: second }, 100000, true);
+  assert.equal(f.active, "plan-1");
+  assert.throws(() => adopt(f, {}, 100000, false), /No candidate/);
+  assert.equal(adopt(f, { graphJsonl: second }, 100000, true), "plan-2");
+  assert.equal(adopt(f, { graphJsonl: second }, 100000, true), "plan-2", "the same graph keeps its name");
+  assert.equal(adopt(f, { graphJsonl: first }, 100000, true), "plan-1");
+  assert.throws(() => adopt(f, { replaceNode: task("A") }, 100000, true), /single adoption/);
+  adopt(f, { graphJsonl: second }, 100000, true);
   replace(f, "A", "updated");
-  assert.throws(() => adopt(f, { version: "preview" }, 100000, false), /stale/);
-  assert.throws(() => adopt(f, { version: "preview", graphJsonl: first }, 100000, true), /bound/);
+  assert.throws(() => adopt(f, {}, 100000, false), /stale/);
   adopt(f, { graphJsonl: second }, 100000, false);
   normalize(f);
   deliver(f, "A");
@@ -462,7 +466,7 @@ test("an adopted version keeps the one it replaced; a dropped node's conversatio
   assert.equal(hub.agentInfo(hub.agent(node.agentId)).retired, true);
 
   const again = structuredClone(hub.workflows.read(root.id));
-  adopt(again, { version: again.active }, 100000, false);
+  adopt(again, { graphJsonl: graphJsonl(again.versions[again.active!]) }, 100000, false);
   assert.equal(again.history!.length, 1, "adopting the active version again records nothing");
 });
 
@@ -541,4 +545,44 @@ test("agents are told what their built-in workflow tools are, and a task agent s
   assert.equal(hub.workflows.read(root.id).instances.A.replan, "Use the night version of the base.");
   assert.equal(view(hub.workflows.read(root.id)).nodes.find((n) => n.name === "A")!.paused, true);
   assert.equal(JSON.parse(hub.workflows.read(root.id).outbox.at(-1)!.text).paused, true);
+});
+
+test("versions are xSB's: the model plans and executes by graph, and a fresh context is shown the graphs whole", async (t) => {
+  const g = parseGraph(graph({ ...task("R"), input: { a: 1 }, model: "m", schema: { type: "object" } }, end("x"), end("y"), edge("R", "x", "go"), edge("R", "y", "stop")));
+  assert.equal(canonical(parseGraph(graphJsonl(g))), canonical(g), "the JSONL a context shows parses back to its graph");
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-context-"));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const root = hub.createConversation(),
+    runtime = hub.workflows;
+  const shown = async (id: string) => {
+    const turn = turnFor(root, id);
+    const context = runtime.context(root, turn);
+    turn.first.inserted.resolve();
+    await new Promise((r) => setImmediate(r));
+    return context && JSON.parse(context.slice(context.indexOf("\n") + 1));
+  };
+  const call = (name: string, args: object) => runtime.call(root, name, args, newId("call"));
+  const jsonl = graph(task("A"), end(), edge("A", "end"));
+
+  assert.equal(await shown("t1"), undefined);
+  assert.throws(() => call("plan", { version: "mine", graphJsonl: jsonl }), /additional/, "a model cannot name a version");
+  assert.throws(() => call("execute", {}), /No candidate/);
+  assert.deepEqual(call("plan", { graphJsonl: jsonl }), { version: "plan-1" });
+
+  const second = await shown("t2");
+  assert.equal(second.candidate.version, "plan-1");
+  assert.equal(second.candidate.graphJsonl, graphJsonl(parseGraph(jsonl)));
+  assert.deepEqual(call("execute", {}), { version: "plan-1" }, "execute adopts the candidate this turn was shown");
+
+  const third = await shown("t3");
+  assert.equal(third.version, "plan-1");
+  assert.equal(third.graphJsonl, undefined, "a context that has the graph gets what changed");
+  assert.ok(third.graphRef);
+
+  root.rec.contextEpoch = (root.rec.contextEpoch ?? 0) + 1;
+  const renewed = await shown("t4");
+  assert.equal(renewed.graphJsonl, graphJsonl(parseGraph(jsonl)), "a renewed context is shown the graph whole");
 });

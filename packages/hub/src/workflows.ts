@@ -8,7 +8,7 @@ import { ops } from "./state.ts";
 import { hubLimit } from "./config.ts";
 import { newId, now } from "./util.ts";
 import { boundedText, contextRef, readContext } from "./context.ts";
-import { canonical, fingerprint, validateResult, word } from "./workflow-graph.ts";
+import { canonical, fingerprint, graphJsonl, validateResult, word } from "./workflow-graph.ts";
 import {
   additional,
   adopt,
@@ -35,7 +35,11 @@ const NOTICE_RETRIES = 3;
 export class Workflows {
   private hub: Hub;
   private scheduled = new Set<string>();
-  private known = new WeakMap<LiveSession, { epoch?: number; definitions: Map<string, NodeDef> }>();
+  /** What a main conversation was told of its workflow in its current context: the active definitions and the candidate. */
+  private known = new WeakMap<
+    LiveSession,
+    { epoch?: number; definitions: Map<string, NodeDef>; candidate?: string }
+  >();
   private redirected = new WeakSet<Turn>();
   private seen = new WeakMap<Turn, Seen>();
   constructor(hub: Hub) {
@@ -460,15 +464,21 @@ export class Workflows {
         .map((key) => [key, n[key] ?? null]);
       return entries.length ? [{ node: n.node, ...Object.fromEntries(entries) }] : [];
     });
-    const { candidate, ...active } = view(f);
+    // A context that has not had them (a first turn, a compacted or renewed one) gets the graphs whole, in the JSONL the
+    // model writes them in; later turns get what changed. Versions are named for reading: execute takes none.
+    const fresh = !prior || prior.epoch !== epoch;
+    const { candidate, edges, ...active } = view(f);
+    const candidateJsonl = candidate && graphJsonl(candidate.graph);
     const details = {
       ...active,
+      ...(fresh && graph ? { graphJsonl: graphJsonl(graph) } : { edges, definitions: changed }),
+      graphRef: graph && contextRef(this.hub.paths, s.agentId, graphJsonl(graph)).ref,
       candidate: candidate && {
         version: candidate.version,
-        definitionRef: contextRef(this.hub.paths, s.agentId, JSON.stringify(candidate.graph)).ref,
+        basedOn: f.candidate!.base ?? null,
+        ...((fresh || prior.candidate !== candidate.version) && { graphJsonl: candidateJsonl }),
+        graphRef: contextRef(this.hub.paths, s.agentId, candidateJsonl!).ref,
       },
-      definitions: changed,
-      definitionRef: graph && contextRef(this.hub.paths, s.agentId, JSON.stringify(graph)).ref,
       choices: Object.entries(f.instances)
         .filter(([, i]) => i.invitation)
         .map(([node, i]) => ({ node, delivery: i.last })),
@@ -477,7 +487,7 @@ export class Workflows {
     const told = f.cancelled;
     void turn.first.inserted.promise.then(
       () => {
-        if (this.known.get(s) === prior) this.known.set(s, { epoch, definitions });
+        if (this.known.get(s) === prior) this.known.set(s, { epoch, definitions, candidate: f.candidate?.version });
         // Told once it is in the conversation; a context that never got there tells it again.
         if (told?.length) {
           const now = structuredClone(this.read(s.id));
@@ -566,6 +576,9 @@ export class Workflows {
       const observed = this.seen.get(turn);
       if (["plan", "execute"].includes(name)) {
         if (observed?.active !== f.active) throw Error("Active version changed");
+        // Adopting the candidate adopts the one this turn was shown: its name is xSB's to check, not the model's to quote.
+        if (name === "execute" && a.graphJsonl === undefined && a.replaceNode === undefined && f.candidate && observed?.candidate !== f.candidate.version)
+          throw Error("The candidate changed since this turn saw it");
         const steps = hubLimit("workflowValidationSteps");
         const version = adopt(f, a, steps, name === "plan");
         for (const ref of f.versions[version].nodes.flatMap((n) => refs([n.input, n.prompt])))

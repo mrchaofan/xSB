@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { AgentClis, agentCli, codexTarget, configPath, configTemplate, persistPath, run } from "../src/agent-cli.ts";
+import { createHash } from "node:crypto";
+import { AgentClis, agentCli, claudePlatform, codexTarget, configPath, configTemplate, loginCommand, run } from "../src/agent-cli.ts";
 import type { Runner } from "../src/agent-cli.ts";
 
 const ok = (stdout = "", code = 0) => ({ code, stdout, timedOut: false });
@@ -12,8 +14,15 @@ async function fixture() {
   return { home, clean: () => fs.rm(home, { recursive: true, force: true }) };
 }
 
-function registry(executable: string | null = "/fake/cli") {
-  return { executable: () => executable, refresh: async (_extra?: string[]) => {}, setPath: (_name: string, file: string) => { executable = file; return true; } };
+/** The parts of Clis an AgentClis uses; `installs` is the folder of installed programs. */
+function registry(executable: string | null = "/fake/cli", installs = "/unused") {
+  const r = {
+    forgotten: [] as string[], resyncs: 0,
+    executable: (_command?: string) => executable, refresh: async () => {}, resync: () => { r.resyncs++; },
+    installDir: (name: string) => path.join(installs, name), env: () => ({ PATH: "/xsb/bin:/usr/bin", MARK: "child" }),
+    forget: (name: string) => { r.forgotten.push(name); },
+  };
+  return r;
 }
 
 test("providers reject arbitrary IPC names and respect CLI home overrides", () => {
@@ -31,6 +40,14 @@ test("providers reject arbitrary IPC names and respect CLI home overrides", () =
   assert.equal(codexTarget("darwin", "arm64"), "aarch64-apple-darwin");
   assert.equal(codexTarget("win32", "x64"), "x86_64-pc-windows-msvc");
   assert.throws(() => codexTarget("freebsd", "x64"));
+  assert.equal(claudePlatform("darwin", "arm64"), "darwin-arm64");
+  assert.equal(claudePlatform("win32", "x64"), "win32-x64");
+  assert.throws(() => claudePlatform("freebsd", "x64"));
+  // Sign-in is run in the user's terminal: a program in the app's folder is named by its path, quoted for that terminal.
+  assert.equal(loginCommand("claude", "/usr/local/bin/claude", true, "darwin"), "claude auth login");
+  assert.equal(loginCommand("claude", "/Users/o'b/Library/xsb/installed/claude/claude", false, "darwin"), "'/Users/o'\\''b/Library/xsb/installed/claude/claude' auth login");
+  assert.equal(loginCommand("codex", "C:\\Users\\O'Brien\\codex.exe", false, "win32"), "& 'C:\\Users\\O''Brien\\codex.exe' login");
+  assert.equal(loginCommand("codex", null, false, "darwin"), "codex login");
 });
 
 test("inspection never creates files; concurrent creation never overwrites user settings", async () => {
@@ -39,7 +56,7 @@ test("inspection never creates files; concurrent creation never overwrites user 
   delete process.env.CODEX_HOME;
   delete process.env.CLAUDE_CONFIG_DIR;
   try {
-    const service = new AgentClis(registry(), home, async () => ok(), home);
+    const service = new AgentClis(registry(), async () => ok(), home);
     const inspected = await service.config("codex");
     assert.equal(inspected.exists, false);
     await assert.rejects(fs.stat(path.dirname(inspected.path)), { code: "ENOENT" });
@@ -63,8 +80,9 @@ test("inspection never creates files; concurrent creation never overwrites user 
 test("checks use only version and local auth commands and distinguish every failure", async () => {
   const calls: string[][] = [];
   let answer = ok('{"loggedIn":true,"email":"private@example.com","apiProvider":"firstParty"}');
-  const runner: Runner = async (_file, args) => { calls.push(args); return args[0] === "--version" ? ok("cli 2.1.0") : answer; };
-  const service = new AgentClis(registry(), "/unused", runner);
+  const envs: (string | undefined)[] = [];
+  const runner: Runner = async (_file, args, options) => { calls.push(args); envs.push(options?.env?.MARK); return args[0] === "--version" ? ok("cli 2.1.0") : answer; };
+  const service = new AgentClis(registry(), runner);
   assert.deepEqual(await service.check("claude"), { state: "ready", version: "2.1.0" });
   answer = ok('{"loggedIn":false}', 1);
   assert.equal((await service.check("claude")).state, "unauthenticated");
@@ -81,40 +99,19 @@ test("checks use only version and local auth commands and distinguish every fail
   answer = { code: null, stdout: "", timedOut: true };
   assert.deepEqual(await service.check("claude"), { state: "unknown", version: "2.1.0", issue: "timeout" });
   assert.ok(calls.every((args) => ["--version", "auth status --json", "login status"].includes(args.join(" "))));
-  assert.deepEqual(await new AgentClis(registry(null), "/unused", runner).check("codex"), { state: "missing" });
-  assert.deepEqual(await new AgentClis(registry(), "/unused", async () => ok("wrong executable")).check("codex"), { state: "broken", issue: "execution" });
+  // Probes run in the environment of the app's child processes.
+  assert.ok(envs.every((mark) => mark === "child"));
+  assert.deepEqual(await new AgentClis(registry(null), runner).check("codex"), { state: "missing" });
+  assert.deepEqual(await new AgentClis(registry(), async () => ok("wrong executable")).check("codex"), { state: "broken", issue: "execution" });
 });
 
 test("simultaneous checks share one bounded probe", async () => {
   let count = 0;
-  const service = new AgentClis(registry(), "/unused", async () => { count++; return ok("cli 2.1.0"); });
+  const service = new AgentClis(registry(), async () => { count++; return ok("cli 2.1.0"); });
   const first = service.check("codex");
   assert.equal(first, service.check("codex"));
   await first;
   assert.equal(count, 2);
-});
-
-test("PATH persistence is idempotent and preserves user shell setup", async () => {
-  const { home, clean } = await fixture();
-  try {
-    await fs.writeFile(path.join(home, ".zshrc"), "# user's setup\n");
-    const directory = path.join(home, "dir with 'quotes'");
-    await persistPath(directory, run, home, "/bin/zsh", "darwin");
-    const first = await fs.readFile(path.join(home, ".zshrc"), "utf8");
-    await persistPath(directory, run, home, "/bin/zsh", "darwin");
-    assert.equal(await fs.readFile(path.join(home, ".zshrc"), "utf8"), first);
-    assert.ok(first.startsWith("# user's setup\n"));
-    await fs.writeFile(path.join(home, ".profile"), "# existing login setup\n");
-    await persistPath(directory, run, home, "/bin/bash", "darwin");
-    await assert.rejects(fs.stat(path.join(home, ".bash_profile")), { code: "ENOENT" });
-    assert.ok((await fs.readFile(path.join(home, ".profile"), "utf8")).startsWith("# existing login setup\n"));
-    const result = await run("/bin/sh", ["-c", 'HOME="$1"; . "$HOME/.zshrc"; printf "%s" "$PATH"', "sh", home]);
-    assert.equal(result.stdout.split(path.delimiter)[0], directory);
-    const scripts: string[][] = [];
-    await persistPath("C:\\Users\\O'Brien\\bin", async (_file, args) => { scripts.push(args); return ok(); }, home, "", "win32");
-    assert.match(scripts[0][2], /O''Brien/);
-    await assert.rejects(persistPath("C:\\bin", async () => ok("", 1), home, "", "win32"), /could not update user PATH/);
-  } finally { await clean(); }
 });
 
 test("runner terminates a hung process without prompting or exposing stderr", async () => {
@@ -124,22 +121,21 @@ test("runner terminates a hung process without prompting or exposing stderr", as
   assert.equal((await run("/definitely/missing", ["--version"])).code, null);
 });
 
-test("official Codex install preserves release helpers, publishes PATH and combines repeat clicks", async (t) => {
+test("Codex installs from its official release into the app's folder for it, helpers kept; repeat clicks combine", async (t) => {
   const { home, clean } = await fixture();
-  const directory = path.join(home, "installed");
+  const installs = path.join(home, "installed");
   const target = codexTarget(process.platform, process.arch);
   const windows = process.platform === "win32";
   const asset = `codex-${target}${windows ? ".exe.zip" : ".tar.gz"}`;
   const requests: string[] = [];
   t.mock.method(globalThis, "fetch", async (url: string) => {
     requests.push(url);
-    return url.includes("api.github.com")
-      ? Response.json({ assets: [{ name: asset, browser_download_url: `https://github.com/openai/codex/releases/download/test/${asset}` }] })
-      : new Response("mock archive");
+    return new Response("mock archive");
   });
-  let installed: string | null = null;
-  const registry = { executable: () => installed, setPath: (_name: string, file: string) => { installed = file; return true; }, refresh: async (_extra?: string[]) => {} };
-  const service = new AgentClis(registry, directory, async (_file, args) => {
+  const clis = registry(null, installs);
+  const program = path.join(installs, "codex", windows ? "codex.exe" : "codex");
+  clis.executable = () => (existsSync(program) ? program : null);
+  const service = new AgentClis(clis, async (_file, args) => {
     if (args[0] === "-xf") {
       await fs.writeFile(path.join(args[3], `codex-${target}${windows ? ".exe" : ""}`), "binary");
       await fs.writeFile(path.join(args[3], "helper"), "helper");
@@ -147,20 +143,64 @@ test("official Codex install preserves release helpers, publishes PATH and combi
     return args[0] === "--version" ? ok("codex-cli 1.2.3") : ok();
   }, home);
   try {
+    await fs.mkdir(path.join(installs, "codex"), { recursive: true });
+    await fs.writeFile(path.join(installs, "codex", "old"), "an older install");
     const first = service.install("codex");
     assert.equal(first, service.install("codex"));
     assert.equal((await first).state, "ready");
-    assert.equal(await fs.readFile(path.join(directory, "codex", "helper"), "utf8"), "helper");
-    assert.equal(await fs.readFile(installed!, "utf8"), "binary");
-    assert.equal(requests.length, 2);
-    assert.ok(requests.every((url) => /^https:\/\/(api\.github\.com\/repos|github\.com)\/openai\/codex\//.test(url)));
+    assert.deepEqual((await fs.readdir(path.join(installs, "codex"))).sort(), [windows ? "codex.exe" : "codex", "helper"].sort());
+    assert.equal(await fs.readFile(program, "utf8"), "binary");
+    // Nothing is left beside it, and the user's earlier choice of a program gives way to the one just installed.
+    assert.deepEqual(await fs.readdir(installs), ["codex"]);
+    assert.deepEqual(clis.forgotten, ["codex"]);
+    assert.equal(clis.resyncs, 1);
+    // The latest release's file by its fixed name: no API request, which GitHub limits.
+    assert.deepEqual(requests, [`https://github.com/openai/codex/releases/latest/download/${asset}`]);
+    // Nothing of the user's home is touched.
+    assert.deepEqual(await fs.readdir(home), ["installed"]);
   } finally { await clean(); }
 });
 
-test("failed official download does not register a nonexistent executable", async (t) => {
-  let registered = false;
+test("Claude installs its official release's program after checking it against the published checksum", async (t) => {
+  const { home, clean } = await fixture();
+  const installs = path.join(home, "installed");
+  const windows = process.platform === "win32";
+  const platform = claudePlatform(process.platform, process.arch);
+  const binary = Buffer.from("claude program");
+  let checksum = createHash("sha256").update(binary).digest("hex");
+  const requests: string[] = [];
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    requests.push(url);
+    if (url.endsWith("/latest")) return new Response("2.1.332\n");
+    if (url.endsWith("/manifest.json")) return Response.json({ version: "2.1.332", platforms: { [platform]: { binary: windows ? "claude.exe" : "claude", checksum, size: binary.length } } });
+    return new Response(binary);
+  });
+  const clis = registry(null, installs);
+  const program = path.join(installs, "claude", windows ? "claude.exe" : "claude");
+  clis.executable = () => (existsSync(program) ? program : null);
+  const service = new AgentClis(clis, async (_file, args) => args[0] === "--version" ? ok("2.1.332 (Claude Code)") : ok('{"loggedIn":true}'), home);
+  try {
+    assert.equal((await service.install("claude")).state, "ready");
+    assert.equal(await fs.readFile(program, "utf8"), "claude program");
+    if (!windows) assert.equal((await fs.stat(program)).mode & 0o111, 0o111);
+    assert.deepEqual(requests, ["latest", "2.1.332/manifest.json", `2.1.332/${platform}/${windows ? "claude.exe" : "claude"}`]
+      .map((p) => `https://downloads.claude.ai/claude-code-releases/${p}`));
+    // A download that does not match leaves the installed program as it was.
+    checksum = "0".repeat(64);
+    await assert.rejects(service.install("claude"), /checksum/);
+    assert.equal(await fs.readFile(program, "utf8"), "claude program");
+    assert.deepEqual(await fs.readdir(installs), ["claude"]);
+    assert.deepEqual(await fs.readdir(home), ["installed"]);
+  } finally { await clean(); }
+});
+
+test("failed official download installs nothing", async (t) => {
+  const { home, clean } = await fixture();
   t.mock.method(globalThis, "fetch", async () => new Response("unavailable", { status: 503 }));
-  const service = new AgentClis({ executable: () => null, refresh: async () => {}, setPath: () => { registered = true; return true; } }, "/unused");
-  await assert.rejects(service.install("codex"), /HTTP 503/);
-  assert.equal(registered, false);
+  const clis = registry(null, path.join(home, "installed"));
+  try {
+    await assert.rejects(new AgentClis(clis).install("codex"), /HTTP 503/);
+    assert.deepEqual(await fs.readdir(path.join(home, "installed")), []);
+    assert.equal(clis.resyncs, 0);
+  } finally { await clean(); }
 });

@@ -18,7 +18,7 @@ import { Hub } from "./hub.ts";
 import { isLocked, lockFile } from "./lock.ts";
 import { Paths, shipped } from "./paths.ts";
 import { errorMessage, failure } from "@xsb/protocol";
-import { now } from "./util.ts";
+import { now, withhold } from "./util.ts";
 
 const BIN = path.join(shipped("bin"), "xsb-hub");
 
@@ -78,6 +78,8 @@ function claim(paths: Paths): () => void {
 /** Run the hub in this process until it is told to stop. */
 async function runHub(project: string): Promise<void> {
   const paths = new Paths(project);
+  // However this process was started, what it starts does not inherit what xSB withholds.
+  withhold(process.env);
   if (!fs.existsSync(paths.dir)) throw new Error(`no ${paths.dir}: run "xsb init" first`);
   fs.mkdirSync(paths.run, { recursive: true });
   const release = claim(paths);
@@ -123,8 +125,12 @@ function tryConnect(path: string): Promise<net.Socket | null> {
  * With `owned`, the hub is this process's: it lives as long as this process does (the desktop app). A hub that runs
  * for the project already and is not this process's (left by an earlier app, or started by the command line) is
  * stopped first, so that the app always talks to a hub of its own code and its own lifetime.
+ *
+ * `env` is the environment a hub started here is given, and what it starts after it: its PATH is where it finds the
+ * agents' programs. A client that keeps programs of its own (the desktop app) puts them on it; by default it is this
+ * process's. What xSB withholds (`WITHHELD_ENV`) is taken out of it either way.
  */
-export async function hubSocket(paths: Paths, owned = false): Promise<net.Socket> {
+export async function hubSocket(paths: Paths, owned = false, env: NodeJS.ProcessEnv = process.env): Promise<net.Socket> {
   if (!fs.existsSync(paths.dir)) throw failure("not_a_project", { project: paths.project });
   const path = paths.socket("acp");
   if (owned) {
@@ -139,7 +145,7 @@ export async function hubSocket(paths: Paths, owned = false): Promise<net.Socket
   let socket = await tryConnect(path);
   if (socket) return socket;
 
-  spawnHub(paths, owned);
+  spawnHub(paths, owned, env);
   for (let i = 0; i < 100; i++) {
     await sleep(100);
     if ((socket = await tryConnect(path))) return socket;
@@ -148,11 +154,11 @@ export async function hubSocket(paths: Paths, owned = false): Promise<net.Socket
 }
 
 /** Start a hub for the project in the background, logging to `.xsb2/run/hub.log`. */
-function spawnHub(paths: Paths, owned = false): void {
+function spawnHub(paths: Paths, owned: boolean, environment: NodeJS.ProcessEnv): void {
   fs.mkdirSync(paths.run, { recursive: true });
   const log = fs.openSync(paths.hubLog, "a");
   // A client that is an Electron app has Electron's binary as its execPath; this makes it run as Node. Node ignores it.
-  const env = { ...process.env, ELECTRON_RUN_AS_NODE: "1", ...(owned ? { [OWNER_ENV]: String(process.pid) } : {}) };
+  const env = { ...withhold({ ...environment }), ELECTRON_RUN_AS_NODE: "1", ...(owned ? { [OWNER_ENV]: String(process.pid) } : {}) };
   // Owned: its stdin is a pipe this process holds open, and nothing else; it closes when this process ends.
   const child = spawn(process.execPath, [BIN, paths.project], { detached: true, stdio: [owned ? "pipe" : "ignore", log, log], env });
   child.unref();

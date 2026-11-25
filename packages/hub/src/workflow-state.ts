@@ -85,12 +85,13 @@ export function nodeOf(f: Flow, name: string): NodeDef {
   return n;
 }
 const definition = ({ kind, prompt, input, schema, model }: NodeDef) => ({ kind, prompt, input, schema, model });
+/**
+ * Plan saves `graphJsonl` as the candidate; execute adopts `graphJsonl`, `replaceNode`, or with neither the candidate.
+ * Versions are named here, in order, and a graph already named keeps its name: a model never names or quotes one.
+ */
 export function adopt(f: Flow, args: Record<string, any>, limit: number, plan: boolean) {
-  if (
-    plan
-      ? !args.graphJsonl || !args.version
-      : ["version", "graphJsonl", "replaceNode"].filter((k) => args[k] !== undefined).length !== 1
-  )
+  const given = ["graphJsonl", "replaceNode"].filter((k) => args[k] !== undefined);
+  if (plan ? given.length !== 1 || given[0] !== "graphJsonl" : given.length > 1)
     throw Error("Specify a single adoption method");
   let graph: WorkflowGraph;
   const old = graphOf(f);
@@ -106,20 +107,17 @@ export function adopt(f: Flow, args: Record<string, any>, limit: number, plan: b
     );
   } else if (args.graphJsonl !== undefined) graph = parseGraph(args.graphJsonl, limit);
   else {
-    if (args.version !== f.active && args.version !== f.candidate?.version)
-      throw Error("Candidate is no longer available");
-    if (args.version === f.candidate?.version && f.candidate?.base !== f.active) throw Error("Candidate is stale");
-    graph = f.versions[args.version];
-    if (!graph) throw Error("Unknown workflow version");
+    if (!f.candidate) throw Error("No candidate to adopt");
+    if (f.candidate.base !== f.active) throw Error("Candidate is stale: plan it again on the active workflow");
+    graph = f.versions[f.candidate.version];
   }
   const key = canonical(graph);
-  const version =
-    args.version ??
-    Object.keys(f.versions).find((v) => canonical(f.versions[v]) === key) ??
-    `wf-${fingerprint(graph).slice(0, 16)}`;
-  word(version, "version");
-  if (version in Object.prototype || (f.versions[version] && canonical(f.versions[version]) !== key))
-    throw Error("Version already bound to a different definition");
+  let version = Object.keys(f.versions).find((v) => canonical(f.versions[v]) === key);
+  if (!version) {
+    let n = Object.keys(f.versions).length + 1;
+    while (Object.hasOwn(f.versions, `plan-${n}`)) n++;
+    version = `plan-${n}`;
+  }
   f.versions[version] = graph;
   if (plan) {
     f.candidate = { version, base: f.active };

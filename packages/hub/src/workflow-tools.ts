@@ -8,14 +8,14 @@ function tool(name: string, description: string, properties: Record<string, unkn
 const main = [
   tool(
     "plan",
-    "xSB workflow: save one candidate workflow (a DAG of task nodes) for review. One JSON object per line: {node,prompt,input?,model?,schema?,multi?}, {node,kind:'end'}, or {from,to,case?}.",
-    { version: string, graphJsonl: string },
-    ["version", "graphJsonl"],
+    "xSB workflow: save one candidate workflow (a DAG of task nodes) for review, in place of any earlier candidate. One JSON object per line: {node,prompt,input?,model?,schema?,multi?}, {node,kind:'end'}, or {from,to,case?}. xSB names the version; the workflow context shows it with the graph.",
+    { graphJsonl: string },
+    ["graphJsonl"],
   ),
   tool(
     "execute",
-    "xSB workflow: adopt and run the reviewed version, a complete graphJsonl, or one complete replaceNode definition. Supply exactly one.",
-    { version: string, graphJsonl: string, replaceNode: obj },
+    "xSB workflow: adopt and run a workflow. With no arguments, adopt the candidate the workflow context shows; or supply a complete graphJsonl, or one complete replaceNode definition.",
+    { graphJsonl: string, replaceNode: obj },
   ),
   tool(
     "choose",

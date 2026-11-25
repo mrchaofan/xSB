@@ -1,48 +1,74 @@
 /**
- * Volcengine Ark (火山方舟) for the agents xSB starts, through its official CLI, arkcli (@volcengine/ark-cli).
+ * Volcengine Ark (火山方舟) for the agents xSB starts, through its official CLI, arkcli.
  *
- * Each step is the user's, confirmed in main before it runs (main.ts): installing arkcli with npm, signing in with
- * `arkcli auth login volc-sso`, and having xSB's Claude or Codex use a plan of the account. That last one is xSB's
- * alone: the launcher of the agent's ACP wrapper (clis.ts) is given the Ark address, model and key in its
- * environment. Neither agent's own configuration is written, so the terminal's claude and codex stay as they are.
+ * arkcli ships with the app: the program of this platform, from npm's `@volcengine/ark-cli-<platform>-<arch>`, an
+ * optional dependency of package.json that is copied into the app as published, not bundled (electron-builder.config.mjs).
+ * Those packages are the program alone; `@volcengine/ark-cli`, which wraps them, downloads it in its own install
+ * script and adds arkcli's skills to every agent it finds, so it is not used. xSB's arkcli is always this one, the
+ * version xSB was released with; the user's own, if any, is theirs. It is also the one the media plugin runs: it is
+ * on the PATH of what the app starts, by its name (clis.ts, builtin/bin). Its credentials are arkcli's own, shared with any arkcli of the user's (`~/.arkcli`).
+ *
+ * Each step is the user's, confirmed in main before it runs (main.ts): signing in with `arkcli auth login volc-sso`,
+ * and having xSB's Claude or Codex use a plan of the account. That last one is xSB's alone: the launcher of the
+ * agent's ACP wrapper (clis.ts) is given the Ark address, model and key in its environment. Neither agent's own
+ * configuration is written, so the terminal's claude and codex stay as they are.
  *
  *   <dir>/ark.json   agent -> { profile, model, baseUrl }: which plan each agent uses, never the key
  *
  * The key is arkcli's. A launcher asks arkcli for it each time the agent starts (`profile apikey get`), so it is not
  * stored here, follows a key the user rotates, and a backend fails to start, saying why, once the user signs out.
  *
- * What was verified against arkcli 1.0.50 (docs/ARK-SETUP.md): the plan profile's `base_url` is the OpenAI-compatible
+ * What was verified against arkcli (docs/ARK-SETUP.md): the plan profile's `base_url` is the OpenAI-compatible
  * address (…/api/plan/v3) that Codex takes with `wire_api = "responses"`; Claude takes the same without `/v3`
- * (what `arkcli helper configure claude-code` writes). arkcli's own installer would add its skills to every agent it
- * finds; `ARKCLI_SKIP_SKILLS=1` keeps it to installing the CLI.
+ * (what `arkcli helper configure claude-code` writes).
  */
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import spawn from "cross-spawn";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { run, type AgentCli, type Runner } from "./agent-cli.ts";
 import type { Clis } from "./clis.ts";
 
-export const ARK_PACKAGE = "@volcengine/ark-cli@latest";
 /** The official overview of the plans, with where to buy one: arkcli itself buys only from a terminal. */
 export const PLAN_GUIDE = "https://ark.volcengine.com/region:cn-beijing/docs/agent-plan-personal-plan-overview";
 /** The plan's own routing model: Ark picks the model per request. */
 export const ROUTED_MODEL = "ark-code-latest";
-/** npm shipped with the app (rolldown.config.js), run by Electron as Node when the user has no npm. */
-const SHIPPED_NPM = fileURLToPath(new URL("../npm/bin/npm-cli.js", import.meta.url));
 /** Profile and model names go into launcher scripts: only these characters. */
 const NAME = /^[A-Za-z0-9][\w.\-]*$/;
 
+/**
+ * The arkcli program shipped for this platform, or null where none is (a platform the app is not built for, or a
+ * checkout that was not installed). The package of each platform holds it as `bin/arkcli-<os>-<cpu>[.exe]`.
+ */
+export function shippedArkcli(platform: string = process.platform, arch: string = process.arch,
+  resolve: (id: string) => string = createRequire(import.meta.url).resolve): string | null {
+  const os = ({ darwin: "darwin", linux: "linux", win32: "windows" } as Record<string, string>)[platform];
+  const cpu = ({ x64: "amd64", arm64: "arm64" } as Record<string, string>)[arch];
+  if (!os || !cpu) return null;
+  try {
+    const manifest = resolve(`@volcengine/ark-cli-${platform}-${arch}/package.json`);
+    return path.join(path.dirname(manifest), "bin", `arkcli-${os}-${cpu}${platform === "win32" ? ".exe" : ""}`);
+  } catch {
+    return null;
+  }
+}
+
 export type ArkPlan = { profile: string; name: string; type: string; tier?: string; expiresAt?: string; expired: boolean };
 export type ArkBinding = { profile: string; model: string; baseUrl: string };
-export type ArkState = "missing" | "broken" | "unauthenticated" | "noPlan" | "ready";
+/** `broken`: the shipped program is not there or does not run. */
+export type ArkState = "broken" | "unauthenticated" | "noPlan" | "ready";
 export type ArkStatus = { state: ArkState; version?: string; path?: string; issue?: "timeout" | "execution" | "auth"; plans: ArkPlan[]; bindings: Partial<Record<AgentCli, ArkBinding>> };
 export type ArkModel = { name: string; context?: number };
 export type ArkProfile = { profile: string; name: string; type: string; baseUrl: string };
-export type ArkInstaller = { npm: string | null; prefix: string };
+/**
+ * Why xSB's agent that uses a plan cannot use it now: arkcli is signed out, the plan is gone or has expired, or arkcli
+ * cannot be asked (it does not run, or gives no answer).
+ */
+export type ArkProblem = "signedOut" | "planGone" | "unavailable";
+/** An agent's credentials when they are Ark's (`Ark.agentCheck`): its own sign-in is not what it uses then. */
+export type ArkAgentCheck = { state: "ready" | "unauthenticated" | "unknown"; via: "ark"; ark?: ArkProblem; issue?: "timeout" };
 
 /** The one JSON value arkcli answers: all of stdout, or the error envelope on stderr. Notices around it are skipped. */
 export function arkAnswer(stdout: string, stderr = ""): any {
@@ -66,18 +92,6 @@ function failure(result: { stdout: string; stderr?: string; timedOut: boolean },
   return new Error(`${what}: ${(result.stderr || result.stdout).trim().split("\n").slice(-6).join("\n")}`);
 }
 
-/** Where the native arkcli of the package is under a global node_modules: the program itself, which needs no Node. */
-export function nativeArkcli(root: string, platform = process.platform, arch = process.arch, exists = fs.existsSync): string | null {
-  const os = ({ darwin: "darwin", linux: "linux", win32: "windows" } as Record<string, string>)[platform];
-  const cpu = ({ x64: "amd64", arm64: "arm64" } as Record<string, string>)[arch];
-  if (!os || !cpu) return null;
-  const name = `arkcli-${os}-${cpu}${platform === "win32" ? ".exe" : ""}`;
-  const own = path.join(root, "@volcengine", "ark-cli");
-  const sub = path.join("@volcengine", `ark-cli-${platform}-${arch}`, "bin", name);
-  // The old layout, the platform package nested in the CLI's, or hoisted beside it.
-  return [path.join(own, "bin", name), path.join(own, "node_modules", sub), path.join(root, sub)].find((file) => exists(file)) ?? null;
-}
-
 /** Whether the profile is a plan (what the agents are given), not the account's pay-as-you-go platform profile. */
 const planOf = (p: any): ArkPlan | null => typeof p?.name === "string" && typeof p.type === "string" && p.type !== "platform" && NAME.test(p.name)
   ? { profile: p.name, name: String(p.display_name || p.name), type: p.type, tier: p.plan_tier || undefined, expiresAt: p.expires_at || undefined,
@@ -87,23 +101,24 @@ const planOf = (p: any): ArkPlan | null => typeof p?.name === "string" && typeof
 const shQuote = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
 
 export class Ark {
-  private clis: Pick<Clis, "executable" | "refresh" | "setPath">;
+  /** The shipped arkcli (`shippedArkcli`), or null where there is none. */
+  readonly program: string | null;
+  private clis: Pick<Clis, "resync" | "env">;
   private dir: string;
   private file: string;
-  private prefix: string;
   private runner: Runner;
-  private npm: string;
-  private installing?: Promise<ArkStatus>;
   private signingIn?: { done: Promise<ArkStatus>; cancel: () => void };
 
-  /** dir: where the bindings are kept (`ark.json`, also read by the launchers through `arkLaunch`); prefix: the npm prefix of an install the user's npm cannot make globally. */
-  constructor(clis: Pick<Clis, "executable" | "refresh" | "setPath">, dir: string, prefix: string, runner: Runner = run, npm = SHIPPED_NPM) {
+  /**
+   * dir: where the bindings are kept (`ark.json`, also read by the launchers through `arkLaunch`); clis: rewrites the
+   * launchers, and gives arkcli the environment of the app's child processes.
+   */
+  constructor(clis: Pick<Clis, "resync" | "env">, dir: string, program: string | null = shippedArkcli(), runner: Runner = run) {
     this.clis = clis;
     this.dir = dir;
     this.file = path.join(dir, "ark.json");
-    this.prefix = prefix;
+    this.program = program && fs.existsSync(program) ? program : null;
     this.runner = runner;
-    this.npm = npm;
     writeClaudeFiles(dir, this.bindings().claude);
   }
 
@@ -112,14 +127,14 @@ export class Ark {
   }
 
   async status(): Promise<ArkStatus> {
-    await this.clis.refresh();
     const bindings = this.bindings();
-    const file = this.clis.executable("arkcli");
-    if (!file) return { state: "missing", plans: [], bindings };
-    const v = await this.runner(file, ["--version"]);
+    const file = this.program;
+    if (!file) return { state: "broken", issue: "execution", plans: [], bindings };
+    const env = this.clis.env();
+    const v = await this.runner(file, ["--version"], { env });
     const version = /\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/.exec(v.stdout)?.[0];
     if (v.code !== 0 || !version) return { state: "broken", path: file, issue: v.timedOut ? "timeout" : "execution", plans: [], bindings };
-    const auth = await this.runner(file, ["auth", "status", "--format", "json"], { timeout: 20000 });
+    const auth = await this.runner(file, ["auth", "status", "--format", "json"], { timeout: 20000, env });
     let status: any;
     try { status = arkAnswer(auth.stdout, auth.stderr); } catch { status = null; }
     if (!status?.logged_in) return { state: "unauthenticated", version, path: file, issue: status ? undefined : auth.timedOut ? "timeout" : "auth", plans: [], bindings };
@@ -127,16 +142,33 @@ export class Ark {
     return { state: plans.some((p: ArkPlan) => !p.expired) ? "ready" : "noPlan", version, path: file, plans, bindings };
   }
 
+  /**
+   * Whether xSB's `name` can use the plan it is bound to, as its sign-in is checked otherwise (agent-cli.ts): null when
+   * it uses its own configuration. Like that check, it asks arkcli locally and sends no model request.
+   */
+  async agentCheck(name: AgentCli): Promise<ArkAgentCheck | null> {
+    const binding = this.bindings()[name];
+    if (!binding) return null;
+    const status = await this.status();
+    if (status.state === "unauthenticated") {
+      return status.issue ? { state: "unknown", via: "ark", ark: "unavailable", ...(status.issue === "timeout" ? { issue: "timeout" as const } : {}) }
+        : { state: "unauthenticated", via: "ark", ark: "signedOut" };
+    }
+    if (status.state === "broken") return { state: "unknown", via: "ark", ark: "unavailable" };
+    const plan = status.plans.find((p) => p.profile === binding.profile);
+    if (!plan || plan.expired) return { state: "unauthenticated", via: "ark", ark: "planGone" };
+    return { state: "ready", via: "ark" };
+  }
+
   private arkcli(): string {
-    const file = this.clis.executable("arkcli");
-    if (!file) throw new Error("arkcli is not installed");
-    return file;
+    if (!this.program) throw new Error("arkcli is not part of this build of the app");
+    return this.program;
   }
 
   /** A plan profile as arkcli shows it, with the address its models are served at. */
   async profile(profile: string): Promise<ArkProfile> {
     if (!NAME.test(profile)) throw new Error("Unknown Ark profile");
-    const result = await this.runner(this.arkcli(), ["profile", "show", "--profile", profile, "--format", "json"], { timeout: 20000 });
+    const result = await this.runner(this.arkcli(), ["profile", "show", "--profile", profile, "--format", "json"], { timeout: 20000, env: this.clis.env() });
     if (result.code !== 0) throw failure(result, "arkcli profile show");
     const shown = arkAnswer(result.stdout, result.stderr);
     if (!planOf(shown) || typeof shown.base_url !== "string" || !/^https:\/\/[^\s'"]+$/.test(shown.base_url)) throw new Error("This Ark profile is not a plan with a model address");
@@ -146,7 +178,7 @@ export class Ark {
   /** The models of a plan: its routing model first, then the ones it serves directly. */
   async models(profile: string): Promise<ArkModel[]> {
     const { type } = await this.profile(profile);
-    const result = await this.runner(this.arkcli(), ["plans", "model-list", "--plan", type, "--mode", "direct", "--format", "json"], { timeout: 30000 });
+    const result = await this.runner(this.arkcli(), ["plans", "model-list", "--plan", type, "--mode", "direct", "--format", "json"], { timeout: 30000, env: this.clis.env() });
     if (result.code !== 0) throw failure(result, "arkcli plans model-list");
     const list = arkAnswer(result.stdout, result.stderr);
     const direct = (Array.isArray(list?.direct_models) ? list.direct_models : [])
@@ -158,7 +190,10 @@ export class Ark {
     return [{ name: ROUTED_MODEL }, ...direct.filter((m: ArkModel) => m.name !== ROUTED_MODEL)];
   }
 
-  /** Have xSB's `name` use the plan (binding) or its own configuration again (null). Takes effect when it next starts. */
+  /**
+   * Have xSB's `name` use the plan (binding) or its own configuration again (null). A conversation's agent program
+   * started before keeps what it was started with (main.ts, `effect`).
+   */
   async bind(name: AgentCli, binding: ArkBinding | null): Promise<void> {
     const all = this.bindings();
     if (binding) {
@@ -170,57 +205,15 @@ export class Ark {
     await fsp.writeFile(temporary, JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
     await fsp.rename(temporary, this.file);
     writeClaudeFiles(this.dir, all.claude);
-    // Rewrites the launchers (clis.ts), which read the bindings through `arkLaunch`.
-    await this.clis.refresh();
-  }
-
-  /** How arkcli would be installed: with the user's npm, or else the app's. For the confirmation. */
-  installer(): ArkInstaller {
-    return { npm: this.clis.executable("npm"), prefix: this.prefix };
-  }
-
-  install(): Promise<ArkStatus> {
-    this.installing ??= this.performInstall().finally(() => { this.installing = undefined; });
-    return this.installing;
-  }
-
-  private async performInstall(): Promise<ArkStatus> {
-    const windows = process.platform === "win32";
-    const temporary = await fsp.mkdtemp(path.join(os.tmpdir(), "xsb-ark-"));
-    try {
-      const own = this.clis.executable("npm");
-      const env: Record<string, string | undefined> = { ARKCLI_SKIP_SKILLS: "1", npm_config_fund: "false", npm_config_audit: "false", npm_config_update_notifier: "false" };
-      let file: string, base: string[];
-      if (own) { file = own; base = []; }
-      else {
-        if (!fs.existsSync(this.npm)) throw new Error("npm is not available: install Node.js, or reinstall the app");
-        // The app's Electron is the Node: for npm itself, and as `node` for the package's install script.
-        file = process.execPath;
-        base = [this.npm, "--prefix", this.prefix];
-        const shim = path.join(temporary, windows ? "node.cmd" : "node");
-        await fsp.writeFile(shim, windows
-          ? `@echo off\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"${process.execPath}" %*\r\n`
-          : `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shQuote(process.execPath)} "$@"\n`, { mode: 0o755 });
-        Object.assign(env, { ELECTRON_RUN_AS_NODE: "1", PATH: `${temporary}${path.delimiter}${process.env.PATH ?? ""}` });
-      }
-      const add = (args: string[]) => this.runner(file, [...args, "install", "--global", "--include=optional", ARK_PACKAGE], { timeout: 600000, env, cwd: temporary });
-      let result = await add(base);
-      // A global prefix the user cannot write to (a system Node): the same install under the app's own prefix.
-      if (result.code !== 0 && own && /EACCES|EPERM|permission denied/i.test(result.stdout + result.stderr)) result = await add(base = ["--prefix", this.prefix]);
-      if (result.code !== 0) throw failure(result, "npm install");
-      const root = await this.runner(file, [...base, "root", "--global"], { env, cwd: temporary });
-      const binary = root.code === 0 ? nativeArkcli(root.stdout.trim()) : null;
-      // npm's global bin is not always on PATH: the program is remembered where it is (paths.json in clis.ts).
-      if (!binary || !this.clis.setPath("arkcli", binary)) throw new Error("npm finished, but the arkcli program was not found");
-      return await this.status();
-    } finally { await fsp.rm(temporary, { recursive: true, force: true }); }
+    // The launchers (clis.ts) read the bindings through `arkLaunch`.
+    this.clis.resync();
   }
 
   /** `arkcli auth login volc-sso`: arkcli opens the browser and waits for it. onUrl gets the address it prints, for when no browser opened. */
   login(onUrl: (url: string) => void): Promise<ArkStatus> {
     if (this.signingIn) return this.signingIn.done;
     const windows = process.platform === "win32";
-    const child = spawn(this.arkcli(), ["auth", "login", "volc-sso"], { detached: !windows, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined } });
+    const child = spawn(this.arkcli(), ["auth", "login", "volc-sso"], { detached: !windows, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...this.clis.env(), ELECTRON_RUN_AS_NODE: undefined } });
     let said = "", told = false, cancelled = false;
     const stop = () => {
       if (!child.pid) return;

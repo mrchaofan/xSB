@@ -8,13 +8,15 @@
 //   dist/plugins/<name>/      the plugins shipped with the app (plugins/<name>/package.json, whose main is server.mjs):
 //                             the same layout as a plugin the user adds (the hub's plugins.ts)
 //   dist/renderer/            the pages, served as app://xsb/…
-//   dist/npm/                 npm, run by Electron as Node to install arkcli for a user without npm (src/ark.ts)
 //
 // The layout repeats the sources': code in one directory finds the pages in
 // ../renderer, the hub's two programs in ../bin (see daemon.ts and mcp.ts in @xsb/hub) and the shipped plugins in
 // ../plugins: the same in development (packages/desktop/dist) and in the packed app (asar is off).
+//
+// What is bundled is the whole code: package.json lists it under devDependencies, as only the build needs it. Its
+// production dependencies are programs the app ships as published, beside dist/ in node_modules, and runs by path
+// (electron-builder.config.mjs): arkcli (src/ark.ts).
 import fs from "node:fs";
-import path from "node:path";
 import { createRequire } from "node:module";
 import { defineConfig } from "rolldown";
 
@@ -42,18 +44,6 @@ const plugin = (name, entry) => ({
   } }],
 });
 
-/** npm as published, its bundled dependencies included, without its manuals: a program, not a bundle. */
-const npm = {
-  name: "npm",
-  writeBundle() {
-    const root = path.dirname(createRequire(import.meta.url).resolve("npm/package.json"));
-    fs.rmSync("dist/npm", { recursive: true, force: true });
-    for (const entry of ["package.json", "index.js", "bin", "lib", "node_modules"]) {
-      if (fs.existsSync(path.join(root, entry))) fs.cpSync(path.join(root, entry), path.join("dist/npm", entry), { recursive: true });
-    }
-  },
-};
-
 /** The pages' files that are not code: copied as they are. mock.js is only loaded outside Electron. */
 const pages = {
   name: "pages",
@@ -73,7 +63,7 @@ const pages = {
 };
 
 export default defineConfig([
-  { ...node, input: "src/main.ts", output: { file: "dist/app/main.js", format: "esm", codeSplitting: false }, plugins: [npm] },
+  { ...node, input: "src/main.ts", output: { file: "dist/app/main.js", format: "esm", codeSplitting: false } },
   { ...node, input: "src/preload.cjs", output: { file: "dist/app/preload.cjs", format: "cjs" } },
   program("xsb-hub", "../hub/bin/xsb-hub"),
   program("xsb-mcp-bridge", "../hub/bin/xsb-mcp-bridge"),

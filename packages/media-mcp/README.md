@@ -29,7 +29,7 @@ agent ──start_job──▶ Hub ──▶ xsb-media-mcp ──VideoProvider�
 | - | - |
 | `IMAGE_PROVIDER` | 出图的提供方，默认 `seedream` |
 | `VIDEO_PROVIDER` | 出视频的提供方，默认 `seedance` |
-| `ARKCLI` | 可选：arkcli 的路径 |
+| `ARKCLI` | 可选：arkcli 的路径；未设置时按命令名在 PATH 上找。桌面端把内置的 arkcli 放在子进程 PATH 的前面 |
 | `FFMPEG` | 可选：ffmpeg 的路径。只在提供方没给尾帧时用来从视频里取最后一帧 |
 | `VIDEO_POLL_MS` / `VIDEO_TIMEOUT_S` | 轮询间隔（默认 5000）与最长等待（默认 1800） |
 
