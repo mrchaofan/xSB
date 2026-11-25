@@ -13,17 +13,17 @@ import type { Language } from "@xsb/protocol";
 import type { Clis } from "./clis.ts";
 
 export type AgentCli = "codex" | "claude";
-export type CliCheck = { state: "missing" | "broken" | "unauthenticated" | "unknown" | "ready"; version?: string; issue?: "timeout" | "execution" | "auth" };
+export type CliCheck = { state: "missing" | "broken" | "unauthenticated" | "unknown" | "ready"; version?: string; issue?: "timeout" | "execution" | "auth"; via?: "ark" };
 export type CliConfig = { path: string; exists: boolean };
 type Result = { code: number | null; stdout: string; stderr?: string; timedOut: boolean };
-export type Runner = (file: string, args: string[], options?: { timeout?: number; cwd?: string }) => Promise<Result>;
+export type Runner = (file: string, args: string[], options?: { timeout?: number; cwd?: string; env?: Record<string, string | undefined> }) => Promise<Result>;
 const shQuote = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
 const psQuote = (s: string): string => `'${s.replaceAll("'", "''")}'`;
 
 /** Fixed executable + argument vector; no user-controlled shell command. Output is bounded and never returned to UI. */
 export const run: Runner = (file, args, options = {}) => new Promise((resolve) => {
   const windows = process.platform === "win32";
-  const child = spawn(file, args, { cwd: options.cwd, detached: !windows, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined } });
+  const child = spawn(file, args, { cwd: options.cwd, detached: !windows, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, ...options.env } });
   let stdout = "", stderr = "", ended = false;
   const finish = (code: number | null, timedOut = false) => {
     if (ended) return;
@@ -85,6 +85,8 @@ export class AgentClis {
   private directory: string;
   private runner: Runner;
   private home: string;
+  /** Whether xSB's agent uses a Volcengine Ark plan (ark.ts) instead of its own sign-in: then that is not what is checked. */
+  viaArk: (name: AgentCli) => boolean = () => false;
   constructor(clis: Pick<Clis, "executable" | "refresh" | "setPath">, directory: string, runner: Runner = run, home = os.homedir()) {
     this.clis = clis;
     this.directory = directory;
@@ -122,6 +124,7 @@ export class AgentClis {
     const result = await this.runner(executable, ["--version"]);
     const version = /\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/.exec(result.stdout)?.[0];
     if (result.code !== 0 || !version) return { state: "broken", issue: result.timedOut ? "timeout" : "execution" };
+    if (this.viaArk(name)) return { state: "ready", version, via: "ark" };
     const auth = await this.runner(executable, [...PROVIDERS[name].auth]);
     if (auth.timedOut || auth.code === null) return { state: "unknown", version, issue: auth.timedOut ? "timeout" : "auth" };
     if (name === "codex") {

@@ -7,7 +7,7 @@ export const CLI_DETAILS = {
 export function backendPresentation(backend, result, error, pending) {
   const state = pending ? pending : error ? "failed" : !backend.installed ? "missing" : result?.state ?? "found";
   const next = !backend.installed ? (backend.cli ? "install" : backend.missing ? "locate" : null)
-    : result?.state === "unauthenticated" ? "login" : backend.cli ? "check" : null;
+    : result?.state === "unauthenticated" && !backend.ark ? "login" : backend.cli ? "check" : null;
   const primary = pending ? null : error ? error.action : next;
   const tone = pending ? "progress" : error || state === "broken" ? "error" : state === "ready" ? "success" : ["missing", "unauthenticated", "unknown"].includes(state) ? "attention" : "neutral";
   const label = pending ? pending : error ? `retry.${primary}` : primary === "check" && result ? "recheck" : primary;

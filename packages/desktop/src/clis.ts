@@ -79,6 +79,9 @@ async function refreshedPath(): Promise<string> {
 /** The program of the user's machine a wrapper is built around, for a wrapper's command: what is missing when the wrapper is. */
 export const wrapped = (command: string): string | undefined => Object.keys(WRAPPERS).find((program) => WRAPPERS[program].command === command);
 
+/** See `Clis.launchEnv`. locate: where a program is, as `executable` says. */
+export type LaunchEnv = (program: string, windows: boolean, locate: (command: string) => string | null) => { lines: string[]; executable?: string };
+
 export class Clis {
   /** Where the app's browser listens for agents; the browser plugin is told through `SOCKET_ENV`. */
   readonly browserSocket: string;
@@ -88,8 +91,14 @@ export class Clis {
   /** The PATH as the user has it, without the launchers. */
   private userPath: string;
   private refreshing?: Promise<void>;
+  /**
+   * Lines a wrapper's launcher runs before the wrapper, by the program it is built around: how the agent xSB starts
+   * is pointed at another service (ark.ts). The launcher stays the one place xSB's agents get their environment.
+   */
+  private launchEnv: LaunchEnv;
 
-  constructor(dir: string) {
+  constructor(dir: string, launchEnv: LaunchEnv = () => ({ lines: [] })) {
+    this.launchEnv = launchEnv;
     const env = shellEnv();
     for (const [name, value] of Object.entries(env)) process.env[name] ??= value;
     this.userPath = [...new Set([env.PATH ?? process.env.PATH ?? "", path.join(os.homedir(), ".local", "bin")].flatMap((p) => p.split(path.delimiter)))].join(path.delimiter);
@@ -106,6 +115,11 @@ export class Clis {
     // The hubs this app starts inherit these: the shipped plugins, and where their browser plugin connects.
     process.env[PLUGINS_ENV] = PLUGINS;
     process.env[SOCKET_ENV] = this.browserSocket;
+    this.sync();
+  }
+
+  /** Write the launchers again, with what `launchEnv` says now. */
+  resync(): void {
     this.sync();
   }
 
@@ -161,7 +175,10 @@ export class Clis {
       const found = this.locate(command);
       if (!found) continue;
       const wrapper = WRAPPERS[command];
-      if (wrapper) launchers.set(wrapper.command, `${wrapper.env}=${quote(found.path)} ${node(wrapper.command)}`);
+      if (wrapper) {
+        const launch = this.launchEnv(command, false, (c) => this.executable(c));
+        launchers.set(wrapper.command, [...launch.lines, `${wrapper.env}=${quote(launch.executable ?? found.path)} ${node(wrapper.command)}`].join("\n"));
+      }
       // A program the user pointed to is not on PATH: with a launcher of its name, whatever runs it by name finds it.
       if (found.configured) launchers.set(command, `exec ${quote(found.path)} "$@"`);
     }
@@ -178,7 +195,10 @@ export class Clis {
       const found = this.locate(command);
       if (!found) continue;
       const wrapper = WRAPPERS[command];
-      if (wrapper) launchers.set(`${wrapper.command}.cmd`, `${set(wrapper.env, found.path)}${node(wrapper.command)}`);
+      if (wrapper) {
+        const launch = this.launchEnv(command, true, (c) => this.executable(c));
+        launchers.set(`${wrapper.command}.cmd`, `${launch.lines.map((line) => `${line}\r\n`).join("")}${set(wrapper.env, launch.executable ?? found.path)}${node(wrapper.command)}`);
+      }
       if (found.configured) launchers.set(`${command}.cmd`, `${cmdQuote(found.path)} %*`);
     }
     for (const name of fs.readdirSync(this.bin)) if (!launchers.has(name)) fs.rmSync(path.join(this.bin, name));

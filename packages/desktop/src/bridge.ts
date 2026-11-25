@@ -63,9 +63,12 @@ export type PageView = { sessionId?: string; id: string; contentsId: number; url
 /** How far something done to several agents got: their ids, and why it stopped if it did. */
 export type Progress = { done: string[]; failed?: string; error?: string };
 
-export type BackendView = { name: string; command: string; installed: boolean; missing?: string; cli?: "codex" | "claude"; configPath?: string };
+export type BackendView = { name: string; command: string; installed: boolean; missing?: string; cli?: "codex" | "claude"; configPath?: string;
+  /** The Volcengine Ark plan xSB's agent uses instead of its own configuration (ark.ts). */
+  ark?: { profile: string; model: string } };
 
 export type { CliCheck, CliConfig } from "./agent-cli.ts";
+export type { ArkModel, ArkPlan, ArkStatus } from "./ark.ts";
 
 /** Everything a window shows at first. A window without a workspace gets `{ workspace: null, recent }` instead. */
 export type Snapshot = {
@@ -112,6 +115,8 @@ export type Event =
   | { showAgent: string }
   /** The application menu asked for the settings. */
   | { openSettings: true }
+  /** Where arkcli asks the user to sign in, for when it opened no browser (ark.ts `login`). */
+  | { arkLoginUrl: string }
   /** The window now shows another workspace (File > Open Folder): draw it anew. */
   | { workspaceChanged: true }
   /** What the agent is doing now; `null` when its turn is over. */

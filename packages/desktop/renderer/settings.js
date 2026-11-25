@@ -1,4 +1,5 @@
 import { refreshRail, state } from "./app.js";
+import { arkCard } from "./ark.js";
 import { backendControls, refreshBackendControls } from "./backend.js";
 import { ICON, fill, h } from "./dom.js";
 import { confirmDialog, field, select } from "./form.js";
@@ -149,6 +150,7 @@ export function showSettings(key = "general", refresh = true) {
     h("p", { class: "hint" }, t("settings.backendsHint")),
     limitsFailure,
     backendList = h("div", { class: "backend-list" }, ...backendCards()),
+    h("div", { class: "backend-list" }, arkCard()),
     h("div", { class: "backend-check" },
       h("div", { class: "backend-assurance" }, h("span", { "aria-hidden": "true", html: ICON.check }), h("span", {}, t("backend.check.free"))),
       h("details", { class: "backend-explanation" }, h("summary", {}, t("backend.check.scope")), h("p", { class: "hint" }, t("backend.check.hint")))),
