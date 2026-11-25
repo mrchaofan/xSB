@@ -213,13 +213,6 @@ body.no-workspace .hub { display: none; }
 .backend-mark-text { max-width: 88px; height: 18px; padding: 0 var(--space-1h); border-radius: var(--radius-sm); background: var(--wash); color: var(--ink-2); font-size: var(--text-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-row { min-height: 44px; }
 /* 删除按钮悬停时出现在行的最右，盖住状态点 */
-.session-item { position: relative; }
-.session-delete { position: absolute; right: var(--space-1); top: 50%; width: var(--control-sm); height: var(--control-sm); transform: translateY(-50%); border-radius: var(--radius-sm); opacity: 0; }
-.session-item:hover .session-delete, .session-delete:focus-visible { opacity: 1; }
-.session-item:hover .session-delete:not(:disabled) { background: var(--paper); }
-.session-delete:not(:disabled):hover { color: var(--danger); }
-.session-item:hover .session-delete:disabled { opacity: .35; pointer-events: auto; cursor: not-allowed; }
-.session-item:hover .session-row > .state { visibility: hidden; }
 /* 名字占满中间，后端图标和状态点靠右成两列，各行对齐 */
 .session-row .row-text { flex: 1 1 auto; }
 .task .state { margin: 0 var(--space-2); }
@@ -360,6 +353,16 @@ body:not(.no-workspace) .welcome { display: none; }
 .session-menu-name { flex: 1; font-weight: 500; }
 .session-menu-item:hover, .session-menu-item:focus-visible { background: var(--hover); outline: 0; }
 .session-menu-item:hover .backend-icon, .session-menu-item:focus-visible .backend-icon { background: var(--paper); }
+/* 右键菜单（menu.js）：和上面的下拉菜单同一套行高、圆角、悬停色；每项左侧一列 16px 图标，分隔线分组，
+   删除这类操作用危险色，不可用的项写出原因 */
+.context-menu { min-width: 200px; }
+.context-menu .session-menu-item { padding: 0 var(--space-2); }
+.context-menu hr { margin: var(--space-1) var(--space-2); border: 0; border-top: 1px solid var(--line); }
+.context-menu .session-menu-name { font-weight: 400; }
+.context-menu .menu-icon { width: 16px; height: 16px; flex: none; display: grid; place-items: center; color: var(--ink-2); }
+.context-menu .session-menu-item > small { margin-left: auto; font-size: var(--text-xs); color: var(--ink-3); }
+.session-menu-item.danger, .session-menu-item.danger .menu-icon { color: var(--danger); }
+.session-menu-item:disabled, .session-menu-item:disabled .menu-icon { color: var(--ink-3); opacity: .7; cursor: default; background: none; }
 .session-menu .error { padding: var(--space-1) var(--space-2); font-size: var(--text-sm); font-weight: 400; color: var(--ink-2); }
 
 /* ---------- 制品 ---------- */
@@ -415,7 +418,12 @@ body:not(.no-workspace) .welcome { display: none; }
 /* 标签条：标签多了就一起变窄，尽量不滚动（像 Chromium）。足够宽时每个最多 200px；
    变窄后先藏起非当前标签的关闭按钮，再只留图标；当前标签窄到只放得下关闭按钮时只显示关闭按钮。 */
 .tab-list { flex: 1; align-self: stretch; min-width: 0; padding: 0 var(--space-1); margin: 0 calc(-1 * var(--space-1)); display: flex; align-items: center; gap: var(--space-0); overflow-x: auto; scrollbar-width: none; }
-.tab { container: tab / inline-size; flex: 1 1 200px; min-width: 28px; max-width: 200px; height: var(--control-md); display: flex; align-items: center; border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--ink-2); }
+/* 标签宽度：标签栏平分（--tabs 是标签数，pages.js 给出），最宽 200px；数量变了、解除冻结时缓动过去，新标签从 0 长出来。
+   标签元素跨重画保留（pages.js 的 syncTabs），过渡才接得上。 */
+.tab-list { --tab-basis: min(200px, calc((100% - (var(--tabs, 1) - 1) * var(--space-0)) / var(--tabs, 1))); }
+.tab { transition: flex-basis .18s cubic-bezier(.2, 0, 0, 1); }
+@starting-style { .tab { flex-basis: 0; } }
+.tab { container: tab / inline-size; flex: 0 1 var(--tab-basis); min-width: 28px; max-width: 200px; height: var(--control-md); display: flex; align-items: center; border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--ink-2); }
 .tab-list.frozen .tab { flex: 0 0 var(--tab-frozen); }
 .tab[aria-current="true"] { min-width: 36px; }
 .tab:hover { background: var(--hover); color: var(--ink); }
@@ -478,6 +486,10 @@ body:not(.no-workspace) .welcome { display: none; }
 .web-note { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-3); padding: var(--space-6); color: var(--ink-3); text-align: center; }
 .web-note p { margin: 0; }
 .web-note .actions { display: flex; gap: var(--space-2); }
+/* 网页窗口（page.html）的头部：用各栏头部的 .bar（同高、同间距、紧凑按钮），另外让出系统窗口按钮、空白处拖动窗口；
+   标题与对话栏头部的标题同字号 */
+.titlebar { padding-left: calc(var(--controls-left) + var(--space-4)); padding-right: calc(var(--controls-right) + var(--space-3)); background: var(--paper); -webkit-app-region: drag; user-select: none; }
+.titlebar .web-title { font-size: var(--text-lg); }
 .web-title { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #pin[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 /* 拖动分隔线时，鼠标经过网页也仍然是在拖 */
@@ -532,6 +544,7 @@ body:has(.divider.dragging) webview2 { pointer-events: none; }
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; }
+  .tab { transition: none; }
 }
 
 /* ---------- 没有工作区：与主窗口同一块工作面，左"开始"、右"最近打开" ---------- */

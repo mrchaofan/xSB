@@ -52,7 +52,7 @@ export function annotateButton(button, page) {
 export function showAnnotations(container, page) {
   if (!page.annotating || page.nativeView || page.error) return clearAnnotations(page.id);
   shown = { page, container };
-  layer.dataset.tone = page.annotationTone ?? "default";
+  layer.dataset.tone = page.tone ?? "default";
   if (layer.parentElement !== container) container.append(layer);
   render();
 }

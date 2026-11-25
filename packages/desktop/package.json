@@ -34,6 +34,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "test:workflow-ui": "npm run build && node test/workflow-window.cjs",
+    "test:menus-ui": "npm run build && node test/context-menu-window.cjs",
     "test:browser-native": "node test/browser-native.mjs"
   }
 }

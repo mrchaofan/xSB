@@ -16,6 +16,7 @@ import { sessionPages, onPage, onPageRemoved, renderSide, selectTab } from "./pa
 import { closeSettings, showSettings } from "./settings.js";
 import { onPreferencesChanged, syncWindowColors } from "./preferences.js";
 import { confirmDialog, openDialog } from "./form.js";
+import { openContextMenu } from "./menu.js";
 import { bindArtifactResize } from "./resize.js";
 
 import { showWeb } from "./webview.js";
@@ -120,11 +121,13 @@ function applyProviderTheme() {
   syncWindowColors();
 }
 
-/** 删除对话：先确认。它从列表消失、后端停下；记录和文件留在工作区，到设置里"清理工作区"才真正删掉。 */
+/**
+ * 删除对话（会话行的右键菜单）：说过话、有了后端会话的，先确认；空的新会话直接删。
+ * 工作中的对话由中枢拒绝删除（停下后才能删），菜单里这一项不可用。
+ */
 async function deleteConversation(agent) {
-  if (agent.state !== "idle") return;
-  const ok = await confirmDialog(t("rail.delete.title", { name: agent.name }), [h("p", {}, t("rail.delete.body"))], t("rail.delete.confirm"));
-  if (!ok) return;
+  const used = agent.backendStarted || (state.transcripts[agent.id] ?? []).length > 0;
+  if (used && !(await confirmDialog(t("rail.delete.title", { name: agent.name }), [h("p", {}, t("rail.delete.body"))], t("rail.delete.confirm")))) return;
   try { await xsb.deleteConversation(agent.id); }
   catch (e) { openDialog(t("rail.delete.failed"), [h("p", {}, e.message)], [{ label: t("common.close"), primary: true }]); }
 }
@@ -132,15 +135,15 @@ async function deleteConversation(agent) {
 function renderRail() {
   applyProviderTheme();
   const roots = state.agents.filter(a => !a.workflowOwner);
-  // 每行右侧悬停时出现删除按钮（盖住状态点）；工作中的对话不能删。
-  fill($("#agents"), ...roots.map(a => h("div", { class: "session-item" },
+  const menu = (e, a) => openContextMenu(e, [
+    { label: t("rail.delete"), icon: "trash", danger: true, disabled: a.state !== "idle", hint: t("rail.delete.busy"), run: () => deleteConversation(a) },
+  ], a.name);
+  fill($("#agents"), ...roots.map(a =>
     h("button", { class:"row session-row", "aria-pressed":String(state.open.includes(a.id)),title:a.name,onclick:() => focusLane(a.id),
-      oncontextmenu: (e) => { e.preventDefault(); void deleteConversation(a); } },
+      oncontextmenu: (e) => menu(e, a) },
       avatarImage(a),
       h("span",{class:"row-text"},h("strong",{},a.name)), backendMark(a.backend),
-      h("i",{class:"state","data-state":a.state,title:STATE_TEXT[a.state]})),
-    h("button", { class: "icon-btn session-delete", html: ICON.trash, disabled: a.state !== "idle",
-      title: t(a.state === "idle" ? "rail.delete" : "rail.delete.busy"), "aria-label": t("rail.delete"), onclick: () => deleteConversation(a) }))));
+      h("i",{class:"state","data-state":a.state,title:STATE_TEXT[a.state]}))));
   $("#agent-count").textContent = roots.length;
   $("#settings").setAttribute("aria-pressed", String(!!state.settings));
   fill($("#blank"),h("p",{},t("flow.empty")),h("button",{class:"btn primary",onclick:() => newSession()},t("flow.new")));
@@ -877,8 +880,7 @@ export async function start() {
   renderRail();
 }
 
-// 系统的窗口按钮在哪（styles.css 按它让位）：macOS 在左上，其余在右上；配色跟着系统深浅变时同步给它们。
-document.documentElement.dataset.platform = /Mac/.test(navigator.platform) ? "mac" : "other";
+// 系统的窗口按钮（位置见 preferences.js）配色跟着系统深浅变时同步给它们。
 syncWindowColors();
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncWindowColors);
 

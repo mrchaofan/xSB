@@ -199,7 +199,7 @@ if (initial) { pageWindowId = initial.id; receive({ page: initial }); }
   assert.equal(sent.annotation.image.mimeType, 'image/png');
   assert.equal(Buffer.from(sent.annotation.image.data, 'base64').subarray(1, 4).toString(), 'PNG');
   // In the style of the page's agent: claude's orange, not red.
-  assert.equal(pages.list()[0].annotationTone, 'claude');
+  assert.equal(pages.list()[0].tone, 'claude');
   assert.equal(await original.executeJavaScript("document.querySelector('xsb-annotations').style.getPropertyValue('--xsb-accent')"), 'rgb(217,119,87)');
   const tree = JSON.stringify(await original.debugger.sendCommand('DOM.getDocument', { depth: -1, pierce: true }));
   assert.ok(tree.includes('检查这个按钮 <b>not html</b>'), 'the note is embedded in the page, as text');
