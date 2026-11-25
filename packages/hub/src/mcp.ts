@@ -15,6 +15,7 @@ import { shipped } from "./paths.ts";
 
 import type { LiveSession } from "./session.ts";
 import { workflowTools } from "./workflow-tools.ts";
+import { WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT } from "./prompts.ts";
 import { boundedText } from "./context.ts";
 import { newId, VERSION } from "./util.ts";
 import { serveToolContext } from "./tool-context.ts";
@@ -73,6 +74,11 @@ export function serveMcp(
     protocolVersion: MCP_VERSIONS.includes(p.protocolVersion) ? p.protocolVersion : MCP_VERSIONS[0],
     capabilities: { tools: {} },
     serverInfo: { name: WORKFLOW_SERVER, version: VERSION },
+    // Shown to the model by agent programs that pass server instructions on: what these tools are, before it guesses.
+    instructions: (() => {
+      try { return hub.agent(attached().agentId).workflowOwner ? WORKFLOW_TASK_ABOUT : WORKFLOW_MAIN_ABOUT; }
+      catch { return WORKFLOW_MAIN_ABOUT; }
+    })(),
   }));
   conn.onRequest("ping", () => ({}));
   conn.onRequest("tools/list", () => {

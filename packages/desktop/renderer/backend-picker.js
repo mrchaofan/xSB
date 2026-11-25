@@ -1,10 +1,11 @@
 // 输入框里的后端切换：一个只显示后端图标的按钮，点开下拉列出可用的后端（claude、codex …）。
-// 对话还没有消息时直接切换；已有消息时先确认：换后端会开一个新的后端会话，之前的对话按新后端的上下文限制压缩成交接
-// 带过去，模型从此只看到摘要（中枢的 backend_changed 分割线）。
-import { agentOf, onAgent, state } from "./app.js";
+// 后端会话在第一条消息发出时才建立。还没建立的对话直接切换；已经建立的不能原地换，确认后新建一个用新后端的对话，
+// 新对话的模型用 previous_conversation 工具按需读取原对话（只迁移主对话，工作流不迁移），原对话保留。
+// 当前一轮还没结束时不能切换。
+import { agentOf, focusLane, onAgent, state } from "./app.js";
 import { backendIcon } from "./backend-icons.js";
 import { fill, h, ICON } from "./dom.js";
-import { confirmDialog } from "./form.js";
+import { confirmDialog, openDialog } from "./form.js";
 import { t } from "./i18n.js";
 
 export function backendPicker(agentId) {
@@ -12,15 +13,22 @@ export function backendPicker(agentId) {
   const menu = h("div", { class: "session-menu backend-menu", popover: "auto", role: "menu", "aria-label": t("composer.backend") });
   const failure = h("p", { class: "error", role: "alert" });
 
-  const hasHistory = () => (state.transcripts[agentId] ?? []).some((e) => e.kind === "input" || e.kind === "output");
   const choose = async (name) => {
     menu.hidePopover();
     const agent = agentOf(agentId);
     if (!agent || name === agent.backend) return;
-    if (hasHistory() && !(await confirmDialog(t("composer.backend.confirmTitle", { name }),
-      [h("p", {}, t("composer.backend.confirmBody", { from: agent.backend, to: name }))], t("composer.backend.confirm")))) return;
-    try { onAgent(await xsb.setBackend(agentId, name)); }
-    catch (e) { failure.textContent = e.message; menu.showPopover(); }
+    if (agent.state !== "idle") {
+      openDialog(t("composer.backend.busyTitle"), [h("p", {}, t("composer.backend.busyBody"))], [{ label: t("common.close") }]);
+      return;
+    }
+    try {
+      if (!agent.backendStarted) return onAgent(await xsb.setBackend(agentId, name));
+      if (!(await confirmDialog(t("composer.backend.confirmTitle", { name }),
+        [h("p", {}, t("composer.backend.confirmBody", { from: agent.backend, to: name }))], t("composer.backend.confirm")))) return;
+      const moved = await xsb.migrate(agentId, name);
+      onAgent(moved);
+      focusLane(moved.id);
+    } catch (e) { failure.textContent = e.message; menu.showPopover(); }
   };
   const paint = () => {
     const agent = agentOf(agentId);
@@ -28,7 +36,8 @@ export function backendPicker(agentId) {
     fill(trigger, backendIcon(agent.backend));
     trigger.title = t("composer.backend") + " · " + agent.backend;
     trigger.setAttribute("aria-label", trigger.title);
-    trigger.disabled = agent.state !== "idle";
+    // 工作中也能点开：选了别的后端时，弹窗说明当前一轮还没结束。
+    trigger.dataset.busy = String(agent.state !== "idle");
     fill(menu, h("small", {}, t("composer.backend")),
       ...state.backends.map((b) => h("button", { type: "button", role: "menuitemradio", class: "session-menu-item", "aria-checked": String(b.name === agent.backend),
         onclick: () => choose(b.name) },

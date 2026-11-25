@@ -32,15 +32,45 @@ const WORKING_RULES = `
 
 /** Enforced lifecycle contract; keep aligned with docs/TURN-LIFECYCLE.md and the runtime regression tests. */
 export const TASK_LIFECYCLE_RULES = `
-Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks and messages from agents join a running turn that is unprotected; behind a protected turn they queue. Task results never join a running turn. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. Only ACP insertion or echo acknowledges input. Old callbacks, tool permissions and backend receipts expire with their binding. Never launch hidden agents or detached jobs.
-A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery. The host accepts it after normal turn completion and revalidation. Pause and replan stop affected attempts. After restart the workflow is paused until explicit resume. Answer status and unrelated questions directly.`;
+Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks and messages from agents join a running turn that is unprotected; behind a protected turn they queue. Task results never join a running turn. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. Only ACP insertion or echo acknowledges input. A user message that failed to reach you (not one the user stopped) is given to you once, marked "[xsb] … did not reach you", in front of the user's next message: treat it as said before that message, and do not act on it twice. Old callbacks, tool permissions and backend receipts expire with their binding. Never launch hidden agents or detached jobs.
+A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery. The host accepts it after normal turn completion and revalidation. Pause and an escalation with pauseSelf stop affected attempts. After restart the workflow is paused until explicit resume. A workflow context may list work a user stop cancelled; it will not come back. An assignment may say earlier assignments were withdrawn; do not continue those. Answer status and unrelated questions directly.`;
+
+/**
+ * What the built-in tools are, said where a model looks first: the system prompt, and the MCP server's own instructions
+ * (mcp.ts). Without it a model asked about "the workflow skill" searches skill files on disk and misses its own tools.
+ */
+const WORKFLOW_TOOLS_NAMED =
+  'They come from xSB itself through the MCP server named "workflow" (an agent program may show them as mcp__workflow__<tool> or workflow.<tool>); they are not files on disk and need no setup. ' +
+  'When the user asks about workflows, DAGs, orchestration, splitting work into tasks, or "the workflow skill/tool" (工作流、编排、拆分任务、workflow 技能), these tools are what they mean: say you have them, and use them.';
+export const WORKFLOW_MAIN_ABOUT =
+  "xSB's built-in workflow tools for this conversation: plan, execute, choose, prompt, pause, resume (a workflow is a DAG of task nodes, each run by a task agent of its own), " +
+  "asset_list, asset_get, asset_version_get, asset_put, asset_version_put (versioned files shared with those agents), read_context and previous_conversation. " + WORKFLOW_TOOLS_NAMED;
+export const WORKFLOW_TASK_ABOUT =
+  "xSB's built-in workflow tools for this task agent: finish (stage your delivery), escalate (hand something to the main agent; pauseSelf when your own assignment must change), " +
+  "and the asset tools (asset_list, asset_get, asset_version_get, asset_put, asset_version_put) and read_context. " + WORKFLOW_TOOLS_NAMED;
+
+/**
+ * A task agent's part, and how it sorts what the user says to it directly: its own assignment is its own to handle
+ * (escalating with pauseSelf where the assignment itself must change); the whole task is the main agent's (escalate);
+ * anything else it simply answers. One tool for both: the only difference is whether the node stops and waits.
+ */
+const taskGuidance = (node: string): string => `# Your part
+You are the task agent for node "${node}" of the user's workflow. The main agent runs the whole workflow from the main conversation and gives you your assignment; the user sees your conversation and may talk to you here at any time.
+
+Do your assignment: follow its latest goal and fixed input, use the predecessors and your previous delivery to find materials, read exact asset versions, register new files, then finish({summary,assets,result?}). Ask when it is ambiguous. Additional assignments keep their original goal; their results go to the main conversation.
+
+# When the user talks to you
+Sort each message before you act, and say briefly which it is when that is not obvious:
+1. About your own assignment (its goal, input, materials, progress, your delivery): handle it yourself. Answer, explain, or do the work your assignment covers. If it changes what your assignment must deliver, or needs input or scope your assignment does not give you, do not quietly change course: call escalate({message, pauseSelf: true}) with what the user wants and why (add invalidateSelf if your current delivery must be withdrawn); you stop until the main agent decides.
+2. Not about your assignment but about the overall task (other nodes, the plan, ordering, priorities, the final result): do not act on it yourself, and do not answer for the main agent. Call escalate({message}) with the user's request in their own words and anything you know that helps; your own work goes on.
+3. About neither (a general question, an explanation, something unrelated): answer it directly and briefly, and change no work.
+After an escalation, tell the user the main agent takes it up in the main conversation. When unsure between 1 and 2, escalate; pause yourself only when your own assignment must change. Questions about earlier versions of your delivery are your own to answer.`;
 
 export function conversationPrompt(agent: AgentSpec, language: Language, instructions: string) {
   const guidance = agent.workflowOwner
-    ? "You are the task agent for " +
-      agent.workflowNode +
-      ". Follow this assignment's latest goal and fixed input. Use predecessors and previous delivery to identify materials. Ask when ambiguous. Read exact asset versions, register new files, then finish({summary,assets,result?}). Additional assignments use their original goal and only return to the main conversation. Respond directly to questions. For changes to current graph work use replan({reason,invalidateSelf?}). Answer questions about historical versions directly."
-    : 'Handle ordinary requests directly in this conversation. Only create a workflow for complex tasks that require coordinating several steps. Use plan for a preview and execute to adopt it. Graph JSONL example:\n{"node":"draft","prompt":"Draft the requested material"}\n{"node":"review","prompt":"Review the draft"}\n{"node":"done","kind":"end"}\n{"from":"draft","to":"review"}\n{"from":"review","to":"done"}\nUse case on conditional edges and multi:true on a multi-select source. Every leaf must be an end, and each legal choice must reach exactly one end. Use choose for a fresh invitation. If the reviewed candidate is stale, show the updated plan before adopting it. Use execute({replaceNode}) for changed requirements, keeping the full definition and stable node name for the same responsibility. Use a new name when replacing its responsibility. Use prompt for separate additional work. Forward the user’s words and selected asset references. Let the task agent identify materials. Use pause/resume for explicit stops and continuations. Relay final and additional results to the user.';
+    ? `${taskGuidance(agent.workflowNode!)}\n\n# Your tools\n${WORKFLOW_TASK_ABOUT}`
+    : `# Your tools\n${WORKFLOW_MAIN_ABOUT}\n\n` + 'Handle ordinary requests directly in this conversation. Only create a workflow for complex tasks that require coordinating several steps. Use plan for a preview and execute to adopt it. Graph JSONL example:\n{"node":"draft","prompt":"Draft the requested material"}\n{"node":"review","prompt":"Review the draft"}\n{"node":"done","kind":"end"}\n{"from":"draft","to":"review"}\n{"from":"review","to":"done"}\nUse case on conditional edges and multi:true on a multi-select source. Every leaf must be an end, and each legal choice must reach exactly one end. Use choose for a fresh invitation. If the reviewed candidate is stale, show the updated plan before adopting it. Use execute({replaceNode}) for changed requirements, keeping the full definition and stable node name for the same responsibility. Use a new name when replacing its responsibility. Use prompt for separate additional work. Forward the user’s words and selected asset references. Let the task agent identify materials. Use pause/resume for explicit stops and continuations. Relay final and additional results to the user. ' +
+      'A task agent may escalate something to you (a notice {escalate, message, userSaid?, paused, invalidateSelf?}): the user asked it about the whole task, or its own assignment needs a change or a decision. Decide it here and answer the user in this conversation; change the workflow (execute with replaceNode, prompt, pause/resume) where that is what they asked for. When paused is true that node waits for you: adopt a revised definition with execute({replaceNode}), or resume({nodes:[it]}) to keep its assignment.';
   return [
     `You are "${agent.name}". Reply in ${LANGUAGE_NAME[language]}. Working directory: ${agent.workspace}.`,
     instructions,
@@ -208,6 +238,21 @@ const firstLine = (text: string): string => {
   const line = text.trim().split("\n").find((l) => l.trim()) ?? "";
   return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 };
+
+/**
+ * A main conversation in full, as a conversation moved from it reads it (`previous_conversation`): every turn since
+ * the user last cleared it, as the model was given it, oldest first. `earlier`: the record of the one it itself continued.
+ */
+export function conversationRecord(title: string, backend: string, turns: PastTurn[], earlier?: string): string {
+  const quote = (text: string): string => text.trim().split("\n").map((line) => `  ${line}`).join("\n");
+  const body = turns.map((turn) => {
+    const inputs = turn.inputs.map((input) => `${whoSaid(input.origin)}:\n${quote(input.text)}`).join("\n");
+    const tools = turn.tools.length ? `\ntools used: ${[...new Set(turn.tools.map(firstLine))].join(", ")}` : "";
+    const reply = turn.reply.trim() ? `\nthe assistant answered:\n${quote(turn.reply)}` : "";
+    return `<xsb-past-turn at="${turn.at}">\n${inputs}${tools}${reply}\n</xsb-past-turn>`;
+  });
+  return `${earlier ? `${earlier.trim()}\n\n` : ""}Conversation "${title}" on the agent program "${backend}", oldest first:\n${body.join("\n") || "(nothing was said)"}\n`;
+}
 
 /** Why a session goes on in a backend session that has none of its conversation. */
 export type Renewal = "backend_changed" | "not_restored" | "renewed" | "stopped" | "isolated";

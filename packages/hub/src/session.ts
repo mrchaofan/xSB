@@ -20,8 +20,8 @@ import path from "node:path";
  * stopped while the hub still held it. The user's is then kept for the next
  * turn; mail waits for a turn of its own.
  */
-import { SessionControls, Boundaries, Discarded, OriginExt, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
-import type { Boundary, ContentBlock, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
+import { SessionControls, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, Redelivered, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
+import type { Boundary, ContentBlock, DiscardReason, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
@@ -83,6 +83,10 @@ export type Input = Discarded &
     receipted?: boolean;
     /** User input accepted after a replacement committed joins that replacement's new turn. */
     joinsTaskId?: string;
+    /** Earlier user messages the model never got (`SessionRec.owed`), given in front of this one. */
+    owedIds?: string[];
+    /** How the model is given it, where that differs from what it is (`DeliveredAs`). */
+    deliveredAs?: DeliveredAs;
   };
 const inputOf = (req: TurnRequest): Input => {
   const messageId = req.origin.messageId ?? newId("m");
@@ -96,6 +100,23 @@ const again = (input: Input): Input => {
   return fresh;
 };
 const itemsOf = (inputs: Input[]): MailItem[] => inputs.flatMap((i) => (i.item ? [i.item] : []));
+/** What the model of a conversation moved from another is told with its first message (`SessionRec.migratedFrom`). */
+const migrationPreface = (m: NonNullable<SessionRec["migratedFrom"]>): string =>
+  `[xsb] This conversation continues an earlier one with the user ("${m.title}", on the agent program "${m.backend}"). The user moved it here ` +
+  `to switch agent programs; you have none of it in your context. Read it with the previous_conversation tool (oldest first, a page at a time) ` +
+  `before relying on what was said or decided there; the user may refer to it. It is history: do not redo its work unless asked. ` +
+  `Workflows of that conversation did not move.`;
+
+/** How the user's input differs as the model gets it (`DeliveredAs`): images it cannot see, text saved to files, a note in front. */
+const deliveredAs = (content: ContentBlock[], given: ContentBlock[], scope: string | undefined, images: boolean): DeliveredAs | undefined => {
+  const imagesHidden = images ? 0 : content.filter((b) => b.type === "image").length;
+  const spilled = content.flatMap((b, i) => {
+    const file = b.type === "text" && given[i] !== b ? /saved whole at (\S+?);/.exec(String(given[i]?.text ?? ""))?.[1] : undefined;
+    return file ? [{ chars: String(b.text ?? "").length, file }] : [];
+  });
+  const out: DeliveredAs = { ...(imagesHidden ? { imagesHidden } : {}), ...(spilled.length ? { spilled } : {}), ...(scope ? { scope } : {}) };
+  return Object.keys(out).length ? out : undefined;
+};
 
 /** How a turn ended. */
 export type TurnEnd = { stopReason: StopReason; failure?: unknown };
@@ -151,6 +172,10 @@ export class LiveSession {
   private queue: Input[] = [];
   /** What the user said that a stop kept from the model: it goes first when the next turn starts. */
   private carried: Input[] = [];
+  /** Inputs whose end is recorded already, in the conversation (`user_message_chunk`) or discarded: recorded once. */
+  private settled = new Set<string>();
+  /** The input whose prompt carries the owed messages, until it is in the conversation. */
+  private owedCarrier?: Input;
   private priorityTaskId?: string;
   /** A user stop freezes dispatch until the old turn is confirmed idle. */
   private userStopping = false;
@@ -337,8 +362,10 @@ export class LiveSession {
     this.notifyControls();
   }
 
-  /** A handoff written for this conversation that no prompt has carried yet goes with the next one. */
+  /** A handoff written for this conversation that no prompt has carried yet goes with the next one; so does word of a move. */
   private pendingHandoff(): void {
+    const moved = this.rec.migratedFrom;
+    if (moved?.pending) this.prefaces.push(migrationPreface(moved));
     if (!this.rec.contextHandoffPending) return;
     const file = path.join(this.hub.paths.dir, "agents", this.agentId, "context", `${this.rec.contextHandoffPending}.txt`);
     this.handoffPreface = boundedText(this.hub.paths, this.agentId, fs.readFileSync(file, "utf8"), Math.min(6000, this.hub.policy(this.agentId).promptTokens / 4));
@@ -440,6 +467,14 @@ export class LiveSession {
 
   async setConfig(params: { configId: string; type?: string; value: unknown }) {
     const { configId, value } = params;
+    // The agent program is not called before the first message: a choice made before it is kept, and applied when the
+    // first message opens the backend session (`restoreConfig`), as one the backend no longer offers would be dropped.
+    if (!this.rec.backendSessionId) {
+      if (typeof value !== "string") throw RpcError.invalidParams("value must be an option id");
+      this.save({ selectedConfig: { ...this.rec.selectedConfig, [configId]: value } });
+      this.notifyControls();
+      return this.composerState();
+    }
     const backend = await this.ensureBackend();
     const binding = this.rec.backendSessionId;
     const revision = this.usageRevision;
@@ -465,7 +500,7 @@ export class LiveSession {
   }
 
   composerState() {
-    return { connected: !!this.backend, configOptions: this.backend ? this.setup.configOptions ?? [] : [],
+    return { connected: !!this.backend, ...(!this.rec.backendSessionId ? { lazy: true } : {}), configOptions: this.backend ? this.setup.configOptions ?? [] : [],
       selected: this.rec.selectedConfig ?? {}, used: this.used, size: this.contextSize };
   }
 
@@ -645,20 +680,120 @@ export class LiveSession {
   private show(input: Input): void {
     if (input.shown) return;
     input.shown = true;
+    this.settled.add(input.messageId);
     this.emitInput(input);
   }
 
-  private emitInput({ messageId, origin, content, from }: Input): void {
+  private emitInput({ messageId, origin, content, from, deliveredAs }: Input): void {
+    const meta = { [OriginExt.key]: origin, ...(deliveredAs ? { [DeliveredAs.key]: deliveredAs } : {}) };
+    const except = from?.echo ? undefined : from;
     for (const block of content) {
-      this.emit({ sessionUpdate: "user_message_chunk", content: block, messageId, _meta: { [OriginExt.key]: origin } }, from?.echo ? undefined : from);
+      this.emit({ sessionUpdate: "user_message_chunk", content: block, messageId, _meta: meta }, except);
     }
   }
 
-  /** Record, and show, that the model never saw this input (see `Discarded` in @xsb/protocol); `why` it did not. */
-  private discard(input: Input, why?: unknown): void {
+  /**
+   * The user's message, accepted: recorded as waiting, so that what the user sees of it (also after a restart) is
+   * what became of it: waiting, in the conversation, or discarded (docs/TURN-LIFECYCLE.md 4).
+   */
+  accept(messageId: string, origin: OriginMeta, content: ContentBlock[], from?: Client): void {
+    if (this.settled.has(messageId)) return;
+    // A client that did not opt in to its own input (`OriginExt`) is not sent it, as in plain ACP.
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [Accepted.key]: { messageId, origin, content } } } as SessionUpdate, from?.echo ? undefined : from);
+  }
+
+  /**
+   * The user's message ended before it was this session's input (refused, expired, abandoned, dropped on a restart):
+   * recorded as discarded, once. Its content is in its `Accepted` record.
+   */
+  unaccepted(messageId: string, reason: DiscardReason, detail?: string): void {
+    if (this.settled.has(messageId)) return;
+    this.settled.add(messageId);
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: { messageId, origin: { kind: "user", messageId }, content: [], reason, ...(detail ? { detail } : {}) } } } as SessionUpdate);
+  }
+
+  /** The insertion of a message this session holds (queued, carried or in the running turn), to wait on. */
+  insertionOf(messageId: string): Promise<void> | undefined {
+    return [...this.queue, ...this.carried, ...(this.current?.inputs ?? [])].find((i) => i.messageId === messageId)?.inserted.promise;
+  }
+
+  // ---- owed: the user's messages that failed to get to the model ----------------
+
+  private owedFile(messageId: string): string {
+    return path.join(this.hub.paths.dir, "agents", this.agentId, "context", `owed-${messageId.replace(/[^\w.-]/g, "_")}.json`);
+  }
+
+  /** The user's message failed to get into the conversation: the model is given it in front of the user's next one. */
+  private owe(input: Input): void {
+    const owed = this.rec.owed ?? [];
+    if (owed.includes(input.messageId)) return;
+    const file = this.owedFile(input.messageId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(input.content));
+    fs.renameSync(temporary, file);
+    this.save({ owed: [...owed, input.messageId] });
+  }
+
+  /**
+   * The user sends an owed message again, as a message of its own: it is no longer owed. One that already went to the
+   * model with a later message, or is on its way there, is not sent twice.
+   */
+  resend(messageId: string, as: string): void {
+    if (this.owedCarrier?.owedIds?.includes(messageId) && this.owedCarrier.sent && !this.owedCarrier.in) {
+      throw new RpcError(-32602, "This message is on its way to the model with the user's latest message; it is not sent again.", { errorKind: "already_redelivered" });
+    }
+    if ((this.rec.redelivered ?? []).includes(messageId)) {
+      throw new RpcError(-32602, "This message already reached the model with a later message; it is not sent again.", { errorKind: "already_redelivered" });
+    }
+    if ((this.rec.owed ?? []).includes(messageId)) {
+      this.save({ owed: this.rec.owed!.filter((id) => id !== messageId) });
+      fs.rmSync(this.owedFile(messageId), { force: true });
+    }
+    // Recorded, so that the transcript (also after a restart) no longer says it will be given with the next message.
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: { messageId, origin: { kind: "user", messageId }, content: [], owed: false, resentAs: as } } } as SessionUpdate);
+  }
+
+  /** The owed messages, for the prompt of a user's input, and the text that introduces them. */
+  private owedContent(policy: ReturnType<Hub["policy"]>): { ids: string[]; content: ContentBlock[] } | undefined {
+    const ids: string[] = [], content: ContentBlock[] = [];
+    for (const id of this.rec.owed ?? []) {
+      let blocks: ContentBlock[];
+      try { blocks = JSON.parse(fs.readFileSync(this.owedFile(id), "utf8")); } catch { continue; }
+      ids.push(id);
+      content.push(text(`[xsb] Earlier message ${ids.length} from the user (it failed to reach you then):`), ...this.spill(blocks, policy));
+    }
+    if (!ids.length) return undefined;
+    return { ids, content: [text(`[xsb] ${ids.length === 1 ? "A message" : `${ids.length} messages`} the user sent earlier did not reach you: giving ${ids.length === 1 ? "it" : "them"} to you failed, and you have not seen ${ids.length === 1 ? "it" : "them"} until now. ${ids.length === 1 ? "It comes" : "They come"} first, in order; the user's new message follows. Take ${ids.length === 1 ? "it" : "them"} into account; the user may refer to ${ids.length === 1 ? "it" : "them"}.`), ...content, text("[xsb] The user's new message:")] };
+  }
+
+  /** The owed messages went into the conversation with `carrier`: settled, once, and said so. */
+  private redelivered(carrier: Input): void {
+    const ids = carrier.owedIds ?? [];
+    if (this.owedCarrier === carrier) this.owedCarrier = undefined;
+    if (!ids.length) return;
+    const left = (this.rec.owed ?? []).filter((id) => !ids.includes(id));
+    this.save({ owed: left, redelivered: [...(this.rec.redelivered ?? []), ...ids].slice(-200) });
+    for (const id of ids) fs.rmSync(this.owedFile(id), { force: true });
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [Redelivered.key]: { messageIds: ids, with: carrier.messageId } } } as SessionUpdate);
+  }
+
+  /**
+   * Record, and show, that the model never saw this input (see `Discarded` in @xsb/protocol); `why` it did not. The
+   * user's input that failed to get there (not stopped, not too large) is owed: it goes with the user's next message.
+   */
+  private discard(input: Input, why?: unknown, reason?: DiscardReason): void {
     if (input.receipted) return; // A failed replacement context cannot invalidate the original insertion receipt.
     const { messageId, origin, content } = input;
-    this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: { messageId, origin, content } } } as SessionUpdate);
+    const kind = (why as RpcError | undefined)?.data && typeof (why as RpcError).data === "object" ? ((why as RpcError).data as { errorKind?: string }).errorKind : undefined;
+    reason ??= this.userStopping || !why || (why instanceof RpcError && why.code === RpcError.CANCELLED) ? "stopped"
+      : kind === "input_too_large" ? "too_large" : /Target turn has ended or changed/.test(errorMessage(why)) ? "expired" : "failed";
+    const owed = users(input) && reason === "failed";
+    if (owed) this.owe(input);
+    if (this.settled.has(messageId) && !input.shown) return void this.receipt(input, false, why);
+    this.settled.add(messageId);
+    const detail = why && reason !== "stopped" ? errorMessage(why) : undefined;
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: { messageId, origin, content, reason, ...(detail ? { detail } : {}), ...(owed ? { owed } : {}) } } } as SessionUpdate);
     this.receipt(input, false, why);
   }
 
@@ -672,7 +807,10 @@ export class LiveSession {
       this.hub.workflows?.inserted(this,input.messageId);
       this.show(input);
       input.inserted.resolve();
-    } else input.inserted.reject(why);
+    } else {
+      if (users(input)) this.hub.workflows?.discarded(this, input.messageId);
+      input.inserted.reject(why);
+    }
   }
 
   // ---- turns --------------------------------------------------------------
@@ -694,7 +832,7 @@ export class LiveSession {
       if (!q.item || !match(q.item)) return true;
       taken.push(q.item);
       if (q.item.taskId === this.priorityTaskId) this.priorityTaskId = undefined;
-      q.inserted.reject(RpcError.cancelled());
+      this.discard(q, RpcError.cancelled(), "stopped");
       return false;
     });
     return taken;
@@ -848,10 +986,18 @@ export class LiveSession {
         this.handoffPreface = shorter;
       }
     }
-    const content = [...this.prefaces.map((p) => text(p)), ...batch.flatMap(i => {
-      const scope = i !== turn.first && users(i) ? this.hub.workflows?.interruptionContext(this,i.messageId) : undefined;
+    // The user's earlier messages that never got to the model go in front of the user's next one, until one is in.
+    const carrierBusy = !!this.owedCarrier && !!this.owedCarrier.sent && !this.owedCarrier.in && !!turn.inputs.includes(this.owedCarrier);
+    const userInput = batch.find(users);
+    const owed = userInput && !carrierBusy ? this.owedContent(policy) : undefined;
+    if (userInput) userInput.owedIds = owed?.ids;
+    if (owed && userInput) this.owedCarrier = userInput;
+    const content = [...this.prefaces.map((p) => text(p)), ...(owed?.content ?? []), ...batch.flatMap(i => {
+      // A node's first input has its purpose in the turn's workflow context; the main conversation's does not.
+      const scope = users(i) && (i !== turn.first || !this.hub.agent(this.agentId).workflowOwner) ? this.hub.workflows?.interruptionContext(this,i.messageId) : undefined;
       if (scope) void i.inserted.promise.then(()=>this.recordWorkflow(turn.id,{messageId:i.messageId,scope}),()=>{});
       const given = users(i) ? this.spill(i.content, policy) : i.content;
+      if (users(i)) i.deliveredAs = deliveredAs(i.content, given, scope, backend.caps.image);
       return scope ? [text(scope),...given] : given;
     })];
     const tokens = contentTokens(content);
@@ -907,6 +1053,8 @@ export class LiveSession {
     if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) return;
     turn.inserted = true;
     if (this.rec.contextHandoffPending) this.save({ contextHandoffPending: undefined });
+    if (this.rec.migratedFrom?.pending) this.save({ migratedFrom: { ...this.rec.migratedFrom, pending: undefined } });
+    for (const input of batch) if (input.owedIds) this.redelivered(input);
     for (const input of batch) {
       input.in = true;
       this.take(input.gives);
@@ -1061,9 +1209,12 @@ export class LiveSession {
     const unsent = out.find((i) => i.sent && i.prefaces);
     if (unsent) this.restorePrefaces(unsent.batch ?? [unsent], turn);
     let next: Input[] = [];
-    if (!turn.started && end.failure) {
+    if (!turn.started && end.failure && !this.hub.stopping) {
       // It never reached the backend: nothing else will run what it brought (its tasks fail with it).
       for (const input of out) this.discard(input, end.failure);
+    } else if (!turn.started && end.failure) {
+      // While the hub stops, what never reached the backend stays in the inbox and runs on the next start.
+      for (const input of out) this.leave(input);
     } else {
       // Stopped or failed: the backend drops what it did not take. Ended: it runs it next, a turn of its own (3.1, 5).
       if (turn.cancelledBy || end.failure || !turn.started || expiredAppend) for (const input of out) this.leave(input);

@@ -5,19 +5,21 @@ import { fill, h } from "./dom.js";
 import { t } from "./i18n.js";
 import { clearNative, showNative } from "./native-page.js";
 import { showControl } from "./page-control.js";
+import { clearAnnotations, showAnnotations } from "./annotate.js";
 
 /** container 里显示 page；page 打不开时显示原因。container 里换成别的内容，就是不再显示它。 */
 export function showWeb(container, page) {
   showControl(container, page);
-  if (!page.error && page.nativeView) return showNative(container, page);
+  if (!page.error && page.nativeView) { clearAnnotations(); return showNative(container, page); }
   clearNative();
   if (page.error) {
+    clearAnnotations();
     return fill(container, h("div", { class: "web-note" },
       h("p", {}, t("web.error", { error: page.error })),
       h("button", { class: "btn", onclick: () => xsb.page(page.id, "reload") }, t("web.reload"))));
   }
   const id = String(page.contentsId);
-  if (container.firstElementChild?.getAttribute("web-contents-id") === id) return;
+  if (container.firstElementChild?.getAttribute("web-contents-id") === id) return showAnnotations(container, page);
   const el = document.createElement("webview2");
   // 一个网页同一时刻只能显示在一处。它刚从别处移过来时，那边可能还没放手：稍等再试。
   let tries = 0;
@@ -28,4 +30,5 @@ export function showWeb(container, page) {
   }, 100));
   fill(container, el);
   el.setAttribute("web-contents-id", id);
+  showAnnotations(container, page);
 }

@@ -1,0 +1,12 @@
+{
+  "name": "@xsb/plugin-media",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Generate an image or video from a prompt using the configured provider.",
+  "main": "server.mjs",
+  "xsb": {
+    "env": {
+      "PATH": "${env:PATH}"
+    }
+  }
+}

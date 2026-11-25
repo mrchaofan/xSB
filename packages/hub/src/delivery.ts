@@ -12,10 +12,11 @@
  * only served work that was stopped, and tells the kernel how turns ended.
  */
 import { errorMessage, text, RpcError } from "@xsb/protocol";
-import type { Addr, ContentBlock, OriginMeta } from "@xsb/protocol";
+import type { Addr, ContentBlock, DiscardReason, OriginMeta } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Hub } from "./hub.ts";
 import { isVeto } from "./hooks.ts";
+import { TAKEN_IN } from "./kernel.ts";
 import type { Recipient, Route } from "./kernel.ts";
 import { inboxDigest, renderMail } from "./prompts.ts";
 import type { Gives, TaskContext } from "./prompts.ts";
@@ -44,6 +45,11 @@ export class Delivery {
     this.hub = hub;
     const { hooks } = hub.kernel;
     hooks.on("message.routed", ({ item, route }) => this.deliver(item, route));
+    // The user's message that ended without the session recording it (dropped, refused, abandoned at quit, or settled on a
+    // restart) is recorded as discarded: what the user sees of it is what became of it.
+    hooks.on("message.discarded", (entry) => {
+      if (entry.from.kind === "user") this.hub.live.get(entry.sessionId)?.unaccepted(entry.messageId, this.hub.stopping ? "abandoned" : "refused");
+    });
     hooks.on("message.withdrawn", (items) => {
       for (const item of items) this.hub.live.get(item.to.sessionId)?.withdraw((m) => m.id === item.id);
     });
@@ -218,11 +224,15 @@ export class Delivery {
    */
   async fromUser(session: LiveSession, prompt: ContentBlock[], origin: OriginMeta, client: Client): Promise<{ messageId: string }> {
     const { kernel } = this.hub;
-    session.protect();
     const messageId = origin.messageId ?? newId("m");
+    if (this.known(messageId)) return this.again(session, messageId);
+    // Sent again by the user: it is a message of its own, and the one it repeats is no longer owed (never both).
+    if (origin.resendOf) session.resend(origin.resendOf, messageId);
+    session.protect();
     const to = { agentId: session.agentId, sessionId: session.id };
     const waiting = deferred<void>();
     this.inserted.set(messageId, { done: waiting, client });
+    session.accept(messageId, { ...origin, messageId }, prompt, client);
     try {
       const open = kernel.userTask(session.id);
       if (open) {
@@ -235,9 +245,36 @@ export class Delivery {
       }
       await waiting.promise;
       return { messageId };
+    } catch (e) {
+      session.unaccepted(messageId, reasonOf(e), errorMessage(e));
+      throw e;
     } finally {
       this.inserted.delete(messageId);
     }
+  }
+
+  /** Whether xsb has accepted a message of this id: a client sending it again (it lost the answer) gets no second copy. */
+  known(messageId: string): boolean {
+    return this.inserted.has(messageId) || this.hub.state.mail.has(messageId) || this.hub.state.ledger.has(messageId);
+  }
+
+  /** The answer to a message sent again: what became of the one accepted, once it is known. */
+  private async again(session: LiveSession, messageId: string): Promise<{ messageId: string }> {
+    const state = this.hub.state.ledger.get(messageId)?.state;
+    if (state && TAKEN_IN.has(state)) return { messageId };
+    if (state === "discarded_unseen") throw new RpcError(-32602, "This message did not get into the model's conversation; it is recorded so.", { errorKind: "discarded" });
+    const pending = this.inserted.get(messageId)?.done.promise ?? session.insertionOf(messageId);
+    if (pending) { await pending; return { messageId }; }
+    // In the inbox, or routed after a restart and not yet in a session: wait for its routing to settle it.
+    const waiting = deferred<void>();
+    this.inserted.set(messageId, { done: waiting });
+    try { await waiting.promise; return { messageId }; } finally { this.inserted.delete(messageId); }
+  }
+
+  /** What the states of messages are, by id (`Ledger.status`): "unknown" for one xsb never accepted. */
+  status(messageIds: string[]): Record<string, string> {
+    const { ledger, mail } = this.hub.state;
+    return Object.fromEntries(messageIds.map((id) => [id, ledger.get(id)?.state ?? (mail.has(id) || this.inserted.has(id) ? "inboxed" : "unknown")]));
   }
 
   /**
@@ -322,4 +359,12 @@ export class Delivery {
       });
     return { inputs };
   }
+}
+
+/** Why the user's message did not get to the session: its rejection, worded as a `DiscardReason`. */
+function reasonOf(e: unknown): DiscardReason {
+  const message = errorMessage(e);
+  if (e instanceof RpcError && e.code === RpcError.CANCELLED) return "stopped";
+  if (/Target turn has ended or changed|no longer exists|not registered|no longer active|expired/.test(message)) return "expired";
+  return "refused";
 }

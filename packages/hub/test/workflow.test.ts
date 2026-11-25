@@ -465,3 +465,80 @@ test("an adopted version keeps the one it replaced; a dropped node's conversatio
   adopt(again, { version: again.active }, 100000, false);
   assert.equal(again.history!.length, 1, "adopting the active version again records nothing");
 });
+
+test("on restart only the workflow's own input is held; what got into a conversation is the kernel's to settle", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-restart-"));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const root = hub.createConversation();
+  turnFor(root, "request");
+  hub.workflows.call(root, "execute", { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, newId("call"));
+  hub.workflows.input(root, "interrupt", [text("about the graph")], "workflow");
+  assert.equal(hub.workflows.read(root.id).interruptions.length, 1);
+  const to = { agentId: root.agentId, sessionId: root.id };
+  const mail = (id: string) => ({ id, to, from: { kind: "user" as const }, kind: "message" as const, ts: "", prompt: [text(id)], pref: "wake" as const });
+  hub.state.commit([ops.enqueue(mail("interrupt")), ops.enqueue(mail("unrelated")), ops.enqueue(mail("in-already"))]);
+  hub.kernel.mark("in-already", "inserted", { ...to, from: { kind: "user" } });
+  const restarted = new Hub(dir);
+  restarted.stopping = true;
+  restarted.workflows.restart();
+  const { mail: inbox } = restarted.state;
+  assert.equal(inbox.get("interrupt")?.workflowHeld, true, "the workflow's interruption waits for it to resume");
+  assert.ok(!inbox.get("unrelated")?.workflowHeld, "the main conversation's other mail is not the workflow's");
+  assert.ok(inbox.has("in-already") && !inbox.get("in-already")?.workflowHeld, "left to kernel.resume, which notes its outcome is unknown");
+});
+
+test("an interruption that never got to the model holds nothing", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-discard-"));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const root = hub.createConversation();
+  turnFor(root, "request");
+  hub.workflows.call(root, "execute", { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, newId("call"));
+  hub.workflows.input(root, "lost", [text("about the graph")], "workflow");
+  assert.equal(view(hub.workflows.read(root.id)).interrupted, true);
+  hub.workflows.discarded(root, "lost");
+  assert.equal(hub.workflows.read(root.id).interruptions.length, 0);
+  assert.equal(view(hub.workflows.read(root.id)).interrupted, false);
+});
+
+test("agents are told what their built-in workflow tools are, and a task agent sorts what the user asks it", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-prompt-"));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const root = hub.createConversation();
+  turnFor(root, "request");
+  const main = hub.systemPromptFor(hub.agent(root.agentId));
+  assert.match(main, /MCP server named "workflow"/, "where the tools come from");
+  assert.match(main, /mcp__workflow__/, "and how an agent program shows them");
+  assert.match(main, /workflow 技能/, "what a user calls them");
+  assert.match(main, /escalate/, "and what a task agent's escalation is");
+  hub.workflows.call(root, "execute", { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, newId("call"));
+  const f = structuredClone(hub.workflows.read(root.id)), w = claim(f, "A")!;
+  const worker = hub.createConversation("claude", "A", { owner: root.id, node: "A", bind: (agentId, sessionId) => {
+    Object.assign(f.instances.A, { agentId, sessionId });
+    return ops.workflow(f);
+  } });
+  const prompt = hub.systemPromptFor(hub.agent(worker.agentId));
+  for (const part of [/own assignment/, /overall task/, /escalate\(\{message\}\)/, /escalate\(\{message, pauseSelf: true\}\)/, /answer it directly/]) assert.match(prompt, part);
+  assert.doesNotMatch(prompt, /replan|coordinate/, "one tool, not two");
+  // The user asks the task agent about the whole task: it goes to the main conversation, with the user's words.
+  const turn = turnFor(worker, w.attempt!);
+  const asked = { ...turn.first, origin: { kind: "user" }, messageId: "q", content: [text("Should the ending change too?")], in: true } as Turn["first"];
+  turn.inputs.push(asked);
+  assert.deepEqual(hub.workflows.call(worker, "escalate", { message: "The user asks whether the ending should change." }, newId("call")), { forwarded: "main conversation" });
+  const notice = JSON.parse(hub.workflows.read(root.id).outbox.at(-1)!.text);
+  assert.deepEqual(notice, { escalate: "A", message: "The user asks whether the ending should change.", userSaid: "Should the ending change too?", paused: false });
+  assert.equal(hub.workflows.read(root.id).instances.A.replan, undefined, "without pauseSelf the node's work goes on");
+  assert.throws(() => hub.workflows.call(worker, "escalate", { message: "x", invalidateSelf: true }, newId("call")), /needs pauseSelf/);
+  assert.throws(() => hub.workflows.call(root, "escalate", { message: "x" }, newId("call")), /Unavailable|unavailable/);
+  // Its own assignment must change (here its own work finds so): it stops and waits for the main agent, which is told so.
+  turnFor(worker, w.attempt!);
+  hub.workflows.call(worker, "escalate", { message: "Use the night version of the base.", pauseSelf: true }, newId("call"));
+  assert.equal(hub.workflows.read(root.id).instances.A.replan, "Use the night version of the base.");
+  assert.equal(view(hub.workflows.read(root.id)).nodes.find((n) => n.name === "A")!.paused, true);
+  assert.equal(JSON.parse(hub.workflows.read(root.id).outbox.at(-1)!.text).paused, true);
+});

@@ -877,6 +877,6 @@ export class Kernel {
 }
 
 /** Ledger states of mail a backend had taken into its conversation. */
-const TAKEN_IN = new Set<LedgerState>(["inserted", "seen", "inserted_unprocessed"]);
+export const TAKEN_IN = new Set<LedgerState>(["inserted", "seen", "inserted_unprocessed"]);
 
 const RANK: Record<LedgerState, number> = { inboxed: 0, queued: 0, submitted: 1, inserted: 2, inserted_unprocessed: 3, seen: 4, discarded_unseen: 4 };

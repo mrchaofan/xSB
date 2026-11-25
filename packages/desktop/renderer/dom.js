@@ -48,6 +48,7 @@ export const ICON = {
   plug: '<svg viewBox="0 0 16 16"><path d="M6 1.5v3M10 1.5v3M4 4.5h8v3a4 4 0 0 1-8 0zM8 11.5v3"/></svg>',
   plus: '<svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
+  trash: '<svg viewBox="0 0 16 16"><path d="M2.5 4.5h11M6.5 4.5V3h3v1.5M4 4.5l.7 9h6.6l.7-9M6.8 7v4.5M9.2 7v4.5"/></svg>',
   stop: '<svg viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="7" height="7" rx="1" fill="currentColor" stroke="none"/></svg>',
   send: '<svg viewBox="0 0 16 16"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg>',
   file: '<svg viewBox="0 0 16 16"><path d="M4 1.5h5l3 3v10H4zM9 1.5v3h3"/></svg>',

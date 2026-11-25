@@ -205,6 +205,7 @@ test("long snapshot parts retain their content and all element refs despite page
   const contents = {
     debugger: {
       attach() {},
+      isAttached: () => false,
       async sendCommand(method, params) {
         if (method === "Accessibility.getFullAXTree") {
           captures++;
@@ -226,7 +227,7 @@ test("long snapshot parts retain their content and all element refs despite page
     getURL: () => "https://example.com/",
     isLoading: () => false,
   };
-  const driven = new Driven(contents);
+  const driven = new Driven(contents, () => {});
   assert.match(await driven.snapshot(), /"from": 20000/);
   assert.match(await driven.snapshot(20000), /\[2\] button "Last"/);
   assert.equal(captures, 1);
@@ -296,5 +297,70 @@ test("the user is told when the work is done, failed, or waits for them", async 
   ws["sessionAgent"].set("s-a", "a");
   void peer.requests.get("session/request_permission")({ sessionId: "s-a", title: "rm -rf build", subject: { type: "tool_call", toolCall: { toolCallId: "c", title: "rm -rf build" } }, options: [] });
   assert.deepEqual(notices, ["permission a rm -rf build"]);
+  ws.close();
+});
+
+// ---- what the user sees of a message is what became of it ---------------------------------------------------------
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Accepted, Discarded, Ledger, OriginExt, Redelivered } from "@xsb/protocol";
+
+function sending(t: any) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-outbox-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const peer = new Peer();
+  snapshot(peer, [{ ...agent("a"), mainSessionId: "s" }] as any);
+  peer.requests.set(History.page, () => ({ updates: [], cursor: null, state: "idle", agent: { ...agent("a"), mainSessionId: "s" } }));
+  const open = () => new Workspace(new Paths(dir), peer as any, (e) => e.message, () => {}, () => {});
+  return { dir, peer, open };
+}
+const inputs = (snap: any) => snap.transcripts.a.filter((e: any) => e.kind === "input");
+
+test("a message xsb did not take stays in the transcript, marked, and after a restart is still there to send again under its id", async (t) => {
+  const { peer, open } = sending(t);
+  const ws = open();
+  await ws.load();
+  const sent: any[] = [];
+  peer.requests.set("session/prompt", (p: any) => { sent.push(p._meta[OriginExt.key]); throw new Error("connection lost"); });
+  await ws.send("a", [{ type: "text", text: "hello" }]);
+  let [entry] = inputs(await ws.load());
+  assert.equal(entry.unsent, true, "not deleted: marked as not delivered");
+  assert.equal(entry.detail, "connection lost");
+  ws.close();
+  // After a restart the hub is asked: it never got it, so it is shown again, and sent again under the same id.
+  peer.requests.set(Ledger.status, (p: any) => ({ states: Object.fromEntries(p.messageIds.map((id: string) => [id, "unknown"])) }));
+  const again = open();
+  [entry] = inputs(await again.load());
+  assert.equal(entry.unsent, true);
+  peer.requests.set("session/prompt", (p: any) => { sent.push(p._meta[OriginExt.key]); return { messageId: p._meta[OriginExt.key].messageId }; });
+  await again.resend("a", entry.id);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].messageId, sent[0].messageId, "the same id: xsb keeps one copy if it did get the first");
+  again.close();
+});
+
+test("a message xsb recorded follows its records: waiting, owed, given later, and never appended to itself", async (t) => {
+  const { peer, open } = sending(t);
+  const ws = open();
+  await ws.load();
+  const update = (u: any) => peer.emit("session/update", { sessionId: "s", update: u });
+  const info = (key: string, value: any) => update({ sessionUpdate: "session_info_update", _meta: { [key]: value } });
+  const said = [{ type: "text", text: "first" }];
+  info(Accepted.key, { messageId: "m1", origin: { kind: "user", messageId: "m1" }, content: said });
+  let [entry] = inputs(await ws.load());
+  assert.equal(entry.pending, true, "waiting");
+  info(Discarded.key, { messageId: "m1", origin: { kind: "user" }, content: [], reason: "failed", detail: "rate limited", owed: true });
+  [entry] = inputs(await ws.load());
+  assert.deepEqual([entry.discarded, entry.owed, entry.reason, entry.content], [true, true, "failed", said], "kept, with its content, and why");
+  info(Redelivered.key, { messageIds: ["m1"], with: "m2" });
+  [entry] = inputs(await ws.load());
+  assert.equal(entry.redelivered, true);
+  info(Accepted.key, { messageId: "m3", origin: { kind: "user", messageId: "m3" }, content: [{ type: "text", text: "third" }] });
+  update({ sessionUpdate: "user_message_chunk", messageId: "m3", content: { type: "text", text: "third" }, _meta: { [OriginExt.key]: { kind: "user" } } });
+  const third = inputs(await ws.load()).find((e: any) => e.id === "s:m3");
+  assert.deepEqual(third.content, [{ type: "text", text: "third" }], "the waiting entry became the one in the conversation");
+  assert.ok(!third.pending);
   ws.close();
 });

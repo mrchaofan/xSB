@@ -4,12 +4,14 @@ import "./preferences.js";
 import { $ } from "./dom.js";
 import "./i18n.js";      // 换上 page.html 里的静态文字
 import { showWeb } from "./webview.js";
+import { annotateButton } from "./annotate.js";
 
 let id;
 function sync(page) {
   id = page.id;
   $("#title").textContent = document.title = page.title || page.url;
   $("#pin").setAttribute("aria-pressed", String(page.pinned));
+  annotateButton($("#annotate"), page);
   showWeb($("#web-body"), page);
 }
 

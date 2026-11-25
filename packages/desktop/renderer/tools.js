@@ -1,7 +1,8 @@
-// 设置里的"插件"：工具服务以文件夹的形式放在三个地方（hub 的 plugins.ts），结构相同：
-//   应用自带  <应用>/plugins/<名称>/plugin.json
-//   这台设备  ~/.xsb/plugins/<名称>/plugin.json
-//   本工作区  <工作区>/.xsb2/plugins/<名称>/plugin.json
+// 设置里的"插件"：工具服务以文件夹的形式放在三个地方（hub 的 plugins.ts），结构相同。每个文件夹是一个 npm 包，
+// 运行的文件是 package.json 的 main：
+//   应用自带  <应用>/plugins/<名称>/package.json
+//   这台设备  ~/.xsb2_global/plugins/<名称>/package.json
+//   本工作区  <工作区>/.xsb2/plugins/<名称>/package.json
 // 添加插件 = 把文件夹放进去，重启桌面端或点"重新加载"。这里只看、启停、确认工作区插件，不编辑插件本身。
 import { ICON, fill, h } from "./dom.js";
 import { t } from "./i18n.js";

@@ -15,7 +15,7 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Discarded, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal } from "@xsb/protocol";
+import { SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal } from "@xsb/protocol";
 import type { HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
@@ -53,6 +53,11 @@ export class Workspace {
   private hidden = false;
   private workflows = new Map<string, WorkflowView>();
   private agents = new Map<string, AgentInfo>();
+
+  /** The backend of the agent whose main conversation `sessionId` is. */
+  backendOf(sessionId: string): string | undefined {
+    return [...this.agents.values()].find((agent) => agent.mainSessionId === sessionId)?.backend;
+  }
   private agentVersions = new Map<string, number>();
   private tasks = new Map<string, Task>();
   private taskVersions = new Map<string, number>();
@@ -229,6 +234,7 @@ export class Workspace {
     assets.forEach((asset) => this.asset(asset));
     // Attaching to a session replays its history; the snapshot is complete once every replay is.
     await Promise.allSettled(this.mains.values());
+    await this.restoreOutbox();
     for (const agentId of this.growing.keys()) this.settle(agentId);
     // What the replayed history ended on is what an agent that is still at work is doing.
     for (const agent of this.agents.values()) if (agent.state === "idle") this.does(agent.id, null);
@@ -359,7 +365,9 @@ export class Workspace {
     const loading = this.conn.request<HistoryPage>(History.page, { sessionId, before: cursor }).then((page) => {
       this.historyUpdates.set(agentId, [...page.updates, ...(this.historyUpdates.get(agentId) ?? [])]);
       this.historyCursors.set(agentId, page.cursor);
-      const pending = (this.transcripts.get(agentId) ?? []).filter((entry) => this.pending.has(entry.id) || entry.kind === "permission");
+      // What only this window knows of (a message xsb has not recorded yet, or never got) is kept across the rebuild.
+      const local = (entry: Entry): boolean => entry.kind === "input" && (entry.unsent || (!!entry.pending && this.pending.has(entry.id.slice(entry.id.indexOf(":") + 1))));
+      const pending = (this.transcripts.get(agentId) ?? []).filter((entry) => local(entry) || entry.kind === "permission");
       this.rebuildHistory(agentId);
       pending.forEach((entry) => this.put(agentId, entry));
       return { entries: this.transcripts.get(agentId) ?? [], cursor: page.cursor };
@@ -439,13 +447,35 @@ export class Workspace {
       this.settle(agentId);
       return this.put(agentId, { id: this.newId(), kind: "boundary", boundary });
     }
-    const discarded = update.sessionUpdate === "session_info_update" ? (update._meta?.[Discarded.key] as Discarded | undefined) : undefined;
+    const info = update.sessionUpdate === "session_info_update" ? update._meta : undefined;
+    const accepted = info?.[Accepted.key] as Accepted | undefined;
+    if (accepted) {
+      // xsb has it, and the model not yet: it waits, also after a restart, until it is in or discarded (same id).
+      const id = `${sessionId}:${accepted.messageId}`;
+      this.pending.delete(accepted.messageId);
+      this.unsend(accepted.messageId);
+      const prior = this.inputEntry(agentId, id);
+      if (prior && !prior.pending && !prior.unsent) return;
+      return this.put(agentId, { id, kind: "input", origin: accepted.origin, content: accepted.content, pending: true });
+    }
+    const discarded = info?.[Discarded.key] as Discarded | undefined;
     if (discarded) {
-      // The turn it was for was stopped before the model saw it: shown where it was, or, if it waited for its turn, where the stop was.
+      // The model did not see it: it stays where it was, said so and why; never taken out of the transcript.
       const id = `${sessionId}:${discarded.messageId}`;
-      const prior = this.transcripts.get(agentId)!.find((e): e is Extract<Entry, { kind: "input" }> => e.id === id);
-      if (this.pending.delete(discarded.messageId)) this.drop(agentId, discarded.messageId);
-      return this.put(agentId, { id, kind: "input", origin: prior?.origin ?? discarded.origin, content: prior?.content ?? discarded.content, discarded: true });
+      const prior = this.inputEntry(agentId, id);
+      this.pending.delete(discarded.messageId);
+      if (discarded.resentAs) return prior && this.put(agentId, { ...prior, owed: false, resentAs: discarded.resentAs });
+      return this.put(agentId, { id, kind: "input", origin: prior?.origin ?? discarded.origin, content: prior?.content?.length ? prior.content : discarded.content,
+        pending: false, unsent: false, discarded: true, reason: discarded.reason ?? prior?.reason ?? "stopped", detail: discarded.detail ?? prior?.detail, owed: !!discarded.owed });
+    }
+    const redelivered = info?.[Redelivered.key] as Redelivered | undefined;
+    if (redelivered) {
+      // Owed messages went to the model in front of a later one: the model has them now.
+      for (const messageId of redelivered.messageIds) {
+        const prior = this.inputEntry(agentId, `${sessionId}:${messageId}`);
+        if (prior) this.put(agentId, { ...prior, owed: false, redelivered: true });
+      }
+      return;
     }
     const failed = update.sessionUpdate === "session_info_update" ? (update._meta?.[TurnFailure.key] as { message: string; data?: unknown } | undefined) : undefined;
     if (failed) {
@@ -467,13 +497,23 @@ export class Workspace {
     if (update.sessionUpdate === "user_message_chunk") {
       // A message arrives block by block under one id.
       const id = `${sessionId}:${update.messageId}`;
-      const prior = this.transcripts.get(agentId)!.find((e): e is Extract<Entry, { kind: "input" }> => e.id === id);
-      if (prior) return this.put(agentId, { ...prior, content: append(prior.content, update.content) });
+      const prior = this.inputEntry(agentId, id);
+      const deliveredAs = update._meta?.[DeliveredAs.key] as DeliveredAs | undefined;
+      // Its first block settles the waiting entry (`Accepted`) into the one the model has; the rest follow it.
+      if (prior && !prior.pending && !prior.unsent) return this.put(agentId, { ...prior, content: append(prior.content, update.content) });
+      if (prior) {
+        this.settle(agentId);
+        this.does(agentId, "waiting");
+        this.pending.delete(update.messageId);
+        this.unsend(update.messageId);
+        return this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? prior.origin, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}) });
+      }
       // Input marks where a turn begins, or where a message entered the running one: what was said before is complete.
       this.settle(agentId);
       this.does(agentId, "waiting"); // the model has it now, and has not answered yet
-      if (this.pending.delete(update.messageId)) this.drop(agentId, update.messageId);
-      this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? { kind: "user" }, content: [update.content] });
+      this.pending.delete(update.messageId);
+      this.unsend(update.messageId);
+      this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? { kind: "user" }, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}) });
     } else if (update.sessionUpdate === "tool_call_update") {
       this.settle(agentId);
       const id = `${sessionId}:${update.toolCallId}`;
@@ -501,32 +541,95 @@ export class Workspace {
    * at once; the hub sends it back under the same id when it has become part
    * of a turn, and that entry takes the place of this one.
    */
-  async send(agentId: string, content: Content, target?: string): Promise<void> {
+  async send(agentId: string, content: Content, target?: string, again?: { messageId?: string; resendOf?: string }): Promise<void> {
     const agent = this.agents.get(agentId)!;
-    const id = `m_${randomUUID()}`;
-    const entry = { id, kind: "input" as const, origin: { kind: "user" as const }, content, pending: true };
-    this.pending.add(id);
-    this.put(agentId, entry);
+    // One id for the message, kept until xsb has it: sent again under it, it is never a second copy (the hub knows it).
+    const messageId = again?.messageId ?? `m_${randomUUID()}`;
     let sessionId: string;
     try {
       sessionId = await this.session(agent);
     } catch (e) {
-      this.pending.delete(id);
       const text = this.why(e);
-      this.put(agentId, { id: this.newId(), kind: "error", text });
+      this.put(agentId, { id: `unsent:${messageId}`, kind: "input", origin: { kind: "user" }, content, discarded: true, unsent: true, reason: "failed", detail: text });
       this.notify({ agentId, kind: "failed", detail: text });
-      this.drop(agentId, id);
-      throw e;
+      return;
     }
-    // Answered once it is in the conversation. If it never gets there, the transcript says why: it records the
-    // message as discarded, and a turn that failed as failed (`TurnFailure`).
-    await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId: id }, [Workflow.target]:target } }).catch(e => {
-      if (this.pending.delete(id)) {
-        this.drop(agentId,id);
-        this.put(agentId,{ id:this.newId(),kind:"error",text:this.why(e) });
-        throw e;
-      }
+    const id = `${sessionId}:${messageId}`;
+    this.drop(agentId, `unsent:${messageId}`);
+    this.pending.add(messageId);
+    this.outbox(agentId, messageId, content, again?.resendOf);
+    this.put(agentId, { id, kind: "input", origin: { kind: "user" }, content, pending: true });
+    // Answered once it is in the conversation. Once xsb has it (`Accepted`), the transcript says what becomes of it:
+    // in the conversation, or discarded and why (and whether it is owed to the model with the next message).
+    await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId, ...(again?.resendOf ? { resendOf: again.resendOf } : {}) }, [Workflow.target]: target } }).catch((e) => {
+      if (!this.pending.delete(messageId)) return;
+      // xsb did not take it, or its answer was lost: shown as not delivered, to be sent again under the same id.
+      const prior = this.inputEntry(agentId, id);
+      this.put(agentId, { id, kind: "input", origin: prior?.origin ?? { kind: "user" }, content: prior?.content ?? content, discarded: true, unsent: true, reason: "failed", detail: this.why(e) });
     });
+  }
+
+  /**
+   * Send again a message the model did not see. One xsb never had goes again under its own id; one it discarded goes
+   * as a message of its own that names it (`resendOf`), so that it is no longer owed and never reaches the model twice.
+   */
+  async resend(agentId: string, entryId: string): Promise<void> {
+    const entry = this.inputEntry(agentId, entryId);
+    if (!entry?.discarded || entry.origin.kind !== "user" || entry.redelivered || entry.resentAs) throw new Error("this message cannot be sent again");
+    const messageId = entryId.slice(entryId.indexOf(":") + 1);
+    if (entry.unsent) {
+      this.drop(agentId, entryId);
+      return this.send(agentId, entry.content, undefined, { messageId });
+    }
+    return this.send(agentId, entry.content, undefined, { resendOf: messageId });
+  }
+
+  private inputEntry(agentId: string, id: string): Extract<Entry, { kind: "input" }> | undefined {
+    return this.transcripts.get(agentId)?.find((e): e is Extract<Entry, { kind: "input" }> => e.id === id && e.kind === "input");
+  }
+
+  // ---- the outbox: messages xsb may not have yet --------------------------------
+
+  private get outboxFile(): string {
+    return path.join(this.paths.dir, "desktop", "outbox.json");
+  }
+
+  private readOutbox(): Record<string, { agentId: string; content: Content; resendOf?: string }> {
+    try { return JSON.parse(fs.readFileSync(this.outboxFile, "utf8")) ?? {}; } catch { return {}; }
+  }
+
+  private writeOutbox(outbox: Record<string, unknown>): void {
+    fs.mkdirSync(path.dirname(this.outboxFile), { recursive: true });
+    const temporary = `${this.outboxFile}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(outbox));
+    fs.renameSync(temporary, this.outboxFile);
+  }
+
+  /** Kept on disk until xsb has the message: a restart in between still shows it, as not delivered. */
+  private outbox(agentId: string, messageId: string, content: Content, resendOf?: string): void {
+    this.writeOutbox({ ...this.readOutbox(), [messageId]: { agentId, content, ...(resendOf ? { resendOf } : {}) } });
+  }
+
+  private unsend(messageId: string): void {
+    const outbox = this.readOutbox();
+    if (!(messageId in outbox)) return;
+    delete outbox[messageId];
+    this.writeOutbox(outbox);
+  }
+
+  /** After a restart: what the hub never got is shown as not delivered; what it got, its transcript shows. */
+  private async restoreOutbox(): Promise<void> {
+    const outbox = this.readOutbox();
+    const ids = Object.keys(outbox);
+    if (!ids.length) return;
+    let states: Record<string, string>;
+    try { ({ states } = await this.conn.request<{ states: Record<string, string> }>(Ledger.status, { messageIds: ids })); } catch { return; }
+    if (!states) return; // A hub without the query: its transcript is all there is to show.
+    for (const [messageId, { agentId, content }] of Object.entries(outbox)) {
+      const sessionId = this.agents.get(agentId)?.mainSessionId;
+      if (states[messageId] !== "unknown" || !sessionId) { this.unsend(messageId); continue; }
+      this.put(agentId, { id: `${sessionId}:${messageId}`, kind: "input", origin: { kind: "user" }, content, discarded: true, unsent: true, reason: "failed" });
+    }
   }
 
   /** Clear the agent's context: its model starts anew and sees nothing of what was said. The transcript keeps it. */
@@ -589,11 +692,31 @@ export class Workspace {
     return agent;
   }
 
-  /** Move a conversation to another backend; its next turn is handed the conversation (`backend_changed`). */
+  /** Move a conversation that was never given to its agent program to another backend (the hub refuses one that was). */
   async setBackend(agentId: string, backend: string): Promise<AgentInfo> {
     const { agent } = await this.conn.request<{ agent: AgentInfo }>(Agents.set, { agentId, backend });
     this.onAgent(agent);
     return agent;
+  }
+
+  /**
+   * Move a conversation its agent program has onto another backend: a new conversation, whose model reads this one
+   * as history (`Agents.migrate`). Returns the new conversation.
+   */
+  async migrate(agentId: string, backend: string): Promise<AgentInfo> {
+    const { agent } = await this.conn.request<{ agent: AgentInfo }>(Agents.migrate, { agentId, backend });
+    this.onAgent(agent);
+    return agent;
+  }
+
+  /** Delete a conversation (`Agents.delete`): it leaves the list when the hub says it is removed. Its files stay until `cleanUp`. */
+  async deleteConversation(agentId: string): Promise<void> {
+    await this.conn.request(Agents.delete, { agentId });
+  }
+
+  /** Remove for good what deleted conversations left in `.xsb2/` (`Agents.purge`). */
+  cleanUp(): Promise<{ conversations: number; bytes: number }> {
+    return this.conn.request(Agents.purge, {});
   }
 
   async composerState(agentId: string, discover = false): Promise<ComposerState> {

@@ -50,6 +50,8 @@ export type AgentSpec = {
   /** Absolute working directory. */
   workspace: string;
   createdAt: string;
+  /** When the user deleted this conversation. It is out of every list; its files stay until `Agents.purge`. */
+  deleted?: string;
 };
 
 export type AgentState = "idle" | "running" | "requires_action";
@@ -63,6 +65,12 @@ export type AgentInfo = AgentSpec & {
   turnProtected?: boolean;
   /** A workflow node's agent whose node an adopted version dropped: its conversation can be read, not continued. */
   retired?: boolean;
+  /**
+   * Its conversation has been given to the agent program (a backend session holds it): its backend cannot change in
+   * place any more; switching moves the conversation to a new one (`Agents.migrate`). Before that, the backend is
+   * not called at all and switching is free.
+   */
+  backendStarted?: boolean;
 };
 
 /** Current backend-provided settings and token counts for one conversation. */
@@ -74,6 +82,8 @@ export const SessionControls = {
 
 export type ComposerState = {
   connected: boolean;
+  /** No backend session yet: it is made with the first message, and its settings are offered from then on. */
+  lazy?: boolean;
   configOptions: unknown;
   selected: Record<string, string>;
   used?: number;
@@ -89,6 +99,24 @@ export const Agents = {
   removed: `_${NS}/agents/removed`,
   set: `_${NS}/agents/set`,
   asks: `_${NS}/agents/asks`,
+  /**
+   * Move a main conversation that has been given to its agent program onto another backend: a new conversation, whose
+   * model can read the old one with its `previous_conversation` tool. Refused while a turn of it runs.
+   *   request  _dev.xsb/agents/migrate { agentId, backend } -> { agent: AgentInfo }   (the new conversation)
+   */
+  migrate: `_${NS}/agents/migrate`,
+  /**
+   * Delete a main conversation: out of the list, its backends stopped, its workflow paused, input still queued for it
+   * dropped. Refused while it or an agent of its workflow is working. Its files stay until `purge`.
+   *   request  _dev.xsb/agents/delete { agentId } -> {}   (then `removed` for it and its workflow's agents)
+   */
+  delete: `_${NS}/agents/delete`,
+  /**
+   * Clean up the project: remove for good what deleted conversations left — their transcripts, drafts, the assets
+   * only they made, their records — and compact the logs.
+   *   request  _dev.xsb/agents/purge {} -> { conversations: number, bytes: number }
+   */
+  purge: `_${NS}/agents/purge`,
 } as const;
 
 /**
@@ -253,7 +281,14 @@ export const Tasks = {
  */
 export type LedgerState = "inboxed" | "queued" | "submitted" | "inserted" | "seen" | "inserted_unprocessed" | "discarded_unseen";
 export type LedgerEntry = { messageId: string; agentId: string; sessionId: string; from: Origin; taskId?: string; state: LedgerState; ts: string };
-export const Ledger = { update: `_${NS}/messages/update` } as const;
+export const Ledger = {
+  update: `_${NS}/messages/update`,
+  /**
+   * What became of messages, by id: `_dev.xsb/messages/status { messageIds }` -> `{ states: { [id]: LedgerState | "unknown" } }`.
+   * "unknown": xsb never accepted it (a client may then send it again under the same id).
+   */
+  status: `_${NS}/messages/status`,
+} as const;
 
 /**
  * Context boundaries: where what the model of a session sees starts anew. The transcript keeps everything that was
@@ -277,11 +312,13 @@ export const Ledger = { update: `_${NS}/messages/update` } as const;
  * isolated after an input it held expired (`isolated`); or the backend compacted it itself (`compacted`, no handoff:
  * the backend's own summary stands in for it).
  */
-export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed" | "stopped" | "isolated" | "compacted";
+export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed" | "stopped" | "isolated" | "compacted" | "migrated";
 export type Boundary = {
   kind: BoundaryKind;
   /** The backend the session continues on. */
   backend?: string;
+  /** `migrated`: the title of the conversation this one continues. */
+  from?: string;
   /** Whether the model was given a handoff of what precedes this boundary. */
   handoff: boolean;
 };
@@ -305,7 +342,38 @@ export const TurnFailure = { key: `${NS}/turn_failed` } as const;
  * ledger (`Ledger`) says what became of every message; this record is what a transcript shows of the user's.
  */
 export const Discarded = { key: `${NS}/discarded` } as const;
-export type Discarded = { messageId: string; origin: OriginMeta; content: ContentBlock[] };
+/**
+ * `reason`: why the model did not see it. `owed`: it failed to get there, and xsb gives it to the model in front of the
+ * user's next message (`Redelivered` says when it did); a client may also offer to send it again (`OriginExt.resendOf`).
+ * `content` may be empty when the message was already recorded (`Accepted`): it is that message.
+ */
+export type Discarded = { messageId: string; origin: OriginMeta; content: ContentBlock[]; reason?: DiscardReason; detail?: string; owed?: boolean;
+  /** The user sent it again, as this message: it is no longer owed. */
+  resentAs?: string };
+export type DiscardReason = "stopped" | "failed" | "too_large" | "refused" | "expired" | "abandoned";
+
+/**
+ * The user's message as xsb accepted it, before it is in the model's conversation: recorded, so that a reader of the
+ * transcript sees it waiting (and after a restart, still waiting) until it is inserted (`user_message_chunk`, same
+ * `messageId`) or discarded (`Discarded`).
+ *   session/update { sessionUpdate: "session_info_update", _meta: { "dev.xsb/accepted": Accepted } }
+ */
+export const Accepted = { key: `${NS}/accepted` } as const;
+export type Accepted = { messageId: string; origin: OriginMeta; content: ContentBlock[] };
+
+/**
+ * Messages the model had not seen (`Discarded` with `owed`) went into its conversation along with `with`, in front of it:
+ *   session/update { sessionUpdate: "session_info_update", _meta: { "dev.xsb/redelivered": Redelivered } }
+ */
+export const Redelivered = { key: `${NS}/redelivered` } as const;
+export type Redelivered = { messageIds: string[]; with: string };
+
+/**
+ * How the model was given an input that differs from what it is (`user_message_chunk` `_meta`), for a reader to see:
+ * images it was told of but cannot see, text saved to a file it was given the start of, a note of what the input addresses.
+ */
+export const DeliveredAs = { key: `${NS}/delivered` } as const;
+export type DeliveredAs = { imagesHidden?: number; spilled?: { chars: number; file: string }[]; scope?: string };
 
 /** Desktop history pages use byte cursors and image references, leaving ACP replay unchanged. */
 export const History = {
@@ -416,6 +484,8 @@ export type Origin =
 
 export type OriginMeta = Origin & {
   messageId?: string;
+  /** On `session/prompt`: this sends again a message the model did not see (`Discarded`), as a message of its own. */
+  resendOf?: string;
   taskId?: string;
   turnId?: string;
   /** What the message is: free text, a task, or a task's result. */

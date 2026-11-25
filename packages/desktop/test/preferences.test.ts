@@ -63,8 +63,6 @@ test("a failed preference save remains visible to the caller and leaves appearan
   assert.equal(prefs.globalPreferences().theme, "light");
 });
 
-test("every settings label and hint is available in both interface languages", () => {
-  for (const key of Object.keys(TEXT["zh-CN"]).filter((key) => key.startsWith("settings.") || ["rail.outputs", "rail.tasks.finished"].includes(key))) {
-    assert.ok(TEXT.en[key], `missing English label: ${key}`);
-  }
+test("both interface languages have the same keys", () => {
+  assert.deepEqual(Object.keys(TEXT.en).sort(), Object.keys(TEXT["zh-CN"]).sort());
 });

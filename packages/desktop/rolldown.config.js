@@ -5,7 +5,7 @@
 //   dist/bin/xsb-hub          the hub daemon, started by main as a process of its own
 //   dist/bin/xsb-mcp-bridge   the MCP bridge, started by the hub for each backend session
 //   dist/bin/claude-agent-acp, codex-acp   the ACP wrappers of the agents that do not speak ACP themselves
-//   dist/plugins/<name>/      the plugins shipped with the app (plugins/<name>/plugin.json and its server.mjs):
+//   dist/plugins/<name>/      the plugins shipped with the app (plugins/<name>/package.json, whose main is server.mjs):
 //                             the same layout as a plugin the user adds (the hub's plugins.ts)
 //   dist/renderer/            the pages, served as app://xsb/…
 //
@@ -30,12 +30,15 @@ const program = (name, entry) => ({
   output: { file: `dist/bin/${name}`, format: "esm", codeSplitting: false },
 });
 
-/** A shipped plugin: its folder's plugin.json, and its server bundled next to it as server.mjs. */
+/** A shipped plugin: an npm package, its folder's package.json, and its server bundled next to it as server.mjs, its main. */
 const plugin = (name, entry) => ({
   ...node,
   input: entry,
   output: { file: `dist/plugins/${name}/server.mjs`, format: "esm", codeSplitting: false },
-  plugins: [{ name: "manifest", writeBundle: () => fs.copyFileSync(`plugins/${name}/plugin.json`, `dist/plugins/${name}/plugin.json`) }],
+  plugins: [{ name: "manifest", writeBundle: () => {
+    fs.copyFileSync(`plugins/${name}/package.json`, `dist/plugins/${name}/package.json`);
+    fs.rmSync(`dist/plugins/${name}/plugin.json`, { force: true });
+  } }],
 });
 
 /** The pages' files that are not code: copied as they are. mock.js is only loaded outside Electron. */

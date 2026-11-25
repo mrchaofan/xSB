@@ -10,7 +10,7 @@ function choices(option) {
 }
 
 export function composerSettings(agentId) {
-  let latest = {}, sequence = 0, working = false, message = "";
+  let latest = {}, sequence = 0, working = false, fetching = false, message = "";
   const trigger = h("button", { class: "model-settings", type: "button", "aria-haspopup": "dialog" });
   const ring = h("span", { class: "context-ring", tabindex: "0" });
   const percentLabel = h("small", { "aria-hidden": "true" });
@@ -51,7 +51,11 @@ export function composerSettings(agentId) {
       ring.setAttribute("aria-valuemax", "100");
       ring.setAttribute("aria-valuetext", ring.title);
     }
-    const signature = JSON.stringify([model, effort, latest.connected]);
+    // 后端还没连上、正在拉取时，值和列表都显示"获取中"，不拿"后端默认"冒充已知的值。
+    // 还没发过消息的对话不调后端：设置要等第一条消息发出、后端会话建好之后才有。
+    const lazy = !!latest.lazy;
+    const loading = fetching && !latest.connected && !lazy;
+    const signature = JSON.stringify([model, effort, latest.connected, loading, lazy]);
     if (signature !== lastFields) {
       lastFields = signature;
       fill(fields, ...[[model, "model"], [effort, "effort"]].map(([option, name]) => {
@@ -61,11 +65,11 @@ export function composerSettings(agentId) {
           ...items.map(o => h("button", { type: "button", role: "menuitemradio", class: "cascade-item", "aria-checked": String(o.value === option.currentValue),
             onclick: () => { menu.hidePopover(); request(() => xsb.setComposerOption(agentId, option.configId ?? option.id, o.value)); } },
             h("span", { class: "cascade-check", "aria-hidden": "true", html: ICON.check }), h("span", {}, o.name ?? o.value))),
-          !items.length && h("small", { class: "cascade-empty" }, t(latest.connected ? "composer.unsupported" : "composer.pending")));
+          !items.length && (lazy || loading || latest.connected) && h("small", { class: "cascade-empty" }, t(lazy ? "composer.afterFirst" : loading ? "composer.loading" : "composer.unsupported")));
         const row = h("div", { class: "cascade-row", "data-name": name },
           h("button", { type: "button", role: "menuitem", class: "cascade-item cascade-parent", "aria-haspopup": "menu", "aria-expanded": "false",
             onclick: () => expand(name, true), onmouseenter: () => expand(name), onfocus: () => expand(name) },
-            h("span", {}, t("composer." + name)), h("small", {}, current?.name ?? option?.currentValue ?? t("composer.default")),
+            h("span", {}, t("composer." + name)), h("small", {}, loading ? t("composer.loading") : current?.name ?? option?.currentValue ?? t("composer.default")),
             h("span", { class: "cascade-arrow", "aria-hidden": "true", html: ICON.forward })),
           sub);
         return row;
@@ -76,10 +80,12 @@ export function composerSettings(agentId) {
     status.textContent = message;
     status.hidden = !message;
   }
-  async function request(operation) {
+  /** fetch：只是拉取最新设置（打开菜单时），不显示"正在读取"的状态行，列表里显示获取中。 */
+  async function request(operation, fetch = false) {
     const seq = ++sequence;
     working = true;
-    message = t("composer.pending");
+    fetching = fetch;
+    message = fetch ? "" : t("composer.pending");
     draw();
     try {
       const result = await operation();
@@ -87,7 +93,7 @@ export function composerSettings(agentId) {
     } catch (error) {
       if (seq === sequence) { lastFields = null; message = error.message; }
     } finally {
-      if (seq === sequence) { working = false; draw(); }
+      if (seq === sequence) { working = fetching = false; draw(); }
     }
   }
   /** 展开一项的二级列表；放不下时朝左展开。focus：把焦点移进去（点击或按 → 时）。 */
@@ -123,7 +129,7 @@ export function composerSettings(agentId) {
     menu.style.bottom = (innerHeight - rect.top + 7) + "px";
     menu.showPopover();
     fields.querySelector(".cascade-parent")?.focus();
-    request(() => xsb.composerState(agentId, true));
+    request(() => xsb.composerState(agentId, true), true);
   };
   draw();
   let updated = false;
