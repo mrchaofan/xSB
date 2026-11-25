@@ -132,6 +132,7 @@ button.lane-avatar:hover::after { border-color: var(--accent); }
 .backend-icon[data-kind="other"] { padding: 0; background: var(--line); }
 .backend-icon.lg { width: 32px; height: 32px; padding: var(--space-1h); border-radius: var(--radius-md); background: var(--wash); border: 1px solid var(--line); font-size: var(--text-lg); }
 .backend-icon.lg[data-kind="claude"] { background: color-mix(in srgb, #d97757 10%, var(--paper)); border-color: color-mix(in srgb, #d97757 22%, var(--paper)); }
+.backend-icon.lg[data-kind="ark"] { background: color-mix(in srgb, #006aff 8%, var(--paper)); border-color: color-mix(in srgb, #006aff 18%, var(--paper)); }
 .backend-icon.lg[data-kind="other"] { padding: 0; }
 
 /* 状态只靠形状区分：空心圈 = 空闲，实心点 = 工作中，实心菱形 = 等你批准，勾 = 已完成 */
@@ -832,6 +833,25 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 .backend-login .hint { line-height: var(--leading); }
 .backend-login .error { color: var(--cli-error); font-weight: 400; font-size: var(--text-sm); }
 .backend-card [hidden], .backend-controls [hidden] { display: none !important; }
+/* 火山方舟：套餐列表、等待登录，以及每个智能体的接入状态 */
+.ark-plans { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-1h); }
+.ark-plans li { padding: 2px var(--space-2); border-radius: var(--radius-sm); background: var(--wash); color: var(--ink-2); font-size: var(--text-xs); }
+.ark-plans li[data-expired="true"] { color: var(--cli-attention); }
+.ark-waiting { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--accent-wash); }
+.ark-waiting .hint { margin: 0; }
+.ark-agents { display: flex; flex-direction: column; border-top: 1px solid var(--line); padding-top: var(--space-2); }
+.ark-agents-title { font-size: var(--text-xs); color: var(--ink-3); padding-bottom: var(--space-1); }
+.ark-agent { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) 0; min-width: 0; }
+.ark-agent + .ark-agent { border-top: 1px solid var(--line); }
+.ark-agent-copy { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.ark-agent-copy strong { font-weight: 500; color: var(--ink); font-size: var(--text-sm); }
+.ark-agent-copy small { font-size: var(--text-xs); color: var(--ink-3); overflow-wrap: anywhere; }
+.ark-agent-copy small[data-tone="success"] { color: var(--cli-success); }
+.ark-agent-copy small[data-tone="attention"] { color: var(--cli-attention); }
+.ark-agent-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; justify-content: flex-end; }
+.ark-agent-actions .backend-quiet { border-color: transparent; color: var(--ink-2); }
+.ark-bind select { width: 100%; }
+@media (max-width: 760px) { .ark-agent { flex-wrap: wrap; } .ark-agent-actions { flex-basis: 100%; justify-content: flex-start; padding-left: 28px; } }
 @keyframes backend-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .backend-badge[data-tone="progress"]::before { animation: none; } }
 @media (max-width: 760px) {

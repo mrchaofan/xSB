@@ -25,6 +25,7 @@ import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
 import { AgentClis, agentCli, configPath } from "./agent-cli.ts";
+import { ARK_PACKAGE, Ark, ROUTED_MODEL, arkLaunch, readArkBindings } from "./ark.ts";
 import type { BackendView, Event } from "./bridge.ts";
 import { serveBrowser } from "./browser.ts";
 import { imagesFromPaths } from "./clipboard-image.ts";
@@ -42,6 +43,7 @@ const PRELOAD = fileURLToPath(new URL("./preload.cjs", import.meta.url));
 /** Set up once this is known to be the one running app, and before any hub is started: the hub inherits the PATH it sets up, and finds the agents' programs on it. */
 let clis: Clis;
 let agentClis: AgentClis;
+let ark: Ark;
 
 /** The hub's backends, with which of them lack their program. */
 async function backends(workspace?: Workspace): Promise<BackendView[]> {
@@ -49,8 +51,10 @@ async function backends(workspace?: Workspace): Promise<BackendView[]> {
   const list = workspace ? await workspace.backends() : describeBackends().map((b) => ({ name: b.name, command: [b.command, ...b.args].join(" "), installed: b.installed }));
   return list.map((b) => {
     const cli = wrapped(b.command.split(" ")[0]);
+    const via = cli ? ark.bindings()[agentCli(cli)] : undefined;
     return { ...b, installed: cli ? !clis.missing(cli) : b.installed, missing: cli && clis.missing(cli) ? cli : undefined,
-      cli: cli ? agentCli(cli) : undefined, configPath: cli ? configPath(agentCli(cli)) : undefined };
+      cli: cli ? agentCli(cli) : undefined, configPath: cli ? configPath(agentCli(cli)) : undefined,
+      ark: via && { profile: via.profile, model: via.model } };
   });
 }
 
@@ -160,6 +164,79 @@ async function revealCliConfig(win: BrowserWindow, name: "codex" | "claude"): Pr
     config = await agentClis.config(name, true, language());
   }
   shell.showItemInFolder(config.path);
+  return true;
+}
+
+/** Ask before a step of Volcengine Ark is taken: each is the user's (ark.ts). Whether they said yes. */
+async function confirmStep(win: BrowserWindow, message: string, detail: string, ok: string): Promise<boolean> {
+  const zh = language() === "zh-CN";
+  const { response } = await dialog.showMessageBox(win, { type: "question", message, detail, buttons: [zh ? "取消" : "Cancel", ok], defaultId: 1, cancelId: 0 });
+  return response === 1;
+}
+
+const AGENT_NAMES = { claude: "Claude Code", codex: "Codex" } as const;
+
+/** Install arkcli with npm, once the user agreed to how. The new status, or null when they did not. */
+async function installArk(win: BrowserWindow) {
+  const zh = language() === "zh-CN";
+  const { npm, prefix } = ark.installer();
+  const how = npm
+    ? (zh ? `使用你的 npm 全局安装：\n${npm} install --global ${ARK_PACKAGE}\n\n如果全局目录没有写入权限，会改为安装到：\n${prefix}` : `With your npm, globally:\n${npm} install --global ${ARK_PACKAGE}\n\nIf its global folder is not writable, into:\n${prefix}`)
+    : (zh ? `没有找到 npm，将使用应用自带的 npm（由应用内置的 Node 运行）安装到：\n${prefix}` : `No npm was found. The app's own npm (run by its built-in Node) installs it into:\n${prefix}`);
+  const detail = zh
+    ? `${how}\n\n安装完成后，xSB 会记住 arkcli 程序的位置，PATH 中找不到它也能使用。安装时不会向 Claude、Codex 等智能体添加 arkcli 的技能。`
+    : `${how}\n\nxSB then remembers where the arkcli program is, so it works even when PATH does not find it. arkcli's skills are not added to Claude, Codex or other agents.`;
+  if (!(await confirmStep(win, zh ? "安装火山方舟命令行工具 arkcli？" : "Install arkcli, the Volcengine Ark CLI?", detail, zh ? "安装" : "Install"))) return null;
+  return ark.install();
+}
+
+async function loginArk(win: BrowserWindow) {
+  const zh = language() === "zh-CN";
+  const detail = zh
+    ? "将运行 arkcli auth login volc-sso，并在浏览器中打开火山引擎登录页。请在浏览器中完成登录，应用会等待登录完成。\n\n登录凭据由 arkcli 保存，xSB 不会读取或保存你的密码。"
+    : "This runs arkcli auth login volc-sso and opens the Volcengine sign-in page in your browser. Finish signing in there; the app waits for it.\n\narkcli keeps the credentials; xSB never reads or stores your password.";
+  if (!(await confirmStep(win, zh ? "登录火山引擎账号？" : "Sign in to Volcengine?", detail, zh ? "登录" : "Sign in"))) return null;
+  return ark.login((url) => win.webContents.send("xsb:event", { arkLoginUrl: url } satisfies Event));
+}
+
+/** What in Claude's own settings would win over the environment xSB gives it: settings `env` is applied over it. */
+function claudeOverrides(): string[] {
+  try {
+    const settings = JSON.parse(fs.readFileSync(configPath("claude"), "utf8"));
+    // Elsewhere xSB's `--settings` ranks above these (ark.ts claudeFiles); the key it cannot put there, nor on Windows anything.
+    const keys = (process.platform === "win32" ? ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"] : ["ANTHROPIC_AUTH_TOKEN"])
+      .filter((key) => settings?.env?.[key] !== undefined);
+    return settings?.apiKeyHelper ? [...keys, "apiKeyHelper"] : keys;
+  } catch { return []; }
+}
+
+/** Have xSB's agent use the plan (model) or its own configuration again (null), once the user agreed. Whether it changed. */
+async function bindArk(win: BrowserWindow, name: "claude" | "codex", profile: string | null, model?: string): Promise<boolean> {
+  const zh = language() === "zh-CN";
+  const agent = AGENT_NAMES[name];
+  if (profile === null) {
+    const detail = zh
+      ? `xSB 中的 ${agent} 将恢复使用它自己的配置和登录。下次启动 ${agent} 会话时生效，正在进行的会话不受影响。`
+      : `${agent} in xSB uses its own configuration and sign-in again, from the next ${agent} session it starts. Sessions under way are not affected.`;
+    if (!(await confirmStep(win, zh ? `解除 ${agent} 的火山方舟接入？` : `Stop ${agent} using Volcengine Ark?`, detail, zh ? "解除" : "Stop using"))) return false;
+    await ark.bind(name, null);
+    return true;
+  }
+  if (typeof model !== "string") throw new Error("model is required");
+  const plan = await ark.profile(profile);
+  const models = await ark.models(profile);
+  if (!models.some((m) => m.name === model)) throw new Error(zh ? "该套餐不提供这个模型" : "This plan does not serve that model");
+  const shown = model === ROUTED_MODEL ? (zh ? "智能路由" : "Smart routing") : model;
+  const address = name === "claude" ? plan.baseUrl.replace(/\/v3$/, "") : plan.baseUrl;
+  const winning = name === "claude" ? claudeOverrides() : [];
+  const warning = winning.length
+    ? (zh ? `\n\n注意：你的 Claude 配置文件中设置了 ${winning.join("、")}，Claude 会优先使用它们，接入可能不生效。` : `\n\nNote: your Claude settings file sets ${winning.join(", ")}, which Claude prefers; this may not take effect.`)
+    : "";
+  const detail = zh
+    ? `xSB 中的 ${agent} 将改用火山方舟：\n套餐：${plan.name}\n模型：${shown}\n地址：${address}\n\n这会覆盖 ${agent} 自己配置的接口地址和密钥，只在 xSB 中生效：${agent} 的配置文件不会被修改，终端中的 ${agent} 保持不变。密钥由 arkcli 保管，每次启动时从 arkcli 读取，xSB 不保存密钥。\n\n下次启动 ${agent} 会话时生效，正在进行的会话不受影响。${warning}`
+    : `${agent} in xSB will use Volcengine Ark:\nPlan: ${plan.name}\nModel: ${shown}\nAddress: ${address}\n\nThis overrides the API address and key ${agent} is configured with, in xSB only: ${agent}'s configuration files are not changed, and ${agent} in your terminal stays as it is. arkcli keeps the key; it is read from arkcli each time the agent starts, and xSB does not store it.\n\nIt takes effect from the next ${agent} session; sessions under way are not affected.${warning}`;
+  if (!(await confirmStep(win, zh ? `让 ${agent} 使用火山方舟？` : `Have ${agent} use Volcengine Ark?`, detail, zh ? "确认接入" : "Use Ark"))) return false;
+  await ark.bind(name, { profile, model, baseUrl: plan.baseUrl });
   return true;
 }
 
@@ -514,6 +591,19 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       return agentClis.install(agentCli(args[0]));
     case "checkCli":
       return agentClis.check(agentCli(args[0]));
+    // Volcengine Ark (ark.ts): every step that changes something is confirmed here, not in the page.
+    case "arkStatus":
+      return ark.status();
+    case "arkModels":
+      return ark.models(String(args[0]));
+    case "arkInstall":
+      return installArk(win);
+    case "arkLogin":
+      return loginArk(win);
+    case "arkCancelLogin":
+      return ark.cancelLogin();
+    case "arkBind":
+      return bindArk(win, agentCli(args[0]), args[1] === null ? null : String(args[1]), args[2]);
     case "newWindow":
       return createWindow();
     case "windowColors":
@@ -617,8 +707,15 @@ void app.whenReady().then(() => {
   if (!first) return;
   setUpNotices();
   buildMenu();
-  clis = new Clis(path.join(app.getPath("userData"), "backends"));
-  agentClis = new AgentClis(clis, path.join(app.getPath("userData"), "backends", "installed"));
+  const backendsDir = path.join(app.getPath("userData"), "backends");
+  // The launchers of xSB's agents carry the Ark plan each uses, from the first that is written.
+  clis = new Clis(backendsDir, (program, windows, locate) =>
+    arkLaunch(readArkBindings(path.join(backendsDir, "ark.json"))[program as "claude" | "codex"], program, windows, locate("arkcli"), backendsDir, locate(program)));
+  agentClis = new AgentClis(clis, path.join(backendsDir, "installed"));
+  ark = new Ark(clis, backendsDir, path.join(backendsDir, "installed", "npm"));
+  // Ark has written the program Claude is started through; the launchers name it from now on.
+  clis.resync();
+  agentClis.viaArk = (name) => !!ark.bindings()[name];
   protocol.handle(APP_SCHEME, (request) => {
     const file = path.join(RENDERER, decodeURIComponent(new URL(request.url).pathname));
     const inside = !path.relative(RENDERER, file).startsWith("..");

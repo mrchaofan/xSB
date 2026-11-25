@@ -1,6 +1,7 @@
 // 窗口本身：打开工作区、左栏、对话栏、制品栏。
 // 只通过 window.xsb 取数据和发指令，不知道背后是 mock 还是 Electron 的 preload。
 // xsb 是全局对象：Electron 里由 preload 注入，浏览器里直接打开时由 mock.js 提供。
+import { onArkLoginUrl } from "./ark.js";
 import { avatarImage, avatarPicker } from "./avatars.js";
 import { backendIcon, backendKind, backendMark } from "./backend-icons.js";
 import { createArtifactBrowser, artifactDetails, artifactLabel, artifactNavigation } from "./artifacts.js";
@@ -829,6 +830,7 @@ xsb.on((event) => {
   else if (event.page) onPage(event.page);
   else if (event.removedPage) onPageRemoved(event.removedPage);
   else if (event.hub === "down") showHub(false);
+  else if (event.arkLoginUrl) onArkLoginUrl(event.arkLoginUrl);
   else if (event.revealPage) {
     const page = state.pages?.find(p => p.id === event.revealPage);
     const owner = page && state.agents.find(a => a.mainSessionId === page.sessionId);

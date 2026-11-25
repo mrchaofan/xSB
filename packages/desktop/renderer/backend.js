@@ -1,6 +1,7 @@
 // One persistent control per provider: status updates preserve focus, open details and agent drafts.
 import { state } from "./app.js";
 import { CLI_DETAILS, backendPresentation } from "./backend-state.js";
+import { arkModelLabel } from "./ark.js";
 import { backendIcon } from "./backend-icons.js";
 import { h } from "./dom.js";
 import { openDialog } from "./form.js";
@@ -155,11 +156,15 @@ export function backendControls(backend, onChange = () => {}, { card = false } =
     version.textContent = result?.version && backend.installed ? `v${result.version}` : "";
     description.textContent = error ? t(`backend.failure.${error.action}`) : t(`backend.detail.${presentation.state}`, { name });
     if (result?.issue && !pending && !error) description.textContent += t("sentence.gap") + t(`backend.issue.${result.issue}`);
+    // xSB 中的这个智能体用的是火山方舟套餐，不是它自己的登录（ark.js）。
+    if (backend.ark && !pending && !error && ["found", "ready", "unauthenticated", "unknown"].includes(presentation.state))
+      description.textContent = t("backend.detail.viaArk", { name, model: arkModelLabel(backend.ark.model) });
     if (!cli && presentation.state === "found") description.textContent = t("backend.detail.custom");
     if (!cli && presentation.state === "missing") description.textContent = t("backend.detail.customMissing");
     if (!card) {
-      description.hidden = ["found", "ready"].includes(presentation.state);
-      if (!description.hidden) description.textContent = t(`backend.compact.${presentation.state}`);
+      const viaArk = backend.ark && ["found", "ready", "unauthenticated", "unknown"].includes(presentation.state);
+      description.hidden = ["found", "ready"].includes(presentation.state) && !viaArk;
+      if (!description.hidden) description.textContent = viaArk ? t("backend.compact.viaArk", { model: arkModelLabel(backend.ark.model) }) : t(`backend.compact.${presentation.state}`);
     }
     if (!cli && presentation.state === "found") badge.textContent = t("backend.status.custom");
     primary.hidden = !presentation.primary && !pending;
