@@ -81,7 +81,7 @@ const TEXT: Record<Language, Words> = {
     notRunnable: (file) => `${file} is not a program that can be run`,
     noProgram: (agent, program) => `Agent "${agent}" runs on ${program}, and the ${program} program was not found on your PATH. Install it, or open this agent's settings and use "Locate…" next to its backend.`,
     badAddress: "Enter a valid address: http, https, file://, or an absolute file path.",
-    agentControl: "Agent is operating this page",
+    agentControl: "An agent is controlling this page",
     notice: ({ kind, name, detail }) =>
       ({
         done: { title: `${name} finished`, body: "All work is done. Nobody is working now." },
@@ -104,7 +104,7 @@ const TEXT: Record<Language, Words> = {
     notRunnable: (file) => `${file} 不是可执行文件`,
     noProgram: (agent, program) => `智能体“${agent}”要用 ${program}，但在 PATH 中没有找到 ${program} 程序。请安装它，或打开这个智能体的设置，在后端旁点“指定路径…”。`,
     badAddress: "请输入有效地址，支持 http、https、file:// 或绝对文件路径。",
-    agentControl: "Agent 正在操作网页",
+    agentControl: "智能体正在控制网页",
     notice: ({ kind, name, detail }) =>
       ({
         done: { title: `${name}完成了工作`, body: "工作已全部完成，现在没有智能体在工作。" },
@@ -323,11 +323,17 @@ async function createWindow(project?: string): Promise<void> {
     height: 900,
     minWidth: 960,
     minHeight: 600,
-    titleBarStyle: "hiddenInset",
+    // 没有单独的标题栏，系统的窗口按钮放进界面的头部（renderer/styles.css 的 --bar 52px）：
+    // macOS 是左上角的红绿灯，垂直居中；Windows/Linux 是右上角的按钮覆盖层，颜色跟着主题（windowColors）。
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 18, y: 20 } }
+      : { titleBarStyle: "hidden" as const, titleBarOverlay: { color: "#ffffff", symbolColor: "#474747", height: 52 } }),
     webPreferences: { preload: PRELOAD, webview2Tag: Pages.supported } as WebPreferences,
   });
   const id = win.webContents.id;
-  const pages = new Pages(win.webContents, { preload: PRELOAD, pageWindowUrl: `${APP_SCHEME}://xsb/page.html`, controlText: TEXT[language()].agentControl });
+  const pages = new Pages(win.webContents, { preload: PRELOAD, pageWindowUrl: `${APP_SCHEME}://xsb/page.html`, controlText: TEXT[language()].agentControl,
+    // The same rule as the window's style (renderer/backend-icons.js): a backend named for claude is claude's.
+    toneOf: (sessionId) => /claude/i.test((sessionId && workspaceOf(id)?.backendOf(sessionId)) || "") ? "claude" : "default" });
   panels.set(id, pages);
   // A window shows the app and nothing else. A link in what an agent wrote opens as a page
   // of the side panel, or in the user's browser where there are no such pages.
@@ -428,7 +434,7 @@ async function pickFolder(win: BrowserWindow): Promise<{ path: string; initializ
 // ---- window.xsb -------------------------------------------------------------
 
 /** The calls that are a method of the window's workspace, arguments and all. */
-const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","setAvatar","setBackend","workflowControl","history","send","cancel","clear","permit"]);
+const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","setAvatar","setBackend","workflowControl","history","send","resend","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();
@@ -481,6 +487,7 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       try {
         if (args[1] === "bounds") return pages.layout(args[0], event.sender, args[2]);
         if (args[1] === "controlBounds") return pages.controlLayout(args[0], event.sender, args[2]);
+        if (["annotate", "annotationSave", "annotationDiscard", "annotationsClear", "annotationsRemove"].includes(args[1])) return pages.annotate(args[0], event.sender, args[1], args[2]);
         return pages.call(args[0], args[1], args[2]);
       } catch (e) {
         throw e instanceof BadAddress ? new Error(TEXT[language()].badAddress) : e;
@@ -509,6 +516,9 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       return agentClis.check(agentCli(args[0]));
     case "newWindow":
       return createWindow();
+    case "windowColors":
+      if (process.platform !== "darwin") win.setTitleBarOverlay({ color: String(args[0]), symbolColor: String(args[1]) });
+      return;
     // Plugins (hub's plugins.ts): folders the user puts in place. The machine's reach every open project.
     case "plugins":
       return listPlugins(workspace?.paths);
@@ -537,6 +547,9 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       return shell.openPath(ensurePluginRoot(args[0], workspace?.paths));
   }
   if (!workspace) throw new Error("this window has no workspace open");
+  // A message's id is the workspace's to choose: the renderer sends content, or names an entry to send again.
+  if (method === "send") return workspace.send(args[0], args[1], typeof args[2] === "string" ? args[2] : undefined);
+  if (method === "resend" && (typeof args[0] !== "string" || typeof args[1] !== "string")) throw new Error("resend takes an agent and an entry");
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);
   throw new Error(`unknown method ${method}`);
 }

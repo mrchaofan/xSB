@@ -23,6 +23,8 @@ import type { PageView } from "./bridge.ts";
 import { ownDownloads } from "./browser-downloads.ts";
 import type { BrowserDownloads } from "./browser-downloads.ts";
 import { controlInput, installInputGuard } from "./page-input.ts";
+import { Annotator, NOTE_LIMIT } from "./page-annotations.ts";
+import type { AnnotationTarget, Tone } from "./page-annotations.ts";
 
 /** What the private Electron adds to the official one's types. */
 type Webview2 = WebContents & { isAttached(): boolean; detach(): boolean; destroy(): void };
@@ -34,9 +36,10 @@ const WEB_PARTITION = "persist:xsb-web";
 export const PREVIEW_PARTITION = "xsb-preview";
 
 export type PageOptions = { sessionId?: string; embedded?: boolean; agent?: boolean; downloads?: BrowserDownloads; onPopup?: (id: string, openerId: string) => void };
-type Page = { id: string; contents: Webview2; embedded: boolean; agent: boolean; controlling?: boolean; controlBounds?: { sender: WebContents; bounds: Rectangle | null }; controlView?: WebContentsView; controlHost?: BrowserWindow; window?: BrowserWindow; nativeView?: WebContentsView; viewHost?: BrowserWindow; error?: string; favicon?: string; releaseDownloads?: () => void; options: PageOptions };
+type Page = { id: string; contents: Webview2; embedded: boolean; agent: boolean; controlling?: boolean; controlBounds?: { sender: WebContents; bounds: Rectangle | null }; controlView?: WebContentsView; controlHost?: BrowserWindow; window?: BrowserWindow; nativeView?: WebContentsView; viewHost?: BrowserWindow; error?: string; favicon?: string; releaseDownloads?: () => void; annotator?: Annotator; options: PageOptions };
 /** Where the app's own files are, for a page's window. */
-type Shell = { preload: string; pageWindowUrl: string; controlText?: string };
+/** `toneOf`: the style of annotations on a page of this session (page-annotations.ts), after its agent's backend. */
+type Shell = { preload: string; pageWindowUrl: string; controlText?: string; toneOf?: (sessionId?: string) => Tone };
 
 export class Pages {
   /** False on an Electron without `<webview2>` (the official one): there are no page tabs then. */
@@ -141,7 +144,7 @@ export class Pages {
     const page = this.pages.get(id);
     if (!page) throw new Error("this page was closed");
     const { contents, window } = page;
-    if (page.controlling && ["navigate", "back", "forward", "reload", "external"].includes(op)) throw new Error(this.shell.controlText ?? "Agent is operating this page");
+    if (page.controlling && ["navigate", "back", "forward", "reload", "external"].includes(op)) throw new Error(this.shell.controlText ?? "An agent is controlling this page");
     if (op === "navigate") void this.navigate(id, String(arg)).catch(() => {});
     else if (op === "back") contents.navigationHistory.goBack();
     else if (op === "forward") contents.navigationHistory.goForward();
@@ -193,11 +196,66 @@ export class Pages {
     if (page.controlView?.getVisible() && page.controlHost === owner) owner.contentView.addChildView(page.controlView);
   }
 
-  /** Control follows the actual runtime turn, not the lifetime of a tab or tool call. */
+  /**
+   * The user's annotations (page-annotations.ts), asked for by the host that shows the page and by
+   * no one else. The host never names a node: it confirms or drops the one the user selected.
+   */
+  async annotate(id: string, sender: WebContents, op: string, arg?: unknown): Promise<void> {
+    const page = this.pages.get(id);
+    if (!page) throw new Error("this page was closed");
+    const annotator = page.annotator;
+    // The composer of the page's conversation, in the main window, takes out notes it sent or dropped.
+    if (op === "annotationsRemove") {
+      if (sender !== this.host && sender !== this.hostOf(page)) throw new Error("this page is shown elsewhere");
+      const ids = Array.isArray(arg) && arg.length <= 200 && arg.every((id) => typeof id === "string" && id.length <= 64) ? arg as string[] : undefined;
+      if (!ids) throw new Error("annotationsRemove takes a list of ids");
+      return annotator?.remove(ids);
+    }
+    if (sender !== this.hostOf(page)) throw new Error("this page is shown elsewhere");
+    if (op === "annotate") {
+      if (typeof arg !== "boolean") throw new Error("annotate takes true or false");
+      if (!arg) return annotator?.stop();
+      if (page.controlling) throw new Error(this.shell.controlText ?? "An agent is controlling this page");
+      if (page.nativeView || page.embedded) throw new Error("this page cannot be annotated");
+      page.annotator ??= new Annotator(page.contents, (target) => this.sendTarget(page, target), () => this.changed(page),
+        () => this.shell.toneOf?.(page.options.sessionId) ?? "default");
+      return page.annotator.start();
+    }
+    if (!annotator?.active) throw new Error("annotation mode is off");
+    if (op === "annotationSave") {
+      const text = typeof arg === "string" ? arg.trim() : "";
+      if (!text || text.length > NOTE_LIMIT) throw new Error(`a note has 1 to ${NOTE_LIMIT} characters`);
+      // The note, the element and its picture go to the page's conversation, whose composer is in the main window.
+      const annotation = await annotator.save(page.id, text);
+      if (!this.host.isDestroyed()) this.host.send("xsb:event", { webAnnotation: { pageId: page.id, sessionId: page.options.sessionId, annotation } });
+      return;
+    }
+    if (op === "annotationDiscard") return annotator.discard();
+    if (op === "annotationsClear") {
+      const ids = await annotator.clear();
+      if (ids.length && !this.host.isDestroyed()) this.host.send("xsb:event", { webAnnotationsRemoved: { pageId: page.id, sessionId: page.options.sessionId, ids } });
+      return;
+    }
+    throw new Error(`unknown page operation ${op}`);
+  }
+
+  /** Where the node being annotated is goes only to the host that shows the page. */
+  private sendTarget(page: Page, target: AnnotationTarget | null): void {
+    const host = this.hostOf(page);
+    if (!host.isDestroyed()) host.send("xsb:event", { annotationTarget: { pageId: page.id, ...(target ?? { seq: 0, rect: null, label: "" }) } });
+  }
+
+  private hostOf(page: Page): WebContents {
+    return page.window?.webContents ?? this.host;
+  }
+
+  /** Control lasts one browser tool call (browser.ts): a shield above the page, user input blocked. */
   setAgentControl(id: string, controlling: boolean): void {
     const page = this.pages.get(id);
     if (!page || page.controlling === controlling) return;
     page.controlling = controlling;
+    // An agent taking the page ends the user's annotating; the notes stay.
+    if (controlling) page.annotator?.stop();
     controlInput(page.contents, controlling);
     if (!controlling) this.unmountControl(page);
     else if (page.controlBounds?.bounds) this.controlLayout(id, page.controlBounds.sender, page.controlBounds.bounds);
@@ -217,17 +275,17 @@ export class Pages {
       page.controlView = view;
       view.setBackgroundColor("#00000000");
       view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-      const label = this.shell.controlText ?? "Agent is operating this page";
+      const label = this.shell.controlText ?? "An agent is controlling this page";
       const html = `<!doctype html><html><head><style>
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;font:13px system-ui;user-select:none;cursor:not-allowed}
 .frame{position:fixed;inset:0;box-sizing:border-box;border:3px solid #f04452;background:rgba(240,68,82,.025);box-shadow:inset 0 0 18px rgba(240,68,82,.55);animation:breathe 1.8s ease-in-out infinite}
 .label{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:7px 14px;border-radius:18px;color:#fff;background:#b92335;white-space:nowrap;box-shadow:0 3px 12px #0003}
 @keyframes breathe{50%{border-color:#ff8790;box-shadow:inset 0 0 34px rgba(240,68,82,.8)}}
 @media(prefers-reduced-motion:reduce){.frame{animation:none}}
-</style></head><body tabindex="0"><div class="frame"><div class="label"></div></div><script>
+</style></head><body><div class="frame"><div class="label"></div></div><script>
 document.querySelector('.label').textContent=${JSON.stringify(label)};
 for(const type of ['keydown','keyup','mousedown','mouseup','click','wheel','contextmenu','dragover','drop'])addEventListener(type,e=>e.preventDefault(),{passive:false});
-document.body.focus();</script></body></html>`;
+</script></body></html>`;
       void view.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(() => {});
     }
     if (page.controlHost !== owner) {
@@ -239,8 +297,8 @@ document.body.focus();</script></body></html>`;
     const x = Math.max(0, Math.min(size.width, Math.round(bounds.x))), y = Math.max(0, Math.min(size.height, Math.round(bounds.y)));
     page.controlView.setBounds({ x, y, width: Math.max(0, Math.min(size.width - x, Math.round(bounds.width))), height: Math.max(0, Math.min(size.height - y, Math.round(bounds.height))) });
     page.controlView.setVisible(bounds.width > 0 && bounds.height > 0);
-    owner.contentView.addChildView(page.controlView); // Shield stays above any native popup view.
-    page.controlView.webContents.focus();
+    // Shield stays above any native popup view. It is not focused: the user's keyboard focus stays where it is.
+    owner.contentView.addChildView(page.controlView);
   }
 
   private unmountControl(page: Page): void {
@@ -314,6 +372,7 @@ document.body.focus();</script></body></html>`;
       if (page.window === window) this.close(page);
     });
     // The side panel lets go first; a page is shown in one place at a time.
+    page.annotator?.discard();
     page.controlBounds = undefined;
     this.unmountControl(page);
     if (page.nativeView) this.unmount(page);
@@ -326,6 +385,7 @@ document.body.focus();</script></body></html>`;
   private restore(page: Page): void {
     const window = page.window;
     if (!window) return;
+    page.annotator?.discard();
     page.window = undefined;
     page.controlBounds = undefined;
     this.unmountControl(page);
@@ -339,6 +399,7 @@ document.body.focus();</script></body></html>`;
 
   private close(page: Page): void {
     if (!this.pages.delete(page.id)) return;
+    page.annotator?.dispose();
     const window = page.window;
     page.window = undefined;
     this.unmountControl(page);
@@ -362,7 +423,7 @@ document.body.focus();</script></body></html>`;
     if (!this.host.isDestroyed()) this.host.send("xsb:event", event);
   }
 
-  private view({ id, options, contents, window, nativeView, agent, controlling, error, favicon }: Page): PageView {
+  private view({ id, options, contents, window, nativeView, agent, controlling, error, favicon, annotator }: Page): PageView {
     return {
       id,
       contentsId: contents.id,
@@ -377,6 +438,9 @@ document.body.focus();</script></body></html>`;
       pinned: !!window && window.isAlwaysOnTop(),
       agent,
       controlling: !!controlling,
+      annotating: !!annotator?.active,
+      annotations: annotator?.count ?? 0,
+      annotationTone: annotator?.tone ?? "default",
       error,
       favicon,
     };

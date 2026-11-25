@@ -51,6 +51,19 @@ export type SessionRec = {
   contextCheckpoint?: string;
   /** Resend the quoted handoff on resume until the new backend confirms its first input. */
   contextHandoffPending?: string;
+  /**
+   * The user's messages that failed to get to the model (not stopped): given in front of the user's next message until
+   * one is in the conversation (session.ts, `owe`). Their content is in the agent's context folder, `owed-<id>.json`.
+   */
+  owed?: string[];
+  /** The latest owed messages that did get to the model with a later one: a resend of them is refused. */
+  redelivered?: string[];
+  /**
+   * This conversation continues another, moved here when the user switched backends (`Agents.migrate`): its record,
+   * frozen at the move, is the context file `ref` of this agent, read with the `previous_conversation` tool.
+   * `pending`: the model has not been told yet; it is, in front of the first message, until that is in.
+   */
+  migratedFrom?: { agentId: string; sessionId: string; title: string; backend: string; ref: string; pending?: boolean };
   /** An interrupted input with observed execution must not be blindly replayed after a hub restart. */
   contextExecution?: { messageId: string };
   title?: string;
@@ -186,6 +199,40 @@ export class State {
         this.store.rewrite(file, live.map((note) => ({ op: "put", note })));
       }
     }
+  }
+
+  /**
+   * Forget agents for good (a deleted conversation, cleaned up): their agents, sessions, the workflows those sessions
+   * own, notes, and assets only they made. Each file they appear in is rewritten without them, so the space comes back.
+   * Returns the assets dropped, whose files the caller removes. Tasks, mail and ledger entries are small and stay.
+   */
+  forget(agentIds: Set<string>): Asset[] {
+    const sessions = new Set([...this.sessions.values()].filter((s) => agentIds.has(s.agentId)).map((s) => s.id));
+    for (const id of agentIds) {
+      this.agents.delete(id);
+      this.mainIds.delete(id);
+      this.notes.delete(id);
+      this.topics.delete(id);
+    }
+    for (const id of sessions) {
+      this.sessions.delete(id);
+      this.workflows.delete(id);
+    }
+    const dropped: Asset[] = [];
+    for (const [id, versions] of this.assets) {
+      if (!versions.every((v) => agentIds.has(v.by))) continue;
+      dropped.push(...versions);
+      this.assets.delete(id);
+      this.assetPointers.delete(id);
+    }
+    this.store.rewrite(F.agents, [...this.agents.values()].map((agent) => ({ op: "put", agent })));
+    this.store.rewrite(F.sessions, [...this.sessions.values()].map((session) => ({ op: "put", session })));
+    this.store.rewrite(F.workflows, [...this.workflows.values()].map((flow) => ({ flow })));
+    this.store.rewrite(F.assets, [...this.assets].flatMap(([id, versions]) => [
+      ...versions.map((asset) => ({ op: "put", asset })),
+      { op: "pointer", id, version: this.assetPointers.get(id) ?? null },
+    ]));
+    return dropped;
   }
 
   commit(list: Op[]): void {

@@ -42,7 +42,12 @@ import type { ContextOwner } from "./tool-context.ts";
 import { randomBytes } from "node:crypto";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
-import { conversationPrompt } from "./prompts.ts";
+import { conversationPrompt, conversationRecord } from "./prompts.ts";
+import { contextRef } from "./context.ts";
+import { turnsSinceCleared } from "./transcript.ts";
+import { Boundaries } from "@xsb/protocol";
+import type { SessionUpdate } from "@xsb/protocol";
+import path from "node:path";
 import type { ToolOrigin } from "./prompts.ts";
 import { LiveSession } from "./session.ts";
 import type { MailItem, SessionRec } from "./state.ts";
@@ -177,6 +182,7 @@ export class Hub {
       ...(rec?.title && !agent.workflowOwner && { name: rec.title }),
       state,
       mainSessionId: rec?.id,
+      ...(rec?.backendSessionId && !rec.backendFresh ? { backendStarted: true } : {}),
       ...(turn ? { currentTurnId: turn.id, turnProtected: turn.protected } : {}),
       ...(agent.workflowOwner && this.workflows.retired(agent.id) ? { retired: true } : {}),
     };
@@ -316,6 +322,90 @@ export class Hub {
    * turn at a time. The hub is its only registry: it is made here, once, and never by a delivery or a backend.
    * `clientMcp`: the MCP servers of the client that made it, passed on next to the hub's own.
    */
+  /**
+   * Move a main conversation onto another backend (`Agents.migrate`): a new conversation on it, whose model reads the
+   * old one, as it stands now, with its `previous_conversation` tool; it is told so with its first message. Only the
+   * main conversation moves: its workflows stay with it. The old conversation stays, as it was.
+   */
+  migrate(agentId: string, backend: string): LiveSession {
+    const agent = this.agent(agentId);
+    const old = this.mainSession(agentId);
+    if (old.busy) throw new RpcError(-32602, "The conversation's current turn has not ended; switch its backend once it has.", { errorKind: "turn_running" });
+    this.backends.spec({ ...agent, backend });
+    const title = old.rec.title ?? agent.name;
+    const prior = old.rec.migratedFrom;
+    const earlier = prior ? fs.readFileSync(path.join(this.paths.dir, "agents", agentId, "context", `${prior.ref}.txt`), "utf8") : undefined;
+    const record = conversationRecord(title, agent.backend, turnsSinceCleared(this.state.store, agentId, old.id), earlier);
+    const created = this.createConversation(backend, title);
+    const { ref } = contextRef(this.paths, created.agentId, record);
+    created.save({ migratedFrom: { agentId, sessionId: old.id, title, backend: agent.backend, ref, pending: true } });
+    created.emit({ sessionUpdate: "session_info_update", _meta: { [Boundaries.key]: { kind: "migrated", backend, from: title, handoff: false } } } as SessionUpdate);
+    this.agentChanged(created.agentId);
+    return created;
+  }
+
+  /** Deleted by the user: the conversation itself, or an agent of a deleted conversation's workflow. */
+  isDeleted(agent: AgentSpec): boolean {
+    if (agent.deleted) return true;
+    const owner = agent.workflowOwner && this.state.sessions.get(agent.workflowOwner)?.agentId;
+    return !!owner && !!this.state.agents.get(owner)?.deleted;
+  }
+
+  /** A main conversation and the agents of its workflow, retired ones too. */
+  private conversationAgents(agentId: string): AgentSpec[] {
+    const main = this.state.mainSession(agentId)?.id;
+    return [...this.state.agents.values()].filter((a) => a.id === agentId || (main && a.workflowOwner === main));
+  }
+
+  /**
+   * Delete a main conversation (`Agents.delete`). Nothing of it may be working: a turn ends first, by itself or by
+   * the user's stop. Its workflow is paused so no node starts again; input still queued for it goes with it.
+   * Its files stay until `purgeDeleted`.
+   */
+  deleteConversation(agentId: string): void {
+    const agent = this.agent(agentId);
+    if (agent.workflowOwner || agent.deleted) throw RpcError.notFound(`agent ${agentId}`);
+    const members = this.conversationAgents(agentId);
+    const sessions = new Set([...this.state.sessions.values()].filter((s) => members.some((a) => a.id === s.agentId)).map((s) => s.id));
+    if ([...sessions].some((id) => this.live.get(id)?.busy))
+      throw failure("conversation_busy", { agent: agent.name });
+    const main = this.state.mainSession(agentId)?.id;
+    if (main && this.state.workflows.has(main)) {
+      try { this.workflows.clientControl(main, true); } catch { /* no graph running: nothing to pause */ }
+    }
+    const queued = [...this.state.mail.values()].filter((m) => sessions.has(m.to.sessionId)).map((m) => ops.ack(m.id));
+    this.state.commit([...queued, ops.putAgent({ ...agent, deleted: now() })]);
+    for (const a of members) {
+      this.backends.stop(a.id);
+      this.broadcast(Agents.removed, { id: a.id });
+    }
+  }
+
+  /**
+   * Clean up the project (`Agents.purge`): what deleted conversations left goes for good — the agents' folders
+   * (transcripts, drafts, notes), the asset files only they made, their records — and the logs are compacted.
+   */
+  purgeDeleted(): { conversations: number; bytes: number } {
+    const deleted = [...this.state.agents.values()].filter((a) => a.deleted && !a.workflowOwner);
+    const gone = new Set(deleted.flatMap((a) => this.conversationAgents(a.id).map((m) => m.id)));
+    if (!gone.size) return { conversations: 0, bytes: 0 };
+    for (const session of [...this.live.values()]) {
+      if (!gone.has(session.agentId)) continue;
+      this.live.delete(session.id);
+      this.bridgeTokens.delete(session.bridgeToken);
+    }
+    let bytes = 0;
+    const remove = (file: string) => {
+      bytes += sizeOf(file);
+      fs.rmSync(file, { recursive: true, force: true });
+    };
+    for (const id of gone) remove(this.paths.agentDir(id));
+    // Only files inside the project's data folder: an asset recorded elsewhere is the user's own file.
+    for (const asset of this.state.forget(gone))
+      if (path.resolve(asset.path).startsWith(this.paths.dir + path.sep)) remove(asset.path);
+    return { conversations: deleted.length, bytes };
+  }
+
   mainSession(agentId: string, clientMcp: McpServer[] = []): LiveSession {
     const rec = this.state.mainSession(agentId);
     if (rec) return this.live.get(rec.id)!;
@@ -353,4 +443,12 @@ export class Hub {
     this.contextTokens.set(token, { session, server: server.name });
     return contextServer(server, this.paths.socket("mcp"), token);
   }
+}
+
+/** Bytes a file or folder takes, 0 if it is not there. */
+function sizeOf(file: string): number {
+  const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!stat) return 0;
+  if (!stat.isDirectory()) return stat.size;
+  return fs.readdirSync(file).reduce((sum, name) => sum + sizeOf(path.join(file, name)), 0);
 }

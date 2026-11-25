@@ -29,6 +29,9 @@ import { checkArguments } from "./workflow-tools.ts";
 import type { Flow } from "./workflow-state.ts";
 
 type Seen = { active?: string; invites: Record<string, string>; candidate?: string };
+/** How many times a workflow notice the model never got is posted again on its own (then it waits for a resume or restart). */
+const NOTICE_RETRIES = 3;
+
 export class Workflows {
   private hub: Hub;
   private scheduled = new Set<string>();
@@ -59,6 +62,12 @@ export class Workflows {
         (!n.delivery || instances.some((i) => i.last?.valid && i.last.id === n.delivery)),
     );
     const prior = this.read(f.owner);
+    // A node whose agent had an assignment in its conversation, now withdrawn (redefined, invalidated): it hears so next.
+    for (const [name, old] of Object.entries(prior.instances)) {
+      const next = f.instances[name];
+      if (next && old.id === next.id && old.work?.inserted && old.work.id !== next.work?.id && !next.revoked?.includes(old.work.id))
+        next.revoked = [...(next.revoked ?? []), old.work.id];
+    }
     const operations = [...extra, ops.workflow(f)];
     this.hub.state.commit(operations);
     // All old completions and tool writes are already fenced by the committed snapshot.
@@ -109,7 +118,16 @@ export class Workflows {
   }
   private drain(owner: string) {
     const root = this.hub.session(owner);
-    const initial = this.read(owner);
+    let initial = this.read(owner);
+    // A notice the model never got (refused, the backend failed) is posted again, a few times, without waiting for a resume.
+    const unseen = initial.outbox.filter((n) => n.posted && !this.hub.state.mail.has(n.posted) &&
+      this.hub.state.ledger.get(n.posted)?.state === "discarded_unseen" && (n.attempts ?? 0) < NOTICE_RETRIES);
+    if (unseen.length && !initial.paused) {
+      const f = structuredClone(initial);
+      for (const n of f.outbox) if (unseen.some((u) => u.id === n.id)) { n.attempts = (n.attempts ?? 0) + 1; delete n.posted; }
+      this.save(f);
+      initial = this.read(owner);
+    }
     if (initial.outbox.some((n) => !n.posted) && !initial.paused) {
       const f = structuredClone(initial),
         items = f.outbox.filter((n) => !n.posted);
@@ -176,13 +194,18 @@ export class Workflows {
         this.hub.broadcast(Workflow.update, { workflow: view(this.read(owner)) });
       } else this.save(f);
       if (!this.acceptsAttempt(session, work.attempt!)) continue;
+      // The short form only where the conversation still has the assignment: not after it was renewed.
+      const resume = work.inserted && work.epoch === session.rec.contextEpoch;
+      const revoked = i.revoked?.length
+        ? `[xSB] Assignment(s) ${i.revoked!.join(", ")} that you worked on earlier in this conversation were withdrawn (redefined or invalidated). Do not continue them; work only on the assignment below.\n`
+        : "";
       session.enqueue({
         origin: { kind: "system", messageId: work.attempt },
         prompt: [
-          text(
-            work.inserted
+          text(revoked +
+            (resume
               ? `Resume assignment ${work.id} from this conversation. Pinned current versions: ${JSON.stringify(work.selected)}. Versions previously read: ${JSON.stringify(work.reads ?? [])}. Continue the saved assignment:\n${work.assignment.text ?? work.assignment.target}`
-              : `Workflow ${work.kind} assignment ${work.id}\n${JSON.stringify(work.assignment)}\nSelected versions: ${JSON.stringify(work.selected)}\n${work.assignment.text ?? work.assignment.target}`,
+              : `Workflow ${work.kind} assignment ${work.id}\n${JSON.stringify(work.assignment)}\nSelected versions: ${JSON.stringify(work.selected)}\n${work.assignment.text ?? work.assignment.target}`),
           ),
         ],
       });
@@ -208,6 +231,21 @@ export class Workflows {
       ],
     });
   }
+  /**
+   * The user's interruption did not get to the model (refused, failed, expired): it no longer holds the graph, and it is
+   * not continued later. Only an interruption the model has counts (docs/WORKFLOWS.md).
+   */
+  discarded(session: LiveSession, id: string) {
+    const spec = this.hub.agent(session.agentId);
+    const owner = spec.workflowOwner ?? session.id;
+    if (!this.hub.state.workflows.has(owner)) return;
+    const f = structuredClone(this.read(owner));
+    const list = spec.workflowOwner ? f.instances[spec.workflowNode!]?.interruptions : f.interruptions;
+    if (!list?.some((p) => p.id === id)) return;
+    if (spec.workflowOwner) f.instances[spec.workflowNode!].interruptions = list.filter((p) => p.id !== id);
+    else f.interruptions = list.filter((p) => p.id !== id);
+    this.save(f);
+  }
   inserted(session: LiveSession, id: string) {
     const spec = this.hub.agent(session.agentId);
     if (!spec.workflowOwner) {
@@ -221,8 +259,11 @@ export class Workflows {
     }
     const f = structuredClone(this.read(spec.workflowOwner)),
       w = f.instances[spec.workflowNode!]?.work;
-    if (w?.attempt === id && !w.inserted) {
+    if (w?.attempt === id && (!w.inserted || w.epoch !== session.rec.contextEpoch)) {
       w.inserted = true;
+      w.epoch = session.rec.contextEpoch;
+      // The node's agent has its new assignment, and with it the word that the earlier ones are withdrawn.
+      delete f.instances[spec.workflowNode!].revoked;
       this.save(f);
     }
   }
@@ -251,21 +292,17 @@ export class Workflows {
       );
       for (const n of f.outbox) delete n.posted;
       for (const i of Object.values(f.instances)) if (i.work?.state === "running") suspend(i.work);
+      // Held until the workflow resumes: what its nodes were sent, and the main conversation's interruptions of it. The
+      // main conversation's other mail is not the workflow's. What already got into a conversation, or was discarded,
+      // is the kernel's to settle on resume (a note that its outcome is unknown, its task failed): never acknowledged here.
+      const interruptions = new Set(f.interruptions.map((p) => p.id));
       const heldInputs = [...this.hub.state.mail.values()].filter(
         (m) =>
           !m.workflowNotice &&
-          (this.hub.state.agents.get(m.to.agentId)?.workflowOwner === f.owner || m.to.sessionId === f.owner),
+          (this.hub.state.agents.get(m.to.agentId)?.workflowOwner === f.owner || (m.to.sessionId === f.owner && interruptions.has(m.id))) &&
+          !["inserted", "seen", "inserted_unprocessed", "discarded_unseen"].includes(this.hub.state.ledger.get(m.id)?.state ?? ""),
       );
-      this.save(f, [
-        ...held.map((item) => ops.ack(item.id)),
-        ...heldInputs.map((item) =>
-          ["inserted", "seen", "inserted_unprocessed", "discarded_unseen"].includes(
-            this.hub.state.ledger.get(item.id)?.state ?? "",
-          )
-            ? ops.ack(item.id)
-            : ops.enqueue({ ...item, workflowHeld: true }),
-        ),
-      ]);
+      this.save(f, [...held.map((item) => ops.ack(item.id)), ...heldInputs.map((item) => ops.enqueue({ ...item, workflowHeld: true }))]);
     }
   }
   available(s: LiveSession) {
@@ -316,17 +353,22 @@ export class Workflows {
     if (!graphOf(this.read(owner))) return this.hub.delivery.userStop(s);
     const f = structuredClone(this.read(owner));
     const sessions = new Set([s]);
+    // What the stop takes away that the main agent was told is coming: it hears that it will not.
+    const cancelled: string[] = [];
     if (!spec.workflowOwner) {
       f.interruptions = [];
+      if (f.outbox.length) cancelled.push(`${f.outbox.length} workflow notice(s) not yet delivered to you were dropped by the user's stop`);
       f.outbox = [];
     }
     control(f, true, spec.workflowOwner ? [spec.workflowNode!] : undefined);
     for (const [name, i] of Object.entries(f.instances))
       if (!spec.workflowOwner || spec.workflowNode === name) {
         if (i.sessionId) sessions.add(this.hub.session(i.sessionId));
+        if (i.extras.length) cancelled.push(`${i.extras.length} queued additional prompt(s) for node "${name}" were cancelled by the user's stop`);
         i.extras = [];
         i.interruptions = [];
       }
+    if (cancelled.length) f.cancelled = [...(f.cancelled ?? []), ...cancelled];
     this.save(f, [], sessions);
   }
   input(s: LiveSession, id: string, blocks: ContentBlock[], target?: string) {
@@ -396,7 +438,7 @@ export class Workflows {
         JSON.stringify({
           purpose: message
             ? "User interruption concerning current graph work or delivery"
-            : "Direct conversation. Answer this question without changing other work.",
+            : "The user talks to you directly here. Sort it as your instructions say: your own assignment (handle it; escalate with pauseSelf if the assignment itself must change), the overall task (escalate to the main agent), or neither (just answer).",
           target: message?.target,
           current: i.work?.assignment.target,
           last: i.last?.valid ? i.last : undefined,
@@ -430,10 +472,19 @@ export class Workflows {
       choices: Object.entries(f.instances)
         .filter(([, i]) => i.invitation)
         .map(([node, i]) => ({ node, delivery: i.last })),
+      ...(f.cancelled?.length ? { cancelled: f.cancelled } : {}),
     };
+    const told = f.cancelled;
     void turn.first.inserted.promise.then(
       () => {
         if (this.known.get(s) === prior) this.known.set(s, { epoch, definitions });
+        // Told once it is in the conversation; a context that never got there tells it again.
+        if (told?.length) {
+          const now = structuredClone(this.read(s.id));
+          now.cancelled = (now.cancelled ?? []).filter((c) => !told.includes(c));
+          if (!now.cancelled.length) delete now.cancelled;
+          this.save(now);
+        }
       },
       () => {},
     );
@@ -495,6 +546,11 @@ export class Workflows {
       throw Error("Tool unavailable for task agent");
     checkArguments(name, a);
     if (name === "read_context") return readContext(this.hub.paths, s.agentId, a.ref, a.offset, a.bytes);
+    if (name === "previous_conversation") {
+      const moved = s.rec.migratedFrom;
+      if (!moved) throw Error("This conversation does not continue another one.");
+      return readContext(this.hub.paths, s.agentId, moved.ref, a.offset, a.bytes);
+    }
     const node = spec.workflowNode,
       i = node ? instance(f, node) : undefined;
     const work = i?.work?.attempt === turn.first.messageId ? i.work : undefined;
@@ -562,25 +618,37 @@ export class Workflows {
       }
       work.staged = { summary: a.summary, assets: a.assets, result: a.result };
       result = { staged: true };
-    } else if (name === "replan" && i) {
+    } else if (name === "escalate" && i) {
+      // To the main agent, which runs the whole workflow: the user's request about the whole task, or a need of this
+      // node's work. With pauseSelf the node's own assignment must change: it waits for the main agent's decision
+      // (execute with replaceNode, or resume to keep the assignment), and may withdraw its delivery.
+      const message = word(a.message, "message");
       const userInput = turn.inputs.findLast(
         (input) => input.in && (input.interruptionId || input.origin.kind === "user"),
       );
-      const latest =
-        userInput && i.interruptions.find((p) => p.id === (userInput.interruptionId ?? userInput.messageId));
-      const target = (i.work?.kind === "graph" ? i.work.id : undefined) ?? (i.last?.valid ? i.last.id : undefined);
-      if (!target || (userInput ? latest?.target !== target : work?.kind !== "graph"))
-        throw Error("Graph work or delivery expired");
-      this.redirected.add(turn);
-      i.replan = word(a.reason, "reason");
-      i.interruptions = i.interruptions.filter((p) => p !== latest);
-      if (a.invalidateSelf === true) {
-        if (i.last) i.last.valid = false;
-        if (i.work?.kind === "graph") delete i.work;
-        delete i.invitation;
+      const said = userInput?.content.flatMap((b) => (b.type === "text" ? [String(b.text ?? "")] : [])).join("\n").trim();
+      const pause = a.pauseSelf === true;
+      if (a.invalidateSelf === true && !pause) throw Error("invalidateSelf withdraws your delivery: it needs pauseSelf");
+      if (pause) {
+        const latest =
+          userInput && i.interruptions.find((p) => p.id === (userInput.interruptionId ?? userInput.messageId));
+        const target = (i.work?.kind === "graph" ? i.work.id : undefined) ?? (i.last?.valid ? i.last.id : undefined);
+        if (!target || (userInput ? latest?.target !== target : work?.kind !== "graph"))
+          throw Error("Graph work or delivery expired");
+        this.redirected.add(turn);
+        i.replan = message;
+        i.interruptions = i.interruptions.filter((p) => p !== latest);
+        if (a.invalidateSelf === true) {
+          if (i.last) i.last.valid = false;
+          if (i.work?.kind === "graph") delete i.work;
+          delete i.invitation;
+        }
       }
-      notice(f, JSON.stringify({ replan: node, reason: i.replan, invalidateSelf: a.invalidateSelf === true }));
-      result = { paused: node };
+      notice(f, JSON.stringify({
+        escalate: node, message, ...(said ? { userSaid: said.slice(0, 4000) } : {}),
+        paused: pause, ...(a.invalidateSelf === true ? { invalidateSelf: true } : {}),
+      }));
+      result = pause ? { forwarded: "main conversation", paused: node } : { forwarded: "main conversation" };
     } else throw Error("Tool unavailable for this execution");
     f.receipts[key] = result;
     this.save(f, effects);

@@ -31,6 +31,14 @@ export function applyPreferences() {
   document.documentElement.dataset.theme = prefs.theme;
   document.documentElement.dataset.density = prefs.density;
   document.documentElement.classList.toggle("hide-tools", !prefs.showTools);
+  syncWindowColors();
+}
+
+/** Windows/Linux 右上角的系统按钮自己不跟页面主题走：配色变了就把头部的底色和图标色告诉主进程。 */
+export function syncWindowColors() {
+  if (document.documentElement.dataset.platform !== "other") return;
+  const style = getComputedStyle(document.documentElement);
+  globalThis.xsb?.windowColors?.(style.getPropertyValue("--paper").trim(), style.getPropertyValue("--ink-2").trim())?.catch?.(() => {});
 }
 export function onPreferencesChanged(listener) {
   window.addEventListener("storage", (e) => {

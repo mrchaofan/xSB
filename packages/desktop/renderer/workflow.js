@@ -128,13 +128,23 @@ const when = (iso) => new Date(iso).toLocaleString(language, { month: "numeric",
 export function renderWorkflow(flow) {
   const panel = $("#task-conversation");
   if (!flow) {
-    fill(panel);
+    // 还没有工作流：标签照样能开，标题栏只有标题，下方说明它从哪来。
+    panel.firstElementChild?.saveDraft?.();
+    document.querySelector("#side-workflow").classList.remove("flow-folded");
+    // 标签已经写着"工作流"，空的时候不再要一条标题栏
+    $("#flow-heading").hidden = true;
+    fill($("#flow-heading"));
+    $("#flow-map").hidden = true;
+    fill($("#flow-map"));
+    fill(panel, h("div", { class: "catalog-empty flow-none" }, h("span", { class: "launcher-icon", html: ICON.flow }),
+      h("strong", {}, t("flow.none")), h("small", {}, t("flow.noneHint"))));
     return;
   }
   const shown = versionOf(flow);
   const folded = !!collapsed.get(flow.sessionId);
   const id = selected.get(flow.sessionId) ?? state.referenceAgent;
   const error = h("small", { class: "error", role: "alert" }, flow.error);
+  const held = flow.paused || (flow.interrupted && state.agents.find((a) => a.mainSessionId === flow.sessionId)?.state === "idle");
   const button = (pause, names, label) => h("button", { class: "btn sm",
     onclick: () => xsb.workflowControl(flow.sessionId, pause, names).catch((e) => (error.textContent = e.message)) }, label);
   // 版本下拉：当前、候选、历史（最新的在前）。
@@ -146,13 +156,15 @@ export function renderWorkflow(flow) {
   const picker = h("select", { class: "flow-version", "aria-label": t("flow.version.label"),
     onchange: (e) => { viewing.set(flow.sessionId, e.target.value === flow.version ? null : e.target.value); renderWorkflow(flow); } },
     ...versions.map(([value, label]) => h("option", { value, selected: value === shown.version }, label)));
+  $("#flow-heading").hidden = false;
   fill($("#flow-heading"),
     h("button", { class: "icon-btn flow-fold", "aria-expanded": String(!folded), title: t(folded ? "flow.expand" : "flow.collapse"), "aria-label": t(folded ? "flow.expand" : "flow.collapse"),
       html: folded ? ICON.forward : ICON.down, onclick: () => { collapsed.set(flow.sessionId, !folded); renderWorkflow(flow); } }),
     h("strong", {}, t("flow.title")),
     versions.length > 1 ? picker : h("small", { title: shown.version }, shown.version),
     shown.kind === "history" && h("span", { class: "flow-badge" }, t("flow.version.readonly")),
-    shown.kind === "active" && button(!flow.paused, undefined, t(flow.paused ? "flow.resume" : "flow.pause")),
+    // 主会话的插话挡住了整张图（它那一轮失败或被停了）：和暂停一样，给"继续"。
+    shown.kind === "active" && button(!held, undefined, t(held ? "flow.resume" : "flow.pause")),
     error);
   document.querySelector("#side-workflow").classList.toggle("flow-folded", folded);
   const map = $("#flow-map");

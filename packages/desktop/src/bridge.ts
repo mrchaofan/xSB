@@ -12,8 +12,9 @@ import type { ComposerState, WorkflowView } from "@xsb/protocol";
  * for each (../renderer/text.js). Main hands it facts, and errors already
  * worded in that language, since only main can tell what an error is about.
  */
-import type { AgentInfo, Boundary, OriginMeta, Task } from "@xsb/protocol";
+import type { AgentInfo, Boundary, DeliveredAs, DiscardReason, OriginMeta, Task } from "@xsb/protocol";
 import type { Content } from "./content.ts";
+import type { WebAnnotation } from "./page-annotations.ts";
 
 /**
  * One line of an agent's transcript. `id` is its identity: the same id again replaces it.
@@ -21,7 +22,13 @@ import type { Content } from "./content.ts";
  */
 export type Entry = { id: string } & (
   /** `discarded`: the model never saw it, and never will. `pending`: sent, and not in the conversation yet. */
-  | { kind: "input"; origin: OriginMeta; content: Content; discarded?: boolean; pending?: boolean }
+  | { kind: "input"; origin: OriginMeta; content: Content; discarded?: boolean; pending?: boolean;
+      /** Why the model did not see it; `detail` is the error. `unsent`: xsb never had it (sent again under its id). */
+      reason?: DiscardReason; detail?: string; unsent?: boolean;
+      /** Owed: given to the model with the user's next message. `redelivered`: it was. `resentAs`: the user sent it again. */
+      owed?: boolean; redelivered?: boolean; resentAs?: string;
+      /** How the model was given it, where that differs (images it cannot see, text saved to a file, a note in front). */
+      deliveredAs?: DeliveredAs }
   | { kind: "output"; content: Content; streaming?: boolean }
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
@@ -45,8 +52,9 @@ export type Artifact = { sessionIds?: string[]; fileUri?: string; id: string; na
  * other pages are shown by `<webview2 web-contents-id>` using `contentsId`.
  * `window`: it is shown in a window of its own, `pinned` on top of the others. `agent`: an agent opened it and drives it.
  * `favicon`: the site's icon (http(s) or data: image), once the page named one.
+ * `annotating`: the user is annotating it; `annotations`: the notes embedded in its current document.
  */
-export type PageView = { sessionId?: string; id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; nativeView?: boolean; pinned: boolean; agent: boolean; controlling?: boolean; error?: string; favicon?: string };
+export type PageView = { sessionId?: string; id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; nativeView?: boolean; pinned: boolean; agent: boolean; controlling?: boolean; annotating?: boolean; annotations?: number; annotationTone?: "claude" | "default"; error?: string; favicon?: string };
 
 /**
  * `missing` is set when the backend is one of the known agents and its
@@ -89,6 +97,15 @@ export type Event =
   | { removedPage: string }
   /** The connection to the workspace's hub is gone. Opening the workspace again makes a new one. */
   | { hub: "down" }
+  /**
+   * The element the user selected to annotate on a page this window shows: where it is in the page's
+   * viewport (`rect` null: out of sight, or nothing selected when `seq` is 0). A new `seq` is a new selection.
+   */
+  | { annotationTarget: { pageId: string; seq: number; rect: { x: number; y: number; width: number; height: number } | null; label: string } }
+  /** A confirmed note on a page of `sessionId`, for that conversation's composer (page-annotations.ts `WebAnnotation`). */
+  | { webAnnotation: { pageId: string; sessionId?: string; annotation: WebAnnotation } }
+  /** The user cleared these notes on the page: the composer drops them too. */
+  | { webAnnotationsRemoved: { pageId: string; sessionId?: string; ids: string[] } }
   /** Make this page's tab the current one of the side panel. */
   | { revealPage: string }
   /** Show this agent's conversation: the user clicked a notification of it. */

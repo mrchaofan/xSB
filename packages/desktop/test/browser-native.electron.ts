@@ -19,13 +19,16 @@ async function until(check: () => boolean | Promise<boolean>) {
 }
 const body = `<title>Opener</title><h1>Original</h1><input aria-label="Agent input" id="field"><button onclick="window.clicks=(window.clicks||0)+1">Change</button>
 <script>addEventListener('keydown',()=>window.keys=(window.keys||0)+1)</script>
+<div id="region" style="height:120px;overflow:auto"><div style="height:800px;padding-top:300px"><p id="deep">Deep text</p></div></div>
 <form id="post" action="/post" method="POST" target="_blank"><input name="value" value="preserved"></form>
 <form id="download" action="/download" method="POST"><input name="value" value="file"></form>
 <script>addEventListener('message', e => window.received = e.data)</script>`;
 let postBody = "";
 let downloadCookie = "";
 const server = http.createServer((req, res) => {
-  if (req.url === "/slow") {
+  if (req.url === "/later") {
+    setTimeout(() => res.end(body), 1500);
+  } else if (req.url === "/slow") {
     res.writeHead(200, { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment; filename="slow.csv"', 'Content-Length': '6' });
     res.write('abc'); setTimeout(() => res.end('def'), 1800);
   } else if (req.url === "/download") {
@@ -59,7 +62,7 @@ contextBridge.exposeInMainWorld('xsb', {
 });`);
   const html = path.join(cwd, 'host.html');
   const hostUrl = new URL(`file://${html}`).href;
-  fs.writeFileSync(html, `<html><body style="margin:0;height:100vh;display:flex"><main style="width:100%;height:100%;display:flex"></main>
+  fs.writeFileSync(html, `<html><body style="margin:0;height:100vh;display:flex"><input id="hostEditor" style="position:absolute;left:-9999px"><main style="width:100%;height:100%;display:flex"></main>
 <script type="module">
 import {showNative, clearNative} from './native-page.js';
 import {showControl,clearControl} from './page-control.js';
@@ -75,6 +78,9 @@ function show(page) {
   container.replaceChildren(view); view.setAttribute('web-contents-id', String(page.contentsId));
 }
 const receive = event => {
+  if (event.annotationTarget) window.target = event.annotationTarget;
+  if (event.webAnnotation) window.notes = [...(window.notes ?? []), event.webAnnotation];
+  if (event.webAnnotationsRemoved) window.removed = [...(window.removed ?? []), event.webAnnotationsRemoved];
   if (event.page) {
     if (!pages.has(event.page.id)) selected = event.page.id;
     pages.set(event.page.id, event.page);
@@ -89,7 +95,7 @@ if (initial) { pageWindowId = initial.id; receive({ page: initial }); }
   ipcMain.handle('test-page-window', event => pages?.shownIn(event.sender));
   host = new BrowserWindow({ show: false, webPreferences: { preload, webview2Tag: true } as any });
   await host.loadURL(hostUrl);
-  pages = new Pages(host.webContents, { preload, pageWindowUrl: hostUrl, controlText: "Agent 正在操作网页" });
+  pages = new Pages(host.webContents, { preload, pageWindowUrl: hostUrl, controlText: "智能体正在控制网页", toneOf: (sessionId) => sessionId === 'sa' ? 'claude' : 'default' });
   ipcMain.handle('test-page', (event, id, op, arg) => {
     if (op === 'bounds') return pages!.layout(id, event.sender, arg);
     if (op === 'controlBounds') return pages!.controlLayout(id, event.sender, arg);
@@ -104,23 +110,44 @@ if (initial) { pageWindowId = initial.id; receive({ page: initial }); }
     assert.ok(!result.isError, `${name} ${JSON.stringify(args)}: ${JSON.stringify(result)}`);
     return result;
   };
+  const shieldView = () => host!.contentView.children.find((view) => view instanceof WebContentsView && ![1, 2, 3, 4, 5].some((n) => pages!.contents(`p${n}`) === view.webContents)) as WebContentsView | undefined;
+  const userTypes = async (key: string) => {
+    await original.executeJavaScript("document.querySelector('#field').focus(); true");
+    original.sendInputEvent({ type: 'keyDown', keyCode: key });
+    original.sendInputEvent({ type: 'char', keyCode: key });
+    original.sendInputEvent({ type: 'keyUp', keyCode: key });
+  };
+  const userClicks = async () => {
+    const point = await original.executeJavaScript("(()=>{const r=document.querySelector('button').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()");
+    original.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    original.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  };
+  await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
   await invoke("browser_navigate", { url });
   const original = pages.contents("p1")!;
-  await until(() => host!.contentView.children.some((view) => view instanceof WebContentsView && view.webContents !== original && view.getVisible()));
-  assert.equal(pages.list()[0].controlling, true);
-  const shield = host.contentView.children.find((view) => view instanceof WebContentsView && view.webContents !== original && view.getVisible()) as WebContentsView;
-  await until(async () => (await shield.webContents.executeJavaScript("document.querySelector('.label')?.textContent")) === 'Agent 正在操作网页');
+  // Control lasts the tool call only: the page is the user's again afterwards.
+  assert.equal(pages.list()[0].controlling, false);
+  await userTypes('A');
+  await pause(100);
+  assert.equal(await original.executeJavaScript("document.querySelector('#field').value"), 'A');
+  await original.executeJavaScript("document.querySelector('#field').value = ''; true");
+  // During a call (a slow load), a visible shield says so and user input is blocked.
+  const slowCall = invoke("browser_navigate", { url: `${url}/later` });
+  await until(() => pages!.list()[0].controlling && !!shieldView()?.getVisible());
+  const shield = shieldView()!;
+  await until(async () => (await shield.webContents.executeJavaScript("document.querySelector('.label')?.textContent")) === '智能体正在控制网页');
   assert.equal(await shield.webContents.executeJavaScript("getComputedStyle(document.querySelector('.frame')).animationName"), 'breathe');
-  await original.executeJavaScript("document.querySelector('#field').focus(); true");
-  original.sendInputEvent({ type: 'keyDown', keyCode: 'A' });
-  original.sendInputEvent({ type: 'char', keyCode: 'A' });
-  original.sendInputEvent({ type: 'keyUp', keyCode: 'A' });
-  const point = await original.executeJavaScript("(()=>{const r=document.querySelector('button').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()");
-  original.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 });
-  original.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  assert.equal(shield.webContents.isFocused(), false, 'the shield must not take the focus');
+  assert.throws(() => pages!.call('p1', 'reload'), /智能体/);
+  await userTypes('A');
+  await userClicks();
   await pause(100);
   assert.equal(await original.executeJavaScript("document.querySelector('#field').value"), '');
   assert.equal(await original.executeJavaScript("window.clicks||0"), 0);
+  await slowCall;
+  assert.equal(pages.list()[0].controlling, false);
+  assert.equal(shield.getVisible(), false);
+  await invoke("browser_navigate", { url });
   const snap = (await invoke('browser_snapshot')).content[0].text;
   const fieldRef = Number(/\[(\d+)\] textbox "Agent input"/.exec(snap)![1]);
   await invoke('browser_type', { ref: fieldRef, text: 'agent works' });
@@ -130,7 +157,103 @@ if (initial) { pageWindowId = initial.id; receive({ page: initial }); }
   const buttonSnap = (await invoke('browser_snapshot')).content[0].text;
   await invoke('browser_click', { ref: Number(/\[(\d+)\] button "Change"/.exec(buttonSnap)![1]) });
   assert.equal(await original.executeJavaScript("window.clicks"), 1);
-  assert.throws(() => pages!.call('p1', 'reload'), /Agent/);
+  // Focus emulation: the agent's clicks and typing leave the host's real focus where the user had it.
+  assert.equal(await host.webContents.executeJavaScript("document.activeElement.id"), 'hostEditor');
+  assert.doesNotThrow(() => pages!.call('p1', 'forward'));
+
+  // Annotations: the debugger's node selection, edited in the host, embedded in the page.
+  const target = () => host!.webContents.executeJavaScript("window.target ?? null");
+  const userClicksAt = async (selector: string) => {
+    const point = await original.executeJavaScript(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);
+    original.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y });
+    original.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    original.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  };
+  await assert.rejects(pages.annotate('p1', original, 'annotate', true), /elsewhere/);
+  await assert.rejects(pages.annotate('p1', host.webContents, 'annotationSave', 'x'), /off/);
+  await pages.annotate('p1', host.webContents, 'annotate', true);
+  assert.equal(pages.list()[0].annotating, true);
+  await userClicksAt('button');
+  await until(async () => (await target())?.seq === 1 && !!(await target()).rect);
+  assert.match((await target()).label, /^button/);
+  assert.equal(await original.executeJavaScript("window.clicks"), 1, 'selection takes the click, not the page');
+  assert.equal(pages.list()[0].annotating, true, 'a selection does not end the mode');
+  await userTypes('Z');
+  await pause(100);
+  assert.equal(await original.executeJavaScript("document.querySelector('#field').value"), 'agent works', 'the keyboard is blocked while annotating');
+  await assert.rejects(pages.annotate('p1', host.webContents, 'annotationSave', ' '), /characters/);
+  await pages.annotate('p1', host.webContents, 'annotationSave', '检查这个按钮 <b>not html</b>');
+  assert.equal(pages.list()[0].annotations, 1);
+  assert.equal((await target()).seq, 0);
+  // The note goes to the conversation: the user's words, the element's HTML and its picture.
+  const [sent] = await host.webContents.executeJavaScript("window.notes");
+  assert.equal(sent.sessionId, 'sa');
+  assert.equal(sent.annotation.type, 'web_annotation');
+  assert.match(sent.annotation.id, /^[0-9a-f-]{36}$/);
+  assert.equal(sent.annotation.pageId, 'p1');
+  assert.equal(sent.annotation.index, 1);
+  assert.equal(sent.annotation.note, '检查这个按钮 <b>not html</b>');
+  assert.match(sent.annotation.html, /^<button onclick=.*>Change<\/button>$/);
+  assert.match(sent.annotation.label, /^button/);
+  assert.equal(sent.annotation.url, `${url}/`);
+  assert.equal(sent.annotation.image.mimeType, 'image/png');
+  assert.equal(Buffer.from(sent.annotation.image.data, 'base64').subarray(1, 4).toString(), 'PNG');
+  // In the style of the page's agent: claude's orange, not red.
+  assert.equal(pages.list()[0].annotationTone, 'claude');
+  assert.equal(await original.executeJavaScript("document.querySelector('xsb-annotations').style.getPropertyValue('--xsb-accent')"), 'rgb(217,119,87)');
+  const tree = JSON.stringify(await original.debugger.sendCommand('DOM.getDocument', { depth: -1, pierce: true }));
+  assert.ok(tree.includes('检查这个按钮 <b>not html</b>'), 'the note is embedded in the page, as text');
+  assert.equal(await original.executeJavaScript("typeof window.xsbNotes"), 'undefined', 'the page cannot reach the isolated world');
+  // A scrolling region: the selected element's place follows it, and leaves when it scrolls out of sight.
+  await original.executeJavaScript("document.querySelector('#region').scrollTop = 250; true");
+  await pause(50);
+  await userClicksAt('#deep');
+  await until(async () => (await target())?.seq === 2 && !!(await target()).rect);
+  const first = (await target()).rect;
+  await original.executeJavaScript("document.querySelector('#region').scrollTop = 230; true");
+  await until(async () => Math.abs(((await target()).rect?.y ?? -1) - (first.y + 20)) < 1.5);
+  await original.executeJavaScript("document.querySelector('#region').scrollTop = 0; true");
+  await until(async () => (await target()).seq === 2 && (await target()).rect === null);
+  await pages.annotate('p1', host.webContents, 'annotationDiscard');
+  await until(async () => (await target()).seq === 0);
+  // An agent taking the page ends the annotating; the note stays.
+  await invoke('browser_snapshot');
+  assert.equal(pages.list()[0].annotating, false);
+  assert.equal(pages.list()[0].annotations, 1);
+  await userTypes('Y');
+  await pause(100);
+  assert.equal(await original.executeJavaScript("document.querySelector('#field').value"), 'agent worksY', 'the keyboard is the user\'s again');
+  // The composer takes a note out of the page (sent, or dropped from its tray), annotating or not; only by its ids.
+  await assert.rejects(pages.annotate('p1', host.webContents, 'annotationsRemove', 'all'), /list of ids/);
+  await assert.rejects(pages.annotate('p1', host.webContents, 'annotationsRemove', [1]), /list of ids/);
+  await assert.rejects(pages.annotate('p1', original, 'annotationsRemove', [sent.annotation.id]), /elsewhere/);
+  await pages.annotate('p1', host.webContents, 'annotationsRemove', ['not-a-note']);
+  assert.equal(pages.list()[0].annotations, 1);
+  await pages.annotate('p1', host.webContents, 'annotationsRemove', [sent.annotation.id]);
+  assert.equal(pages.list()[0].annotations, 0);
+  assert.ok(!JSON.stringify(await original.debugger.sendCommand('DOM.getDocument', { depth: -1, pierce: true })).includes('检查这个按钮'));
+  // A new document: no notes, and selection works again in it.
+  await pages.annotate('p1', host.webContents, 'annotate', true);
+  await pages.navigate('p1', url);
+  await until(() => !original.isLoading() && pages!.list()[0].annotations === 0);
+  await pause(200);
+  await userClicksAt('button');
+  await until(async () => (await target())?.seq === 3 && !!(await target()).rect);
+  // Clearing on the page tells the main window which notes went, for the composer to drop them too.
+  await pages.annotate('p1', host.webContents, 'annotationSave', 'A');
+  await userClicksAt('#field');
+  await until(async () => (await target())?.seq === 4);
+  await pages.annotate('p1', host.webContents, 'annotationSave', 'B');
+  assert.equal(pages.list()[0].annotations, 2);
+  const kept = (await host.webContents.executeJavaScript("window.notes")).slice(-2).map((n: any) => n.annotation.id);
+  await pages.annotate('p1', host.webContents, 'annotationsClear');
+  assert.equal(pages.list()[0].annotations, 0);
+  await until(async () => (await host!.webContents.executeJavaScript("window.removed?.length ?? 0")) === 1);
+  const [cleared] = await host.webContents.executeJavaScript("window.removed");
+  assert.deepEqual({ ...cleared, ids: [...cleared.ids].sort() }, { pageId: 'p1', sessionId: 'sa', ids: [...kept].sort() });
+  await pages.annotate('p1', host.webContents, 'annotate', false);
+  assert.equal(pages.list()[0].annotating, false);
+  await original.executeJavaScript("document.querySelector('#field').value = 'agent works'; true");
   await original.executeJavaScript(`window.child = window.open('about:blank'); child.document.write('<h1>Blank child</h1>'); true`, true);
   await until(() => pages!.list().length === 2);
   assert.equal(original.getURL(), `${url}/`);
@@ -220,8 +343,6 @@ if (initial) { pageWindowId = initial.id; receive({ page: initial }); }
   assert.equal((await browser.call('browser_downloads_progress', { id: oldId }, new AbortController().signal)).isError, true);
   await until(() => fs.existsSync(path.join(cwd, '.xsb2/downloads/slow.csv')) && fs.readFileSync(path.join(cwd, '.xsb2/downloads/slow.csv'), 'utf8') === 'abcdef');
   assert.equal(JSON.parse((await invoke('browser_downloads_list')).content[0].text).total, 0);
-  context = { ...context, active: false };
-  for (const fn of listeners) fn(context);
   assert.equal(pages.list().find(p => p.id === 'p1')!.controlling, false);
   await original.executeJavaScript("document.querySelector('#field').focus(); true");
   original.sendInputEvent({ type: 'keyDown', keyCode: 'B' });
@@ -235,7 +356,7 @@ if (initial) { pageWindowId = initial.id; receive({ page: initial }); }
   assert.equal(pages.list().find((p) => p.id === 'p5')!.agent, false);
   assert.equal(pages.list().find((p) => p.id === 'p5')!.window, false);
   assert.equal(BrowserWindow.getAllWindows().length, 1, 'user popups must also stay in tabs');
-  console.log("PASS user input blocked while CDP works, runtime unlock, controlled popup tabs, POST/blob/direct downloads with preserved suffixes, per-turn list reset, explicit windows and restore");
+  console.log("PASS annotations (debugger selection, embedded notes, region scrolling), shield and blocked user input for one tool call only, host focus kept by focus emulation, controlled popup tabs, POST/blob/direct downloads with preserved suffixes, per-turn list reset, explicit windows and restore");
 } catch (e) {
   console.error(e);
   process.exitCode = 1;

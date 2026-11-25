@@ -10,6 +10,7 @@ import { $, ICON, fill, h } from "./dom.js";
 import { t } from "./i18n.js";
 import { showWeb } from "./webview.js";
 import { clearControl } from "./page-control.js";
+import { annotateButton, clearAnnotations } from "./annotate.js";
 
 function ownerOf(page) {
   const agent = state.agents.find(a => a.mainSessionId === page.sessionId);
@@ -38,8 +39,8 @@ export function selectTab(id) {
 }
 
 /** 标签栏从左到右的 id。 */
-function tabIds(hasWorkflow) {
-  return ordered([hasWorkflow && state.workflowTab && "workflow", state.catalogTab && "catalog",
+function tabIds() {
+  return ordered([state.workflowTab && "workflow", state.catalogTab && "catalog",
     ...state.artifactTabs.map((tab) => tab.id), ...sessionPages().map((p) => p.id)].filter(Boolean));
 }
 
@@ -102,8 +103,8 @@ function dragToReorder(list) {
 }
 
 /** 关掉一个标签；关的是当前标签时，选中它旁边的那个，一个都不剩就回到启动页。 */
-function closeTab(id, hasWorkflow) {
-  const ids = tabIds(hasWorkflow), index = ids.indexOf(id);
+function closeTab(id) {
+  const ids = tabIds(), index = ids.indexOf(id);
   if (id === "workflow") state.workflowTab = false;
   else if (id === "catalog") state.catalogTab = false;
   else state.artifactTabs = state.artifactTabs.filter((tab) => tab.id !== id);
@@ -124,14 +125,17 @@ function launcher(hasWorkflow) {
     !session && h("p", { class: "launcher-note" }, t("side.launcher.noSession")),
     state.pages && item(ICON.globe, t("side.launcher.browser"), t("side.launcher.browserHint"), newTab),
     item(ICON.grid, t("tabs.artifacts"), t("side.launcher.assetsHint"), () => selectTab("catalog")),
-    item(ICON.flow, t("flow.title"), t(hasWorkflow || !session ? "side.launcher.workflowHint" : "side.launcher.workflowNone"), () => selectTab("workflow"), !hasWorkflow));
+    item(ICON.flow, t("flow.title"), t(hasWorkflow || !session ? "side.launcher.workflowHint" : "side.launcher.workflowNone"), () => selectTab("workflow")));
 }
+
+// 用鼠标连续关标签时（像 Chromium）：关掉一个后，其余标签保持关之前的宽度，下一个标签的关闭按钮正好移到鼠标下；
+// 鼠标离开标签栏后再恢复随数量伸缩。键盘关闭不冻结。
+let frozenWidth = null;
 
 /** 按 state.tab 和 state.pages 画出标签栏和当前的网页。 */
 export function renderSide() {
   const flow = currentFlow();
   const hasWorkflow = flow?.version || flow?.candidate;
-  if (!hasWorkflow && state.tab === "workflow") state.tab = null;
   // 标签都属于打开的会话；没有会话时只剩启动页。
   if (!rootSession()) { state.tab = null; state.catalogTab = false; state.workflowTab = false; state.artifactTabs = []; }
   if (state.tab === "catalog") state.catalogTab = true;
@@ -140,28 +144,34 @@ export function renderSide() {
   const page = pageOf(state.tab);
   const launching = state.tab === null;
   $("#side-workflow").hidden = !workflow;
-  if (workflow) renderWorkflow(flow);
-  else if (!hasWorkflow) renderWorkflow(null);
-  if (!page || page.window) clearControl();
+  if (workflow || !hasWorkflow) renderWorkflow(hasWorkflow ? flow : null);
+  if (!page || page.window) { clearControl(); clearAnnotations(); }
   $("#side-launcher").hidden = !launching;
   if (launching) fill($("#side-launcher"), launcher(hasWorkflow));
   $("#side-artifacts").hidden = !!page || workflow || launching;
   $("#side-web").hidden = !page;
   $("#tabs").hidden = false;      // 没有 webview2 时仍然可以打开制品标签
   const tabList = h("div", { class: "tab-list" });
-  const closeButton = (onclick) => h("button", { class: "icon-btn", title: t("tabs.close"), "aria-label": t("tabs.close"), html: ICON.close, onclick });
+  if (frozenWidth) { tabList.classList.add("frozen"); tabList.style.setProperty("--tab-frozen", frozenWidth + "px"); }
+  $("#tabs").onpointerleave = () => {
+    if (!frozenWidth) return;
+    frozenWidth = null;
+    $("#tabs .tab-list")?.classList.remove("frozen");
+  };
+  const closeButton = (onclick) => h("button", { class: "icon-btn", title: t("tabs.close"), "aria-label": t("tabs.close"), html: ICON.close,
+    onclick: (e) => { if (e.detail > 0) frozenWidth ??= e.currentTarget.closest(".tab").getBoundingClientRect().width; onclick(); } });
   // 标签像 Chromium 的标签条一样随数量变窄（styles.css 的 .tab 容器查询）：先藏起非当前标签的关闭按钮，再只留图标。
   const tab = (id, icon, label, title, close, extra = {}) => h("div", { class: "tab", "data-id": id, "aria-current": String(state.tab === id), title, ...extra },
     h("button", { class: "tab-main", onclick: () => selectTab(id) }, icon, h("span", { class: "tab-title" }, label)),
     closeButton(close));
-  const fixed = (id, icon, label) => tab(id, h("span", { class: "tab-icon", "aria-hidden": "true", html: icon }), label, label, () => closeTab(id, hasWorkflow));
+  const fixed = (id, icon, label) => tab(id, h("span", { class: "tab-icon", "aria-hidden": "true", html: icon }), label, label, () => closeTab(id));
   const tabs = [
-    hasWorkflow && state.workflowTab && fixed("workflow", ICON.flow, t("flow.title")),
+    state.workflowTab && fixed("workflow", ICON.flow, t("flow.title")),
     state.catalogTab && fixed("catalog", ICON.grid, t("tabs.artifacts")),
     ...state.artifactTabs.map((item) => {
       const artifact = state.artifacts.find((a) => a.id === item.artifactId);
       return tab(item.id, fileIcon(artifact?.name ?? item.artifactId), artifact ? artifactLabel(artifact) : item.artifactId,
-        artifact ? `${artifact.name}\n${artifact.path}` : item.artifactId, () => closeTab(item.id, hasWorkflow));
+        artifact ? `${artifact.name}\n${artifact.path}` : item.artifactId, () => closeTab(item.id));
     }),
     // 智能体打开并操作的网页，图标角上有一个强调色的点。
     ...pages.map((p) => tab(p.id, pageIcon(p), titleOf(p), p.agent ? `${titleOf(p)}\n${p.url}\n${t("tabs.agent")}` : `${titleOf(p)}\n${p.url}`,
@@ -195,6 +205,7 @@ export function renderSide() {
 
   $("#web-back").disabled = !page.canGoBack;
   $("#web-forward").disabled = !page.canGoForward;
+  annotateButton($("#web-annotate"), page);
   if (document.activeElement !== $("#web-url")) $("#web-url").value = page.url.replace(/^about:blank$/, "");
   if (page.window) {
     fill($("#web-body"), h("div", { class: "web-note" },

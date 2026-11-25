@@ -716,3 +716,84 @@ test("a huge paste is saved whole to a file the agent can read, not rejected; th
   assert.equal(shown.map((u: any) => u.content.text).join(""), huge, "the user sees what they sent");
   assert.ok(!records.some((u: any) => u._meta?.["dev.xsb/discarded"]), "nothing is discarded for its size");
 });
+
+// ---- what the user sees is what the model sees (docs/TURN-LIFECYCLE.md 4) ---------------------------------------
+
+const metas = (state: State, to: Addr) => state.store.read(Paths.transcript(to.agentId, to.sessionId)).map((r: any) => r.update ?? {});
+
+test("a user's message that failed to reach the model goes with the next one, once; sending it again after that is refused", async (t) => {
+  const { session, state, hub, settle, prompts, idle, B } = setup(t);
+  const backend = await (session as any).ensureBackend();
+  const real = backend.prompt;
+  let refuse = true;
+  backend.prompt = async (id: string, blocks: any[]) => {
+    if (refuse) { refuse = false; throw new RpcError(-32603, "rate limited"); }
+    return real(id, blocks);
+  };
+  const client: any = { echo: true };
+  await assert.rejects(hub.delivery.fromUser(session, [text("FIRST")], { kind: "user", messageId: "u1" }, client), /rate limited/);
+  await settle();
+  assert.deepEqual(session.rec.owed, ["u1"], "owed, and kept on disk");
+  const discarded = metas(state, B).map((u) => u._meta?.["dev.xsb/discarded"]).filter(Boolean);
+  assert.deepEqual(discarded.map((d: any) => [d.messageId, d.reason, d.owed]), [["u1", "failed", true]], "recorded as not seen, why, and owed");
+  const second = hub.delivery.fromUser(session, [text("SECOND")], { kind: "user", messageId: "u2" }, client);
+  await settle(); await second;
+  assert.match(prompts.at(-1)!, /did not reach you[^]*FIRST[^]*new message:\nSECOND/, "given first, and said so");
+  assert.equal(session.rec.owed?.length ?? 0, 0, "settled once it was in");
+  assert.deepEqual(metas(state, B).map((u) => u._meta?.["dev.xsb/redelivered"]).filter(Boolean), [{ messageIds: ["u1"], with: "u2" }]);
+  idle(); await settle();
+  const third = hub.delivery.fromUser(session, [text("THIRD")], { kind: "user", messageId: "u3" }, client);
+  await settle(); await third;
+  assert.doesNotMatch(prompts.at(-1)!, /FIRST/, "never given twice");
+  idle(); await settle();
+  await assert.rejects(hub.delivery.fromUser(session, [text("FIRST")], { kind: "user", messageId: "u4", resendOf: "u1" }, client), /already reached the model/);
+  assert.ok(!prompts.some((p) => p.split("\nFIRST\n").length > 2), "its content is in one prompt once");
+});
+
+test("sending the same message again (its answer was lost) reaches the model once, and xsb says what became of it", async (t) => {
+  const { session, state, hub, settle, prompts, idle, B } = setup(t);
+  const client: any = { echo: true };
+  const first = hub.delivery.fromUser(session, [text("ONCE")], { kind: "user", messageId: "d1" }, client);
+  const again = hub.delivery.fromUser(session, [text("ONCE")], { kind: "user", messageId: "d1" }, client);
+  await settle();
+  assert.deepEqual(await Promise.all([first, again]), [{ messageId: "d1" }, { messageId: "d1" }]);
+  idle(); await settle();
+  assert.deepEqual(await hub.delivery.fromUser(session, [text("ONCE")], { kind: "user", messageId: "d1" }, client), { messageId: "d1" });
+  assert.equal(prompts.filter((p) => p.includes("ONCE")).length, 1);
+  const status = hub.delivery.status(["d1", "never-sent"]);
+  assert.equal(status["never-sent"], "unknown");
+  assert.ok(["inserted", "seen"].includes(status.d1));
+  // Recorded as waiting first, then as in the conversation, under the same id: a reader sees it waiting until it is in.
+  const updates = metas(state, B);
+  const accepted = updates.findIndex((u) => u._meta?.["dev.xsb/accepted"]?.messageId === "d1");
+  const inserted = updates.findIndex((u) => u.sessionUpdate === "user_message_chunk" && u.messageId === "d1");
+  assert.ok(accepted >= 0 && inserted > accepted);
+  assert.equal(updates.filter((u) => u._meta?.["dev.xsb/accepted"]?.messageId === "d1").length, 1);
+});
+
+test("a user stop records what it took from the model: queued user mail is shown as not seen, not dropped silently", async (t) => {
+  const { session, state, hub, settle, B, give, A, idle } = setup(t);
+  give(A, B, "work"); await settle();
+  const client: any = { echo: true };
+  const waiting = hub.delivery.fromUser(session, [text("LATER")], { kind: "user", messageId: "s1" }, client);
+  await settle();
+  hub.delivery.userStop(session);
+  idle("cancelled");
+  await settle();
+  await assert.rejects(waiting);
+  const records = metas(state, B).map((u) => u._meta?.["dev.xsb/discarded"]).filter((d: any) => d?.messageId === "s1");
+  assert.equal(records.length, 1, "one record of it");
+  assert.equal(records[0].reason, "stopped");
+  assert.ok(!records[0].owed, "a stop is the user's choice: not given later");
+});
+
+test("while the hub stops, a turn that could not start keeps its input in the inbox for the next start", async (t) => {
+  const { session, state, hub, settle, B } = setup(t);
+  (session as any).ensureBackend = async () => { hub.stopping = true; throw new Error("the agent program is gone"); };
+  const client: any = { echo: true };
+  void hub.delivery.fromUser(session, [text("KEEP")], { kind: "user", messageId: "k1" }, client).catch(() => {});
+  await settle();
+  assert.ok(state.mail.has("k1"), "still in the inbox");
+  assert.notEqual(state.ledger.get("k1")?.state, "discarded_unseen", "not recorded as never to be seen");
+  assert.ok(!metas(state, B).some((u) => u._meta?.["dev.xsb/discarded"]?.messageId === "k1"));
+});

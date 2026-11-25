@@ -3,12 +3,15 @@
   const params = new URLSearchParams(location.search);
   const language = params.get("lang") ?? (navigator.language.startsWith("zh") ? "zh-CN" : "en");
   const label = (zh, en) => (language === "zh-CN" ? zh : en);
+  // ?long：所有名字都加得很长，用来检查文字超长时有没有省略号、会不会撑破布局。
+  const long = params.has("long");
+  const L = (text) => long ? text + label("：一个名字特别特别长、专门用来检查省略号和换行的示例文字", " — an extremely long name used to check ellipsis and wrapping") : text;
   const listeners = new Set();
   const emit = (event) => listeners.forEach((fn) => fn(structuredClone(event)));
   const now = () => new Date().toISOString();
   let sequence = 0;
   const entry = (kind, text) => ({ id: "m" + ++sequence, kind, content: [{ type: "text", text }] });
-  const workspace = { name: label("短片工作区", "Film studio"), path: "/preview/film" };
+  const workspace = { name: L(label("短片工作区", "Film studio")), path: long ? "/Users/someone/Documents/projects/clients/very-long-client-name/preview/film-studio-workspace" : "/preview/film" };
   const agent = (id, name, backend = "codex") => ({
     id,
     name,
@@ -20,9 +23,9 @@
     createdAt: now(),
     mainSessionId: "session-" + id,
   });
-  const main = agent("main", label("短片制作", "Short film"));
+  const main = agent("main", L(label("短片制作", "Short film")));
   const worker = {
-    ...agent("art", label("定妆图", "Costume")),
+    ...agent("art", L(label("定妆图", "Costume"))),
     workflowOwner: main.mainSessionId,
     workflowNode: "A",
     state: "running",
@@ -77,7 +80,7 @@
 
   const art = {
     id: "material",
-    name: "brief.md",
+    name: long ? "a-very-long-brief-file-name-for-checking-ellipsis-in-every-place.md" : "brief.md",
     registeredName: "brief",
     assetId: main.mainSessionId + "/brief",
     assetVersion: 1,
@@ -117,8 +120,11 @@
     if (!a) throw Error("Unknown conversation");
     return a;
   };
+  // 后端在第一次打开设置菜单（discover）时才连上，拉取要一会儿。
+  const connected = new Set();
   function composerState(id) {
     const selected = get(id).selected ?? {};
+    if (!connected.has(id)) return { connected: false, selected, configOptions: [] };
     const option = (id, category, values) => ({ configId: id, category, type: "select", currentValue: selected[id] ?? values[0],
       options: values.map(value => ({ name: value, value })) });
     return { connected: true, selected, configOptions: [
@@ -127,11 +133,11 @@
   }
   // 插件：三处文件夹，规则与中枢 plugins.ts 相同（后面的地方代替同名的，工作区插件需确认）。
   const plugins = [
-    { name: "browser", scope: "builtin", dir: "<app>/plugins/browser", description: label("右栏浏览器", "The side panel browser"), runs: "${node} ${pluginDir}/server.mjs" },
-    { name: "media", scope: "builtin", dir: "<app>/plugins/media", description: label("生成图片和视频", "Generate images and videos"), runs: "${node} ${pluginDir}/server.mjs" },
-    { name: "search", scope: "global", dir: "~/.xsb2_global/plugins/search", description: label("网页搜索", "Web search"), runs: "npx -y search-mcp" },
+    { name: "browser", scope: "builtin", dir: "<app>/plugins/browser", description: L(label("右栏浏览器", "The side panel browser")), runs: "XSB_BROWSER_SOCKET=${env:XSB_BROWSER_SOCKET} node server.mjs" },
+    { name: "media", scope: "builtin", dir: "<app>/plugins/media", description: L(label("生成图片和视频", "Generate images and videos")), runs: "PATH=${env:PATH} node server.mjs" },
+    { name: "search", scope: "global", dir: "~/.xsb2_global/plugins/search", description: label("网页搜索", "Web search"), runs: "node index.js" },
     { name: "broken", scope: "global", dir: "~/.xsb2_global/plugins/broken", problem: "bad_json" },
-    { name: "render", scope: "project", dir: ".xsb2/plugins/render", runs: "./render-mcp --gpu", approved: false },
+    { name: "render", scope: "project", dir: ".xsb2/plugins/render", runs: "node dist/server.js", approved: false },
   ];
   const off = { global: new Set(), project: new Set() };
   function pluginViews() {
@@ -156,7 +162,16 @@
     },
     pickFolder: async () => ({ ...workspace, initialized: true }),
     newWindow: () => window.open(location.href),
-    composerState: async id => composerState(id),
+    windowColors: async () => {},
+    deleteConversation: async (id) => {
+      const index = data.agents.findIndex((a) => a.id === id);
+      if (index >= 0) { data.agents.splice(index, 1); emit({ removedAgent: id }); }
+    },
+    cleanUp: async () => ({ conversations: 1, bytes: 3_456_789 }),
+    composerState: async (id, discover) => {
+      if (discover && !connected.has(id)) { await new Promise(r => setTimeout(r, 1500)); connected.add(id); }
+      return composerState(id);
+    },
     setComposerOption: async (id, configId, value) => {
       (get(id).selected ??= {})[configId] = value;
       const controls = composerState(id);
@@ -164,7 +179,7 @@
       return controls;
     },
     openPage: async (url, embedded, sessionId) => {
-      const page = { id: "page" + ++sequence, sessionId, contentsId: 0, url, title: "", loading: false, canGoBack: false, canGoForward: false, window: false, pinned: false, agent: false };
+      const page = { id: "page" + ++sequence, sessionId, contentsId: 0, url, title: long ? L("网页") : "", loading: false, canGoBack: false, canGoForward: false, window: false, pinned: false, agent: false };
       if (!embedded) emit({ page });
       return structuredClone(page);
     },

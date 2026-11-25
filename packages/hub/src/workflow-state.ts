@@ -14,6 +14,8 @@ export type Work = {
   attempt?: string;
   staged?: Output;
   inserted?: boolean;
+  /** The context epoch of the node's conversation when the assignment got into it: a renewed conversation may not have it. */
+  epoch?: number;
   suspendedBy?: "pause" | "failure";
   selected: Record<string, string>;
   reads?: AssetRef[];
@@ -27,13 +29,17 @@ type Instance = {
   goals: string[];
   extras: Record<string, unknown>[];
   work?: Work;
+  /** Assignments the node's agent had in its conversation that were withdrawn since: it is told so with its next one. */
+  revoked?: string[];
   last?: Delivery;
   paused: boolean;
+  /** The node waits for the main agent's decision: its agent escalated with pauseSelf, for this reason. */
   replan?: string;
   invitation?: string;
   interruptions: Interruption[];
 };
-type Notice = { id: string; text: string; invitation?: string; delivery?: string; posted?: string };
+/** `attempts`: how many times it was posted and discarded unseen (the model never got it); retried a few times on its own. */
+type Notice = { id: string; text: string; invitation?: string; delivery?: string; posted?: string; attempts?: number };
 export type Flow = {
   owner: string;
   active?: string;
@@ -47,6 +53,11 @@ export type Flow = {
   interruptions: Interruption[];
   receipts: Record<string, unknown>;
   outbox: Notice[];
+  /**
+   * What a user stop took away before the main agent heard of it (queued additional work, undelivered notices): it is
+   * told so with its next workflow context, once that is in its conversation.
+   */
+  cancelled?: string[];
 };
 /** How many replaced versions a workflow keeps. */
 const HISTORY_LIMIT = 50;
@@ -424,6 +435,7 @@ export function view(f: Flow): WorkflowView {
     version: f.active,
     candidate: f.candidate && { version: f.candidate.version, graph: f.versions[f.candidate.version] },
     paused: f.paused,
+    interrupted: f.interruptions.length > 0,
     error: f.error,
     edges: graph?.edges ?? [],
     nodes:
@@ -446,6 +458,7 @@ export function view(f: Flow): WorkflowView {
           kind: n.kind,
           status,
           paused: i.paused || !!i.replan,
+          interrupted: i.interruptions.length > 0,
           agentId: i.agentId,
           sessionId: i.sessionId,
           target: i.work?.kind === "graph" ? i.work.id : i.last?.valid ? i.last.id : undefined,

@@ -4,7 +4,7 @@
  * Each new ACP session starts an independent main conversation. Extensions expose
  * its workflow, active task conversations, workspace assets and installed backends.
  */
-import { SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
+import { SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, LANGUAGES, LanguageExt, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
 import type { Connection, HistoryImage, OriginMeta } from "@xsb/protocol";
 import { describeBackends, loadProjectConfig, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
@@ -138,12 +138,24 @@ export class Client {
       // Answered once it is in the conversation; the user's word never waits behind work (kernel.ts, `deliveryPolicy`).
       const origin = userOrigin(p);
       origin.messageId ??= newId("m");
+      // The same message sent again (its answer was lost): no second copy, and no second workflow interruption.
+      if (hub.delivery.known(origin.messageId)) return hub.delivery.fromUser(session, p.prompt, origin, this);
       hub.workflows.input(session,origin.messageId,p.prompt,p._meta?.[Workflow.target]);
       if (!session.rec.title && !hub.agent(session.agentId).workflowOwner) {
         const first = p.prompt.find((b: any) => b.type === "text")?.text?.trim();
         if (first) { session.save({title:first.slice(0,64)}); hub.agentChanged(session.agentId); }
       }
-      return hub.delivery.fromUser(session, p.prompt, origin, this);
+      const messageId = origin.messageId;
+      // An interruption is the workflow's only once the model has it: one that never gets there blocks nothing.
+      return hub.delivery.fromUser(session, p.prompt, origin, this).catch((e) => {
+        hub.workflows.discarded(session, messageId);
+        throw e;
+      });
+    });
+
+    conn.onRequest(Ledger.status, (p) => {
+      if (!Array.isArray(p?.messageIds) || p.messageIds.length > 500 || !p.messageIds.every((id: unknown) => typeof id === "string")) throw RpcError.invalidParams("messageIds must be a list of ids");
+      return { states: hub.delivery.status(p.messageIds) };
     });
 
     // The user's stop: the session's work, and the tasks it works on (delivery.ts, `userStop`).
@@ -159,7 +171,9 @@ export class Client {
 
     conn.onRequest(SessionControls.get, async (p) => {
       const session = this.own(p.sessionId);
-      if (p.discover === true) await session.ensureBackend();
+      // Only a conversation the agent program already has is resumed for its settings: a new one calls no backend
+      // until its first message (`ComposerState.lazy`).
+      if (p.discover === true && session.rec.backendSessionId) await session.ensureBackend();
       return session.composerState();
     });
 
@@ -168,7 +182,7 @@ export class Client {
     // ---- agents ------------------------------------------------------------
 
     conn.onRequest(Agents.list, () => ({
-      agents: [...hub.state.agents.values()].filter(a => a.conversation && (!a.workflowOwner || hub.workflows.read(a.workflowOwner).instances[a.workflowNode!]?.agentId === a.id || hub.workflows.retired(a.id))).map((a) => hub.agentInfo(a)),
+      agents: [...hub.state.agents.values()].filter(a => a.conversation && !hub.isDeleted(a) && (!a.workflowOwner || hub.workflows.read(a.workflowOwner).instances[a.workflowNode!]?.agentId === a.id || hub.workflows.retired(a.id))).map((a) => hub.agentInfo(a)),
     }));
     conn.onRequest(ToolServers.apply, () => ({ waiting: hub.applyTools() }));
 
@@ -187,16 +201,32 @@ export class Client {
         if (typeof p.backend !== "string") throw RpcError.invalidParams("backend must be a name");
         hub.backends.spec({ ...agent, backend: p.backend });
         const session = hub.mainSession(agent.id);
-        if (session.busy) throw RpcError.invalidParams("The conversation is working; switch its backend once it is idle.");
+        if (session.busy) throw new RpcError(-32602, "The conversation's current turn has not ended; switch its backend once it has.", { errorKind: "turn_running" });
+        // Only a conversation never given to its agent program changes backend in place; one that was moves to a
+        // new conversation (`Agents.migrate`), whose model reads this one as history.
+        if (session.rec.backendSessionId && !session.rec.backendFresh)
+          throw new RpcError(-32602, "This conversation has been given to its agent program; switching backends moves it to a new conversation.", { errorKind: "backend_started" });
         next = { ...next, backend: p.backend };
-        // Its next turn binds the new backend: a new backend session, handed what came before within the new
-        // backend's own limits (LiveSession.bind, `backend_changed`). The old process has no part in it any more.
+        // A session opened only to read settings held nothing: the first message opens one on the new backend.
+        if (session.rec.backendSessionId) session.save({ backendSessionId: undefined, backendFresh: undefined, backend: undefined, selectedConfig: undefined });
         hub.backends.stop(agent.id);
       }
       hub.state.commit([ops.putAgent(next)]);
       hub.agentChanged(agent.id);
       return { agent: hub.agentInfo(hub.agent(agent.id)) };
     });
+    conn.onRequest(Agents.migrate, (p) => {
+      const agent = hub.state.agents.get(p?.agentId);
+      if (!agent || agent.workflowOwner) throw RpcError.notFound(`agent ${p?.agentId}`);
+      if (typeof p.backend !== "string" || !p.backend) throw RpcError.invalidParams("backend must be a name");
+      const created = hub.migrate(agent.id, p.backend);
+      return { agent: hub.agentInfo(hub.agent(created.agentId)) };
+    });
+    conn.onRequest(Agents.delete, (p) => {
+      hub.deleteConversation(p?.agentId);
+      return {};
+    });
+    conn.onRequest(Agents.purge, () => hub.purgeDeleted());
     conn.onRequest(Workflow.get, p => hub.workflows.get(p.sessionId));
     conn.onRequest(Workflow.list, () => ({ workflows:[...hub.state.workflows.keys()].map(id => hub.workflows.get(id)) }));
     for (const action of ["pause","resume"] as const) conn.onRequest(Workflow[action], p => hub.workflows.clientControl(p.sessionId,action === "pause",p.nodes));
@@ -247,8 +277,8 @@ export class Client {
 
 /** Input from a client is the user's; the client may name the message to recognise it when it is echoed. */
 function userOrigin(params: any): OriginMeta {
-  const messageId = params._meta?.[OriginExt.key]?.messageId;
-  return { kind: "user", ...(typeof messageId === "string" ? { messageId } : {}) };
+  const { messageId, resendOf } = params._meta?.[OriginExt.key] ?? {};
+  return { kind: "user", ...(typeof messageId === "string" ? { messageId } : {}), ...(typeof resendOf === "string" ? { resendOf } : {}) };
 }
 
 function setup(session: LiveSession): Record<string, unknown> {

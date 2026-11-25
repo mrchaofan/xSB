@@ -88,7 +88,7 @@ Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src
 | | `language` | Agent 的工作语言（`en` 或 `zh-CN`），见 3.4 |
 | | `plugins.<名称>.enabled` | 在这个项目里停用某个插件 |
 
-**插件（工具服务，MCP）**（[plugins.ts](../packages/hub/src/plugins.ts)）：每个插件一个文件夹，三处位置结构相同——应用自带 `<应用>/plugins/<名称>/`（随代码放在 `dist/plugins`，开发与发布时相对位置一致，不在 asar 内）、这台机器 `~/.xsb2_global/plugins/<名称>/`、项目 `.xsb2/plugins/<名称>/`，后面的同名代替前面的。文件夹里的 `plugin.json` 写 `{ description?, command, args?, env? }`（stdio）或 `{ type: "http", url, headers? }`，字符串里可用 `${pluginDir}`、`${node}`（应用自带的 Node）、`${env:变量名}`；以 `./` 开头的命令在插件文件夹里。内置的 browser、media 也是这样的文件夹。添加插件就是放入文件夹，重启桌面端或调用 `_dev.xsb/tools/apply`；中枢在启动后端时读取，按名称排序，工具与提示词不变的会话不会被重启。项目插件随项目走，要在这台机器上确认（按项目路径、名称和清单内容算指纹）后才启动。文件夹缺失或被删、清单缺失或格式错误、配置文件损坏，都只让那个插件标为"无法使用"并跳过，不影响会话和桌面端。
+**插件（工具服务，MCP）**（[plugins.ts](../packages/hub/src/plugins.ts)）：每个插件一个文件夹，三处位置结构相同——应用自带 `<应用>/plugins/<名称>/`（随代码放在 `dist/plugins`，开发与发布时相对位置一致，不在 asar 内）、这台机器 `~/.xsb2_global/plugins/<名称>/`、项目 `.xsb2/plugins/<名称>/`，后面的同名代替前面的。每个插件文件夹是一个 npm 包（不必发布）：`package.json` 的 `main` 是要运行的文件（未写时按 npm 惯例为 `index.js`），必须是插件文件夹里的文件；它用应用自带的 Node 以 stdio 方式作为 MCP 服务启动。`description` 是告诉会话的说明；插件自己的环境变量写在 `xsb.env`，其中可用 `${pluginDir}`、`${node}`（应用自带的 Node）、`${env:变量名}`。插件名是文件夹名，不是包名。内置的 browser、media 也是这样的文件夹（`main` 为打包出的 `server.mjs`）。添加插件就是放入文件夹，重启桌面端或调用 `_dev.xsb/tools/apply`；中枢在启动后端时读取，按名称排序，工具与提示词不变的会话不会被重启。项目插件随项目走，要在这台机器上确认（按项目路径、名称、`package.json` 和 `main` 文件的内容算指纹，任一改动都要重新确认；`main` 再加载的其他文件不在指纹内）后才启动。文件夹缺失或被删、`package.json` 缺失或格式错误、`main` 不在文件夹内或不存在、配置文件损坏，都只让那个插件标为"无法使用"并跳过，不影响会话和桌面端。
 
 两个文件各有一个 `version`，只表示该文件自身的格式。后端只在全局定义，项目不能覆盖；Agent 用后端的**名称**引用它（`agents.jsonl` 的 `backend`）。两个文件都是每次使用时读取，修改后不必重启 Hub。
 

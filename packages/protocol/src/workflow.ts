@@ -26,6 +26,8 @@ export type WorkflowNodeView = {
   kind: NodeDef["kind"];
   status: string;
   paused: boolean;
+  /** The user's interruption of it got to its agent and is not handled yet (its turn failed or stopped): it holds the node until resumed. */
+  interrupted?: boolean;
   agentId?: string;
   sessionId?: string;
   target?: string;
@@ -46,6 +48,8 @@ export type WorkflowView = {
   candidate?: { version: string; graph: WorkflowGraph };
   edges: Edge[];
   paused: boolean;
+  /** An interruption from the main conversation holds the whole graph until it is handled, or the workflow resumed. */
+  interrupted?: boolean;
   error?: string;
   nodes: WorkflowNodeView[];
 };

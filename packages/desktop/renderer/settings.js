@@ -1,7 +1,7 @@
 import { refreshRail, state } from "./app.js";
 import { backendControls, refreshBackendControls } from "./backend.js";
 import { ICON, fill, h } from "./dom.js";
-import { field, select } from "./form.js";
+import { confirmDialog, field, select } from "./form.js";
 import { t } from "./i18n.js";
 import { globalPreferences, saveGlobalPreferences } from "./preferences.js";
 import { pluginsSection } from "./tools.js";
@@ -41,6 +41,32 @@ function settingsShell(...content) {
           : h("small", { class: "settings-workspace-name" }, t("settings.noWorkspace")),
         state.workspace && navItem("workspace","folder"), state.workspace && navItem("workspaceTools", "plug")),
       h("div", { class: "settings-content" }, ...content))];
+}
+
+/** 清理工作区：彻底删掉已删除对话留下的东西（中枢的 Agents.purge），先确认，做完说释放了多少。 */
+function cleanupSection() {
+  const result = h("small", { class: "settings-saved", role: "status" });
+  const button = h("button", { class: "btn", onclick: async () => {
+    if (!(await confirmDialog(t("settings.cleanup.confirmTitle"), [h("p", {}, t("settings.cleanup.confirmBody"))], t("settings.cleanup.run")))) return;
+    button.disabled = true;
+    result.textContent = t("settings.cleanup.running");
+    try {
+      const { conversations, bytes } = await xsb.cleanUp();
+      result.textContent = conversations ? t("settings.cleanup.done", { count: conversations, size: bytesText(bytes) }) : t("settings.cleanup.nothing");
+    } catch (e) {
+      result.textContent = t("settings.cleanup.failed", { error: e.message });
+    } finally { button.disabled = false; }
+  } }, t("settings.cleanup.run"));
+  return section(t("settings.storage"), h("div", { class: "settings-card-body" },
+    settingRow(t("settings.cleanup"), t("settings.cleanupHint"), button)), result);
+}
+
+/** 字节数，读起来顺的单位。 */
+function bytesText(bytes) {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${unit ? value.toFixed(1) : value} ${units[unit]}`;
 }
 
 /** 工作区的工作语言（.xsb2/config.json）。 */
@@ -123,8 +149,9 @@ export function showSettings(key = "general", refresh = true) {
     h("p", { class: "hint" }, t("settings.backendsHint")),
     limitsFailure,
     backendList = h("div", { class: "backend-list" }, ...backendCards()),
-    h("div", { class: "backend-assurance" }, h("span", { "aria-hidden": "true", html: ICON.check }), h("span", {}, t("backend.check.free"))),
-    h("details", { class: "backend-explanation" }, h("summary", {}, t("backend.check.scope")), h("p", { class: "hint" }, t("backend.check.hint"))),
+    h("div", { class: "backend-check" },
+      h("div", { class: "backend-assurance" }, h("span", { "aria-hidden": "true", html: ICON.check }), h("span", {}, t("backend.check.free"))),
+      h("details", { class: "backend-explanation" }, h("summary", {}, t("backend.check.scope")), h("p", { class: "hint" }, t("backend.check.hint")))),
     section(t("limits.hub"), h("p", { class: "hint" }, t("limits.hubIntro")), hubLimits)];
   if (key === "tools") content = pluginsSection("global");
   if (key === "workspaceTools") content = pluginsSection("project");
@@ -132,7 +159,7 @@ export function showSettings(key = "general", refresh = true) {
     content = [section(t("settings.workspaceInfo"),
       field(t("common.name"), h("div", { class: "readonly" }, state.workspace.name)),
       field(t("settings.folder"), h("div", { class: "readonly path" }, state.workspace.path))),
-      ...languageSection()];
+      ...languageSection(), cleanupSection()];
   }
   fill(dialog, ...settingsShell(h("div", { class: "settings-body" },
     h("div", { class: "settings-heading" }, h("span", { class: "scope-label" }, t(GLOBAL_KEYS.includes(key) ? "settings.globalScope" : "settings.workspaceScope")),

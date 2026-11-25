@@ -13,7 +13,8 @@ import { backendPicker } from "./backend-picker.js";
 import { clock, t } from "./i18n.js";
 import { sessionPages, onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
 import { closeSettings, showSettings } from "./settings.js";
-import { onPreferencesChanged } from "./preferences.js";
+import { onPreferencesChanged, syncWindowColors } from "./preferences.js";
+import { confirmDialog, openDialog } from "./form.js";
 import { bindArtifactResize } from "./resize.js";
 
 import { showWeb } from "./webview.js";
@@ -115,16 +116,30 @@ function applyProviderTheme() {
   const kind = backendKind(agentOf(state.open[0])?.backend);
   if (kind) document.documentElement.dataset.provider = kind;
   else delete document.documentElement.dataset.provider;
+  syncWindowColors();
+}
+
+/** 删除对话：先确认。它从列表消失、后端停下；记录和文件留在工作区，到设置里"清理工作区"才真正删掉。 */
+async function deleteConversation(agent) {
+  if (agent.state !== "idle") return;
+  const ok = await confirmDialog(t("rail.delete.title", { name: agent.name }), [h("p", {}, t("rail.delete.body"))], t("rail.delete.confirm"));
+  if (!ok) return;
+  try { await xsb.deleteConversation(agent.id); }
+  catch (e) { openDialog(t("rail.delete.failed"), [h("p", {}, e.message)], [{ label: t("common.close"), primary: true }]); }
 }
 
 function renderRail() {
   applyProviderTheme();
   const roots = state.agents.filter(a => !a.workflowOwner);
-  fill($("#agents"), ...roots.map(a =>
-    h("button", { class:"row session-row", "aria-pressed":String(state.open.includes(a.id)),title:a.name,onclick:() => focusLane(a.id) },
+  // 每行右侧悬停时出现删除按钮（盖住状态点）；工作中的对话不能删。
+  fill($("#agents"), ...roots.map(a => h("div", { class: "session-item" },
+    h("button", { class:"row session-row", "aria-pressed":String(state.open.includes(a.id)),title:a.name,onclick:() => focusLane(a.id),
+      oncontextmenu: (e) => { e.preventDefault(); void deleteConversation(a); } },
       avatarImage(a),
       h("span",{class:"row-text"},h("strong",{},a.name)), backendMark(a.backend),
-      h("i",{class:"state","data-state":a.state,title:STATE_TEXT[a.state]}))));
+      h("i",{class:"state","data-state":a.state,title:STATE_TEXT[a.state]})),
+    h("button", { class: "icon-btn session-delete", html: ICON.trash, disabled: a.state !== "idle",
+      title: t(a.state === "idle" ? "rail.delete" : "rail.delete.busy"), "aria-label": t("rail.delete"), onclick: () => deleteConversation(a) }))));
   $("#agent-count").textContent = roots.length;
   $("#settings").setAttribute("aria-pressed", String(!!state.settings));
   fill($("#blank"),h("p",{},t("flow.empty")),h("button",{class:"btn primary",onclick:() => newSession()},t("flow.new")));
@@ -133,6 +148,28 @@ function renderRail() {
 
 
 // ---------- 对话栏 ----------
+
+/** 节点停在那里等用户：暂停了、挂起了，或者被一条还没处理完的插话挡住（它那一轮失败或被停了）。 */
+const resumable = (node) => node.paused || node.status === "suspended" || (node.interrupted && node.status === "paused" && agentOf(node.agentId)?.state === "idle");
+
+/** 一条输入在模型那边的状态：标签和说明（原因写进说明）。 */
+function inputState(entry) {
+  const why = entry.reason ? t(`entry.reason.${entry.reason}`) + (entry.detail ? `：${entry.detail}` : "") : "";
+  if (entry.unsent) return { tag: t("entry.tag.unsent"), title: [t("entry.tag.unsent.title"), entry.detail].filter(Boolean).join("\n") };
+  if (entry.redelivered) return { tag: t("entry.tag.redelivered"), title: t("entry.tag.redelivered.title") };
+  if (entry.discarded && entry.resentAs) return { tag: t("entry.tag.resent"), title: why };
+  if (entry.discarded && entry.owed) return { tag: t("entry.tag.owed"), title: [t("entry.tag.owed.title"), why].filter(Boolean).join("\n") };
+  if (entry.discarded) return { tag: t("entry.tag.discarded"), title: [t("entry.tag.discarded.title"), why].filter(Boolean).join("\n") };
+  if (entry.pending) return { tag: t("entry.tag.pending"), title: t("entry.tag.pending.title") };
+  return { tag: entry.origin.steered ? t("entry.tag.interjected") : null };
+}
+
+/** 模型收到的和用户看到的不一样的地方：看不到的图片、存成文件的长文本、附在前面的说明。 */
+function deliveredNote(as) {
+  return [as.imagesHidden && t("entry.delivered.images", { count: as.imagesHidden }),
+    as.spilled?.length && t("entry.delivered.spilled", { count: as.spilled.length }),
+    as.scope && t("entry.delivered.scope")].filter(Boolean).join(" · ");
+}
 
 const laneOf = (agentId) => document.querySelector(`.lane[data-agent="${agentId}"]`);
 
@@ -176,7 +213,11 @@ function openLane(agentId, panel, readonly) {
     editor.clear();
     // /clear 是 xsb 自己的命令，不交给后端：由中枢换一个新的后端会话，对哪种后端都一样。
     if (content.length === 1 && content[0].type === "text" && content[0].text.trim() === "/clear") return xsb.clear(agentId);
-    try { await xsb.send(agentId, content, target); }
+    try {
+      await xsb.send(agentId, content, target);
+      // 批注随这条消息交给了智能体：网页里的那几条也撤下。
+      dropPageAnnotations(sent.filter((b) => b.type === "web_annotation"));
+    }
     catch (e) {
       const current = laneOf(agentId)?.editor ?? editor;
       current.restore([...sent, ...(current.el.isConnected ? current.snapshot() : loadDraft(key))]);
@@ -196,7 +237,7 @@ function openLane(agentId, panel, readonly) {
       if (editor.isReading()) pendingEditors.set(key, editor);
       else if (pendingEditors.get(key) === editor) pendingEditors.delete(key);
       syncLane(agentId);
-    });
+    }, dropPageAnnotations);
     editor.restore(loadDraft(key));
   }
   editor.el.onfocus = () => {
@@ -215,7 +256,7 @@ function openLane(agentId, panel, readonly) {
       h("button", { class: "icon-btn", title: t("lane.close"), "aria-label": t("lane.close"), html: ICON.close, hidden:!!panel, onclick: () => {closeLane(agentId); renderSide();} })),
     h("div", { class: "transcript" }, h("button", { class: "btn history-more", hidden: state.history?.[agentId] == null, onclick: () => loadHistory(agentId) }, t("history.more")), h("div", { class: "entries" })),
     h("div", { class: "composer" },
-      editor.el, editor.error,
+      editor.tray, editor.el, editor.error,
       h("div", { class: "composer-row" },
         h("span", { class: "hint", role: "status" }, h("i", { class: "state" }), h("span", {})),
         picker?.el, controls.el, controls.usage, h("button", { class: "send", onclick: press }))));
@@ -244,7 +285,7 @@ function openLane(agentId, panel, readonly) {
     lane.querySelector(".lane-head").append(h("button",{class:"btn task-control",onclick:() => {
       const flow = currentFlow(), node = flow?.nodes.find(n => n.agentId === agentId);
       if (!node) return;
-      if (node.paused || node.status === "suspended") xsb.workflowControl(flow.sessionId,false,[node.name]);
+      if (resumable(node)) xsb.workflowControl(flow.sessionId,false,[node.name]);
       else xsb.cancel(agentId);
     }},t("flow.stop")));
   }
@@ -332,7 +373,7 @@ function syncLane(agentId) {
   const control = lane.querySelector(".task-control");
   if (control) {
     const node = currentFlow()?.nodes.find(n => n.agentId === agentId);
-    control.textContent = t(node?.paused || node?.status === "suspended" ? "flow.resume" : "flow.stop");
+    control.textContent = t(node && resumable(node) ? "flow.resume" : "flow.stop");
   }
 
   const action = s !== "idle" && !lane.editor.read().length && !lane.editor.isReading() ? "stop" : "send";
@@ -382,16 +423,16 @@ function entryNode(agentId, entry) {
   // 上下文的边界：对话记录都还在，分隔线告诉用户模型从哪里起看不到上面的内容。
   if (entry.kind === "boundary") {
     return h("div", { ...base, role: "separator", "data-boundary": entry.boundary.kind },
-      h("span", {}, t(`entry.boundary.${entry.boundary.kind}`, { backend: entry.boundary.backend ?? "" })));
+      h("span", {}, t(`entry.boundary.${entry.boundary.kind}`, { backend: entry.boundary.backend ?? "", from: entry.boundary.from ?? "" })));
   }
 
   if (entry.kind === "input") {
     const o = entry.origin;
-    // 停止时模型还没看到的输入被丢弃了：照样留在记录里，但标明模型没有看到。
-    // 模型是否看到：已丢弃（不会再送达）、尚未送达（等插入回执）、插话（已进入正在进行的一轮）。
-    const tag = entry.discarded ? t("entry.tag.discarded") : entry.pending ? t("entry.tag.pending") : o.steered ? t("entry.tag.interjected") : null;
-    return h("div", { ...base, "data-origin": o.kind, "data-discarded": entry.discarded, "data-pending": entry.pending,
-      title: entry.discarded ? t("entry.tag.discarded.title") : entry.pending ? t("entry.tag.pending.title") : undefined },
+    // 用户看到的就是模型看到的：每条输入标明模型是否收到。模型没收到的照样留在记录里，写明原因，从不删除。
+    const { tag, title } = inputState(entry);
+    const unseen = entry.discarded && !entry.redelivered;
+    const resendable = entry.discarded && o.kind === "user" && !entry.redelivered && !entry.resentAs;
+    return h("div", { ...base, "data-origin": o.kind, "data-discarded": unseen, "data-pending": entry.pending || entry.unsent, title },
       o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId)),
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
       o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),
@@ -399,7 +440,12 @@ function entryNode(agentId, entry) {
         const a = state.artifacts.find(a => a.registeredName === ref.name && "v" + a.assetVersion === ref.version);
         return a && (() => followContentLink(a.url, laneOf(agentId), agentId));
       }) })),
-      tag && h("span", { class: "tag" }, tag));
+      entry.deliveredAs && h("div", { class: "delivered-as" }, deliveredNote(entry.deliveredAs)),
+      tag && h("span", { class: "tag" }, tag),
+      resendable && h("button", { class: "btn sm resend", onclick: (e) => {
+        e.currentTarget.disabled = true;
+        xsb.resend(agentId, entry.id).catch((error) => { e.target.disabled = false; e.target.title = error.message; });
+      } }, t("entry.resend")));
   }
 
   if (entry.kind === "tool") {
@@ -579,7 +625,7 @@ export async function renderArtifact(force = false) {
 // ---------- 窗口级交互 ----------
 
 $("#ws").onclick = () => showSettings(state.workspace ? "workspace" : "general");
-$("#settings").onclick = $("#title-settings").onclick = () => showSettings();
+$("#settings").onclick = () => showSettings();
 /** 与中枢的连接是否还在，画成工作区名字旁的圆点。 */
 function showHub(up, why) {
   const dot = $("#hub");
@@ -732,6 +778,31 @@ export function onAgent(agent) {
   renderRail();
   syncLane(agent.id);
 }
+/**
+ * 网页批注和输入框联动：确认的批注（一份完整快照）进这个网页所属会话输入框的附件栏，下次发送时跟着发出；
+ * 会话没有打开时存进它的草稿。网页上清除批注，附件栏也去掉；附件栏删掉或已发出的，网页上也撤下。
+ */
+function addAnnotation({ sessionId, annotation }) {
+  const agent = state.agents.find((a) => a.mainSessionId === sessionId);
+  if (!agent || annotation?.type !== "web_annotation") return;
+  const lane = laneOf(agent.id);
+  if (lane) return lane.editor.insert([annotation], true);
+  const key = draftKey(state.workspace.path, agent);
+  saveDraft(key, [...loadDraft(key), annotation]);
+}
+function onAnnotationsRemoved({ sessionId, ids }) {
+  const agent = state.agents.find((a) => a.mainSessionId === sessionId);
+  if (!agent || !Array.isArray(ids)) return;
+  const lane = laneOf(agent.id);
+  if (lane) return lane.editor.removeAnnotations(ids);
+  const key = draftKey(state.workspace.path, agent);
+  saveDraft(key, loadDraft(key).filter((b) => b.type !== "web_annotation" || !ids.includes(b.id)));
+}
+function dropPageAnnotations(notes) {
+  const byPage = Map.groupBy(notes.filter((n) => n.pageId && n.id), (n) => n.pageId);
+  // 网页可能已经关了或换了文档：那边已经没有这些批注，不算错。
+  for (const [pageId, list] of byPage) xsb.page(pageId, "annotationsRemove", list.map((n) => n.id)).catch(() => {});
+}
 xsb.on((event) => {
   if (event.controls) laneOf(event.agentId)?.controls.update(event.controls);
   else if (event.workflow) {
@@ -753,6 +824,8 @@ xsb.on((event) => {
     upsert(state.artifacts, event.artifact);
     if (belongsHere(event.artifact) && (state.tab === "catalog" || state.artifactId === event.artifact.id)) renderArtifact();
   }
+  else if (event.webAnnotation) addAnnotation(event.webAnnotation);
+  else if (event.webAnnotationsRemoved) onAnnotationsRemoved(event.webAnnotationsRemoved);
   else if (event.page) onPage(event.page);
   else if (event.removedPage) onPageRemoved(event.removedPage);
   else if (event.hub === "down") showHub(false);
@@ -787,6 +860,7 @@ export async function start() {
   document.body.classList.toggle("no-workspace", !state.workspace);
   $("#ws-name").textContent = document.title = state.workspace?.name ?? t("app.title");
   $("#ws-path").textContent = state.workspace?.path ?? "";
+  $("#ws").title = state.workspace?.path ?? t("settings.workspace");
   if (!state.workspace) return renderWelcome();
 
   showHub(true);
@@ -800,6 +874,11 @@ export async function start() {
   restoreSide();
   renderRail();
 }
+
+// 系统的窗口按钮在哪（styles.css 按它让位）：macOS 在左上，其余在右上；配色跟着系统深浅变时同步给它们。
+document.documentElement.dataset.platform = /Mac/.test(navigator.platform) ? "mac" : "other";
+syncWindowColors();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncWindowColors);
 
 // Other workspace windows share global appearance and update immediately.
 onPreferencesChanged(() => {
