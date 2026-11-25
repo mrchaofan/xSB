@@ -44,7 +44,7 @@ export function showTask(id) {
 function versionOf(flow) {
   const want = viewing.get(flow.sessionId) ?? (!flow.version && flow.candidate ? flow.candidate.version : null);
   if (want && flow.candidate?.version === want) {
-    return { kind: "candidate", version: want, nodes: flow.candidate.graph.nodes.map((n) => ({ name: n.node, status: "candidate" })), edges: flow.candidate.graph.edges };
+    return { kind: "candidate", version: want, nodes: flow.candidate.graph.nodes.map((n) => ({ name: n.node, status: "proposed" })), edges: flow.candidate.graph.edges };
   }
   const old = want && flow.history?.find((v) => v.version === want);
   if (old) return { kind: "history", version: old.version, at: old.retiredAt, nodes: old.nodes, edges: old.edges };
@@ -147,21 +147,23 @@ export function renderWorkflow(flow) {
   const held = flow.paused || (flow.interrupted && state.agents.find((a) => a.mainSessionId === flow.sessionId)?.state === "idle");
   const button = (pause, names, label) => h("button", { class: "btn sm",
     onclick: () => xsb.workflowControl(flow.sessionId, pause, names).catch((e) => (error.textContent = e.message)) }, label);
-  // 版本下拉：当前、候选、历史（最新的在前）。
-  const versions = [
-    flow.version && [flow.version, t("flow.version.active", { version: flow.version })],
-    flow.candidate && [flow.candidate.version, t("flow.version.candidate", { version: flow.candidate.version })],
-    ...(flow.history ?? []).map((v) => [v.version, t("flow.version.history", { version: v.version, time: when(v.retiredAt) })]),
-  ].filter(Boolean);
-  const picker = h("select", { class: "flow-version", "aria-label": t("flow.version.label"),
-    onchange: (e) => { viewing.set(flow.sessionId, e.target.value === flow.version ? null : e.target.value); renderWorkflow(flow); } },
-    ...versions.map(([value, label]) => h("option", { value, selected: value === shown.version }, label)));
+  const look = (version) => { viewing.set(flow.sessionId, version === flow.version ? null : version); renderWorkflow(flow); };
+  // 活动方案和候选方案并排切换；历史版本（最新的在前）收在下拉里。
+  const plans = flow.version && flow.candidate && h("div", { class: "segmented flow-plans", role: "group", "aria-label": t("flow.version.label") },
+    ...[["active", flow.version], ["candidate", flow.candidate.version]].map(([kind, version]) =>
+      h("button", { "aria-pressed": String(shown.kind === kind), title: version, onclick: () => shown.kind !== kind && look(version) }, t("flow." + kind))));
+  const history = !!flow.history?.length && h("select", { "aria-label": t("flow.history"),
+    onchange: (e) => look(e.target.value || flow.version) },
+    h("option", { value: "", selected: shown.kind !== "history" }, t("flow.history")),
+    ...flow.history.map((v) => h("option", { value: v.version, selected: v.version === shown.version }, t("flow.version.history", { version: v.version, time: when(v.retiredAt) }))));
   $("#flow-heading").hidden = false;
   fill($("#flow-heading"),
     h("button", { class: "icon-btn flow-fold", "aria-expanded": String(!folded), title: t(folded ? "flow.expand" : "flow.collapse"), "aria-label": t(folded ? "flow.expand" : "flow.collapse"),
       html: folded ? ICON.forward : ICON.down, onclick: () => { collapsed.set(flow.sessionId, !folded); renderWorkflow(flow); } }),
     h("strong", {}, t("flow.title")),
-    versions.length > 1 ? picker : h("small", { title: shown.version }, shown.version),
+    plans,
+    h("small", { title: shown.version }, shown.version),
+    history,
     shown.kind === "history" && h("span", { class: "flow-badge" }, t("flow.version.readonly")),
     // 主会话的插话挡住了整张图（它那一轮失败或被停了）：和暂停一样，给"继续"。
     shown.kind === "active" && button(!held, undefined, t(held ? "flow.resume" : "flow.pause")),
