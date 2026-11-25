@@ -1,6 +1,6 @@
 {
   "name": "@xsb/store",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Append-only JSONL event logs with a write-ahead log for multi-file changes",
   "type": "module",
   "private": true,
