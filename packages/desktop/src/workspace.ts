@@ -15,7 +15,7 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal } from "@xsb/protocol";
+import { Answer, Question, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal } from "@xsb/protocol";
 import type { HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
@@ -30,7 +30,7 @@ type Emit = (event: Event) => void;
  * What the user is told of even when they are not looking (main.ts makes it a notification of the system):
  * the work they set going is over, or went wrong, or waits for them. `detail` is in the words it came in.
  */
-export type Notice = { agentId: string; name: string; kind: "done" | "failed" | "confirm" | "permission"; detail: string };
+export type Notice = { agentId: string; name: string; kind: "done" | "failed" | "confirm" | "permission" | "question"; detail: string };
 type Notify = (notice: Notice) => void;
 type Tool = Extract<Entry, { kind: "tool" }>;
 
@@ -67,6 +67,8 @@ export class Workspace {
   private sessionAgent = new Map<string, string>();
   /** Agent id -> the output entry that is still growing. */
   private growing = new Map<string, Extract<Entry, { kind: "output" }>>();
+  /** Messages that answer or skip a question: the question's card shows them, not a message of their own. */
+  private replies = new Set<string>();
   /** The user's messages that were sent but are not yet part of a turn, by id: shown, to be replaced by the hub's echo. */
   private pending = new Set<string>();
   /** Agent id -> what it is doing, while it has a turn running, and the tool calls of it that have not ended. */
@@ -449,6 +451,24 @@ export class Workspace {
       return this.put(agentId, { id: this.newId(), kind: "boundary", boundary });
     }
     const info = update.sessionUpdate === "session_info_update" ? update._meta : undefined;
+    // A question the agent asked (the `ask` tool): a card, closed by the user's reply, which the card then shows.
+    const question = info?.[Question.key] as Question | undefined;
+    if (question) {
+      const id = `${sessionId}:question:${question.id}`;
+      const prior = this.transcripts.get(agentId)?.find((e): e is Extract<Entry, { kind: "question" }> => e.id === id && e.kind === "question");
+      if (question.state === "open") {
+        this.settle(agentId);
+        if (this.live && !this.replaying) this.notify({ agentId, kind: "question", detail: question.questions?.[0]?.question ?? "" });
+        return this.put(agentId, { id, kind: "question", questionId: question.id, questions: question.questions ?? [], state: "open" });
+      }
+      if (question.reply && question.state !== "superseded") {
+        this.replies.add(question.reply);
+        const input = this.inputEntry(agentId, `${sessionId}:${question.reply}`);
+        if (input) this.put(agentId, { ...input, reply: true });
+      }
+      if (prior) this.put(agentId, { ...prior, state: question.state, ...(question.answers ? { answers: question.answers } : {}) });
+      return;
+    }
     const accepted = info?.[Accepted.key] as Accepted | undefined;
     if (accepted) {
       // xsb has it, and the model not yet: it waits, also after a restart, until it is in or discarded (same id).
@@ -507,14 +527,14 @@ export class Workspace {
         this.does(agentId, "waiting");
         this.pending.delete(update.messageId);
         this.unsend(update.messageId);
-        return this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? prior.origin, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}) });
+        return this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? prior.origin, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}), ...(this.replies.has(update.messageId) ? { reply: true } : {}) });
       }
       // Input marks where a turn begins, or where a message entered the running one: what was said before is complete.
       this.settle(agentId);
       this.does(agentId, "waiting"); // the model has it now, and has not answered yet
       this.pending.delete(update.messageId);
       this.unsend(update.messageId);
-      this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? { kind: "user" }, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}) });
+      this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? { kind: "user" }, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}), ...(this.replies.has(update.messageId) ? { reply: true } : {}) });
     } else if (update.sessionUpdate === "tool_call_update") {
       this.settle(agentId);
       const id = `${sessionId}:${update.toolCallId}`;
@@ -542,7 +562,8 @@ export class Workspace {
    * at once; the hub sends it back under the same id when it has become part
    * of a turn, and that entry takes the place of this one.
    */
-  async send(agentId: string, content: Content, target?: string, again?: { messageId?: string; resendOf?: string }): Promise<void> {
+  /** `answer`: the message answers or skips the question the agent asked (`Answer`). */
+  async send(agentId: string, content: Content, target?: string, again?: { messageId?: string; resendOf?: string }, answer?: Answer): Promise<void> {
     const agent = this.agents.get(agentId)!;
     // One id for the message, kept until xsb has it: sent again under it, it is never a second copy (the hub knows it).
     const messageId = again?.messageId ?? `m_${randomUUID()}`;
@@ -559,10 +580,11 @@ export class Workspace {
     this.drop(agentId, `unsent:${messageId}`);
     this.pending.add(messageId);
     this.outbox(agentId, messageId, content, again?.resendOf);
-    this.put(agentId, { id, kind: "input", origin: { kind: "user" }, content, pending: true });
+    if (answer) this.replies.add(messageId);
+    this.put(agentId, { id, kind: "input", origin: { kind: "user" }, content, pending: true, ...(answer ? { reply: true } : {}) });
     // Answered once it is in the conversation. Once xsb has it (`Accepted`), the transcript says what becomes of it:
     // in the conversation, or discarded and why (and whether it is owed to the model with the next message).
-    await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId, ...(again?.resendOf ? { resendOf: again.resendOf } : {}) }, [Workflow.target]: target } }).catch((e) => {
+    await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId, ...(again?.resendOf ? { resendOf: again.resendOf } : {}) }, [Workflow.target]: target, ...(answer ? { [Answer.key]: answer } : {}) } }).catch((e) => {
       if (!this.pending.delete(messageId)) return;
       // xsb did not take it, or its answer was lost: shown as not delivered, to be sent again under the same id.
       const prior = this.inputEntry(agentId, id);

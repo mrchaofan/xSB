@@ -17,6 +17,7 @@ import { closeSettings, showSettings } from "./settings.js";
 import { onPreferencesChanged, syncWindowColors } from "./preferences.js";
 import { confirmDialog, openDialog } from "./form.js";
 import { openContextMenu } from "./menu.js";
+import { questionRecord, syncAskPanel } from "./ask.js";
 import { bindArtifactResize } from "./resize.js";
 
 import { showWeb } from "./webview.js";
@@ -41,7 +42,9 @@ export const state = {
   mode: "preview",      // preview | source
 };
 
-export const STATE_TEXT = { idle: t("state.idle"), running: t("state.running"), requires_action: t("state.requires_action") };
+export const STATE_TEXT = { idle: t("state.idle"), running: t("state.running"), requires_action: t("state.requires_action"), asking: t("state.asking") };
+/** 显示的状态：空闲着、但有提问在等你回答（ask）的，显示"等你回答"。 */
+export const shownState = (agent) => agent.state === "idle" && agent.asking ? "asking" : agent.state;
 export const TASK_TEXT = {
   blocked: t("task.status.blocked"), queued: t("task.status.queued"), running: t("task.status.running"),
   completed: t("task.status.completed"), failed: t("task.status.failed"), cancelled: t("task.status.cancelled"), interrupted: t("task.status.interrupted"),
@@ -143,7 +146,7 @@ function renderRail() {
       oncontextmenu: (e) => menu(e, a) },
       avatarImage(a),
       h("span",{class:"row-text"},h("strong",{},a.name)), backendMark(a.backend),
-      h("i",{class:"state","data-state":a.state,title:STATE_TEXT[a.state]}))));
+      h("i",{class:"state","data-state":shownState(a),title:STATE_TEXT[shownState(a)]}))));
   $("#agent-count").textContent = roots.length;
   $("#settings").setAttribute("aria-pressed", String(!!state.settings));
   fill($("#blank"),h("p",{},t("flow.empty")),h("button",{class:"btn primary",onclick:() => newSession()},t("flow.new")));
@@ -294,6 +297,7 @@ function openLane(agentId, panel, readonly) {
     }},t("flow.stop")));
   }
   lane.querySelector(".entries").append(...state.transcripts[agentId].map((entry) => entryNode(agentId, entry)));
+  syncAsk(agentId);
   syncLane(agentId);
   renderRail();
   const scroller = lane.querySelector(".transcript");
@@ -371,9 +375,9 @@ function syncLane(agentId) {
   fill(lane.querySelector(".lane-avatar"), avatarImage(agentOf(agentId)));
   lane.querySelector(".lane-head strong").textContent = name;
   fill(lane.querySelector(".lane-backend"), backendMark(backend));
-  lane.querySelector(".lane-state .state").dataset.state = s;
-  lane.querySelector(".lane-state span").textContent = STATE_TEXT[s];
-  lane.querySelector(".editor").dataset.placeholder = t(s === "idle" ? "lane.placeholder" : "lane.placeholder.busy", { name });
+  lane.querySelector(".lane-state .state").dataset.state = shownState(agentOf(agentId));
+  lane.querySelector(".lane-state span").textContent = STATE_TEXT[shownState(agentOf(agentId))];
+  lane.querySelector(".editor").dataset.placeholder = t(s === "idle" ? "lane.placeholder" : "lane.placeholder.busy");
   const control = lane.querySelector(".task-control");
   if (control) {
     const node = currentFlow()?.nodes.find(n => n.agentId === agentId);
@@ -394,15 +398,15 @@ function syncLane(agentId) {
 function syncActivity(agentId) {
   const hint = laneOf(agentId)?.querySelector(".hint");
   if (!hint) return;
-  const { state: s } = agentOf(agentId);
+  const agent = agentOf(agentId), s = agent.state;
   const activity = state.activities[agentId];
-  const kind = s === "idle" ? null : s === "requires_action" ? "permission" : (activity?.kind ?? "waiting");
+  const kind = s === "idle" ? (agent.asking ? "asking" : null) : s === "requires_action" ? "permission" : (activity?.kind ?? "waiting");
   hint.hidden = !kind;
   if (!kind) return;
-  const seconds = activity && kind !== "permission" ? Math.max(0, Math.floor((Date.now() - Date.parse(activity.since)) / 1000)) : null;
+  const seconds = activity && !["permission", "asking"].includes(kind) ? Math.max(0, Math.floor((Date.now() - Date.parse(activity.since)) / 1000)) : null;
   const elapsed = seconds === null ? "" : ` ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   hint.dataset.activity = kind;
-  hint.querySelector(".state").dataset.state = kind === "permission" ? "requires_action" : "running";
+  hint.querySelector(".state").dataset.state = kind === "permission" ? "requires_action" : kind === "asking" ? "asking" : "running";
   hint.querySelector("span").textContent = t(`activity.${kind}`, { detail: activity?.detail ?? "" }) + elapsed;
 }
 setInterval(() => state.open.forEach(syncActivity), 1000);
@@ -415,7 +419,14 @@ function upsertEntry(agentId, entry) {
   const old = lane.querySelector(`.entry[data-id="${entry.id}"]`);
   const node = entryNode(agentId, entry);
   if (old) old.replaceWith(node); else lane.querySelector(".entries").append(node);
+  if (entry.kind === "question") syncAsk(agentId);
   if (pinned) scroller.scrollTop = scroller.scrollHeight;
+}
+
+/** 输入框上方的提问面板（ask.js）：跟着这个智能体最后一个还没结束的提问。回答是发给它的下一条消息。 */
+function syncAsk(agentId) {
+  const lane = laneOf(agentId);
+  if (lane && !lane.dataset.readonly) syncAskPanel(lane, state.transcripts[agentId] ?? [], (content, answer) => xsb.send(agentId, content, undefined, undefined, answer));
 }
 
 function entryNode(agentId, entry) {
@@ -430,6 +441,9 @@ function entryNode(agentId, entry) {
       h("span", {}, t(`entry.boundary.${entry.boundary.kind}`, { backend: entry.boundary.backend ?? "", from: entry.boundary.from ?? "" })));
   }
 
+  // 提问的卡片；回答它的那条消息由卡片显示，不另画（没送达的照常显示，好重发）。
+  if (entry.kind === "question") return questionRecord(base, entry);
+  if (entry.kind === "input" && entry.reply && !entry.discarded && !entry.unsent) return h("div", { ...base, hidden: true });
   if (entry.kind === "input") {
     const o = entry.origin;
     // 用户看到的就是模型看到的：每条输入标明模型是否收到。模型没收到的照样留在记录里，写明原因，从不删除。

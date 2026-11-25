@@ -11,15 +11,15 @@
 
 ## 页面与输入控制
 
-`Pages` 统一拥有 WebContents、标签及页面窗口。主动新建的页面用私有 `<webview2>`；Chromium 原生弹出页用 `WebContentsView` 接管已有 guest。`createWindow` 回调必须返回 Electron 提供的同一个 WebContents，这样保留 opener、about:blank 后续脚本、POST 与登录态。重新加载弹窗 URL 会丢失这些语义，因此没有采用。
+`Pages` 统一拥有 WebContents、标签及页面窗口。所有网页都是主进程创建的 webview2 内容，由应用自己的宿主页面用 `<webview2>` 显示：右栏在 `index.html`，独立窗口在 `page.html`。两处都用 `renderer/webview.js`，`<webview2>` 与叠在它上面的蒙层、批注都是宿主页里的 DOM 元素，没有原生视图。
 
-原生 guest 在标签内容区挂载，随选中标签、窗口大小和应用 dialog/popover 变化显示或隐藏。模型只看到自身连接关联的页面；用户和其他 Agent 的页面不进入工具清单。HTML 制品预览继续使用独立分区，不把制品访问权限传给外部网站。
+网站弹出的页面同样如此：Chromium 预先创建的弹出 guest 不能挂到 `<webview2>`，所以拦下弹出，在新建的 webview2 里发出同一个请求（地址、来源、POST 数据）。代价是弹出页没有 `window.opener`：靠它回传结果的登录弹窗、先开 about:blank 再写内容的弹窗不可用；空白弹窗不会打开。模型只看到自身连接关联的页面；用户和其他 Agent 的页面不进入工具清单。HTML 制品预览继续使用独立分区，不把制品访问权限传给外部网站。
 
-控制提示由主进程持有的透明 `WebContentsView` 遮罩显示，放在页面视口上方，提供红色发光边框、呼吸动画和本地化标签；系统偏好减少动态效果时关闭动画。这个原生遮罩同时接收用户鼠标、滚轮、拖放等输入，覆盖普通标签、原生弹出页和显式独立窗口。
+控制提示由 `renderer/page-control.js` 的 DOM 蒙层显示，盖住整个网页，提供红色发光边框、呼吸动画和本地化标签；系统偏好减少动态效果时关闭动画。它接住用户的鼠标、滚轮、拖放，且不带走焦点。
 
-还安装主进程输入保护：用户键盘事件被阻止，可信 CDP 输入按 Chromium 的 debugger 来源标志放行；CDP 鼠标命令在受控注入窗口内放行，物理用户输入由上层原生遮罩截住。没有使用 `Input.setIgnoreInputEvents`，因为它也会阻止 Agent 的 CDP 输入。页面地址栏的导航、后退、前进、刷新等操作在控制中同样被拒绝，关闭标签、停止任务等应用控制仍可用。
+还安装主进程输入保护：用户键盘事件被阻止，可信 CDP 输入按 Chromium 的 debugger 来源标志放行；CDP 鼠标命令在受控注入窗口内放行，物理用户输入由上层 DOM 蒙层截住。没有使用 `Input.setIgnoreInputEvents`，因为它也会阻止 Agent 的 CDP 输入。页面地址栏的导航、后退、前进、刷新等操作在控制中同样被拒绝，关闭标签、停止任务等应用控制仍可用。
 
-停止或退出 turn 立即撤销输入保护并隐藏遮罩；移动标签时，旧窗口的布局消息不能把遮罩或页面移回去。遮罩是应用自己的内容，不属于网站、Agent 的页面列表或模型的页面快照。
+停止或退出 turn 立即撤销输入保护并撤下蒙层。蒙层是应用自己的内容，不属于网站、Agent 的页面列表或模型的页面快照。
 
 ## turn 边界与职责
 
@@ -27,7 +27,7 @@
 flowchart LR
   H[Hub / LiveSession：真实 turn 开始、结束、停止] --> C[只读 ToolContext 通道]
   C --> B[BrowserSession：当前 turn 与页面归属]
-  B --> P[Pages：标签、原生页面、输入遮罩]
+  B --> P[Pages：标签、网页、输入保护]
   P --> D[Chromium will-download / done]
   D --> L[BrowserDownloads：文件、清单与实时进度]
   L --> F[项目 .xsb/downloads]
@@ -125,4 +125,4 @@ turn 结束不删除下载文件；已经开始的下载可继续完成。应用
 
 覆盖：默认名与并发 `(1)` 后缀、预留不交付半成品、查询实时字节及未知进度、新 turn 空清单、旧 id 拒绝、旧 transfer 晚完成不串入、只读凭据不发模型消息、真实 Hub turn id 改变。
 
-真实 Electron 覆盖：用户鼠标/键盘被阻止而 CDP 点击/输入/Enter/截图正常，红色呼吸动画及中文标签，turn 解除后恢复用户键盘，原生 popup tab 不增加 BrowserWindow，opener/postMessage/POST 保留，POST/blob/直接下载保存，慢速文件的 50% 进度及跨 turn 晚完成，显式独立窗口移动和还原。
+真实 Electron 覆盖：用户鼠标/键盘被阻止而 CDP 点击/输入/Enter/截图正常，红色呼吸动画及中文标签，turn 解除后恢复用户键盘，弹出页是 webview2 标签、不增加 BrowserWindow，来源与 POST 保留，POST/blob/直接下载保存，慢速文件的 50% 进度及跨 turn 晚完成，显式独立窗口移动和还原。

@@ -71,6 +71,8 @@ export type AgentInfo = AgentSpec & {
    * not called at all and switching is free.
    */
   backendStarted?: boolean;
+  /** The agent asked the user something (`Question`) and waits for the reply; its state stays what its work is. */
+  asking?: boolean;
 };
 
 /** Current backend-provided settings and token counts for one conversation. */
@@ -374,6 +376,31 @@ export type Redelivered = { messageIds: string[]; with: string };
  */
 export const DeliveredAs = { key: `${NS}/delivered` } as const;
 export type DeliveredAs = { imagesHidden?: number; spilled?: { chars: number; file: string }[]; scope?: string };
+
+/**
+ * A question the agent asks the user with the `ask` tool, and what became of it. The tool returns at once; the user's
+ * reply is their next message to the agent: answers or a skip (with `Answer` in the prompt's `_meta`), or a message of
+ * their own instead. Recorded and shown in the transcript:
+ *   session/update { sessionUpdate: "session_info_update", _meta: { "dev.xsb/question": Question } }
+ * first with `state: "open"` and the questions, then with the id and how it closed.
+ */
+export const Question = { key: `${NS}/question` } as const;
+export type QuestionItem = {
+  question: string;
+  /** single: one option; multi: any number of options; text: a free answer. */
+  kind: "single" | "multi" | "text";
+  options?: string[];
+  /** single/multi: the user may also write an answer of their own. */
+  other?: boolean;
+};
+export type QuestionState = "open" | "answered" | "skipped" | "superseded";
+/** `reply`: the user's message that closed it (answered, skipped or superseded). */
+export type Question = { id: string; state: QuestionState; questions?: QuestionItem[]; answers?: QuestionAnswer[]; reply?: string };
+/** One answer per question, in order: an option or text for single and text, a list for multi. */
+export type QuestionAnswer = string | string[];
+/** `_meta` of the `session/prompt` that answers or skips a question. */
+export const Answer = { key: `${NS}/answer` } as const;
+export type Answer = { questionId: string; answers?: QuestionAnswer[]; skipped?: boolean };
 
 /** Desktop history pages use byte cursors and image references, leaving ACP replay unchanged. */
 export const History = {

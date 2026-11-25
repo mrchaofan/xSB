@@ -99,3 +99,22 @@ test("desktop loads pages over a real hub connection and receives live images as
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a conversation an earlier version named after xsb's own words is named after the user's again", async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "xsb-titles-")));
+  const previousHome = process.env.XSB_HOME;
+  process.env.XSB_HOME = path.join(dir, "home");
+  try {
+    initProject(new Paths(dir));
+    const before = new Hub(dir);
+    const session = before.createConversation("codex"), kept = before.createConversation("codex", "分镜"), silent = before.createConversation("codex");
+    session.emit({ sessionUpdate: "user_message_chunk", messageId: "m1", content: { type: "text", text: "做一支短片" } });
+    session.emit({ sessionUpdate: "user_message_chunk", messageId: "m2", content: { type: "text", text: "继续" } });
+    for (const s of [session, silent]) s.save({ title: "[xsb] This conversation had grown long, and goes on in a new session" });
+    const names = (hub: Hub) => [session, kept, silent].map((s) => hub.session(s.id).rec.title);
+    assert.deepEqual(names(new Hub(dir)), ["做一支短片", "分镜", undefined]);
+  } finally {
+    if (previousHome === undefined) delete process.env.XSB_HOME; else process.env.XSB_HOME = previousHome;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

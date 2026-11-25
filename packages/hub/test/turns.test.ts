@@ -797,3 +797,13 @@ test("while the hub stops, a turn that could not start keeps its input in the in
   assert.notEqual(state.ledger.get("k1")?.state, "discarded_unseen", "not recorded as never to be seen");
   assert.ok(!metas(state, B).some((u) => u._meta?.["dev.xsb/discarded"]?.messageId === "k1"));
 });
+
+test("a backend session named after xsb's own words does not rename the conversation", (t) => {
+  const { session } = setup(t) as any;
+  const title = (value: string) => { session.onBackendUpdate({ sessionUpdate: "session_info_update", title: value }); return session.rec.title; };
+  assert.equal(title("做一支短片"), "做一支短片");
+  for (const own of ["[xsb] This conversation had grown long, and goes on", "[xSB task conversation] {}", '<xsb-task from="director"', '{"excerpt":"[xsb] This session takes over']) {
+    assert.equal(title(own), "做一支短片");
+  }
+  assert.equal(title("短片的分镜"), "短片的分镜");
+});

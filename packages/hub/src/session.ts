@@ -30,7 +30,7 @@ import { bridgeServer } from "./mcp.ts";
 import { boundedText, contentTokens, contextOverflow, contextRef, textTokens } from "./context.ts";
 import { historyUpdate } from "./history.ts";
 import { Paths } from "./paths.ts";
-import { asPreface, handoff } from "./prompts.ts";
+import { asPreface, handoff, isXsbText } from "./prompts.ts";
 import type { Gives, Renewal } from "./prompts.ts";
 import { turnsSinceCleared } from "./transcript.ts";
 import type { MailItem, SessionRec } from "./state.ts";
@@ -634,7 +634,7 @@ export class LiveSession {
         }
         break;
       case "session_info_update":
-        if (typeof update.title === "string" && update.title !== this.rec.title) this.save({ title: update.title });
+        if (typeof update.title === "string" && update.title !== this.rec.title && !isXsbText(update.title)) this.save({ title: update.title });
         break;
       case "config_option_update":
         if (Array.isArray(update.configOptions)) {
@@ -1005,9 +1005,12 @@ export class LiveSession {
       // A node's first input has its purpose in the turn's workflow context; the main conversation's does not.
       const scope = users(i) && (i !== turn.first || !this.hub.agent(this.agentId).workflowOwner) ? this.hub.workflows?.interruptionContext(this,i.messageId) : undefined;
       if (scope) void i.inserted.promise.then(()=>this.recordWorkflow(turn.id,{messageId:i.messageId,scope}),()=>{});
+      // What the message is to the question the agent asked, if it replies to one (questions.ts): the card shows the user.
+      const reply = users(i) ? this.hub.questions?.scope(i.messageId) : undefined;
+      if (reply) void i.inserted.promise.then(() => this.hub.questions?.given(i.messageId), () => {});
       const given = users(i) ? this.spill(i.content, policy) : i.content;
       if (users(i)) i.deliveredAs = deliveredAs(i.content, given, scope, backend.caps.image);
-      return scope ? [text(scope),...given] : given;
+      return [...[reply, scope].filter((note): note is string => !!note).map((note) => text(note)), ...given];
     })];
     const tokens = contentTokens(content);
     if (tokens + this.standingTokens + policy.reserveTokens > policy.promptTokens) {

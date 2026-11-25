@@ -22,7 +22,7 @@ import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, net,
 import type { WebPreferences } from "electron";
 import { Paths, approvePlugin, describeBackends, ensurePluginRoot, findCommand, limitSettings, listPlugins, projectLanguageSetting, setLimit, setPluginEnabled, setProjectLanguage, stopHub } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
-import type { Language } from "@xsb/protocol";
+import type { Answer, Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
 import { AgentClis, agentCli, configPath, loginCommand } from "./agent-cli.ts";
 import { Ark, ROUTED_MODEL, arkLaunch, readArkBindings } from "./ark.ts";
@@ -94,6 +94,7 @@ const TEXT: Record<Language, Words> = {
         failed: { title: `${name}: something failed`, body: detail },
         confirm: { title: `${name} needs your decision`, body: detail },
         permission: { title: `${name} asks for permission`, body: detail },
+        question: { title: `${name} has a question for you`, body: detail },
       })[kind],
     quit: (names) => ({
       message: names.length === 1 ? `${names[0]} is still working` : `${names.length} agents are still working`,
@@ -117,6 +118,7 @@ const TEXT: Record<Language, Words> = {
         failed: { title: `${name}：有工作失败了`, body: detail },
         confirm: { title: `${name}需要你确认`, body: detail },
         permission: { title: `${name}请求授权`, body: detail },
+        question: { title: `${name}有问题想问你`, body: detail },
       })[kind],
     quit: (names) => ({
       message: names.length === 1 ? `${names[0]}还在工作` : `还有 ${names.length} 个智能体在工作`,
@@ -508,6 +510,15 @@ async function pickFolder(win: BrowserWindow): Promise<{ path: string; initializ
 // ---- window.xsb -------------------------------------------------------------
 
 /** The calls that are a method of the window's workspace, arguments and all. */
+/** The renderer's answer to an agent's question (ask.js), as the hub takes it: anything else is not an answer. */
+function answerOf(given: unknown): Answer | undefined {
+  const a = given as Answer | undefined;
+  if (!a || typeof a !== "object" || typeof a.questionId !== "string") return undefined;
+  if (a.skipped === true) return { questionId: a.questionId, skipped: true };
+  const text = (v: unknown) => typeof v === "string" && v.length <= 4000;
+  if (!Array.isArray(a.answers) || a.answers.length > 4 || !a.answers.every((v) => text(v) || (Array.isArray(v) && v.length <= 9 && v.every(text)))) return undefined;
+  return { questionId: a.questionId, answers: a.answers };
+}
 const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","setAvatar","setBackend","workflowControl","history","send","resend","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
 
 ipcMain.on("xsb:language", (event) => {
@@ -559,8 +570,6 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       return null;
     case "page":
       try {
-        if (args[1] === "bounds") return pages.layout(args[0], event.sender, args[2]);
-        if (args[1] === "controlBounds") return pages.controlLayout(args[0], event.sender, args[2]);
         if (["annotate", "annotationSave", "annotationDiscard", "annotationsClear", "annotationsRemove"].includes(args[1])) return pages.annotate(args[0], event.sender, args[1], args[2]);
         return pages.call(args[0], args[1], args[2]);
       } catch (e) {
@@ -633,7 +642,7 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
   }
   if (!workspace) throw new Error("this window has no workspace open");
   // A message's id is the workspace's to choose: the renderer sends content, or names an entry to send again.
-  if (method === "send") return workspace.send(args[0], args[1], typeof args[2] === "string" ? args[2] : undefined);
+  if (method === "send") return workspace.send(args[0], args[1], typeof args[2] === "string" ? args[2] : undefined, undefined, answerOf(args[4]));
   if (method === "resend" && (typeof args[0] !== "string" || typeof args[1] !== "string")) throw new Error("resend takes an agent and an entry");
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);
   throw new Error(`unknown method ${method}`);

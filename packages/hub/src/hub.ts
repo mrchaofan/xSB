@@ -42,7 +42,8 @@ import type { ContextOwner } from "./tool-context.ts";
 import { randomBytes } from "node:crypto";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
-import { conversationPrompt, conversationRecord } from "./prompts.ts";
+import { Questions } from "./questions.ts";
+import { conversationPrompt, conversationRecord, isXsbText } from "./prompts.ts";
 import { contextRef } from "./context.ts";
 import { turnsSinceCleared } from "./transcript.ts";
 import { Boundaries } from "@xsb/protocol";
@@ -64,6 +65,7 @@ export class Hub {
   readonly delivery: Delivery;
   readonly jobs: Jobs;
   readonly permissions: Permissions;
+  readonly questions: Questions;
   readonly assets: Assets;
   readonly workflows: Workflows;
   /** Set by `shutdown`: turns that die with it stay unacknowledged and run again on the next start. */
@@ -93,10 +95,11 @@ export class Hub {
       if (this.toolsPending.has(agentId)) setImmediate(() => this.retool(agentId));
     });
     this.permissions = new Permissions(this);
+    this.questions = new Questions(this);
     this.assets = new Assets(this);
     this.workflows = new Workflows(this);
     // One conversation per agent (docs/DESIGN.md): sessions a client once opened besides it are history, not live.
-    for (const rec of this.state.sessions.values()) if (rec.main) this.track(new LiveSession(this, rec));
+    for (const rec of this.state.sessions.values()) if (rec.main) this.track(new LiveSession(this, this.titled(rec)));
   }
 
   log(line: string): void {
@@ -183,6 +186,7 @@ export class Hub {
       state,
       mainSessionId: rec?.id,
       ...(rec?.backendSessionId && !rec.backendFresh ? { backendStarted: true } : {}),
+      ...(rec?.question ? { asking: true } : {}),
       ...(turn ? { currentTurnId: turn.id, turnProtected: turn.protected } : {}),
       ...(agent.workflowOwner && this.workflows.retired(agent.id) ? { retired: true } : {}),
     };
@@ -416,6 +420,16 @@ export class Hub {
     session.clientMcp = clientMcp;
     this.agentChanged(agentId);
     return session;
+  }
+
+  /** A record an earlier version let be named after xsb's own words is named again, as it was first: after the user's. */
+  private titled(rec: SessionRec): SessionRec {
+    if (!rec.title || !isXsbText(rec.title)) return rec;
+    const said = turnsSinceCleared(this.state.store, rec.agentId, rec.id).flatMap((turn) => turn.inputs);
+    const first = said.find((input) => input.origin.kind === "user" && input.text.trim() && !isXsbText(input.text));
+    const named = { ...rec, title: first?.text.trim().slice(0, 64) };
+    this.state.commit([ops.putSession(named)]);
+    return named;
   }
 
   private track(session: LiveSession): LiveSession {

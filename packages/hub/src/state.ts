@@ -41,6 +41,8 @@ export type SessionRec = {
   contextSize?: number;
   contextRenewAt?: number;
   contextEpoch?: number;
+  /** The question the agent asked the user and waits a reply to (questions.ts). */
+  question?: string;
   /** Written before replacing a refused backend. Unacknowledged mail supplies the durable input. */
   contextRecovery?: { messageId: string; attempts: number };
   /** Successful user-selected ACP options survive a context renewal on the same backend. */
