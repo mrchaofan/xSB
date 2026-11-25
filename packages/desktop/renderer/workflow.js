@@ -1,0 +1,192 @@
+// Topological layers keep parallel branches side by side. Buttons sit over the edge drawing
+// so keyboard navigation, the transcript and the prompt composer use native controls.
+import { $, ICON, h, fill } from "./dom.js";
+import { language, t } from "./i18n.js";
+import { state, agentOf, openTaskLane } from "./app.js";
+import { avatarImage } from "./avatars.js";
+
+export const currentFlow = () => state.workflows?.[agentOf(state.open[0])?.mainSessionId];
+// 每个工作流（按主会话）各自记住：选中的节点、正在看的版本（空 = 当前版本）、图是否折叠。
+const selected = new Map();
+const viewing = new Map();
+const collapsed = new Map();
+export function workflowPanelState(flow) {
+  if (flow) return { selected: selected.get(flow.sessionId), viewing: viewing.get(flow.sessionId), collapsed: collapsed.get(flow.sessionId) };
+}
+export function restoreWorkflowPanel(flow, saved) {
+  if (!flow || !saved) return;
+  selected.set(flow.sessionId, saved.selected);
+  viewing.set(flow.sessionId, saved.viewing ?? null);
+  collapsed.set(flow.sessionId, !!saved.collapsed);
+}
+
+/** 节点能不能打开对话：有会话、智能体还在列表里（当前的，或已被新版本删掉、只能查看的）。 */
+const openable = (n) => !!(n.sessionId && n.agentId && agentOf(n.agentId));
+
+/** 选中一个节点的对话。正在看历史版本时，只认那个版本里的节点。 */
+export function showTask(id) {
+  const flow = currentFlow();
+  if (!flow) return;
+  const shown = versionOf(flow);
+  if (!shown.nodes.some((n) => openable(n) && n.agentId === id)) {
+    if (!flow.nodes.some((n) => openable(n) && n.agentId === id)) return;
+    viewing.set(flow.sessionId, null);
+  }
+  selected.set(flow.sessionId, id);
+  if (!agentOf(id)?.retired) state.referenceAgent = id;
+  renderWorkflow(flow);
+}
+
+/**
+ * 正在看的版本：当前（可以对话）、候选（还没有对话）、或一个历史版本（只能查看）。
+ * 看的版本不存在了（候选被采用、历史被裁掉）就回到当前版本。
+ */
+function versionOf(flow) {
+  const want = viewing.get(flow.sessionId) ?? (!flow.version && flow.candidate ? flow.candidate.version : null);
+  if (want && flow.candidate?.version === want) {
+    return { kind: "candidate", version: want, nodes: flow.candidate.graph.nodes.map((n) => ({ name: n.node, status: "candidate" })), edges: flow.candidate.graph.edges };
+  }
+  const old = want && flow.history?.find((v) => v.version === want);
+  if (old) return { kind: "history", version: old.version, at: old.retiredAt, nodes: old.nodes, edges: old.edges };
+  return { kind: "active", version: flow.version, nodes: flow.nodes, edges: flow.edges };
+}
+
+function diagram(nodes, edges, active, choose) {
+  const incoming = new Map(nodes.map((n) => [n.name, []]));
+  for (const e of edges) incoming.get(e.to)?.push(e);
+  const levels = new Map(),
+    widths = [],
+    positions = new Map();
+  for (const n of nodes) {
+    const parents = incoming.get(n.name);
+    const level = parents.reduce((max, e) => Math.max(max, (levels.get(e.from) ?? 0) + 1), 0);
+    levels.set(n.name, level);
+    const column = widths[level] ?? 0;
+    widths[level] = column + 1;
+    positions.set(n.name, { x: 16 + column * 154, y: 12 + level * 90 });
+  }
+  const width = 18 + Math.max(1, ...widths) * 154,
+    height = 12 + widths.length * 90;
+  const surface = h("div", { class: "dag-surface", style: `width:${width}px;height:${height}px` });
+  // SVG paths scale with browser zoom without allocating a bitmap for a tall graph.
+  const ns = "http://www.w3.org/2000/svg";
+  const lines = document.createElementNS(ns, "svg");
+  lines.setAttribute("width", width);
+  lines.setAttribute("height", height);
+  lines.setAttribute("aria-hidden", "true");
+  for (const e of edges) {
+    const a = positions.get(e.from),
+      b = positions.get(e.to);
+    const x = a.x + 66,
+      endX = b.x + 66,
+      y = a.y + 49,
+      mid = (y + b.y) / 2;
+    const line = document.createElementNS(ns, "path");
+    line.setAttribute("d", `M${x} ${y} C${x} ${mid} ${endX} ${mid} ${endX} ${b.y} m-3 -5 l3 5 3 -5`);
+    lines.append(line);
+    if (e.case) {
+      const label = document.createElementNS(ns, "text");
+      label.setAttribute("x", (x + endX) / 2 + 4);
+      label.setAttribute("y", mid);
+      label.textContent = e.case;
+      lines.append(label);
+    }
+  }
+  surface.append(lines);
+  for (const n of nodes) {
+    const { x, y } = positions.get(n.name),
+      disabled = !openable(n);
+    const deps = incoming
+      .get(n.name)
+      .map((e) => [e.from, e.case].filter(Boolean).join(" · "))
+      .join(", ");
+    const label = t("flow." + n.status);
+    surface.append(
+      h(
+        "button",
+        {
+          class: "dag-node",
+          style: `left:${x}px;top:${y}px`,
+          disabled,
+          "data-agent": n.agentId,
+          "data-state": n.status,
+          "aria-pressed": String(!disabled && active === n.agentId),
+          title: [n.name, label, deps, n.summary].filter(Boolean).join("\n"),
+          "aria-label": [n.name, label, deps].filter(Boolean).join(", "),
+          onclick: () => choose(n.agentId),
+        },
+        h("strong", {}, n.name),
+        h("small", {}, label),
+      ),
+    );
+  }
+  return surface;
+}
+
+const when = (iso) => new Date(iso).toLocaleString(language, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+export function renderWorkflow(flow) {
+  const panel = $("#task-conversation");
+  if (!flow) {
+    fill(panel);
+    return;
+  }
+  const shown = versionOf(flow);
+  const folded = !!collapsed.get(flow.sessionId);
+  const id = selected.get(flow.sessionId) ?? state.referenceAgent;
+  const error = h("small", { class: "error", role: "alert" }, flow.error);
+  const button = (pause, names, label) => h("button", { class: "btn sm",
+    onclick: () => xsb.workflowControl(flow.sessionId, pause, names).catch((e) => (error.textContent = e.message)) }, label);
+  // 版本下拉：当前、候选、历史（最新的在前）。
+  const versions = [
+    flow.version && [flow.version, t("flow.version.active", { version: flow.version })],
+    flow.candidate && [flow.candidate.version, t("flow.version.candidate", { version: flow.candidate.version })],
+    ...(flow.history ?? []).map((v) => [v.version, t("flow.version.history", { version: v.version, time: when(v.retiredAt) })]),
+  ].filter(Boolean);
+  const picker = h("select", { class: "flow-version", "aria-label": t("flow.version.label"),
+    onchange: (e) => { viewing.set(flow.sessionId, e.target.value === flow.version ? null : e.target.value); renderWorkflow(flow); } },
+    ...versions.map(([value, label]) => h("option", { value, selected: value === shown.version }, label)));
+  fill($("#flow-heading"),
+    h("button", { class: "icon-btn flow-fold", "aria-expanded": String(!folded), title: t(folded ? "flow.expand" : "flow.collapse"), "aria-label": t(folded ? "flow.expand" : "flow.collapse"),
+      html: folded ? ICON.forward : ICON.down, onclick: () => { collapsed.set(flow.sessionId, !folded); renderWorkflow(flow); } }),
+    h("strong", {}, t("flow.title")),
+    versions.length > 1 ? picker : h("small", { title: shown.version }, shown.version),
+    shown.kind === "history" && h("span", { class: "flow-badge" }, t("flow.version.readonly")),
+    shown.kind === "active" && button(!flow.paused, undefined, t(flow.paused ? "flow.resume" : "flow.pause")),
+    error);
+  document.querySelector("#side-workflow").classList.toggle("flow-folded", folded);
+  const map = $("#flow-map");
+  const focusedAgent = map.contains(document.activeElement) && document.activeElement.dataset.agent;
+  // 折叠：整块图收起，只留标题栏，空间都给下方的节点对话。
+  map.hidden = folded;
+  if (folded) fill(map); else fill(map, diagram(shown.nodes, shown.edges, id, showTask));
+  if (focusedAgent)
+    map.querySelector(`button[data-agent="${CSS.escape(focusedAgent)}"]:enabled`)?.focus({ preventScroll: true });
+
+  // 下方的对话：当前版本里的节点可以对话；已被删掉的节点、历史版本里的节点只能查看。
+  const node = shown.kind !== "candidate" && shown.nodes.find((n) => n.agentId === id && openable(n));
+  const dropped = shown.kind === "active" && !node && agentOf(id)?.retired && agentOf(id)?.workflowOwner === flow.sessionId;
+  const readonly = shown.kind === "history" ? "flow.readonly.history" : dropped || agentOf(id)?.retired ? "flow.readonly.dropped" : null;
+  const lane = panel.firstElementChild;
+  const same = (node || dropped) && lane?.dataset.agent === id && (lane.dataset.readonly ?? null) === (readonly && t(readonly));
+  if (!same) {
+    lane?.saveDraft?.();
+    fill(panel);
+    if (node || dropped) openTaskLane(id, panel, readonly && t(readonly));
+    else fill(panel, h("p", { class: "empty" }, t(shown.kind === "candidate" ? "flow.preview" : "flow.pick")));
+  }
+  placeAgents(panel, shown.nodes.filter(openable), id);
+}
+
+/** 输入框上方：这个版本里能打开的智能体，横排，点一下切换到它的对话。 */
+function placeAgents(panel, nodes, active) {
+  panel.querySelector(".flow-agents")?.remove();
+  const lane = panel.querySelector(".lane");
+  if (!lane || !nodes.length) return;
+  const bar = h("div", { class: "flow-agents", role: "tablist", "aria-label": t("flow.agents") }, ...nodes.map((n) =>
+    h("button", { class: "flow-agent", role: "tab", "aria-selected": String(n.agentId === active), title: `${n.name} · ${t("flow." + n.status)}`,
+      onclick: () => n.agentId !== active && showTask(n.agentId) },
+      avatarImage(agentOf(n.agentId)), h("span", {}, n.name),
+      h("i", { class: "state", "data-state": n.status === "running" ? "running" : n.status === "completed" ? "done" : "idle" }))));
+  (lane.querySelector(".lane-readonly") ?? lane.querySelector(".composer")).before(bar);
+}

@@ -175,7 +175,7 @@ export function main(env: NodeJS.ProcessEnv = process.env): void {
       },
       {
         name: "generate_video",
-        description: `xsb's video generation, billed by usage. Generate one video clip from a prompt and save it as a file. It takes minutes and answers only when the file is saved, so do not wait in the call: submit it with start_job and collect the result with await_tasks. To give a clip up, cancel that job (cancel_task): a generation still queued at the provider is called off and not billed, one the provider has started finishes and is billed. Every call costs money: draft at a low resolution, and run a shot again only when its prompt or inputs changed. ${video.about}`,
+        description: `xsb's video generation, billed by usage. Generate one video clip from a prompt and save it as a file. The call completes when the file is saved. In a workflow run it in the task assigned to generate that clip. Every call costs money: draft at a low resolution, and run a shot again only when its prompt or inputs changed. ${video.about}`,
         inputSchema: {
           type: "object",
           required: ["prompt", "output"],

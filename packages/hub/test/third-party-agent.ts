@@ -16,7 +16,7 @@ const adapter: AgentAdapter = {
 
   async newSession({ systemPrompt }) {
     const id = `tp_${sessions.size + 1}`;
-    sessions.set(id, { instructed: !!systemPrompt?.includes("You are e.") });
+    sessions.set(id, { instructed: !!systemPrompt?.includes("Each conversation has one effective execution turn") });
     return id;
   },
 

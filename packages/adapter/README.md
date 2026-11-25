@@ -46,7 +46,7 @@ const adapter: AgentAdapter = {
 serveAdapter(adapter); // 默认在 stdin / stdout 上提供 ACP
 ```
 
-2. 在 `~/.xsb/config.json` 里登记为一个普通后端：
+2. 在 `~/.xsb2_global/config.json` 里登记为一个普通后端：
 
 ```json
 {

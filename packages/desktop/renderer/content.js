@@ -92,12 +92,33 @@ export function markdownView(text, openLink, className = "md") {
 /** 文本以外的一块：图片显示本身，文件显示名字，不认识的类型显示类型名。 */
 function partNode(block) {
   if (block.type === "image") return h("img", { class: "part", src: block.url || `data:${block.mimeType};base64,${block.data}`, loading: "lazy", decoding: "async", alt: t("content.image.alt") });
+  if (block.type === "asset_reference") return h("span", { class: "part chip asset-ref", title: block.name + " · " + block.version, html: ICON.file }, block.name + " · " + block.version);
   return h("span", { class: "part chip", title: block.uri, html: ICON.file }, block.type === "resource_link" ? block.name : block.type);
 }
 
 /** 内容 → 对话里的样子：文本按 markdown 渲染，其余各占一块。 */
-export function contentView(content, openLink, { streaming = false } = {}) {
-  const el = h("div", { class: "content" }, ...content.map((block) => {
+export function contentView(content, openLink, { streaming = false, lookupAsset } = {}) {
+  const parts = lookupAsset ? content.flatMap(block => {
+    if (block.type !== "text") return [block];
+    const parts = [];
+    let offset = 0;
+    for (const match of block.text.matchAll(/<asset>(.*?)<\/asset>/gs)) {
+      let ref;
+      try { ref = JSON.parse(match[1]); } catch { continue; }
+      if (typeof ref?.name !== "string" || !/^v[1-9]\d*$/.test(ref?.version)) continue;
+      if (offset < match.index) parts.push({ type: "text", text: block.text.slice(offset, match.index) });
+      parts.push({ type: "asset_reference", name: ref.name, version: ref.version });
+      offset = match.index + match[0].length;
+    }
+    if (offset === 0) return [block];
+    if (offset < block.text.length) parts.push({ type: "text", text: block.text.slice(offset) });
+    return parts;
+  }) : content;
+  const el = h("div", { class: "content" }, ...parts.map((block) => {
+    if (block.type === "asset_reference") {
+      const preview = lookupAsset?.(block);
+      return h(preview ? "button" : "span", { class: "part chip", html: ICON.file, onclick: preview }, block.name + " · " + block.version);
+    }
     if (block.type === "text") return markdownView(block.text, openLink);
     if (block.type === "resource_link") return h("button", { type: "button", class: "part chip", title: block.uri, html: ICON.file, onclick: () => openLink?.(block.uri, el) }, block.name);
     return partNode(block);
@@ -119,17 +140,32 @@ export function createEditor(onEnter, onChange = () => {}) {
   let reading = 0;
   const blocks = new WeakMap();      // 小方块的节点 → 它代表的块
 
+  let caret;
+  el.addEventListener("focusout", () => {
+    const selection = getSelection();
+    if (selection.rangeCount && el.contains(selection.anchorNode)) caret = selection.getRangeAt(0).cloneRange();
+  });
+  function token(block) {
+    const node = partNode(block);
+    node.contentEditable = "false";
+    blocks.set(node, block);
+    if (block.type === "asset_reference" || block.type === "resource_link") node.append(h("button", { class: "remove-ref", tabindex: "-1", type: "button", "aria-label": t("composer.remove"), title: t("composer.remove"), html: ICON.close, onclick: () => { node.remove(); el.focus(); onChange(); } }));
+    return node;
+  }
+
   /** 内容 → 输入框：插到光标处。 */
-  function insert(content) {
+  function insert(content, background = false) {
     // 图片读取可能晚于对话切换；离开后只更新原对话草稿。
-    if (!el.isConnected) {
+    if (!el.isConnected || (background && document.activeElement !== el)) {
       restore([...read(false), ...content]);
       onChange();
       return;
     }
+    const focused = document.activeElement === el;
+    const previous = !focused && caret && el.contains(caret.commonAncestorContainer) ? caret : null;
     el.focus();
     const selection = getSelection();
-    let range = selection.rangeCount ? selection.getRangeAt(0) : null;
+    let range = previous ?? (focused && selection.rangeCount ? selection.getRangeAt(0) : null);
     if (!range || !el.contains(range.commonAncestorContainer)) {
       range = document.createRange();
       range.selectNodeContents(el);
@@ -139,28 +175,39 @@ export function createEditor(onEnter, onChange = () => {}) {
     }
     range.deleteContents();
     for (const block of content) {
-      const node = block.type === "text" ? document.createTextNode(block.text) : partNode(block);
-      if (block.type !== "text") {
-        node.contentEditable = "false";
-        blocks.set(node, block);
-      }
+      const node = block.type === "text" ? document.createTextNode(block.text) : token(block);
       range.insertNode(node);
       range.setStartAfter(node);
     }
     range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    caret = range.cloneRange();
     onChange();
   }
 
   /** 输入框 → 内容：按节点顺序读出，首尾的空白不算。 */
   function read(trim = true) {
     let content = [];
-    for (const node of el.childNodes) {
-      content = append(content, blocks.get(node) ?? { type: "text", text: node.nodeName === "BR" ? "\n" : node.textContent });
+    const addText = text => { if (text) content = append(content, { type: "text", text }); };
+    function walk(parent) {
+      for (const node of parent.childNodes) {
+        const block = blocks.get(node);
+        if (block) content = append(content, block);
+        else if (node.nodeType === Node.TEXT_NODE) addText(node.textContent);
+        else if (node.nodeName === "BR") { if (parent.childNodes.length > 1) addText("\n"); }
+        else {
+          if (node.previousSibling && /^(DIV|P)$/.test(node.nodeName)) addText("\n");
+          walk(node);
+        }
+      }
     }
+    walk(el);
     if (!trim) return content;
     const trimmed = content.map((block, i) => (block.type !== "text" ? block
       : { ...block, text: block.text.slice(i === 0 ? block.text.search(/\S|$/) : 0).replace(i === content.length - 1 ? /\s+$/ : /$^/, "") }));
-    return trimmed.filter((block) => block.type !== "text" || block.text);
+    return trimmed.filter(block => block.type !== "text" || block.text).map(block => block.type === "asset_reference"
+      ? { type: "text", text: "<asset>" + JSON.stringify({ name: block.name, version: block.version }) + "</asset>" } : block);
   }
 
   const take = (data, native = false) => {
@@ -170,7 +217,7 @@ export function createEditor(onEnter, onChange = () => {}) {
     // Start reading immediately, then insert in paste order even if image decoding finishes out of order.
     const content = fromClipboard(data, native);
     content.catch(() => {});
-    pending = pending.catch(() => {}).then(() => content).then(insert).catch((e) => {
+    pending = pending.catch(() => {}).then(() => content).then(blocks => insert(blocks, true)).catch((e) => {
       error.textContent = t("content.pasteFailed", { error: e.message });
       error.hidden = false;
       throw e;
@@ -181,21 +228,20 @@ export function createEditor(onEnter, onChange = () => {}) {
   el.ondragover = (e) => e.preventDefault();
   el.ondrop = (e) => { e.preventDefault(); take(e.dataTransfer); };
   el.onkeydown = (e) => {
-    if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+    if (e.key !== "Enter" || e.isComposing) return;
     e.preventDefault();
-    onEnter();
+    if (e.shiftKey) insert([{ type: "text", text: "\n" }]);
+    else onEnter();
   };
   // 删空之后浏览器会留下一个换行，清掉它，占位文字才会回来
-  el.oninput = () => { error.hidden = true; if (!reading) pending = pending.catch(() => {}); if (!read().length) el.replaceChildren(); onChange(); };
+  el.oninput = () => { error.hidden = true; if (!reading) pending = pending.catch(() => {}); if (!read(false).length) el.replaceChildren(); onChange(); };
 
   // 恢复草稿不抢焦点；附件重新关联到 WeakMap，仍可正常编辑和发送。
   function restore(content) {
+    caret = null;
     el.replaceChildren(...content.map((block) => {
       if (block.type === "text") return document.createTextNode(block.text);
-      const node = partNode(block);
-      node.contentEditable = "false";
-      blocks.set(node, block);
-      return node;
+      return token(block);
     }));
   }
 

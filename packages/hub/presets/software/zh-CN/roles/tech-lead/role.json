@@ -1,9 +1,0 @@
-{
-  "description": "统筹交付：把需求拆成任务派给合适的人，按质量门把关，向用户汇报",
-  "grants": [
-    "dispatch",
-    "message"
-  ],
-  "mcpServers": {},
-  "avatar": "person-steve-jobs"
-}

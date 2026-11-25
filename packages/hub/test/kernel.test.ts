@@ -27,7 +27,9 @@ const hooks: KernelHooks = new Hooks(reports);
 /** Sessions that are busy, and task ids a tool call waits for. */
 const busy = new Set<string>();
 const awaited = new Set<string>();
-const kernel = new Kernel(state, hooks, (to) => ({ exists: state.agents.has(to.agentId), busy: busy.has(to.sessionId), awaits: (id) => awaited.has(id), ...(busy.has(to.sessionId) ? { turn: { id: `turn-${to.sessionId}`, protected: false, taskIds: [...state.tasks.values()].filter((t) => t.to.sessionId === to.sessionId && t.status === "running").map((t) => t.id) } } : {}) }));
+/** Sessions whose running turn is the user's: started or spoken into by the user. */
+const protectedTurns = new Set<string>();
+const kernel = new Kernel(state, hooks, (to) => ({ exists: state.agents.has(to.agentId), busy: busy.has(to.sessionId), awaits: (id) => awaited.has(id), ...(busy.has(to.sessionId) ? { turn: { id: `turn-${to.sessionId}`, protected: protectedTurns.has(to.sessionId), taskIds: [...state.tasks.values()].filter((t) => t.to.sessionId === to.sessionId && t.status === "running").map((t) => t.id) } } : {}) }));
 // What the effectors would do: a task given is a task its executor has (in a session, `started`).
 const routed: { item: MailItem; route: Route }[] = [];
 hooks.on("message.routed", (r) => void routed.push(r));
@@ -129,11 +131,16 @@ const settle = () => hooks.settled();
   console.log("ok 4 notified is not woken");
 }
 
-// §7.1 on the same pipeline: the user's word never waits; a peer's waits its turn, even from whoever gave that work.
+// §7.1 on the same pipeline: the user's word never waits. A peer's goes into a turn that is an agent's, and waits
+// its turn when the running turn is the user's (started or spoken into by the user).
 {
   const t = handed(give(A, B, "work"));
   busy.add("sb");
-  const say = (from: MailItem["from"], content: string) => kernel.post({ to: B, from, kind: "message", content, pref: "wake" });
+  const say = (from: MailItem["from"], content: string, pref: "wake" | "lazy" = "wake") => kernel.post({ to: B, from, kind: "message", content, pref });
+  assert.equal(say({ kind: "agent", ...A }, "into the agent's turn").route, "interject");
+  assert.equal(say({ kind: "agent", ...C }, "from someone else, too").route, "interject");
+  assert.equal(say({ kind: "agent", ...C }, "not urgent", "lazy").route, "inbox");
+  protectedTurns.add("sb");
   assert.equal(say({ kind: "user" }, "from the user").route, "interject");
   const dispatcher = say({ kind: "agent", ...A }, "from the dispatcher");
   assert.equal(dispatcher.route, "turn");
@@ -141,6 +148,7 @@ const settle = () => hooks.settled();
   const other = say({ kind: "agent", ...C }, "from someone else");
   assert.equal(other.route, "turn");
   assert.equal(state.ledger.get(other.item.id)!.state, "queued");
+  protectedTurns.clear();
   busy.clear();
   assert.equal(say({ kind: "user" }, "now idle").route, "turn");
   kernel.complete(state.tasks.get(t.id)!, "completed", "", []);
@@ -156,7 +164,7 @@ const settle = () => hooks.settled();
   busy.add("sb");
   busy.add("sc");
   const second = give(A, B, "second");
-  assert.equal(state.ledger.get([...state.mail.values()].find((m) => m.taskId === second.id)!.id)!.state, "queued", "an agent's task waits its turn");
+  assert.equal(state.ledger.get([...state.mail.values()].find((m) => m.taskId === second.id)!.id)!.state, "submitted", "an agent's task goes into a turn that is an agent's");
   assert.deepEqual(kernel.replace(second, "turn-sb"), [], "mixed work queues without partially cancelling the turn");
   assert.equal(state.tasks.get(first.id)!.status, "running");
   assert.equal(state.tasks.get(theirs.id)!.status, "running");

@@ -1,7 +1,8 @@
 // One persistent control per provider: status updates preserve focus, open details and agent drafts.
 import { state } from "./app.js";
 import { CLI_DETAILS, backendPresentation } from "./backend-state.js";
-import { ICON, h } from "./dom.js";
+import { backendIcon } from "./backend-icons.js";
+import { h } from "./dom.js";
 import { openDialog } from "./form.js";
 import { t } from "./i18n.js";
 
@@ -136,7 +137,7 @@ export function backendControls(backend, onChange = () => {}, { card = false } =
   });
   const actions = h("div", { class: "backend-actions" }, primary, cli && config, more);
   if (card) root.append(h("div", { class: "backend-card-head" },
-    h("span", { class: "backend-mark", "data-provider": cli ?? "custom", "aria-hidden": "true", html: ICON.code }),
+    backendIcon(backend.name, "lg"),
     h("div", { class: "backend-identity" }, h("h2", {}, name), h("small", {}, provider?.vendor ?? t("backend.custom"))), status));
   else root.append(status);
   root.append(description, actions, notice, errorDetails, options);

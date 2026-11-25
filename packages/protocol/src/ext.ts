@@ -25,28 +25,21 @@ export const TurnIsolation = { key: `${NS}/turn-isolation`, version: 1 } as cons
  *
  *   advertise  capabilities._meta["dev.xsb/agents"] = { version: 1 }
  *   opt in     capabilities._meta["dev.xsb/agents"] = {}   (receive `update`, see below)
- *   address    session/new   params._meta["dev.xsb/agent"] = "<agentId>"
- *              SessionInfo   _meta["dev.xsb/agent"], _meta["dev.xsb/main"]
- *   request    _dev.xsb/agents/list   {}            -> { agents: AgentInfo[] }
- *              _dev.xsb/agents/get    { id }        -> { agent: AgentInfo, instructions, systemPrompt }
- *                                                   `instructions` are the agent's own; `systemPrompt` is
- *                                                   everything a new session of it would be told
- *              _dev.xsb/agents/put    { agent, instructions? } -> { agent: AgentInfo }
- *              _dev.xsb/agents/remove { id }        -> {}
- *              _dev.xsb/agents/restart { id }       -> {}   stop its backend process, so that changed
- *                                                   instructions, tools and skills apply from the next
- *                                                   turn on; a turn that is running fails
- *   notify     _dev.xsb/agents/update  { agent: AgentInfo }   (hub -> opted-in clients)
- *              _dev.xsb/agents/removed { id }
- *              _dev.xsb/agents/asks    { agentId, question }   the agent waits for the user to decide or
- *                                                   confirm something (its tool `ask_user`); the question
- *                                                   itself is in its reply, this is for telling the user
+ *   create     session/new starts a main conversation. session/resume opens an existing one.
+ *   address    SessionInfo._meta["dev.xsb/agent"] identifies the conversation's agent.
+ *   request    _dev.xsb/agents/list returns main agents and started, active workflow instances.
+ *   notify     _dev.xsb/agents/update and _dev.xsb/agents/removed update that directory.
+ *   change     _dev.xsb/agents/set { agentId, avatar } sets a main conversation's icon; answers the updated AgentInfo.
  *
  * A client that opted in is an observer: it also receives permission requests
  * of sessions nobody is attached to, so an unattended agent is never stuck.
  */
 export type AgentSpec = {
-  /** Bundled avatar ID. Empty or absent inherits the role avatar, then the default. */
+  /** Set only for an execution instance of a workflow node. */
+  workflowOwner?: string;
+  workflowNode?: string;
+  conversation?: boolean;
+  /** Bundled avatar ID. Empty or absent uses the default. */
   avatar?: string;
   id: string;
   name: string;
@@ -55,11 +48,6 @@ export type AgentSpec = {
   backend: string;
   /** Absolute working directory. */
   workspace: string;
-  /**
-   * The role this agent is an instance of: a directory `.xsb/roles/<role>/`
-   * that gives it its instructions, its MCP servers and its skills.
-   */
-  role?: string;
   createdAt: string;
 };
 
@@ -72,6 +60,23 @@ export type AgentInfo = AgentSpec & {
   /** Snapshot for turn-bound operations. Recheck at execution time. */
   currentTurnId?: string;
   turnProtected?: boolean;
+  /** A workflow node's agent whose node an adopted version dropped: its conversation can be read, not continued. */
+  retired?: boolean;
+};
+
+/** Current backend-provided settings and token counts for one conversation. */
+export const SessionControls = {
+  capability: `${NS}/session-controls`,
+  get: `_${NS}/session-controls/get`,
+  update: `_${NS}/session-controls/update`,
+} as const;
+
+export type ComposerState = {
+  connected: boolean;
+  configOptions: unknown;
+  selected: Record<string, string>;
+  used?: number;
+  size?: number;
 };
 
 export const Agents = {
@@ -79,180 +84,24 @@ export const Agents = {
   sessionKey: `${NS}/agent`,
   mainKey: `${NS}/main`,
   list: `_${NS}/agents/list`,
-  get: `_${NS}/agents/get`,
-  put: `_${NS}/agents/put`,
-  remove: `_${NS}/agents/remove`,
-  restart: `_${NS}/agents/restart`,
   update: `_${NS}/agents/update`,
   removed: `_${NS}/agents/removed`,
+  set: `_${NS}/agents/set`,
   asks: `_${NS}/agents/asks`,
 } as const;
 
 /**
- * Roles: what agents are instances of (see `AgentSpec.role`). A role gives its
- * agents instructions, MCP servers and skills.
+ * Plugins (the hub's plugins.ts) are read from their folders when a backend starts. After the folders or their
+ * settings changed, a client may tell the hub instead of restarting it:
  *
- *   advertise  capabilities._meta["dev.xsb/roles"] = { version: 1 }
- *   request    _dev.xsb/roles/list   {}       -> { roles: RoleDetail[] }
- *              _dev.xsb/roles/get    { name } -> { role: RoleDetail }
- *              _dev.xsb/roles/put    { role: RoleInput } -> { role: RoleDetail }
- *                                    Fields left out stay as they are. `mcpServers` and `skills`,
- *                                    when given, are the whole set: what is not in it is removed.
- *                                    A change is to the project's own role; a team's role is copied to become one.
- *              _dev.xsb/roles/remove { name } -> {}        the project's own role. Refused while an agent has
- *                                    the role, unless a team's role of that name takes its place; a role
- *                                    that is only a team's goes with the team (`teams/drop`)
- *              _dev.xsb/roles/check  { name, server? } -> { servers: McpServerCheck[] }
- *                                    start the role's MCP servers and ask each for its tools
- *   notify     _dev.xsb/roles/update  { role: RoleDetail } (hub -> observers, after `put`)
- *              _dev.xsb/roles/removed { name }
- *
- * A role is also a directory the user may edit by hand; such an edit is read
- * on its next use but announced to nobody.
- *
- * A change applies to an agent of the role from its next session binding on
- * (`agents/restart` forces one); `description`, `backend` and `workspace` are
- * only defaults for new agents.
+ *   request    _dev.xsb/tools/apply {} -> { waiting: number }
+ *              a conversation whose tools or prompt would now differ resumes its backend session in a new process;
+ *              an idle one at once, a working one once its work is over (`waiting` of them). Others are left alone.
  */
-export const Roles = {
-  capability: `${NS}/roles`,
-  list: `_${NS}/roles/list`,
-  get: `_${NS}/roles/get`,
-  put: `_${NS}/roles/put`,
-  remove: `_${NS}/roles/remove`,
-  check: `_${NS}/roles/check`,
-  update: `_${NS}/roles/update`,
-  removed: `_${NS}/roles/removed`,
+export const ToolServers = {
+  apply: `_${NS}/tools/apply`,
 } as const;
 
-/** How to start a stdio MCP server, as in `.mcp.json`. */
-/**
- * How to start an MCP server, in the shape of `.mcp.json`. `about`: one sentence, from whoever provides the server,
- * on what it is and when it is the one to use; agents are told it next to the server's name (where their tools
- * come from), which is what they choose between tools of several sources by.
- */
-export type McpServerSpec = { command: string; args?: string[]; env?: Record<string, string>; about?: string };
-
-/**
- * `description`, `produces` and `inputs` are what the skill's SKILL.md declares
- * in its front matter. A skill that produces an asset type is given with every
- * task that has to produce that type, and `inputs` are the types it is made
- * from; any skill can be loaded by the model.
- */
-export type SkillInfo = { name: string; description: string; produces?: string; inputs: string[] };
-
-export type RoleDetail = {
-  /** Bundled avatar ID, or "role" for the role's own picture (`avatarFile`); empty or absent uses the default. */
-  avatar?: string;
-  /** With `avatar` "role": the absolute path of the role's own picture, a PNG in its directory. */
-  avatarFile?: string;
-  name: string;
-  /**
-   * Set when a team the project uses has a role of this name: which team, and
-   * whether the project has its own role in its place (`roles/remove` then
-   * brings the team's back). `teamTitle` and `title` are what the team and the role are called.
-   */
-  preset?: { team: string; teamTitle: string; own: boolean; title: string };
-  description?: string;
-  backend?: string;
-  grants?: Grant["cap"][];
-  instructions: string;
-  mcpServers: Record<string, McpServerSpec>;
-  /** `dir`: where the skill's files are, on the hub's machine. */
-  skills: (SkillInfo & { content: string; dir: string })[];
-  /** Ids of the agents that are instances of the role. */
-  agents: string[];
-};
-
-export type RoleInput = {
-  /** Bundled avatar ID; empty or absent uses the default. */
-  avatar?: string;
-  name: string;
-  description?: string;
-  backend?: string;
-  /** Team policy: what the role's agents may do in every task, beyond reaching its initiator. */
-  grants?: Grant["cap"][];
-  instructions?: string;
-  mcpServers?: Record<string, McpServerSpec>;
-  skills?: { name: string; content: string }[];
-};
-
-export type McpServerCheck = { server: string; tools?: { name: string; description?: string }[]; error?: string };
-
-/**
- * Teams: the sets of roles xsb ships, and which of them the project uses.
- * Using a team copies nothing: its roles are among the project's from then on
- * (`RoleDetail.preset`), from a frozen project copy of the template.
- *
- *   advertise  capabilities._meta["dev.xsb/teams"] = { version: 2 }
- *   request    _dev.xsb/teams/list {}     -> { teams: TeamInfo[] }
- *              _dev.xsb/teams/use  { id } -> {}    copy on first use; later use preserves the copy
- *              _dev.xsb/teams/drop { id } -> {}    refused while an agent has a role only that team gives
- *              _dev.xsb/teams/derive { id, base } -> { team: TeamInfo }
- *                                  start a team of the user's (~/.xsb/presets) that extends `base`
- *              _dev.xsb/teams/sync-preview { id } -> TeamSyncPlan
- *              _dev.xsb/teams/sync { id, revision, confirm: true } -> TeamSyncPlan
- *                                  replace the project copy and matching custom overrides; changes are lost
- *   The list says, besides the teams, what is wrong among the preset directories that belongs to no team
- *   (`problems`). Teams come from xsb (`builtin`) and from the user's ~/.xsb/presets (`user`), organised alike.
- *
- * The project language selects the initial copy and explicit updates. Team and role folder names identify the
- * origin, with builtin/user source roots distinguishing otherwise equal paths; no extra template id is used.
- *
- * Observers hear of the roles that came, changed or went as `roles/update` and `roles/removed`.
- */
-export const Teams = {
-  capability: `${NS}/teams`,
-  list: `_${NS}/teams/list`,
-  use: `_${NS}/teams/use`,
-  drop: `_${NS}/teams/drop`,
-  derive: `_${NS}/teams/derive`,
-  syncPreview: `_${NS}/teams/sync-preview`,
-  sync: `_${NS}/teams/sync`,
-} as const;
-
-/** Something wrong with a preset team or one of its files (`error`: left out; `warning`: used all the same). */
-export type PresetProblem = { team?: string; path: string; code: string; detail: string; severity: "error" | "warning" };
-
-export type TeamSyncPlan = {
-  id: string;
-  roles: string[];
-  /** Project overrides removed for matching role codes. */
-  overwritten: string[];
-  removed: string[];
-  /** Binds confirmation to the previewed source and project files. */
-  revision: string;
-};
-
-export type TeamInfo = {
-  id: string;
-  snapshot?: boolean;
-  sourceDir?: string;
-  syncAvailable?: boolean;
-  /** Shipped with xsb, or the user's own (~/.xsb/presets). */
-  source: "builtin" | "user";
-  /** The team it builds on. */
-  extends?: string;
-  /** Where it is, in the language read. */
-  dir: string;
-  /** The language its words are in: the project's, unless the team has none in it. */
-  language: Language;
-  /** What is wrong with it, as far as can be checked without running it. */
-  problems: PresetProblem[];
-  /** The programs its roles' MCP servers start. */
-  programs: string[];
-  title: string;
-  description: string;
-  /** What its asset types are called: type -> name, in the project's language. */
-  assets: Record<string, string>;
-  /** The project uses it. */
-  used: boolean;
-  /**
-   * Its roles in order: the project copy when used, otherwise the source template. `name` is what an agent of the role would be called;
-   * `requires` are the programs of the machine the role works with, each with how to get it.
-   */
-  roles: { name: string; role: Omit<RoleDetail, "agents" | "preset">; requires: { command: string; install: string }[] }[];
-};
 
 /**
  * Backends: what an agent can run on, on the machine the hub runs on.
@@ -421,7 +270,13 @@ export const Ledger = { update: `_${NS}/messages/update` } as const;
  * `renewed`: the conversation grew past the project's limit, and goes on in a new backend session, handed what came
  * before.
  */
-export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed" | "stopped";
+/**
+ * Why what precedes a boundary is no longer what the model works from: the user cleared it; the backend changed;
+ * the backend session could not be restored; it had grown too long (`renewed`); it went on after a stop; work was
+ * isolated after an input it held expired (`isolated`); or the backend compacted it itself (`compacted`, no handoff:
+ * the backend's own summary stands in for it).
+ */
+export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed" | "stopped" | "isolated" | "compacted";
 export type Boundary = {
   kind: BoundaryKind;
   /** The backend the session continues on. */
@@ -492,6 +347,7 @@ export type Asset = {
   path: string;
   /** Agent that registered it. */
   by: string;
+  sessionId?: string;
   createdAt: string;
 };
 

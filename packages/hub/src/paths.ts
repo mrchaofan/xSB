@@ -1,21 +1,19 @@
 /**
- * Where things live. The project directory is the one holding `.xsb/`:
+ * Where things live. The project directory is the one holding `.xsb2/`. The name is new with the
+ * conversation layout: a `.xsb/` of the earlier, role-based layout is another program's data and is never read.
  *
- *   .xsb/
- *     config.json                      project settings (machine settings: ~/.xsb/config.json)
- *     agents.jsonl                     the agents (event log)
- *     sessions.jsonl                   sessions and the backend session each maps to
- *     tasks.jsonl  gates.jsonl         dispatched work and joins waiting on it
- *     mailbox.jsonl                    messages between agents: enqueue / ack
+ *   .xsb2/
+ *     config.json                      project settings (machine settings: ~/.xsb2_global/config.json)
+ *     conversations/agents.jsonl       the conversations' agents (event log)
+ *     conversations/sessions.jsonl     sessions and the backend session each maps to
+ *     conversations/tasks.jsonl …      dispatched work, joins, mailbox, ledger, assets index
  *     wal.jsonl                        write-ahead log for multi-file changes
  *     agents/<id>/instructions.md      what this agent is (free text, user-edited)
  *     agents/<id>/memory.jsonl         the agent's own notes, by topic
  *     agents/<id>/sessions/<sid>.jsonl transcript of one session
  *     agents/<id>/scratch/             the agent's own drafts and intermediate files
  *     shared/                          files agents hand to each other
- *     assets.jsonl  assets/            the asset library: its index and its files
- *     roles/<role>/                    role.json, instructions.md, skills/<name>/SKILL.md (user-edited); the roles of
- *                                      the preset teams the project uses are not here (presets.ts)
+ *     assets/                          the asset library's files
  *     run/                             lock, pid, sockets, log of the running hub
  */
 import { createHash } from "node:crypto";
@@ -24,15 +22,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const DIR = ".xsb";
+/** The project's own directory. Machine settings stay in `~/.xsb2_global` (config.ts, `globalDir`). */
+export const DIR = ".xsb2";
 
-/**
- * What xsb ships besides its code, by name ("presets", "bin"). One rule, whatever form xsb runs in: it is the
- * directory of that name next to the directory the code is in. In the sources the code is packages/hub/src and
- * they are packages/hub/presets and packages/hub/bin; in the app (packages/desktop/rolldown.config.js) the code is
- * one file in dist/bin or dist/app, and they are dist/presets and dist/bin. They are plain files in both (the app
- * is packed without asar), so nothing asks which form it runs in.
- */
+/** Companion executables live next to the source or bundled module. */
 export const shipped = (name: string): string => fileURLToPath(new URL(`../${name}/`, import.meta.url));
 
 export function findProject(start = process.cwd()): string | null {
@@ -64,17 +57,6 @@ export class Paths {
   get assets(): string {
     return path.join(this.dir, "assets");
   }
-  /** Project-local template snapshots, never implicitly refreshed after creation. */
-  get templates(): string {
-    return path.join(this.dir, "templates");
-  }
-  /** The project's own roles. */
-  get roles(): string {
-    return path.join(this.dir, "roles");
-  }
-  roleDir(role: string): string {
-    return path.join(this.roles, role);
-  }
   get run(): string {
     return path.join(this.dir, "run");
   }
@@ -92,6 +74,10 @@ export class Paths {
   }
   get hubLog(): string {
     return path.join(this.run, "hub.log");
+  }
+  /** Where the side panel's browser saves downloads. */
+  get downloads(): string {
+    return path.join(this.dir, "downloads");
   }
 
   /** Unix socket paths are limited to ~104 bytes; a deep project falls back to the temp dir. */
@@ -113,7 +99,7 @@ export class Paths {
     return path.join(this.agentDir(id), "scratch");
   }
 
-  // Store-relative names (the store is rooted at `.xsb/`).
+  // Store-relative names (the store is rooted at `.xsb2/`).
   static memory = (agentId: string): string => `agents/${agentId}/memory.jsonl`;
   static transcript = (agentId: string, sessionId: string): string => `agents/${agentId}/sessions/${sessionId}.jsonl`;
 }

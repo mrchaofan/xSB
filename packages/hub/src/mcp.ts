@@ -9,13 +9,14 @@
  */
 import path from "node:path";
 import { RpcError } from "@xsb/protocol";
-import type { Connection, McpServer, McpServerSpec } from "@xsb/protocol";
+import type { Connection, McpServer } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
 import { shipped } from "./paths.ts";
-import { mcpServers } from "./roles.ts";
+
 import type { LiveSession } from "./session.ts";
-import { TOOLS, callTool } from "./tools.ts";
-import { VERSION } from "./util.ts";
+import { workflowTools } from "./workflow-tools.ts";
+import { boundedText } from "./context.ts";
+import { newId, VERSION } from "./util.ts";
 import { serveToolContext } from "./tool-context.ts";
 import type { ContextOwner } from "./tool-context.ts";
 
@@ -26,17 +27,13 @@ export const BRIDGE_ATTACH = "_xsb/attach";
 export const BRIDGE_SOCKET_ENV = "XSB_MCP_SOCKET";
 export const BRIDGE_TOKEN_ENV = "XSB_MCP_TOKEN";
 
-/**
- * The name of the hub's own MCP server, as an agent sees it: its tools are the team's (`team.dispatch_task`, ...;
- * hosts show them as `team/dispatch_task` or `mcp__team__dispatch_task`, for tool names may not contain dots).
- */
-export const TEAM_SERVER = "team";
+export const WORKFLOW_SERVER = "workflow";
 
 /** The `mcpServers` entry that gives a backend session the hub's tools. */
 export function bridgeServer(socketPath: string, token: string): McpServer {
   return {
     type: "stdio",
-    name: TEAM_SERVER,
+    name: WORKFLOW_SERVER,
     command: process.execPath,
     args: [BRIDGE],
     env: [
@@ -49,30 +46,20 @@ export function bridgeServer(socketPath: string, token: string): McpServer {
   };
 }
 
-/**
- * MCP servers every agent has, role or not: what the client that started the hub gives them, in the shape of
- * `.mcp.json` (the desktop app gives its browser). A role's server of the same name takes its place.
- */
-export const COMMON_SERVERS_ENV = "XSB_MCP_SERVERS";
-
-export function commonServers(): { server: McpServer; about?: string }[] {
-  const given = process.env[COMMON_SERVERS_ENV];
-  if (!given) return [];
-  const specs: Record<string, McpServerSpec> = JSON.parse(given);
-  return mcpServers(specs).map((server) => ({ server, about: specs[server.name]?.about }));
-}
-
-/**
- * Serve the team's tools to one bridge. Every session is listed every tool, always: an agent program may take the list
- * once and keep it (codex does, whatever `notifications/tools/list_changed` says). Whether a call is allowed is
- * decided when it is made (capabilities.ts).
- */
-export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => LiveSession | undefined, contextLookup: (token: string) => ContextOwner | undefined = () => undefined): void {
+/** Resolve each call against the live session and its current assignment. */
+export function serveMcp(
+  hub: Hub,
+  conn: Connection,
+  lookup: (token: string) => LiveSession | undefined,
+  contextLookup: (token: string) => ContextOwner | undefined = () => undefined,
+): void {
   serveToolContext(hub, conn, contextLookup);
+  const connectionId = newId("mcp");
   let session: LiveSession | undefined;
   let token: string | undefined;
   const attached = (): LiveSession => {
-    if (!session || !token || lookup(token) !== session) throw new RpcError(-32600, "not attached or bridge revoked");
+    if (!session || !token || lookup(token) !== session)
+      throw new RpcError(-32600, "not attached or bridge revoked");
     return session;
   };
 
@@ -85,17 +72,44 @@ export function serveMcp(hub: Hub, conn: Connection, lookup: (token: string) => 
   conn.onRequest("initialize", (p) => ({
     protocolVersion: MCP_VERSIONS.includes(p.protocolVersion) ? p.protocolVersion : MCP_VERSIONS[0],
     capabilities: { tools: {} },
-    serverInfo: { name: TEAM_SERVER, version: VERSION },
+    serverInfo: { name: WORKFLOW_SERVER, version: VERSION },
   }));
   conn.onRequest("ping", () => ({}));
   conn.onRequest("tools/list", () => {
-    attached();
-    return { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
+    return { tools: workflowTools(!!hub.agent(attached().agentId).workflowOwner) };
   });
-  conn.onRequest("tools/call", async (p) => {
+  conn.onRequest("tools/call", async (p, ctx) => {
     const owner = attached();
-    if (!owner.current?.started || !owner.acceptsTools) throw new RpcError(-32600, "No active turn: stopped or idle work cannot invoke tools.");
-    const result = await callTool(hub, owner, p.name, p.arguments);
-    return { content: [{ type: "text", text: result.text }], isError: result.isError };
+    if (!owner.current?.started || !owner.acceptsTools)
+      throw new RpcError(-32600, "No active turn: stopped or idle work cannot invoke tools.");
+    owner.observeExecution();
+    const turnId = owner.current.id;
+    const receipt =
+      typeof p._meta?.["dev.xsb/call-id"] === "string"
+        ? p._meta["dev.xsb/call-id"]
+        : connectionId + "/" + JSON.stringify(ctx.id);
+    const args = p.arguments ?? {};
+    const budget = hub.policy(owner.agentId).outputTokens;
+    const log = {
+      tool: p.name,
+      receipt,
+      arguments: boundedText(hub.paths, owner.agentId, JSON.stringify(args), budget),
+    };
+    try {
+      const result = hub.workflows.call(owner, p.name, args, receipt);
+      const answer = boundedText(
+        hub.paths,
+        owner.agentId,
+        typeof result === "string" ? result : JSON.stringify(result, null, 2),
+        budget,
+      );
+      owner.recordWorkflow(turnId, { ...log, result: answer });
+      owner.toolOutput(answer);
+      return { content: [{ type: "text", text: answer }] };
+    } catch (error) {
+      const message = (error as Error).message;
+      owner.recordWorkflow(turnId, { ...log, error: message });
+      return { content: [{ type: "text", text: message }], isError: true };
+    }
   });
 }

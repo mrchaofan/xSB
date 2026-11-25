@@ -191,9 +191,10 @@ export class Kernel {
    * The one delivery pipeline. In order:
    *   a. a tool call of the recipient waits for it (`sync`): it is what the call returns;
    *   b. the recipient is gone: it cannot be delivered;
-   *   c. into the running work of a busy recipient, when it is the user's word, or xsb's word on work the session
-   *      has open (`steer`). Nothing an agent sends goes into another's running work: it waits its turn, or its
-   *      sender stops that work and gives it anew (`dispatch` with `replace`);
+   *   c. into the running work of a busy recipient (`interject`): always for the user's word, which makes that turn
+   *      the user's (protected); for xsb's word on work the session has open (`steer`); and for what an agent sends
+   *      while the running turn is still an agent's (unprotected). A turn the user started or spoke into is the
+   *      user's: what an agent sends then waits its turn, or its sender stops that work (`dispatch` with `replace`);
    *   d. `lazy`: it stays in the inbox and comes with the recipient's next turn;
    *   e. otherwise (`wake`) a turn of its own: now if the recipient is idle, after its running turn if not.
    */
@@ -206,6 +207,10 @@ export class Kernel {
     if (results && (item.workGeneration ?? 0) < this.generation(to.sessionId)) return "inbox";
     if (results && !results.mode && r.awaits(results.taskIds[0])) return "return";
     if (r.busy && (from.kind === "user" || item.steer)) return "interject";
+    // An agent's task or message goes into an agent's turn (rechecked where it is put in, LiveSession.steer: the user
+    // may have spoken into the turn since). A task's result does not: it is a fact of the work that asked for it, given
+    // with its own turn, and kept as one if that work is stopped.
+    if (from.kind === "agent" && !results && r.turn && !r.turn.protected && item.pref !== "lazy") return "interject";
     return item.pref === "lazy" ? "inbox" : "turn";
   }
 
@@ -234,7 +239,7 @@ export class Kernel {
 
   /** Mail of a session that waits in its inbox for its next turn. */
   inbox(sessionId: string): MailItem[] {
-    return [...this.state.mail.values()].filter((m) => m.to.sessionId === sessionId && this.state.ledger.get(m.id)?.state === "inboxed");
+    return [...this.state.mail.values()].filter((m) => !m.workflowHeld && m.to.sessionId === sessionId && this.state.ledger.get(m.id)?.state === "inboxed");
   }
 
   private finished(taskId: string): boolean {
@@ -502,7 +507,7 @@ export class Kernel {
     const sent = new Set(sentIds), inserted = new Set(insertedIds);
     const mail = [...this.state.mail.values()].filter((m) => m.to.sessionId === to.sessionId && !inserted.has(m.id) && (this.withdrawable(m) || this.state.ledger.get(m.id)?.state === "submitted" || ids.has(m.id)));
     // Keep facts, but give them a fresh, passive delivery. Withdrawn instructions are never digested again.
-    const kept = mail.filter((m) => !sent.has(m.id) && (m.kind === "results" || (m.kind === "message" && m.from.kind === "system" && !m.steer)))
+    const kept = mail.filter((m) => !sent.has(m.id) && !m.workflowNotice && (m.kind === "results" || (m.kind === "message" && m.from.kind === "system" && !m.steer)))
       .map((m) => ({ ...m, id: newId("m"), pref: "lazy" as const, steer: false }));
     const gates = [...this.state.gates.values()].filter((g) => g.owner.sessionId === to.sessionId);
     // Retire waits belonging to the stopped work. Shared children still return their facts individually, passively.
@@ -772,7 +777,7 @@ export class Kernel {
   }
 
   /** The pipeline: decide how mail reaches its session (`message.pre_deliver`), and say so; the effectors act on it. */
-  private route(item: MailItem): Route {
+  route(item: MailItem): Route {
     if (this.settleTerminalInput(item)) return "drop";
     const decided = this.hooks.decide("message.pre_deliver", { to: item.to, from: item.from, item });
     const route: Route = isVeto(decided) ? "drop" : (decided.route ?? "turn");
@@ -839,9 +844,15 @@ export class Kernel {
 
   /**
    * Pick up what the last stop left unfinished: a stop that was decided ends its tasks (the turns it waited for died
-   * with xsb); mail is routed again; jobs are not run again (they may have cost money).
+   * with xsb); mail is routed again, except what was already in a conversation; jobs are not run again (they may have
+   * cost money).
+   *
+   * Mail the backend had taken in (inserted, seen, or inserted and left unprocessed) is in the backend session the
+   * conversation resumes: sending it again would have the model read, and maybe act on, it twice. It is settled where
+   * it stands, and a task it carried ends as one whose outcome is unknown, as a replay is never made. Returns it, by
+   * session, for the conversations to say that their work was cut short.
    */
-  resume(): void {
+  resume(): Map<string, MailItem[]> {
     this.endStopped([...this.state.tasks.values()].filter((t) => t.stopping).map((t) => t.id));
     for (const task of [...this.state.tasks.values()]) {
       if (!task.tool || isTerminal(task.status)) continue;
@@ -851,8 +862,21 @@ export class Kernel {
           : "xsb stopped while this job ran, so its outcome is unknown. It was not run again; start it again if it is still needed.";
       this.finish([{ task, status: "failed", result, reason: "error", stopper: SYSTEM }]);
     }
-    for (const item of [...this.state.mail.values()]) this.route(item);
+    const taken = new Map<string, MailItem[]>();
+    const uncertain = "xsb stopped while this was in the conversation, so how far it got is unknown. It was not given again; verify its results before going on.";
+    for (const item of [...this.state.mail.values()]) {
+      if (item.workflowHeld) continue;
+      if (!TAKEN_IN.has(this.state.ledger.get(item.id)?.state ?? "inboxed")) { this.route(item); continue; }
+      (taken.get(item.to.sessionId) ?? taken.set(item.to.sessionId, []).get(item.to.sessionId)!).push(item);
+      const task = item.taskId ? this.state.tasks.get(item.taskId) : undefined;
+      this.ack([item.id]);
+      if (task && item.kind === "task") this.fail(task, uncertain);
+    }
+    return taken;
   }
 }
+
+/** Ledger states of mail a backend had taken into its conversation. */
+const TAKEN_IN = new Set<LedgerState>(["inserted", "seen", "inserted_unprocessed"]);
 
 const RANK: Record<LedgerState, number> = { inboxed: 0, queued: 0, submitted: 1, inserted: 2, inserted_unprocessed: 3, seen: 4, discarded_unseen: 4 };

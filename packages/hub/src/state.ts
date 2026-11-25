@@ -6,7 +6,8 @@
  * the WAL when there are several) and then applies the same records. What is
  * in memory is therefore always what a restart would rebuild.
  */
-import type { Addr, AgentSpec, Asset, ContentBlock, DeliveryPref, LedgerEntry, Origin, Task } from "@xsb/protocol";
+import type { Flow } from "./workflow-state.ts";
+import type { Addr, AgentSpec, Asset, ContentBlock, McpServer, DeliveryPref, LedgerEntry, Origin, Task } from "@xsb/protocol";
 import type { Op, Record_, Store } from "@xsb/store";
 import { Paths } from "./paths.ts";
 import { addEdges } from "./task-graph.ts";
@@ -18,6 +19,11 @@ export type SessionRec = {
   /** The backend's own session id, once one exists. */
   backendSessionId?: string;
   /**
+   * The backend session has been given nothing yet: it was opened only to read or change its settings. A backend may
+   * keep no such session (codex writes one at its first prompt), so failing to resume it loses nothing to hand over.
+   */
+  backendFresh?: boolean;
+  /**
    * The agent's conversation: the one session the user, its peers and xsb all talk to it in, and the one it does all
    * its work in, one turn at a time. One per agent. Other sessions are a client's own (`session/new`).
    */
@@ -28,7 +34,7 @@ export type SessionRec = {
    * The conversation grew past `limits.sessionTokens`: its next turn starts a new backend session, handed the
    * conversation so far (session.ts, `renewed`). The session stays the same.
    */
-  renew?: boolean | "stopped";
+  renew?: boolean | "stopped" | "isolated";
   /** How much of the backend's context window the conversation used at the end of its last turn, in tokens. */
   used?: number;
   /** Backend window and conservative renewal point, scoped to this conversation/backend. */
@@ -38,6 +44,8 @@ export type SessionRec = {
   /** Written before replacing a refused backend. Unacknowledged mail supplies the durable input. */
   contextRecovery?: { messageId: string; attempts: number };
   /** Successful user-selected ACP options survive a context renewal on the same backend. */
+  clientMcp?: McpServer[];
+  workflowModel?: {configId:string; baseline?:string};
   selectedConfig?: Record<string, string>;
   /** Immutable handoff checkpoint. New checkpoints reference prior epochs instead of reloading all history. */
   contextCheckpoint?: string;
@@ -72,6 +80,9 @@ export type Gate = {
 };
 
 export type MailItem = {
+  workflowNotice?: boolean;
+  workflowHeld?: boolean;
+  invitation?: string;
   id: string;
   to: Addr;
   from: Origin;
@@ -104,16 +115,18 @@ export type TopicPeer = { count: number; lastAt: string };
 export const topicKey = (topic: string): string => topic.trim().toLowerCase();
 
 export const F = {
-  agents: "agents.jsonl",
-  sessions: "sessions.jsonl",
-  tasks: "tasks.jsonl",
-  gates: "gates.jsonl",
-  mailbox: "mailbox.jsonl",
-  ledger: "ledger.jsonl",
-  assets: "assets.jsonl",
+  workflows: "conversations/workflows.jsonl",
+  agents: "conversations/agents.jsonl",
+  sessions: "conversations/sessions.jsonl",
+  tasks: "conversations/tasks.jsonl",
+  gates: "conversations/gates.jsonl",
+  mailbox: "conversations/mailbox.jsonl",
+  ledger: "conversations/ledger.jsonl",
+  assets: "conversations/assets.jsonl",
 } as const;
 
 export const ops = {
+  workflow: (flow: Flow): Op => ({ file: F.workflows, rec: { flow } }),
   putAgent: (agent: AgentSpec): Op => ({ file: F.agents, rec: { op: "put", agent } }),
   removeAgent: (id: string): Op => ({ file: F.agents, rec: { op: "remove", id } }),
   putSession: (session: SessionRec): Op => ({ file: F.sessions, rec: { op: "put", session } }),
@@ -123,6 +136,7 @@ export const ops = {
   enqueue: (item: MailItem): Op => ({ file: F.mailbox, rec: { op: "enqueue", item } }),
   ack: (id: string): Op => ({ file: F.mailbox, rec: { op: "ack", id } }),
   mark: (entry: LedgerEntry): Op => ({ file: F.ledger, rec: { op: "mark", entry } }),
+  assetPointer: (id:string,version:string|null):Op => ({file:F.assets,rec:{op:"pointer",id,version}}),
   putAsset: (asset: Asset): Op => ({ file: F.assets, rec: { op: "put", asset } }),
   putNote: (agentId: string, note: Note): Op => ({ file: Paths.memory(agentId), rec: { op: "put", note } }),
   removeNote: (agentId: string, topic: string): Op => ({ file: Paths.memory(agentId), rec: { op: "remove", topic } }),
@@ -130,6 +144,8 @@ export const ops = {
 
 export class State {
   readonly store: Store;
+  assetPointers = new Map<string,string|null>();
+  workflows = new Map<string, Flow>();
   agents = new Map<string, AgentSpec>();
   sessions = new Map<string, SessionRec>();
   tasks = new Map<string, Task>();
@@ -157,7 +173,7 @@ export class State {
 
   load(): void {
     this.store.recover();
-    for (const file of [F.agents, F.sessions, F.tasks, F.gates, F.mailbox, F.ledger, F.assets]) {
+    for (const file of [F.agents, F.sessions, F.tasks, F.gates, F.mailbox, F.ledger, F.assets, F.workflows]) {
       for (const rec of this.store.read(file)) this.apply(file, rec);
     }
     for (const id of this.agents.keys()) {
@@ -179,12 +195,16 @@ export class State {
 
   private apply(file: string, rec: Record_): void {
     switch (file) {
+      case F.workflows:
+        this.workflows.set(rec.flow.owner, rec.flow);
+        return;
       case F.agents:
         if (rec.op === "put") this.agents.set(rec.agent.id, rec.agent);
         else this.agents.delete(rec.id);
         return;
       case F.sessions:
         this.sessions.set(rec.session.id, rec.session);
+        if (rec.session.main) this.mainIds.set(rec.session.agentId, rec.session.id);
         return;
       case F.tasks:
         // A task's edges are set when it is made and never change: they are indexed when it is first seen.
@@ -206,6 +226,11 @@ export class State {
         this.ledger.set(rec.entry.messageId, rec.entry);
         return;
       case F.assets: {
+        if (rec.op === "pointer") {
+          this.assetPointers.set(rec.id,rec.version);
+          return;
+        }
+        this.assetPointers.set(rec.asset.id,"v"+rec.asset.version);
         const versions = this.assets.get(rec.asset.id);
         if (versions) versions.push(rec.asset);
         else this.assets.set(rec.asset.id, [rec.asset]);
@@ -237,8 +262,9 @@ export class State {
     }
   }
 
+  private mainIds = new Map<string,string>();
   mainSession(agentId: string): SessionRec | undefined {
-    for (const s of this.sessions.values()) if (s.agentId === agentId && s.main) return s;
-    return undefined;
+    const id = this.mainIds.get(agentId);
+    return id ? this.sessions.get(id) : undefined;
   }
 }

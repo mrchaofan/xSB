@@ -1,6 +1,8 @@
 # @xsb/desktop
 
-xsb 的桌面应用：一个工作区一个窗口。它和 `@xsb/cli` 一样只是 Hub 的一个 ACP 客户端，不读写 `.xsb/` 下的状态（除了把一个文件夹初始化为工作区，用的是 `@xsb/hub` 的 `initProject`）。
+左栏可创建独立主会话。工作流标签展示 DAG，已启动节点的对话与输入位于图下方。详见[界面交互](../../docs/GUI.md)。
+
+xsb 的桌面应用：一个工作区一个窗口。它和 `@xsb/cli` 一样只是 Hub 的一个 ACP 客户端，不读写 `.xsb2/` 下的状态（除了把一个文件夹初始化为工作区，用的是 `@xsb/hub` 的 `initProject`）。
 
 ```bash
 npm start -w @xsb/desktop                 # 欢迎页

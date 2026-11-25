@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { Paths } from "@xsb/hub";
-import { Agents, Assets, Connection, History, Roles, Tasks, Teams } from "@xsb/protocol";
+import { Workflow, Agents, Assets, Connection, History, Tasks } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
 import type { Notice } from "../src/workspace.ts";
 
-const role = (instructions = "old") => ({ name: "developer", instructions, description: "build", backend: "mock", mcpServers: {}, skills: [], agents: [] });
-const agent = (id: string) => ({ id, name: id, role: "developer", workspace: "/tmp", backend: "mock", description: "old", state: "idle" });
+const agent = (id: string) => ({ id, name: id, workspace: "/tmp", backend: "mock", description: "old", state: "idle" });
 class Peer {
   notifications = new Map();
   requests = new Map();
@@ -41,24 +40,18 @@ function workspace(peer: Peer, notify: (notice: Notice) => void = () => {}) {
   );
 }
 function snapshot(peer: Peer, agents = []) {
-  peer.requests.set(Roles.list, () => ({ roles: [role()] }));
-  peer.requests.set(Teams.list, () => ({ teams: [] }));
+  peer.requests.set(Workflow.list, () => ({ workflows: [] }));
   peer.requests.set(Agents.list, () => ({ agents }));
   peer.requests.set(Tasks.list, () => ({ tasks: [] }));
   peer.requests.set(Assets.list, () => ({ assets: [] }));
 }
 
-test("template preview stays read-only and synchronization forwards the confirmed revision", async () => {
-  const peer = new Peer();
-  const plan = { id: "software", roles: ["developer"], overwritten: ["developer"], removed: [], revision: "reviewed-files" };
-  const synced: unknown[] = [];
-  peer.requests.set(Teams.syncPreview, ({ id }) => { assert.equal(id, "software"); return plan; });
-  peer.requests.set(Teams.sync, (params) => { synced.push(params); return plan; });
-  const ws = workspace(peer);
-  assert.deepEqual(await ws.previewTeamSync("software"), plan);
-  assert.deepEqual(synced, []);
-  await ws.syncTeam("software", plan.revision);
-  assert.deepEqual(synced, [{ id: "software", revision: "reviewed-files", confirm: true }]);
+test("node controls carry the workflow session and selected node names", async () => {
+  const peer = new Peer(), ws = workspace(peer);
+  const calls = [];
+  peer.requests.set(Workflow.pause, params => calls.push(params));
+  await ws.workflowControl("main",true,["A"]);
+  assert.deepEqual(calls,[{sessionId:"main",nodes:["A"]}]);
   ws.close();
 });
 
@@ -73,33 +66,14 @@ test("both address entry points share web and local-file normalization", () => {
   for (const url of ["", "javascript:alert(1)", "data:text/plain,a", "ftp://example.com", "https://", "a b"]) assert.throws(() => address(url));
 });
 
-test("roles are one list answer, and an event after it is the newer word", async () => {
-  const peer = new Peer();
-  snapshot(peer);
-  // The list is answered first; what the hub does after it comes as events, while the rest still loads.
-  peer.requests.set(Teams.list, async () => {
-    await new Promise((resolve) => setTimeout(resolve));
-    peer.emit(Roles.update, { role: role("new") });
-    peer.emit(Roles.update, { role: { ...role(), name: "tester" } });
-    peer.emit(Roles.removed, { name: "tester" });
-    return { teams: [] };
-  });
-  const ws = workspace(peer);
-  assert.deepEqual(
-    (await ws.load()).roles.map((r) => [r.name, r.instructions]),
-    [["developer", "new"]],
-  );
-  ws.close();
-});
-
 test("agent idle and removal events during loading win over the earlier list", async () => {
   const peer = new Peer();
   snapshot(peer, [{ ...agent("a"), state: "running" }, agent("b")]);
-  peer.requests.set(Teams.list, async () => {
+  peer.requests.set(Workflow.list, async () => {
     await new Promise((resolve) => setTimeout(resolve));
     peer.emit(Agents.update, { agent: agent("a") });
     peer.emit(Agents.removed, { id: "b" });
-    return { teams: [] };
+    return { workflows: [] };
   });
   const ws = workspace(peer);
   const loaded = await ws.load();
@@ -130,7 +104,7 @@ test("coalesced RPC responses and later notifications cannot restore busy snapsh
   const responses = [];
   const task = { id: "t", status: "running", to: { agentId: "a" } };
   const lists = {
-    [Roles.list]: { roles: [] }, [Teams.list]: { teams: [] },
+    [Workflow.list]: { workflows: [] },
     [Agents.list]: { agents: [{ ...agent("a"), state: "running" }, agent("b")] },
     [Tasks.list]: { tasks: [task] }, [Assets.list]: { assets: [] },
   };
@@ -222,45 +196,6 @@ test("live work arriving with the first page wins over that page's idle snapshot
   const loaded = await ws.load();
   assert.equal(loaded.agents[0].state, "running");
   assert.equal(loaded.transcripts.a[0].content[0].text, "live input");
-  ws.close();
-});
-
-test("apply reports the failed agent and a retry skips successful restarts", async () => {
-  const peer = new Peer();
-  snapshot(peer, [agent("a"), agent("b"), agent("c")]);
-  const ws = workspace(peer);
-  await ws.load();
-  const restarted = [];
-  let fail = true;
-  peer.requests.set(Agents.restart, ({ id }) => {
-    if (id === "b" && fail) throw new Error("restart refused");
-    restarted.push(id);
-    return {};
-  });
-  const first = await ws.applyRole("developer");
-  assert.deepEqual(first, { done: ["a"], failed: "b", error: "restart refused" });
-  fail = false;
-  assert.deepEqual(await ws.applyRole("developer", first.done), { done: ["a", "b", "c"] });
-  assert.deepEqual(restarted, ["a", "b", "c"]);
-  ws.close();
-});
-
-test("sync retries only agents whose values still differ", async () => {
-  const peer = new Peer();
-  snapshot(peer, [agent("a"), agent("b")]);
-  const ws = workspace(peer);
-  await ws.load();
-  const updated = [];
-  let fail = true;
-  peer.requests.set(Agents.put, ({ agent: patch }) => {
-    if (patch.id === "b" && fail) throw new Error("update refused");
-    updated.push(patch.id);
-    return { agent: { ...agent(patch.id), ...patch } };
-  });
-  assert.equal((await ws.syncRole("developer")).failed, "b");
-  fail = false;
-  assert.deepEqual((await ws.syncRole("developer")).done, ["b"]);
-  assert.deepEqual(updated, ["a", "b"]);
   ws.close();
 });
 

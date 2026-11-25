@@ -1,3 +1,4 @@
+import type { ComposerState, WorkflowView } from "@xsb/protocol";
 /**
  * What crosses between main and the renderer: the shapes `window.xsb` returns
  * and the events it delivers. The renderer is plain JavaScript, so this file
@@ -5,8 +6,7 @@
  * second implementation of it, with sample data.
  *
  * They are the hub's shapes (@xsb/protocol) where those fit a screen, and a
- * view of them where they do not: a transcript is entries, not session
- * updates; a role's servers and variables are lists, not maps.
+ * view of them where they do not: a transcript is a list of entries.
  *
  * Words are the renderer's: it reads `window.xsb.language` and has a table
  * for each (../renderer/text.js). Main hands it facts, and errors already
@@ -20,8 +20,8 @@ import type { Content } from "./content.ts";
  * What was said, by the user, a peer or the agent, is content (content.ts).
  */
 export type Entry = { id: string } & (
-  /** `discarded`: its turn was stopped before the model saw it, and it never will. */
-  | { kind: "input"; origin: OriginMeta; content: Content; discarded?: boolean }
+  /** `discarded`: the model never saw it, and never will. `pending`: sent, and not in the conversation yet. */
+  | { kind: "input"; origin: OriginMeta; content: Content; discarded?: boolean; pending?: boolean }
   | { kind: "output"; content: Content; streaming?: boolean }
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
@@ -38,14 +38,15 @@ export type Entry = { id: string } & (
 export type Activity = { kind: "waiting" | "thinking" | "writing" | "tool"; detail?: string; since: string };
 
 /** A file an agent wrote, as something the renderer can show. `assetType` is set for assets of the library. */
-export type Artifact = { id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string; assetId?: string; assetVersion?: number; description?: string };
+export type Artifact = { sessionIds?: string[]; fileUri?: string; id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string; assetId?: string; assetVersion?: number; registeredName?: string; description?: string };
 
 /**
  * A web page of the side panel (pages.ts). `nativeView` popup guests are mounted by main;
  * other pages are shown by `<webview2 web-contents-id>` using `contentsId`.
  * `window`: it is shown in a window of its own, `pinned` on top of the others. `agent`: an agent opened it and drives it.
+ * `favicon`: the site's icon (http(s) or data: image), once the page named one.
  */
-export type PageView = { id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; nativeView?: boolean; pinned: boolean; agent: boolean; controlling?: boolean; error?: string };
+export type PageView = { sessionId?: string; id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; nativeView?: boolean; pinned: boolean; agent: boolean; controlling?: boolean; error?: string; favicon?: string };
 
 /**
  * `missing` is set when the backend is one of the known agents and its
@@ -58,61 +59,11 @@ export type BackendView = { name: string; command: string; installed: boolean; m
 
 export type { CliCheck, CliConfig } from "./agent-cli.ts";
 
-/** A role as it is edited: servers and variables as lists, a skill's front matter as fields. */
-export type RoleView = {
-  avatar?: string;
-  /** With `avatar` "role": the role's own picture, as a URL the window can load. */
-  avatarUrl?: string;
-  name: string;
-  /** The preset team the workspace uses that has this role, what it calls it, and whether the workspace has its own version in its place. */
-  preset: { team: string; teamTitle: string; own: boolean; title: string } | null;
-  description: string;
-  backend: string;
-  instructions: string;
-  mcpServers: { name: string; command: string; args: string[]; env: { name: string; value: string }[] }[];
-  /** `inputs`: the asset types a skill that produces one makes it from, as the user types them (comma-separated). */
-  skills: { name: string; description: string; produces: string | null; inputs: string; body: string }[];
-};
-
-/**
- * A preset team, and whether the workspace uses it. Its roles are shown as they ship. `name` is what an agent of
- * the role would be called; `missing` are the programs the role works with that cannot be found on this machine,
- * each with how to get it. `assets`: what its asset types are called.
- */
-export type Pack = {
-  id: string;
-  snapshot?: boolean;
-  sourceDir?: string;
-  syncAvailable?: boolean;
-  /** Shipped with xsb, or the user's own (~/.xsb/presets). */
-  source: "builtin" | "user";
-  extends?: string;
-  /** Where it is: the folder the user can open. */
-  dir: string;
-  /** The language its words are in, when it is not the workspace's. */
-  language: string;
-  /** What is wrong with it (errors and warnings). */
-  problems: { path: string; code: string; detail: string; severity: "error" | "warning" }[];
-  /** The programs its roles' MCP servers start. */
-  programs: string[];
-  title: string;
-  description: string;
-  assets: Record<string, string>;
-  used: boolean;
-  roles: { name: string; role: RoleView; missing: { command: string; install: string }[] }[];
-};
-
-/** What an agent is told, for its editor: its own instructions, and everything a new session of it gets. */
-export type AgentDetail = { instructions: string; systemPrompt: string };
-
-/** An agent to create or change. An empty `workspace` is the default one. */
-export type AgentInput = Pick<AgentInfo, "id" | "name" | "description" | "backend"> & { avatar?: string; role: string; workspace: string; instructions: string };
-
 /** Everything a window shows at first. A window without a workspace gets `{ workspace: null, recent }` instead. */
 export type Snapshot = {
+  workflows: Record<string,WorkflowView>;
   workspace: { name: string; path: string };
   backends: BackendView[];
-  roles: RoleView[];
   agents: AgentInfo[];
   tasks: Task[];
   artifacts: Artifact[];
@@ -128,10 +79,10 @@ export type Snapshot = {
 
 /** What changed since. Things are replaced by key: an agent, task, artifact and entry by `id`, a role by `name`. */
 export type Event =
+  | { agentId: string; controls: ComposerState }
+  | { workflow: WorkflowView }
   | { agent: AgentInfo }
   | { removedAgent: string }
-  | { role: RoleView }
-  | { removedRole: string }
   | { task: Task }
   | { artifact: Artifact }
   | { page: PageView }
@@ -142,6 +93,10 @@ export type Event =
   | { revealPage: string }
   /** Show this agent's conversation: the user clicked a notification of it. */
   | { showAgent: string }
+  /** The application menu asked for the settings. */
+  | { openSettings: true }
+  /** The window now shows another workspace (File > Open Folder): draw it anew. */
+  | { workspaceChanged: true }
   /** What the agent is doing now; `null` when its turn is over. */
   | { agentId: string; activity: Activity | null }
   | { agentId: string; entry: Entry }

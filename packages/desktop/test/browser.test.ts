@@ -51,7 +51,7 @@ test("native downloads preserve filenames and atomically reserve suffixes across
   const first = new Item(), second = new Item(), third = new Item();
   a.accept(event, first as any, "p1"); b.accept(event, second as any, "p2"); a.accept(event, third as any, "p1");
   assert.deepEqual([first, second, third].map((i) => path.basename(i.destination)), ["report.csv", "report (1).csv", "report (2).csv"]);
-  assert.equal(path.dirname(first.destination), path.join(project, ".xsb", "downloads"));
+  assert.equal(path.dirname(first.destination), path.join(project, ".xsb2", "downloads"));
   assert.equal(a.list()[0].path, undefined);
   first.finish(); second.finish(); third.finish("cancelled", false);
   assert.equal(a.list()[0].path, first.destination);
@@ -95,7 +95,7 @@ test("unsafe names stay in the preset directory; blocked storage never falls bac
   const project = temp(t), d = collector(project), unsafe = new Item();
   unsafe.getFilename = () => "../../CON.csv";
   d.accept(event, unsafe as any, "p1"); assert.equal(path.dirname(unsafe.destination), d.directory); unsafe.finish();
-  const blocked = temp(t); fs.writeFileSync(path.join(blocked, ".xsb"), "not a directory");
+  const blocked = temp(t); fs.writeFileSync(path.join(blocked, ".xsb2"), "not a directory");
   const rejected = collector(blocked); let prevented = false;
   rejected.accept({ preventDefault() { prevented = true; } }, new Item() as any, "p1");
   assert.equal(prevented, true); assert.equal(rejected.list()[0].state, "interrupted");
@@ -189,7 +189,7 @@ test("list/progress APIs are small, nonblocking, and reset on runtime turn chang
   t.after(() => browser.release());
   const invoke = (name: string, args = {}) => browser.call(name, args, signal());
   const baseline = JSON.parse(read(await invoke("browser_downloads_list")));
-  assert.equal(baseline.directory, path.join(project, ".xsb", "downloads"));
+  assert.equal(baseline.directory, path.join(project, ".xsb2", "downloads"));
   assert.equal(pages.counter, 0);
   await invoke("browser_navigate", { url: "export.example" });
   assert.equal(JSON.parse(read(await invoke("browser_downloads_list"))).total, 0);

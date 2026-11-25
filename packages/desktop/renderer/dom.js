@@ -39,9 +39,13 @@ export const ICON = {
   people: '<svg viewBox="0 0 16 16"><circle cx="6" cy="5" r="2.5"/><path d="M1.5 14v-2a4.5 4.5 0 0 1 9 0v2M11 3a2.5 2.5 0 0 1 0 5M12 10a3 3 0 0 1 2.5 3v1"/></svg>',
   grid: '<svg viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>',
   back: '<svg viewBox="0 0 16 16"><path d="M10 3L5 8l5 5"/></svg>',
+  down: '<svg viewBox="0 0 16 16"><path d="M3 6l5 5 5-5"/></svg>',
   forward: '<svg viewBox="0 0 16 16"><path d="M6 3l5 5-5 5"/></svg>',
   play: '<svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 5l5 3-5 3z"/></svg>',
 
+  globe: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c-2 2-2 10 0 12M8 2c2 2 2 10 0 12"/></svg>',
+  flow: '<svg viewBox="0 0 16 16"><rect x="5.5" y="1.5" width="5" height="3.5" rx="1"/><rect x="1.5" y="11" width="5" height="3.5" rx="1"/><rect x="9.5" y="11" width="5" height="3.5" rx="1"/><path d="M8 5v3M4 11V8h8v3"/></svg>',
+  plug: '<svg viewBox="0 0 16 16"><path d="M6 1.5v3M10 1.5v3M4 4.5h8v3a4 4 0 0 1-8 0zM8 11.5v3"/></svg>',
   plus: '<svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
   stop: '<svg viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="7" height="7" rx="1" fill="currentColor" stroke="none"/></svg>',

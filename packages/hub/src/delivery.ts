@@ -19,8 +19,7 @@ import { isVeto } from "./hooks.ts";
 import type { Recipient, Route } from "./kernel.ts";
 import { inboxDigest, renderMail } from "./prompts.ts";
 import type { Gives, TaskContext } from "./prompts.ts";
-import { skillBody } from "./roles.ts";
-import { boundedText, contentTokens, contextPolicy } from "./context.ts";
+import { boundedText, contentTokens } from "./context.ts";
 import type { LiveSession, Turn, TurnEnd } from "./session.ts";
 import type { MailItem } from "./state.ts";
 import { topicKey } from "./state.ts";
@@ -64,7 +63,8 @@ export class Delivery {
   /** What the kernel is to know of a session. */
   recipient(to: Addr): Recipient {
     // Asking makes nothing: a session that is not registered is not there to deliver to.
-    const session = this.hub.state.agents.has(to.agentId) ? this.hub.live.get(to.sessionId) : undefined;
+    const known = this.hub.state.agents.has(to.agentId) ? this.hub.live.get(to.sessionId) : undefined;
+    const session = known && this.hub.workflows?.available(known) !== false ? known : undefined;
     return {
       exists: !!session,
       busy: !!session?.busy,
@@ -86,7 +86,7 @@ export class Delivery {
     const user = this.inserted.get(item.id);
     const waiting = user?.done;
     if (route === "drop") return waiting?.reject(new Error(item.targetTurnId ? "Target turn has ended or changed." : `agent "${item.to.agentId}" no longer exists`));
-    if (!this.hub.state.mail.has(item.id)) return waiting?.reject(RpcError.cancelled());
+    if (!this.hub.state.mail.has(item.id) || !this.recipient(item.to).exists) return waiting?.reject(RpcError.cancelled());
     if (this.hub.kernel.settleTerminalInput(item)) return waiting?.reject(RpcError.cancelled());
     if (route === "inbox") return waiting?.resolve();
     // A route observation can arrive after a user stop changed the result's receiving generation.
@@ -135,7 +135,7 @@ export class Delivery {
     };
     // User/task instructions remain intact. Results/notices may be excerpts, always with retrievable originals.
     const prompt = item.from.kind !== "user" && item.kind !== "task"
-      ? decided.prompt.map((b) => b.type === "text" ? text(boundedText(this.hub.paths, session.agentId, b.text ?? "", contextPolicy(this.hub.paths).outputTokens)) : b)
+      ? decided.prompt.map((b) => b.type === "text" ? text(boundedText(this.hub.paths, session.agentId, b.text ?? "", this.hub.policy(session.agentId).outputTokens)) : b)
       : decided.prompt;
     const excerpted = prompt.some((b, i) => b.type === "text" && decided.prompt[i]?.type === "text" && b.text !== decided.prompt[i].text);
     return { origin, prompt, item, gives: excerpted ? undefined : rendered.gives };
@@ -179,7 +179,7 @@ export class Delivery {
   }
 
   /** The inbox of a session, as it comes in front of its next turn. */
-  digest(session: LiveSession, tokens = contextPolicy(this.hub.paths).promptTokens / 2): Delivered[] {
+  digest(session: LiveSession, tokens = this.hub.policy(session.agentId).promptTokens / 2): Delivered[] {
     const delivered: Delivered[] = [];
     let left = Math.max(0, tokens - 100);
     for (const item of this.hub.kernel.inbox(session.id)) {
@@ -315,13 +315,11 @@ export class Delivery {
         const had = session.given.assets.get(asset.id);
         const earlier = had && had.version !== asset.version ? this.hub.assets.get(`${asset.id}@${had.version}`) : undefined;
         const body = this.hub.assets.text(asset);
-        const budget = Math.min(1500, contextPolicy(this.hub.paths).outputTokens, contextPolicy(this.hub.paths).promptTokens / Math.max(4, (task.inputs?.length ?? 1) * 4));
+        const budget = Math.min(1500, this.hub.policy(session.agentId).outputTokens, this.hub.policy(session.agentId).promptTokens / Math.max(4, (task.inputs?.length ?? 1) * 4));
         // Overlarge materials remain available via get_asset/read_context; never mark an excerpt as fully seen.
         return { asset, text: body !== undefined && contentTokens([text(body)]) <= budget ? body : undefined,
           ...(earlier ? { before: { version: earlier.version, text: this.hub.assets.text(earlier) } } : {}) };
       });
-    const skill = this.hub.role(agent)?.skills.find((s) => task.produces && s.produces === task.produces);
-    const body = skill && skillBody(skill);
-    return { inputs, skill: skill && { ...skill, body: boundedText(this.hub.paths, session.agentId, body!, Math.min(2000, contextPolicy(this.hub.paths).outputTokens)) } };
+    return { inputs };
   }
 }

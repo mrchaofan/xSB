@@ -41,7 +41,7 @@ export function errorMessage(e: unknown): string {
 /** The peer went away. Not -32000: that is ACP's `auth_required`. */
 export const CONNECTION_CLOSED = -32099;
 
-export type RequestCtx = { signal: AbortSignal };
+export type RequestCtx = { id: string | number; signal: AbortSignal };
 type RequestHandler = (params: any, ctx: RequestCtx) => unknown;
 type NotificationHandler = (params: any) => void;
 type Id = string | number;
@@ -186,7 +186,7 @@ export class Connection {
     this.inflight.set(id, abort);
     try {
       if (!handler) throw RpcError.methodNotFound(method);
-      const result = await handler(params ?? {}, { signal: abort.signal });
+      const result = await handler(params ?? {}, { id, signal: abort.signal });
       this.send({ jsonrpc: "2.0", id, result: result ?? {} });
     } catch (e) {
       const error =

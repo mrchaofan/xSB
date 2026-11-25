@@ -12,7 +12,7 @@ const dateLabel = (iso) => {
 /** 搜索控件保持原节点：新制品到达时不会打断输入或失去焦点。 */
 export const artifactLabel = (artifact) => artifact.name.replaceAll("\\", "/").split("/").at(-1);
 
-export function createArtifactBrowser(open, nameOf, assetName) {
+export function createArtifactBrowser(open, nameOf, assetName, reference, referenceTitle) {
   const filters = { query: "", category: "", agentId: "", scope: "", sort: "recent" };
   let artifacts = [], groups = [], selectedId = null;
   const results = h("div", { class: "artifact-results" });
@@ -32,25 +32,32 @@ export function createArtifactBrowser(open, nameOf, assetName) {
     h("option", { value: "recent" }, t("artifact.sort.recent")), h("option", { value: "name" }, t("artifact.sort.name")));
   const advanced = h("details", { class: "catalog-advanced" },
     h("summary", { html: ICON.filter }, h("span", {}, t("artifact.filter.more"))),
-    h("div", { class: "catalog-filters" },
+    h("div", { class: "catalog-filters" }, chips,
       h("label", {}, t("artifact.filter.agent"), agent), h("label", {}, t("artifact.filter.scope"), scope), h("label", {}, t("artifact.sort"), sort)));
   const el = h("div", { class: "artifact-browser" },
-    h("div", { class: "catalog-controls" }, search, chips,
-      h("div", { class: "catalog-summary" }, summary, advanced, clear)), results);
+    h("div", { class: "catalog-controls" }, h("div", { class: "catalog-tools" }, search, advanced),
+      h("div", { class: "catalog-summary" }, summary, clear)), results);
   const visible = () => visibleArtifacts(groups, filters, nameOf);
 
-  function reset() {
-    Object.assign(filters, { query: "", category: "", agentId: "", scope: "", sort: "recent" });
-    search.value = agent.value = scope.value = "";
-    sort.value = "recent";
+  function restore(saved = {}) {
+    Object.assign(filters, { query: "", category: "", agentId: "", scope: "", sort: "recent" }, saved);
+    search.value = filters.query;
+    agent.value = filters.agentId;
+    scope.value = filters.scope;
+    sort.value = filters.sort;
+    advanced.open = false;
     render();
   }
 
+  function reset() { restore(); }
+
   function render() {
     const list = visible();
+    el.querySelector(".catalog-controls").hidden = !groups.length;
+    el.querySelector(".catalog-summary").hidden = !filters.query && !filters.category && !filters.scope && !filters.agentId;
     summary.textContent = t("artifact.results", { count: list.length, total: groups.length });
     clear.hidden = !filters.query && !filters.category && !filters.agentId && !filters.scope;
-    advanced.classList.toggle("filtered", !!filters.agentId || !!filters.scope || filters.sort !== "recent");
+    advanced.classList.toggle("filtered", !!filters.category || !!filters.agentId || !!filters.scope || filters.sort !== "recent");
     chips.querySelectorAll("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.category === filters.category)));
     fill(results, ...list.map((group) => {
       const a = group.latest;
@@ -62,16 +69,18 @@ export function createArtifactBrowser(open, nameOf, assetName) {
         thumb.append(image);
       }
       const label = `${a.name}\n${nameOf(a.agentId)} · ${a.updatedAt}\n${a.path}`;
-      return h("button", { class: "artifact-card", type: "button", title: label, "data-id": a.id, "aria-pressed": String(group.versions.some((version) => version.id === selectedId)), onclick: () => open(a.id) },
+      const preview = h("button", { class: "artifact-card", type: "button", title: label, "data-id": a.id, "aria-pressed": String(group.versions.some((version) => version.id === selectedId)), onclick: () => open(a.id) },
         thumb, h("span", { class: "artifact-card-text" },
           h("strong", {}, artifactLabel(a)),
           h("span", { class: "artifact-card-meta" }, h("span", {}, nameOf(a.agentId)), h("time", { datetime: a.updatedAt }, dateLabel(a.updatedAt))),
-          a.description && h("small", { class: "artifact-description" }, a.description),
-          h("span", { class: "artifact-badges" }, h("span", {}, group.assetId ? assetName(a.assetType ?? group.assetId.split("/")[0]) : t(`artifact.type.${category}`)),
+          a.description && a.description !== a.registeredName && h("small", { class: "artifact-description" }, a.description),
+          h("span", { class: "artifact-badges" }, h("span", {}, group.assetId && a.assetType !== "workflow" ? assetName(a.assetType ?? group.assetId.split("/")[0]) : t(`artifact.type.${category}`)),
             group.assetId && h("span", {}, versionOf(a) ? `v${versionOf(a)}` : t("artifact.latest")),
             group.versions.length > 1 && h("span", {}, t("artifact.versions", { count: group.versions.length })))));
+      return h("div", { class: "artifact-row" }, preview, h("button", { class: "reference-action", "data-name": a.name, title: referenceTitle(), "aria-label": referenceTitle() + " · " + a.name, onclick: () => reference(a) }, t("artifact.reference")));
     }));
-    if (!list.length) fill(results, h("div", { class: "catalog-empty" }, h("strong", {}, t(artifacts.length ? "artifact.noResults" : "artifact.list.empty")),
+    if (!list.length) fill(results, h("div", { class: "catalog-empty" }, !artifacts.length && h("span", { class: "empty-folder", html: ICON.folder }), h("strong", {}, t(artifacts.length ? "artifact.noResults" : "artifact.inSession")),
+      !artifacts.length && h("small", {}, t("artifact.emptyHint")),
       artifacts.length > 0 && h("button", { class: "btn", onclick: reset }, t("artifact.filter.clear"))));
   }
 
@@ -85,7 +94,7 @@ export function createArtifactBrowser(open, nameOf, assetName) {
       if (!owners.includes(filters.agentId)) filters.agentId = "";
       agent.value = filters.agentId;
       render();
-    }, reset };
+    }, reset, restore };
 }
 
 /** 预览中的相邻制品和版本选择，遵循当前的搜索与筛选顺序。 */

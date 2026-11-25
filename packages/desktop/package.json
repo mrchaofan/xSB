@@ -27,6 +27,7 @@
     "package": "rolldown -c && electron-builder --config electron-builder.config.mjs --mac --win",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
+    "test:workflow-ui": "npm run build && node test/workflow-window.cjs",
     "test:browser-native": "node test/browser-native.mjs"
   }
 }

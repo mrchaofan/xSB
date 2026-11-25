@@ -6,8 +6,8 @@
  * the owner of its agents' processes and the listener on its sockets: two of
  * them would each append to the same files, run the same mail twice and take
  * the socket from under the other. That there is only one is the kernel's
- * word, not a file's: the hub holds a lock on `.xsb/run/hub.lock` (lock.ts)
- * for as long as its process lives. `.xsb/run/hub.json` says who holds it.
+ * word, not a file's: the hub holds a lock on `.xsb2/run/hub.lock` (lock.ts)
+ * for as long as its process lives. `.xsb2/run/hub.json` says who holds it.
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -121,7 +121,7 @@ export async function hubSocket(paths: Paths): Promise<net.Socket> {
   throw failure("hub_not_started", { log: paths.hubLog });
 }
 
-/** Start a hub for the project in the background, logging to `.xsb/run/hub.log`. */
+/** Start a hub for the project in the background, logging to `.xsb2/run/hub.log`. */
 function spawnHub(paths: Paths): void {
   fs.mkdirSync(paths.run, { recursive: true });
   const log = fs.openSync(paths.hubLog, "a");
