@@ -61,7 +61,7 @@ try {
     if (result.nodes.at(-1)?.status === "completed") break;
   }
   assert.equal(result.nodes.at(-1)?.status,"completed",JSON.stringify(result));
-  assert.match(ok("send",result.nodes[0].sessionId,"hello task","--history-only"),/Direct conversation[^]*hello task/);
+  assert.match(ok("send",result.nodes[0].sessionId,"hello task","--history-only"),/\[xSB task conversation\][^]*hello task/);
   assert.equal(JSON.parse(ok("workflow","show",b)).nodes.length,0);
   assert.equal(xsb("session","new","--backend","nope").code,13);
   assert.notEqual(xsb("role","add","painter").code,0);
