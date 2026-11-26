@@ -15,6 +15,7 @@ import { conversed, ops } from "./state.ts";
 import type { LiveSession } from "./session.ts";
 import { historyPage, historyImage } from "./history.ts";
 import { newId, VERSION } from "./util.ts";
+import { conversationTitle } from "./prompts.ts";
 
 /** One connected ACP client, as the hub sees it. */
 export class Client {
@@ -25,6 +26,7 @@ export class Client {
   echo = false;
   history = false;
   controls = false;
+  forms = false;
   private hub: Hub;
   private attached = new Set<LiveSession>();
 
@@ -42,11 +44,13 @@ export class Client {
       this.echo = meta?.[OriginExt.capability] != null;
       this.history = meta?.[History.capability] != null;
       this.controls = meta?.[SessionControls.capability] != null;
+      this.forms = p.capabilities?.elicitation?.form != null;
       // The project works in the language of the first user who says which one they read.
       const language = meta?.[LanguageExt.key];
       const config = loadProjectConfig(hub.paths);
       if (!config.language && LANGUAGES.includes(language)) saveProjectConfig(hub.paths, { ...config, language });
       if (this.observer) queueMicrotask(() => hub.permissions.route());
+      if (this.forms) queueMicrotask(() => hub.elicitations.route());
       return {
         protocolVersion: PROTOCOL_VERSION,
         info: { name: "xsb", title: "xsb hub", version: VERSION },
@@ -142,10 +146,12 @@ export class Client {
       if (hub.delivery.known(origin.messageId)) return hub.delivery.fromUser(session, p.prompt, origin, this);
       // A message to an agent that asked the user something replies to it: answers, a skip, or other words instead.
       hub.questions.reply(session, origin.messageId, p._meta?.[Answer.key]);
+      hub.elicitations.cancel(session);
       hub.workflows.input(session,origin.messageId,p.prompt,p._meta?.[Workflow.target]);
       if (!session.rec.title && !hub.agent(session.agentId).workflowOwner) {
         const first = p.prompt.find((b: any) => b.type === "text")?.text?.trim();
-        if (first) { session.save({title:first.slice(0,64)}); hub.agentChanged(session.agentId); }
+        const title = typeof first === "string" ? conversationTitle(first) : "";
+        if (title) { session.save({title}); hub.agentChanged(session.agentId); }
       }
       const messageId = origin.messageId;
       // An interruption is the workflow's only once the model has it: one that never gets there blocks nothing.
@@ -231,8 +237,8 @@ export class Client {
     });
     conn.onRequest(Agents.purge, () => hub.purgeDeleted());
     conn.onRequest(Workflow.get, p => hub.workflows.get(p.sessionId));
-    conn.onRequest(Workflow.list, () => ({ workflows:[...hub.state.workflows.keys()].map(id => hub.workflows.get(id)) }));
-    for (const action of ["pause","resume"] as const) conn.onRequest(Workflow[action], p => hub.workflows.clientControl(p.sessionId,action === "pause",p.nodes));
+    conn.onRequest(Workflow.list, () => ({ workflows: hub.workflows.list() }));
+    for (const action of ["pause","resume"] as const) conn.onRequest(Workflow[action], p => hub.workflows.control(p.sessionId,action,p.nodes));
 
     // ---- backends, assets and tasks ---------------------------------------
 
@@ -267,6 +273,7 @@ export class Client {
     session.clients.add(this);
     this.attached.add(session);
     this.hub.permissions.route();
+    this.hub.elicitations.route();
   }
 
   /** A session this client may drive. Attaching is implicit: the hub is local and single-user. */

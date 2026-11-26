@@ -41,6 +41,16 @@ export type PermissionRequest = {
 
 export type PermissionResponse = { outcome: { outcome: "cancelled" } | { outcome: "selected"; optionId: string } };
 
+export type ElicitationRequest = {
+  mode: "form";
+  sessionId: string;
+  toolCallId?: string;
+  message: string;
+  requestedSchema: { type: "object"; properties: Record<string, any>; required?: string[]; [k: string]: unknown };
+  _meta?: Meta;
+};
+export type ElicitationResponse = { action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> };
+
 export type Implementation = { name: string; title?: string | null; version: string };
 
 export type AgentCapabilities = {
@@ -55,7 +65,13 @@ export type AgentCapabilities = {
   [k: string]: unknown;
 };
 
-export type InitializeRequest = { protocolVersion: number; info: Implementation; capabilities?: { _meta?: Meta | null; [k: string]: unknown }; _meta?: Meta | null };
+export type ClientCapabilities = {
+  auth?: { terminal?: object | null; [k: string]: unknown } | null;
+  elicitation?: { form?: object | null; url?: object | null; [k: string]: unknown } | null;
+  _meta?: Meta | null;
+  [k: string]: unknown;
+};
+export type InitializeRequest = { protocolVersion: number; info: Implementation; capabilities?: ClientCapabilities; _meta?: Meta | null };
 export type InitializeResponse = { protocolVersion: number; info: Implementation; capabilities?: AgentCapabilities; authMethods?: unknown[]; _meta?: Meta | null };
 
 export type PromptResponse = { messageId: string };

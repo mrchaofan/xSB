@@ -139,8 +139,7 @@ export function showSettings(key = "general", refresh = true) {
   });
   if (key === "general") content = [
     section(t("settings.appearance"),
-      settingRow(t("settings.theme"), t("settings.themeHint"), choose("theme", ["light", "dark", "system"])),
-      settingRow(t("settings.density"), t("settings.densityHint"), choose("density", ["comfortable", "compact"]))),
+      settingRow(t("settings.theme"), t("settings.themeHint"), choose("theme", ["light", "dark", "system"]))),
     section(t("settings.conversation"), settingRow(t("settings.showTools"), t("settings.showToolsHint"),
       toggle(t("settings.showTools"), global.showTools, (value) => save(() => saveGlobalPreferences({ showTools: value }))))),
   ];

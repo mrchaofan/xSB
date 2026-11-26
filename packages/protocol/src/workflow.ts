@@ -32,6 +32,7 @@ export type WorkflowNodeView = {
   sessionId?: string;
   target?: string;
   summary?: string;
+  controls?: { pause: boolean; resume: boolean };
 };
 
 /**
@@ -41,6 +42,9 @@ export type WorkflowNodeView = {
 export type WorkflowHistory = { version: string; retiredAt: string; nodes: WorkflowNodeView[]; edges: Edge[] };
 
 export type WorkflowView = {
+  /** Authoritative runtime state and actions; clients need not infer them from node labels. */
+  state?: "empty" | "proposed" | "running" | "paused" | "completed";
+  controls?: { pause: boolean; resume: boolean };
   /** Earlier active versions, the latest first. */
   history?: WorkflowHistory[];
   sessionId: string;

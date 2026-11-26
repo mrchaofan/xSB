@@ -21,7 +21,7 @@ import path from "node:path";
  * turn; mail waits for a turn of its own.
  */
 import { SessionControls, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, Redelivered, RunExt, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
-import type { BackendRun, RunUpdate, Boundary, ContentBlock, DiscardReason, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
+import type { BackendRun, RunUpdate, Boundary, ContentBlock, DiscardReason, ElicitationRequest, ElicitationResponse, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
@@ -30,7 +30,7 @@ import { bridgeServer, XSB_SERVER } from "./mcp.ts";
 import { boundedText, contentTokens, contextOverflow, contextRef, textTokens } from "./context.ts";
 import { historyUpdate } from "./history.ts";
 import { Paths } from "./paths.ts";
-import { asPreface, handoff, isXsbText } from "./prompts.ts";
+import { asPreface, conversationTitle, handoff, isXsbText } from "./prompts.ts";
 import type { Gives, Renewal } from "./prompts.ts";
 import { turnsSinceCleared } from "./transcript.ts";
 import type { MailItem, SessionRec } from "./state.ts";
@@ -590,6 +590,15 @@ export class LiveSession {
     return this.hub.permissions.request(this, request);
   }
 
+  onBackendElicitation(request: ElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
+    const target = (request._meta?.[TurnExt.key] as { id?: string } | undefined)?.id ??
+      (request._meta?.[OriginExt.key] as OriginMeta | undefined)?.turnId;
+    if (signal.aborted || request.sessionId !== this.rec.backendSessionId || !this.current?.started || !this.acceptsTools ||
+      this.currentRun?.turnId !== this.current.id || target && target !== this.current.id) return Promise.resolve({ action: "cancel" });
+    this.observeExecution();
+    return this.hub.elicitations.request(this, request, signal);
+  }
+
   save(patch: Partial<SessionRec>): void {
     this.rec = { ...this.rec, ...patch, updatedAt: now() };
     this.hub.state.commit([ops.putSession(this.rec)]);
@@ -637,9 +646,15 @@ export class LiveSession {
           this.idle();
         }
         break;
-      case "session_info_update":
-        if (!this.rec.titleEdited && typeof update.title === "string" && update.title !== this.rec.title && !isXsbText(update.title)) this.save({ title: update.title });
+      case "session_info_update": {
+        const title = typeof update.title === "string" ? conversationTitle(update.title) : "";
+        if (!this.hub.agent(this.agentId).workflowOwner && !this.rec.titleEdited && title && title !== this.rec.title && !isXsbText(title)) {
+          this.save({ title });
+          // Native generators may publish after idle, when no further state change will refresh the client.
+          this.hub.agentChanged(this.agentId);
+        }
         break;
+      }
       case "config_option_update":
         if (Array.isArray(update.configOptions)) {
           this.setup.configOptions = update.configOptions;
@@ -1257,6 +1272,7 @@ export class LiveSession {
     const turn = this.current;
     if (!turn) return;
     if (end.failure && contextOverflow(end.failure) && this.canRecover(turn)) return void this.recover(turn, end.failure);
+    this.hub.elicitations?.cancel(this);
     if (this.currentRun?.turnId === turn.id) this.finishRun(end);
     if (!turn.cancelledBy) for (const update of turn.refusalChunks ?? []) this.emit(update);
     turn.refusalChunks = [];
@@ -1496,6 +1512,7 @@ export class LiveSession {
       this.discard(input);
     }
     this.hub.permissions.cancel(this);
+    this.hub.elicitations?.cancel(this);
     if (!turn.started) return this.end({ stopReason: "cancelled" });
     this.stopTimer = setTimeout(() => {
       if (this.current !== turn) return;
@@ -1521,6 +1538,7 @@ export class LiveSession {
     const turn = this.current;
     if (!turn) return;
     this.hub.permissions.cancel(this);
+    this.hub.elicitations?.cancel(this);
     if (!turn.started && !users(turn.first)) {
       for (const input of turn.held.filter(users)) this.leave(input, true);
       return;
@@ -1536,6 +1554,7 @@ export class LiveSession {
     if (!turn || turn.id !== targetTurnId) return;
     turn.cancelledBy ??= "hub";
     this.hub.permissions.cancel(this);
+    this.hub.elicitations?.cancel(this);
     if (turn.started && !this.stopTimer) this.stopTimer = setTimeout(() => {
       if (this.current !== turn) return;
       this.hub.log(`${this.agentId}/${this.id}: task stop timed out; closing the old backend`);

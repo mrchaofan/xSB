@@ -9,7 +9,7 @@ const OTHER = "\u0000other";
 
 /** 发给模型的文字：问题和答案逐条列出（界面上由记录显示）。 */
 const replyText = (questions, answers) =>
-  questions.map((q, n) => `${n + 1}. ${q.question}\n${[answers[n]].flat().join("、")}`).join("\n\n");
+  questions.map((q, n) => `${n + 1}. ${q.question}\n${[answers[n] ?? ""].flat().join("、")}`).join("\n\n");
 const shown = (answer) => [answer ?? ""].flat().join("、");
 
 /** 对话里的问答记录：还没结束的由输入框上方的面板显示，这里不画。 */
@@ -33,8 +33,9 @@ export function syncAskPanel(lane, entries, send) {
 function askPanel(entry, send) {
   const { questions } = entry;
   // 每题的答案：单选是一项，多选是一组，"其他"和填空写的文字另存。
-  const picked = questions.map((q) => (q.kind === "multi" ? [] : undefined));
-  const written = questions.map(() => "");
+  const picked = questions.map((q) => q.kind === "multi" ? (Array.isArray(q.default) ? q.default.filter((v) => q.options.includes(v)) : [])
+    : q.kind === "single" && typeof q.default === "string" ? q.options.includes(q.default) ? q.default : q.other ? OTHER : undefined : undefined);
+  const written = questions.map((q) => typeof q.default === "string" && (q.kind === "text" || !q.options?.includes(q.default)) ? q.default : "");
   let page = 0, sending = false, error = "";
   const panel = h("div", { class: "ask-panel", "data-question": entry.questionId, role: "group", "aria-label": t("ask.title"), tabindex: "-1" });
 
@@ -60,14 +61,14 @@ function askPanel(entry, send) {
     catch (e) { sending = false; error = e.message; render(); }
   };
   const next = () => {
-    if (answerOf(page) === undefined || sending) return;
+    if (answerOf(page) === undefined && !questions[page].optional || sending) return;
     if (page < questions.length - 1) { page++; return render(); }
-    const answers = questions.map((_, n) => answerOf(n));
+    const answers = questions.map((_, n) => answerOf(n) ?? null);
     void reply(replyText(questions, answers), { questionId: entry.questionId, answers });
   };
   const typed = (e) => {
     written[page] = e.target.value;
-    panel.querySelector(".ask-next").disabled = sending || answerOf(page) === undefined;
+    panel.querySelector(".ask-next").disabled = sending || answerOf(page) === undefined && !questions[page].optional;
   };
   const enter = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); next(); } };
 
@@ -87,7 +88,7 @@ function askPanel(entry, send) {
       q.kind === "text"
         ? h("textarea", { class: "ask-text", rows: 2, placeholder: t("ask.placeholder"), disabled: sending, oninput: typed, onkeydown: enter })
         : h("div", { class: "ask-rows", role: "menu" },
-            ...q.options.map((o, i) => row(i + 1, o, h("span", { class: "ask-label" }, o))),
+            ...q.options.map((o, i) => row(i + 1, o, h("span", { class: "ask-label" }, o, q.optionDescriptions?.[i] && h("small", {}, q.optionDescriptions[i])))),
             q.other && row(q.options.length + 1, OTHER, h("input", { class: "ask-other-input", type: "text", placeholder: t("ask.otherPlaceholder"), disabled: sending,
               oninput: typed, onkeydown: enter, onfocus: () => { if (!isPicked(page, OTHER)) choose(page, OTHER, true); } }))),
       error && h("p", { class: "error", role: "alert" }, error),
@@ -95,7 +96,7 @@ function askPanel(entry, send) {
         h("small", {}, q.kind === "text" ? "" : t("ask.keys")),
         h("button", { class: "btn", type: "button", disabled: sending, onclick: () => reply(t("ask.skipText"), { questionId: entry.questionId, skipped: true }) }, t("ask.skip")),
         page > 0 && h("button", { class: "btn", type: "button", disabled: sending, onclick: () => { page--; render(); } }, t("ask.previous")),
-        h("button", { class: "btn primary ask-next", type: "button", disabled: sending || answerOf(page) === undefined, onclick: next }, t(last ? "ask.submit" : "ask.next"))));
+        h("button", { class: "btn primary ask-next", type: "button", disabled: sending || answerOf(page) === undefined && !q.optional, onclick: next }, t(last ? "ask.submit" : "ask.next"))));
     const field = panel.querySelector(".ask-text, .ask-other-input");
     if (field) field.value = written[page];
     if (focused) (panel.querySelector(`[data-key="${focused}"]`) ?? panel).focus();

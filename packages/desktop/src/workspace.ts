@@ -15,9 +15,10 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { Answer, Question, RunExt, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal } from "@xsb/protocol";
+import { Answer, Question, RunExt, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent } from "@xsb/protocol";
 import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
+import type { ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
 import { artifactPath } from "./artifact-link.ts";
@@ -47,6 +48,8 @@ export class Workspace {
   private emit: Emit;
   /** False while `load` gathers the snapshot: what arrives then is part of it, not an event. */
   private live = false;
+  private markReady!: () => void;
+  private ready = new Promise<void>(resolve => { this.markReady = resolve; });
   /** This side closed the connection (`close`): its end is then no news. */
   private left = false;
   /** No window shows this workspace (`setShown`). */
@@ -77,6 +80,7 @@ export class Workspace {
   /** Entry id -> how to answer the permission request it shows. */
   private asking = new Map<string, { agentId: string; entry: Extract<Entry, { kind: "permission" }>; request: PermissionRequest; answer: (r: PermissionResponse) => void }>();
   private seq = 0;
+  private nativeQuestions = new Map<string, { agentId: string; form: ReturnType<typeof elicitationForm>; answer: (r: ElicitationResponse) => void }>();
   private replaying = false;
   private historyUpdates = new Map<string, SessionUpdate[]>();
   private historyCursors = new Map<string, number | null>();
@@ -101,13 +105,15 @@ export class Workspace {
     // the environment of the app's child processes (`env`, clis.ts): it finds the agents' programs on its PATH.
     const socket = await hubSocket(paths, true, env);
     const conn = new Connection(socket, socket, "hub");
+    // Requests may arrive in the same stream chunk as initialize's response.
+    const workspace = new Workspace(paths, conn, say, emit, notify);
     await conn.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       info: { name: "xsb-desktop", version: "0.1.0" },
       // An observer of all agents, and a transcript: sent its own input too, when it gets into the conversation.
-      capabilities: { _meta: { [Agents.capability]: {}, [History.capability]: {}, [SessionControls.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
-    });
-    return new Workspace(paths, conn, say, emit, notify);
+      capabilities: { elicitation: { form: {} }, _meta: { [Agents.capability]: {}, [History.capability]: {}, [SessionControls.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
+    }).catch(error => { workspace.close(); throw error; });
+    return workspace;
   }
 
   private constructor(paths: Paths, conn: Connection, say: (e: unknown) => string, emit: Emit, notify: Notify) {
@@ -137,6 +143,7 @@ export class Workspace {
       this.notify({ agentId: p.agentId, kind: "confirm", detail: p.question });
     });
     conn.onRequest("session/request_permission", (p) => this.onPermission(p));
+    conn.onRequest("elicitation/create", (p, ctx) => this.onElicitation(p, ctx.signal));
   }
 
   get connected(): boolean {
@@ -145,6 +152,8 @@ export class Workspace {
 
   close(): void {
     this.left = true;
+    this.markReady();
+    for (const pending of this.nativeQuestions.values()) pending.answer({ action: "cancel" });
     this.conn.close();
   }
 
@@ -155,6 +164,7 @@ export class Workspace {
   setShown(shown: boolean): void {
     this.hidden = !shown;
     if (!shown) for (const entryId of [...this.asking.keys()]) this.answer(entryId, "cancelled");
+    if (!shown) for (const pending of this.nativeQuestions.values()) pending.answer({ action: "cancel" });
   }
 
   /** An error in the user's words. One that is only the connection ending says what ended: the hub. */
@@ -165,6 +175,10 @@ export class Workspace {
   /** With the hub gone nothing runs: no agent is at work any more, and no question of theirs waits for an answer. */
   private onHubGone(emit: Emit): void {
     this.stopped = true;
+    this.markReady();
+    for (const pending of this.nativeQuestions.values()) pending.answer({ action: "cancel" });
+    for (const [agentId, entries] of this.transcripts) for (const entry of entries)
+      if (entry.kind === "question" && entry.source === "acp" && entry.state === "open") this.put(agentId, { ...entry, state: "cancelled" });
     for (const entryId of [...this.asking.keys()]) this.answer(entryId, "cancelled");
     for (const agent of [...this.agents.values()]) this.onAgent({ ...agent, state: "idle" });
     emit({ hub: "down" });
@@ -243,6 +257,7 @@ export class Workspace {
     for (const agent of this.agents.values()) if (agent.state === "idle") this.does(agent.id, null);
     this.busy = this.atWork().size > 0;
     this.live = true;
+    this.markReady();
     return {
       workspace: { name: path.basename(this.paths.project), path: this.paths.project },
       agents: [...this.agents.values()],
@@ -479,7 +494,7 @@ export class Workspace {
       if (question.state === "open") {
         this.settle(agentId);
         if (this.live && !this.replaying) this.notify({ agentId, kind: "question", detail: question.questions?.[0]?.question ?? "" });
-        return this.put(agentId, { id, kind: "question", questionId: question.id, questions: question.questions ?? [], state: "open" });
+        return this.put(agentId, { id, kind: "question", questionId: question.id, questions: question.questions ?? [], state: "open", ...(question.source ? { source: question.source } : {}), ...(question.delivery ? { delivery: question.delivery } : {}) });
       }
       if (question.reply && question.state !== "superseded") {
         this.replies.add(question.reply);
@@ -565,16 +580,20 @@ export class Workspace {
       const prior = this.transcripts.get(agentId)!.find((e): e is Tool & { id: string } => e.id === id);
       const directory = this.agents.get(agentId)?.workspace ?? this.paths.project;
       const files = (update.locations ?? []).flatMap((location: { path?: string }) => location.path ? [this.artifact(path.resolve(directory, location.path), agentId)] : []);
-      const title = update.title ?? prior?.title ?? update.toolCallId;
+      const title = update.title ?? prior?.title ?? update.name ?? "";
       const status = TOOL_STATUS[update.status ?? ""] ?? (update.status ? "running" : (prior?.status ?? "running"));
-      this.put(agentId, { id, kind: "tool", title, status, artifactId: files.find((a: Artifact | undefined) => a)?.id ?? prior?.artifactId });
+      this.put(agentId, { id, kind: "tool", title, status, artifactId: files.find((a: Artifact | undefined) => a)?.id ?? prior?.artifactId,
+        name: update.name ?? prior?.name,
+        input: update.input ?? update.rawInput ?? prior?.input,
+        output: update.output ?? update.rawOutput ?? update.content ?? prior?.output,
+      });
       if (offTurn || run?.state === "idle") return;
       // While any tool call is open the agent is running tools; once the last one ends, its model reads the results.
       const open = this.tools.get(agentId) ?? new Set<string>();
       this.tools.set(agentId, open);
       if (status === "running") open.add(id);
       else open.delete(id);
-      if (status === "running") this.does(agentId, "tool", title);
+      if (status === "running") this.does(agentId, "tool", title.replace(/\s+/g, " ").slice(0, 120));
       else if (!open.size) this.does(agentId, "waiting");
     }
   }
@@ -589,6 +608,18 @@ export class Workspace {
    */
   /** `answer`: the message answers or skips the question the agent asked (`Answer`). */
   async send(agentId: string, content: Content, target?: string, again?: { messageId?: string; resendOf?: string }, answer?: Answer): Promise<void> {
+    if (answer) {
+      const entry = this.transcripts.get(agentId)?.find((e) => e.kind === "question" && e.questionId === answer.questionId);
+      if (entry?.kind === "question" && entry.source === "acp") {
+        const pending = this.nativeQuestions.get(answer.questionId);
+        if (!pending || pending.agentId !== agentId) throw RpcError.notFound("This question has expired");
+        const response: ElicitationResponse = answer.skipped ? { action: "decline" }
+          : { action: "accept", content: elicitationContent(pending.form, answer.answers ?? []) };
+        pending.answer(response);
+        return;
+      }
+    }
+    for (const pending of this.nativeQuestions.values()) if (pending.agentId === agentId) pending.answer({ action: "cancel" });
     const agent = this.agents.get(agentId)!;
     // One id for the message, kept until xsb has it: sent again under it, it is never a second copy (the hub knows it).
     const messageId = again?.messageId ?? `m_${randomUUID()}`;
@@ -707,6 +738,30 @@ export class Workspace {
     this.put(agentId, entry);
     this.notify({ agentId, kind: "permission", detail: entry.detail });
     return new Promise((answer) => this.asking.set(entry.id, { agentId, entry, request, answer }));
+  }
+
+  private async onElicitation(request: ElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
+    if (!this.live) await this.ready;
+    if (signal.aborted || this.left || this.conn.isClosed) return { action: "cancel" };
+    const agentId = this.sessionAgent.get(request.sessionId);
+    if (!agentId || this.hidden) throw RpcError.notFound(`session ${request.sessionId}`);
+    const form = elicitationForm(request);
+    const questionId = (request._meta?.[Question.key] as { id?: string } | undefined)?.id;
+    if (!questionId) throw RpcError.invalidParams("Missing question identity");
+    return new Promise((resolve) => {
+      let settled = false;
+      const answer = (response: ElicitationResponse) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", cancel);
+        this.nativeQuestions.delete(questionId);
+        resolve(response);
+      };
+      const cancel = () => answer({ action: "cancel" });
+      this.nativeQuestions.set(questionId, { agentId, form, answer });
+      signal.addEventListener("abort", cancel, { once: true });
+      if (signal.aborted) cancel();
+    });
   }
 
   /** Answer the permission request an entry shows. */

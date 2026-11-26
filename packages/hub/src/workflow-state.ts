@@ -82,9 +82,17 @@ export const graphOf = (f: Flow) => (f.active ? f.versions[f.active] : undefined
  * queued or a choice open, and no candidate waits to be adopted. The main conversation then talks of other things.
  */
 export function settled(f: Flow): boolean {
+  return executionCompleted(f) && !f.candidate;
+}
+
+/** Completion of the current graph, independent of a proposed next version. */
+export function completed(f: Flow): boolean {
+  return executionCompleted(f) && !f.outbox.length;
+}
+function executionCompleted(f: Flow): boolean {
   const graph = graphOf(f);
-  return !!graph && !f.candidate && graph.nodes.some((n) => n.kind === "end" && f.instances[n.node]?.last?.valid) &&
-    Object.values(f.instances).every((i) => !i.work && !i.extras.length && !i.invitation);
+  return !!graph && graph.nodes.some((n) => n.kind === "end" && f.instances[n.node]?.last?.valid) &&
+    !f.interruptions.length && Object.values(f.instances).every((i) => !i.work && !i.extras.length && !i.invitation && !i.interruptions.length);
 }
 /** What a main conversation's model was last told of its workflow, in its current context (`LiveSession.given`). */
 export type WorkflowTold = { epoch?: number; definitions: Map<string, NodeDef>; candidate?: string; state: string; turns: number };
@@ -412,6 +420,7 @@ export function control(f: Flow, pause: boolean, names?: string[]) {
   if (names !== undefined && (!Array.isArray(names) || !names.length))
     throw Error("Expected a nonempty list of nodes");
   for (const name of names ?? []) instance(f, name);
+  if (completed(f)) return;
   const prior = !pause && names && graphOf(f) ? evaluate(f, graphOf(f)!) : undefined;
   if (!names) {
     f.paused = pause;
@@ -440,7 +449,12 @@ export function view(f: Flow): WorkflowView {
   const graph = graphOf(f),
     gates = graph && evaluate(f, graph);
   const finished = graph?.nodes.some((n) => n.kind === "end" && f.instances[n.node].last?.valid);
+  const done = completed(f);
+  const held = f.paused || !!f.interruptions.length;
+  const state = done ? "completed" : graph ? held ? "paused" : "running" : f.candidate ? "proposed" : "empty";
   return {
+    state,
+    controls: { pause: !!graph && !done && !held, resume: !!graph && !done && held },
     sessionId: f.owner,
     history: f.history ?? [],
     version: f.active,
@@ -464,6 +478,7 @@ export function view(f: Flow): WorkflowView {
               : gate.blocked
                 ? "paused"
                 : gate.signal.state);
+        const actionable = !finished || !!i.work || !!i.extras.length || !!i.interruptions.length;
         return {
           name: n.node,
           kind: n.kind,
@@ -474,6 +489,11 @@ export function view(f: Flow): WorkflowView {
           sessionId: i.sessionId,
           target: i.work?.kind === "graph" ? i.work.id : i.last?.valid ? i.last.id : undefined,
           summary: i.last?.valid ? i.last.summary : undefined,
+          controls: {
+            pause: n.kind === "task" && actionable && !i.paused && !f.paused,
+            resume: n.kind === "task" && !f.paused && actionable &&
+              (!!i.paused || !!i.replan || i.work?.state === "suspended" || !!i.interruptions.length),
+          },
         };
       }) ?? [],
   };
