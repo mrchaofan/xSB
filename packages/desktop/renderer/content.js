@@ -310,6 +310,12 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
   }
 
   return { el, error, tray, isReading: () => reading > 0, ready, insert, read, snapshot: () => read(false), restore, removeAnnotations,
-    setPlaceholder: (text, prompt = []) => { el.dataset.placeholder = text; completion = prompt; },
+    setPlaceholder: (text, prompt = []) => {
+      el.dataset.placeholder = text;
+      completion = prompt;
+      el.toggleAttribute("data-completion", !!prompt.length);
+      if (prompt.length) el.setAttribute("aria-description", t("composer.suggestionComplete"));
+      else el.removeAttribute("aria-description");
+    },
     clear: () => { el.replaceChildren(); notes = []; renderTray(); onChange(); } };
 }
