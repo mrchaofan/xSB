@@ -24,6 +24,7 @@ import { Agents, Assets as AssetsExt, Connection, Ledger, RpcError, Tasks, failu
 import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import { Workflows } from "./workflows.ts";
+import { nodeAgent } from "./workflow-agent.ts";
 import { Store, atomicWrite, syncDirectory } from "@xsb/store";
 import { Client } from "./acp-server.ts";
 import { Assets } from "./assets.ts";
@@ -305,7 +306,10 @@ export class Hub {
   }
 
   systemPromptFor(agent: AgentSpec, clientMcp: McpServer[] = []): string {
-    const tools = this.toolServers(agent, clientMcp).map((t) => t.server.name).join("\n");
+    const frozen = agent.workflowOwner ? this.state.mainSession(agent.id)?.workflowPrompt : undefined;
+    if (frozen !== undefined) return frozen;
+    // Task tool catalogs are supplied by MCP, not volatile names in the standing prefix.
+    const tools = agent.workflowOwner ? "" : this.toolServers(agent, clientMcp).map((t) => t.server.name).join("\n");
     return conversationPrompt(
       agent,
       projectLanguage(this.paths),
@@ -317,7 +321,7 @@ export class Hub {
   createConversation(
     backend = DEFAULT_BACKEND,
     title?: string,
-    task?: { owner: string; node: string; bind(agentId: string, sessionId: string): Op },
+    task?: { owner: string; node: string; agent?: AgentSpec["workflowAgent"]; bind(agentId: string, sessionId: string): Op },
     clientMcp?: McpServer[],
     initial?: { agentId: string; migratedFrom: SessionRec["migratedFrom"]; update: SessionUpdate },
   ): LiveSession {
@@ -331,7 +335,7 @@ export class Hub {
       backend,
       workspace: this.paths.project,
       createdAt: now(),
-      ...(task && { workflowOwner: task.owner, workflowNode: task.node }),
+      ...(task && { workflowOwner: task.owner, workflowNode: task.node, ...(task.agent && { workflowAgent: nodeAgent(task.agent) }) }),
     };
     this.backends.spec(spec);
     const rec: SessionRec = {
@@ -345,6 +349,7 @@ export class Hub {
       createdAt: now(),
       updatedAt: now(),
     };
+    if (task) rec.workflowPrompt = this.systemPromptFor(spec, rec.clientMcp);
     this.state.commit([ops.putAgent(spec), ops.putSession(rec), ...(task ? [task.bind(id, sessionId)] : []),
       ...(initial ? [{ file: Paths.transcript(id, sessionId), rec: { ts: now(), update: initial.update } }] : [])]);
     const session = this.track(new LiveSession(this, rec));

@@ -13,6 +13,7 @@
  * is ignored.
  */
 import type { ContentBlock, SessionUpdate, StopReason } from "./acp.ts";
+import type { NodeAgentConfig } from "./workflow.ts";
 
 /** Namespace of the extensions this project defines itself. */
 export const NS = "dev.xsb";
@@ -39,6 +40,8 @@ export type AgentSpec = {
   /** Set only for an execution instance of a workflow node. */
   workflowOwner?: string;
   workflowNode?: string;
+  /** Frozen when this execution instance is created; never reread from an evolving DAG. */
+  workflowAgent?: NodeAgentConfig;
   conversation?: boolean;
   /** Bundled avatar ID. Empty or absent uses the default. */
   avatar?: string;

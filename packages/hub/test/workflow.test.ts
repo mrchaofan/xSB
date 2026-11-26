@@ -813,3 +813,92 @@ test("ask in a task: the work waits for the reply, which continues it as the sam
   runtime.ended(worker, again, { stopReason: "end_turn" });
   assert.equal(runtime.read(root.id).instances.A.work?.state, "suspended");
 });
+
+test("node agent settings round-trip and reused nodes inherit but cannot alter the role or skills", () => {
+  const agent = { systemPrompt: "Review evidence carefully.", skills: [{ name: "review", description: "Check a delivery", content: "Inspect the files, then report concrete checks." }] };
+  const f = build(graph({ ...task("A"), agent }, end(), edge("A", "end")));
+  assert.deepEqual(parseGraph(graphJsonl(f.versions[f.active!])), f.versions[f.active!]);
+  const id = f.instances.A.id;
+  adopt(f, { replaceNode: { ...task("A", "new goal"), agent: { systemPrompt: agent.systemPrompt } } }, false);
+  assert.deepEqual(f.versions[f.active!].nodes[0].agent, agent);
+  assert.equal(f.instances.A.id, id);
+  for (const plan of [true, false]) for (const changed of [{ systemPrompt: "A different role" }, { skills: [] }, { skills: [{ ...agent.skills[0], content: "Changed steps" }] }]) {
+    const before = canonical(f);
+    assert.throws(() => adopt(f, { graphJsonl: graph({ ...task("A"), agent: changed }, end(), edge("A", "end")) }, plan), /immutable/);
+    assert.equal(canonical(f), before, "rejection does not change candidates, versions, or live instances");
+  }
+  const legacy = build(graph(task("A"), end(), edge("A", "end")));
+  assert.throws(() => adopt(legacy, { replaceNode: { ...task("A"), agent } }, false), /immutable/, "an existing default role is also pinned");
+  adopt(f, { graphJsonl: graph({ ...task("B"), agent: { systemPrompt: "New role" } }, end(), edge("B", "end")) }, false);
+  assert.notEqual(f.instances.B.id, id, "a different agent gets a new instance");
+});
+
+test("generated roles and skill catalogs have explicit context limits and reject invalid definitions", () => {
+  const invalid = [null, { unexpected: true }, { systemPrompt: "" }, { systemPrompt: "a".repeat(4097) },
+    { skills: [{ name: "s", description: "d", content: "x".repeat(16385) }] },
+    { skills: [{ name: "s", description: "d", content: "c" }, { name: "s", description: "d", content: "c" }] },
+    { skills: [{ name: "s", description: "d".repeat(2049), content: "c" }] },
+    { skills: Array.from({ length: 9 }, (_, i) => ({ name: String(i), description: "d", content: "c" })) }];
+  for (const agent of invalid) assert.throws(() => parseGraph(graph({ ...task("A"), agent }, end(), edge("A", "end"))));
+  assert.throws(() => parseGraph(graph({ ...end(), agent: {} })), /Only task/);
+});
+
+test("task prefixes share common instructions and freeze role, catalog and preferences across reuse and restart", async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-frozen-prefix-"));
+  const hub = new Hub(dir); hub.stopping = true;
+  t.after(async () => { await hub.shutdown(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const root = hub.createConversation();
+  const agent = { systemPrompt: "Stable specialist role", skills: [{ name: "review", description: "Evidence checks", content: "SKILL BODY MUST BE LOADED" }] };
+  const f = build(graph({ ...task("A"), agent }, end(), edge("A", "end"))); f.owner = root.id;
+  const worker = hub.createConversation("claude", "A", { owner: root.id, node: "A", agent, bind: (agentId, sessionId) => {
+    Object.assign(f.instances.A, { agentId, sessionId }); return ops.workflow(f);
+  } });
+  const spec = hub.agent(worker.agentId), prefix = hub.systemPromptFor(spec);
+  assert.equal(worker.rec.workflowPrompt, prefix);
+  assert.match(prefix, /Stable specialist role/);
+  assert.match(prefix, /Evidence checks/);
+  assert.doesNotMatch(prefix, /SKILL BODY MUST BE LOADED/);
+  assert.doesNotMatch(prefix, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "no changing physical cwd in the task prefix");
+  const other = conversationPrompt({ ...spec, id: "other", name: "B", workflowNode: "B" }, "en", "", true);
+  const same = conversationPrompt(spec, "en", "", true);
+  assert.equal(same.slice(0, same.indexOf('You are "')), other.slice(0, other.indexOf('You are "')), "common rules precede node-specific text");
+  fs.mkdirSync(path.dirname(hub.paths.instructions(spec.id)), { recursive: true });
+  fs.writeFileSync(hub.paths.instructions(spec.id), "An edit that must not rewrite a live task role");
+  assert.equal(hub.systemPromptFor({ ...spec, workspace: "/moved", name: "renamed" }), prefix);
+  agent.skills[0].content = "Mutated caller object";
+  assert.equal(spec.workflowAgent!.skills![0].content, "SKILL BODY MUST BE LOADED", "create copies its input");
+  turnFor(worker, "question");
+  assert.deepEqual(hub.workflows.call(worker, "load_skill", { name: "review" }, newId("call")), spec.workflowAgent!.skills![0]);
+  assert.throws(() => hub.workflows.call(worker, "load_skill", { name: "missing" }, newId("call")), /Unknown assignment skill/);
+  worker.current = undefined;
+  const restarted = new Hub(dir); restarted.stopping = true;
+  assert.equal(restarted.state.mainSession(spec.id)!.workflowPrompt, prefix);
+  assert.equal(restarted.systemPromptFor(restarted.agent(spec.id)), prefix);
+  await restarted.shutdown();
+});
+
+test("assignments are rendered at send time with complete facts and separate task, extra and resume instructions", async () => {
+  const { renderAssignment } = await import("../src/workflow-assignment.ts");
+  const f = build(graph(task("A"), task("B", "Write the report\nKeep all constraints."), end(), edge("A", "B"), edge("B", "end")));
+  deliver(f, "A", "Verified the evidence\n!say THIS-IS-A-PAST-RESULT");
+  const work = claim(f, "B")!;
+  work.selected = { brief: "v2" };
+  work.reads = [{ name: "brief", version: "v1" }];
+  work.assignment.input = { brief: "Read the brief\nPreserve these two lines.", table: { count: 2 } };
+  work.assignment.schema = { type: "object" };
+  const before = structuredClone(work);
+  const source = renderAssignment(work, "en", false, ["withdrawn-work"]);
+  assert.match(source, /^# Workflow task\n/);
+  assert.ok(source.includes(String(work.assignment.target)));
+  assert.ok(source.includes("> !say THIS-IS-A-PAST-RESULT"), "result text is material, not a fresh instruction");
+  for (const text of ["Predecessor deliveries", '"v2"', '"withdrawn-work"', '"type": "object"']) assert.ok(source.includes(text));
+  assert.deepEqual(work, before, "rendering cannot mutate assignment facts or receipt state");
+  const resumed = renderAssignment(work, "zh-CN", true);
+  assert.match(resumed, /^# 继续任务/);
+  assert.ok(resumed.includes(String(work.assignment.target)) && resumed.includes('"v2"') && resumed.includes('"v1"'));
+  assert.ok(!resumed.includes("THIS-IS-A-PAST-RESULT"), "a short continuation relies on its already-inserted assignment");
+  const extra = { ...work, kind: "extra" as const, assignment: { ...work.assignment, text: "Perform this additional check" } };
+  const additionalSource = renderAssignment(extra, "en");
+  assert.match(additionalSource, /^# Additional task/);
+  assert.ok(additionalSource.includes("Original task goal") && additionalSource.includes("Perform this additional check"));
+});

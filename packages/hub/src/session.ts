@@ -417,6 +417,8 @@ export class LiveSession {
     const agent = this.hub.agent(this.agentId);
 
     const instructions = this.hub.systemPromptFor(agent, this.clientMcp);
+    // Legacy task conversations acquire the same durable prefix pin before any backend request.
+    if (agent.workflowOwner && this.rec.workflowPrompt === undefined) this.save({ workflowPrompt: instructions });
     this.standingTokens = backend.caps.systemPrompt ? textTokens(instructions) : 0;
     if (textTokens(instructions) + this.hub.policy(this.agentId).reserveTokens > this.hub.policy(this.agentId).promptTokens) {
       throw new RpcError(-32602, "The agent's standing instructions exceed the context budget. Shorten the role instructions or memory, or configure limits.promptTokens.", { errorKind: "input_too_large" });

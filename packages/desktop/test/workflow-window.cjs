@@ -145,6 +145,10 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.equal(await has(panel), false);
   await click(".dag-node:not(:disabled)");
   await until(() => has(panel), "task chat");
+  await untilJS(q(panel + " .input .said h1") + "?.textContent.match(/Workflow task|工作流任务/)!=null", "readable assignment title");
+  const assignmentSource = await js(`xsb.load().then(snapshot => snapshot.transcripts[${q(panel)}.dataset.agent].find(entry => entry.kind === "input" && entry.origin.kind === "system").content[0].text)`);
+  assert.ok(assignmentSource.includes(rows[0].prompt), "the exact task instructions remain in the sent Markdown");
+  assert.equal(await js(q(panel + " .input .said details") + ".open"), false, "internal assignment identifiers start collapsed");
   await click(panel + " .task-control");
   await untilJS(q(panel + " .task-control") + ".innerText.match(/Resume|继续/)!=null", "task stop");
   await send(panel, "!say SIDE-ONLY");

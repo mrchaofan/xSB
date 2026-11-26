@@ -147,6 +147,8 @@ async function step(session: Session, line: string): Promise<void> {
       return say(session, `echo: ${session.prompt.replaceAll("\n", " | ")}\n`);
     case "consultation":
       return say(session, "consultation: " + (session.instructions?.match(/Current preference: (enabled|disabled)|当前偏好：[开启关闭]+/)?.[0] ?? "No system preference"));
+    case "instructions":
+      return say(session, `instructions: ${session.instructions}\n`);
     case "usage":
       return update(session, { sessionUpdate: "usage_update", used: Number(rest), size: 1_000_000 });
     case "model":

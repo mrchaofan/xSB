@@ -7,6 +7,8 @@ import type { LiveSession, Turn, TurnEnd } from "./session.ts";
 import { ops } from "./state.ts";
 import { newId, now } from "./util.ts";
 import { boundedText, contextRef, readContext } from "./context.ts";
+import { projectLanguage } from "./config.ts";
+import { renderAssignment } from "./workflow-assignment.ts";
 import { canonical, fingerprint, graphJsonl, validateResult, word } from "./workflow-graph.ts";
 import {
   additional,
@@ -214,6 +216,7 @@ export class Workflows {
         session = this.hub.createConversation(spec.backend, n.node, {
           owner,
           node: n.node,
+          agent: n.agent,
           bind: (agentId, sessionId) => {
             i.agentId = agentId;
             i.sessionId = sessionId;
@@ -225,18 +228,9 @@ export class Workflows {
       if (!this.acceptsAttempt(session, work.attempt!)) continue;
       // The short form only where the conversation still has the assignment: not after it was renewed.
       const resume = work.inserted && work.epoch === session.rec.contextEpoch;
-      const revoked = i.revoked?.length
-        ? `[xSB] Assignment(s) ${i.revoked!.join(", ")} that you worked on earlier in this conversation were withdrawn (redefined or invalidated). Do not continue them; work only on the assignment below.\n`
-        : "";
       session.enqueue({
         origin: { kind: "system", messageId: work.attempt },
-        prompt: [
-          text(revoked +
-            (resume
-              ? `Resume assignment ${work.id} from this conversation. Pinned current versions: ${JSON.stringify(work.selected)}. Versions previously read: ${JSON.stringify(work.reads ?? [])}. Continue the saved assignment:\n${work.assignment.text ?? work.assignment.target}`
-              : `Workflow ${work.kind} assignment ${work.id}\n${JSON.stringify(work.assignment)}\nSelected versions: ${JSON.stringify(work.selected)}\n${work.assignment.text ?? work.assignment.target}`),
-          ),
-        ],
+        prompt: [text(renderAssignment(work, projectLanguage(this.hub.paths), resume, i.revoked))],
       });
     }
   }
@@ -508,7 +502,7 @@ export class Workflows {
     const changed = graph?.nodes.flatMap((n) => {
       const old = prior?.definitions.get(n.node);
       if (!old) return [n];
-      const entries = (["kind", "prompt", "input", "schema", "multi", "model"] as const)
+      const entries = (["kind", "prompt", "input", "schema", "multi", "model", "agent"] as const)
         .filter((key) => canonical(old[key]) !== canonical(n[key]))
         .map((key) => [key, n[key] ?? null]);
       return entries.length ? [{ node: n.node, ...Object.fromEntries(entries) }] : [];
@@ -607,6 +601,12 @@ export class Workflows {
     if (spec.workflowOwner && ["execute", "choose", "prompt", "plan", "resume", "pause"].includes(name))
       throw Error("Tool unavailable for task agent");
     checkArguments(name, a);
+    if (name === "load_skill") {
+      if (!spec.workflowOwner) throw Error("Tool unavailable for main agent");
+      const skill = spec.workflowAgent?.skills?.find(skill => skill.name === a.name);
+      if (!skill) throw Error(`Unknown assignment skill: ${a.name}`);
+      return { ...skill };
+    }
     if (name === "read_context") return readContext(this.hub.paths, s.agentId, a.ref, a.offset, a.bytes);
     if (name === "previous_conversation") {
       const moved = s.rec.migratedFrom;

@@ -370,6 +370,31 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   await prompt(session.id,"again");
   assert.equal(said.get(session.id),"echo: again\n");
 }
+// Node profiles reach ACP session/new, survive rebinding, and expose portable skills through real MCP.
+for (const backend of ["mock", "bare"]) {
+  const main = await create(backend);
+  const profile = { systemPrompt: "E2E stable reviewer role", skills: [{ name: "review", description: "Inspect evidence", content: "E2E portable skill procedure" }] };
+  const program = "!instructions\n!echo\n" + call("load_skill", { name: "review" }) + "\n" + call("finish", { summary: "profile tested", assets: [] });
+  const rows = [{ node: "reviewer", prompt: program, agent: profile }, { node: "done", kind: "end" }, { from: "reviewer", to: "done" }];
+  await prompt(main.id, call("execute", { graphJsonl: rows.map(row => JSON.stringify(row)).join("\n") }));
+  await until("configured node completes", () => hub.workflows.read(main.id).instances.reviewer.last?.valid);
+  const instance = hub.workflows.read(main.id).instances.reviewer;
+  const worker = hub.session(instance.sessionId!);
+  await idle(worker.agentId);
+  const prefix = worker.rec.workflowPrompt!;
+  assert.ok(prefix.includes(profile.systemPrompt) && !prefix.includes(profile.skills[0].content));
+  assert.match(answered(worker.agentId), /E2E portable skill procedure/);
+  const source = received(worker.agentId).find(message => message.text.startsWith("# Workflow task") || message.text.startsWith("# 工作流任务"))!.text;
+  assert.ok(source.includes(program));
+  if (backend === "mock") assert.ok(answered(worker.agentId).includes(JSON.stringify({ mode: "append", content: [{ type: "text", text: prefix }] })), "the exact prefix was applied as ACP systemPrompt");
+  else assert.ok(answered(worker.agentId).includes("E2E stable reviewer role"), "fallback instructions are in the received prompt");
+  hub.backends.stop(worker.agentId);
+  await prompt(worker.id, "!instructions");
+  await idle(worker.agentId);
+  assert.equal(worker.rec.workflowPrompt, prefix);
+  if (backend === "mock") assert.ok(said.get(worker.id)!.includes(JSON.stringify({ mode: "append", content: [{ type: "text", text: prefix }] })), "resume receives the identical prefix");
+}
+
 // 14. An agent without ACP, wrapped with @xsb/adapter, goes through the same chain as the others.
 {
   const e = (await create("wrapped")).id;
