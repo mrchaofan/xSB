@@ -110,6 +110,25 @@ require("./window-harness.cjs").windowTest(__filename, async ({ js, q, click, dr
     'document.querySelectorAll(".dag-node").length===3 && !document.querySelector(".dag-node").disabled',
     "DAG",
   );
+  // The global icon size must not clip the DAG's curved edges to a 16 × 16 viewport.
+  const drawing = await js(`(() => {
+    const surface = document.querySelector(".dag-surface"), svg = surface.querySelector("svg");
+    return {
+      surface: [surface.clientWidth, surface.clientHeight],
+      viewport: [svg.clientWidth, svg.clientHeight],
+      edges: [...svg.querySelectorAll("path")].map(path => {
+        const box = path.getBBox(), style = getComputedStyle(path);
+        return { curved: path.getAttribute("d").includes("C"), right: box.x + box.width, bottom: box.y + box.height,
+          stroke: style.stroke, width: parseFloat(style.strokeWidth) };
+      }),
+    };
+  })()`);
+  assert.deepEqual(drawing.viewport, drawing.surface);
+  assert.equal(drawing.edges.length, 2);
+  for (const edge of drawing.edges) {
+    assert.ok(edge.curved && edge.stroke !== "none" && edge.width > 0);
+    assert.ok(edge.right <= drawing.viewport[0] && edge.bottom <= drawing.viewport[1], "edge is inside the SVG viewport");
+  }
   assert.equal(await js('document.querySelectorAll(".dag-node")[1].disabled'), true);
   await click(".dag-node:disabled");
   assert.equal(await has(panel), false);
