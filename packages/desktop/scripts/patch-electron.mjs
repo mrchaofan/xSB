@@ -20,7 +20,7 @@ export function patchElectron(dir, patch) {
   const target = path.relative(cwd, dir).split(path.sep).join("/");
   // Git for Windows can check out the patch as CRLF, while npm's tarball sources retain LF.
   const input = fs.readFileSync(patch, "utf8").replace(/\r\n/g, "\n");
-  const apply = (args) => execFileSync("git", ["apply", ...(target ? ["--directory", target] : []), ...args], { cwd, stdio: "pipe", input });
+  const apply = (args) => execFileSync("git", ["-c", "core.autocrlf=false", "apply", ...(target ? ["--directory", target] : []), ...args], { cwd, stdio: "pipe", input });
   const alreadyPatched = fs.existsSync(path.join(dir, "mirror-config.js"));
   if (!alreadyPatched) {
     apply(["--check"]);
