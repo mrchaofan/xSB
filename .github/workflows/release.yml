@@ -33,6 +33,8 @@ jobs:
         env:
           SELECTED_REF: ${{ github.ref }}
         run: test "$SELECTED_REF" = refs/heads/main
+      - name: Require hosted runner
+        run: test "$RUNNER_ENVIRONMENT" = github-hosted
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
@@ -67,6 +69,10 @@ jobs:
     name: Build reserved version
     needs: version
     uses: ./.github/workflows/desktop.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     with:
       ref: ${{ needs.version.outputs.commit }}
       build_packages: true
@@ -88,9 +94,15 @@ jobs:
           pattern: xsb-*
           path: release
           merge-multiple: true
-      - name: Verify downloaded archives
-        working-directory: release
-        run: sha256sum --check *.zip.sha256
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Verify signed application builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.version.outputs.commit }}
+        run: node scripts/release-publish.mjs verify
       - name: Create and push version tag
         env:
           RELEASE_TAG: ${{ needs.version.outputs.tag }}
@@ -104,13 +116,9 @@ jobs:
             git tag -a "$RELEASE_TAG" "$RELEASE_COMMIT" -m "xsb $RELEASE_TAG"
             git push origin "refs/tags/$RELEASE_TAG"
           fi
-      - name: Publish GitHub Release
+      - name: Publish and verify immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.version.outputs.tag }}
-        run: |
-          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release/*.zip release/*.zip.sha256 --clobber
-          else
-            gh release create "$RELEASE_TAG" release/*.zip release/*.zip.sha256 --verify-tag --generate-notes
-          fi
+          RELEASE_COMMIT: ${{ needs.version.outputs.commit }}
+        run: node scripts/release-publish.mjs publish
