@@ -11,6 +11,7 @@ const METHODS = [
   "arkStatus", "arkModels", "arkLogin", "arkCancelLogin", "arkBind",
   "openPage", "page", "pageWindow",
   "limitSettings", "setLimit", "projectLanguage", "setProjectLanguage",
+  "consultationSettings", "setConsultation",
   "plugins", "setPluginEnabled", "approvePlugin", "reloadPlugins", "revealPlugins",
   "pluginApprovals", "revokePluginApproval", "exportSettings", "importSettings",
   "readClipboardImages", "copyText", "openArtifact", "revealArtifact",

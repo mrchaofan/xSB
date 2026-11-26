@@ -82,6 +82,37 @@ function languageSection() {
   return [failure, section(t("settings.languageSection"), body)];
 }
 
+/** AI behavior is shared with the Hub, with an explicit workspace inheritance option. */
+function consultationSection(scope) {
+  const body = h("div", { class: "settings-card-body" });
+  const failure = h("p", { class: "error", role: "alert" });
+  const current = revision;
+  const paint = (settings) => {
+    if (current !== revision) return;
+    const change = async (value) => {
+      control.disabled = true;
+      failure.textContent = "";
+      try { paint(await xsb.setConsultation(scope, value)); }
+      catch (error) {
+        paint(settings);
+        if (current === revision) failure.textContent = t("settings.saveFailed", { error: error.message });
+      }
+    };
+    const control = scope === "global"
+      ? toggle(t("settings.consultation"), settings.global, change)
+      : h("select", { "aria-label": t("settings.consultation"), onchange: (event) => change(event.target.value === "inherit" ? null : event.target.value === "enabled") },
+        ...[["inherit", t("settings.consultation.inherit", { state: t(settings.global ? "settings.consultation.enabled" : "settings.consultation.disabled") })],
+          ["enabled", t("settings.consultation.enabled")], ["disabled", t("settings.consultation.disabled")]]
+          .map(([value, label]) => h("option", { value, selected: value === (settings.project === null ? "inherit" : settings.project ? "enabled" : "disabled") }, label)));
+    control.dataset.setting = "consultation";
+    fill(body, settingRow(t("settings.consultation"), t("settings.consultation.hint"), control));
+  };
+  xsb.consultationSettings().then(paint, (error) => {
+    if (current === revision) failure.textContent = t("settings.saveFailed", { error: error.message });
+  });
+  return section(t("settings.aiCollaboration"), body, h("p", { class: "hint" }, t("settings.consultation.applies")), failure);
+}
+
 /**
  * 限制都在这台设备上（~/.xsb2_global/config.json），没有工作区或会话单独的设置。表单按中枢给出的表生成（默认值、范围），
  * 留空即用默认值；改动立即保存，下次用到时生效。backend：某个后端的上下文限制。
@@ -145,6 +176,7 @@ export function showSettings(key = "general", refresh = true) {
       settingRow(t("settings.theme"), t("settings.themeHint"), choose("theme", ["light", "dark", "system"]))),
     section(t("settings.conversation"), settingRow(t("settings.showTools"), t("settings.showToolsHint"),
       toggle(t("settings.showTools"), global.showTools, (value) => save(() => saveGlobalPreferences({ showTools: value }))))),
+    consultationSection("global"),
     section(t("settings.backup"), h("p", {}, t("settings.backupHint")), h("div", { class: "actions" },
       h("button", { class: "btn", onclick: async () => {
         try { const ui = Object.fromEntries(Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(key => key?.startsWith("xsb.ui.")).map(key => [key, localStorage.getItem(key)])); await xsb.exportSettings(ui); }
@@ -165,7 +197,7 @@ export function showSettings(key = "general", refresh = true) {
     content = [section(t("settings.workspaceInfo"),
       field(t("common.name"), h("div", { class: "readonly" }, state.workspace.name)),
       field(t("settings.folder"), h("div", { class: "readonly path" }, state.workspace.path))),
-      ...languageSection(), cleanupSection()];
+      ...languageSection(), consultationSection("project"), cleanupSection()];
   }
   fill(dialog, ...settingsShell(h("div", { class: "settings-body" },
     h("div", { class: "settings-heading" }, h("span", { class: "scope-label" }, t(GLOBAL_KEYS.includes(key) ? "settings.globalScope" : "settings.workspaceScope")),

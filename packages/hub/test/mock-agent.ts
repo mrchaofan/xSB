@@ -48,6 +48,8 @@ type Session = {
   task?: string;
   /** The prompt of the running work, as text. */
   prompt: string;
+  /** Standing instructions supplied on session/new or session/resume. */
+  instructions?: string;
   /** Names of the MCP servers the session was opened with. */
   servers: string[];
   /** Prompts held while it works. */
@@ -143,6 +145,8 @@ async function step(session: Session, line: string): Promise<void> {
     }
     case "echo":
       return say(session, `echo: ${session.prompt.replaceAll("\n", " | ")}\n`);
+    case "consultation":
+      return say(session, "consultation: " + (session.instructions?.match(/Current preference: (enabled|disabled)|当前偏好：[开启关闭]+/)?.[0] ?? "No system preference"));
     case "usage":
       return update(session, { sessionUpdate: "usage_update", used: Number(rest), size: 1_000_000 });
     case "model":
@@ -263,6 +267,7 @@ function config(session: Session) {
 }
 conn.onRequest("session/new", async (p) => {
   const session = await open("mock_" + process.pid + "_" + ++counter, p.mcpServers);
+  session.instructions = JSON.stringify(p.systemPrompt);
   return { sessionId: session.id, ...config(session) };
 });
 conn.onRequest("session/set_config_option", (p) => {
@@ -276,7 +281,8 @@ conn.onRequest("session/set_config_option", (p) => {
 });
 conn.onRequest("session/resume", async (p) => {
   if (flags.includes("--no-resume")) throw new RpcError(-32002, "no such session");
-  await open(p.sessionId, p.mcpServers);
+  const session = await open(p.sessionId, p.mcpServers);
+  session.instructions = JSON.stringify(p.systemPrompt);
   update(sessions.get(p.sessionId)!, { sessionUpdate: "state_update", state: "idle" });
   return config(sessions.get(p.sessionId)!);
 });
