@@ -17,7 +17,7 @@ import { clock, t } from "./i18n.js";
 import { sessionPages, onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
 import { closeSettings, showSettings } from "./settings.js";
 import { migrateWorkspaceState, onPreferencesChanged, syncWindowColors } from "./preferences.js";
-import { confirmDialog, field, openDialog } from "./form.js";
+import { confirmDialog, openDialog } from "./form.js";
 import { openContextMenu } from "./menu.js";
 import { questionRecord, syncAskPanel } from "./ask.js";
 import { bindArtifactResize } from "./resize.js";
@@ -136,32 +136,10 @@ async function deleteConversation(agent) {
   catch (e) { openDialog(t("rail.delete.failed"), [h("p", {}, e.message)], [{ label: t("common.close"), primary: true }]); }
 }
 
-function renameConversation(agent) {
-  const name = h("input", { type: "text", maxlength: 64, required: true, autocomplete: "off" });
-  name.value = agent.name;
-  let saving = false;
-  const dialog = openDialog(t("rail.rename"), [field(t("rail.rename.name"), name)], [
-    { label: t("common.cancel") },
-    { label: t("rail.rename.save"), primary: true, run: async () => {
-      if (saving) return false;
-      if (!name.value.trim()) throw Error(t("rail.rename.empty"));
-      saving = true;
-      try { onAgent(await xsb.renameConversation(agent.id, name.value.trim())); }
-      finally { saving = false; }
-    } },
-  ]);
-  name.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); dialog.querySelector(".primary").click(); }
-  });
-  name.focus();
-  name.select();
-}
-
 function renderRail() {
   applyProviderTheme();
   const roots = state.agents.filter(a => !a.workflowOwner);
   const menu = (e, a) => openContextMenu(e, [
-    { label: t("rail.rename"), icon: "edit", run: () => renameConversation(a) },
     { label: t("rail.delete"), icon: "trash", danger: true, disabled: a.state !== "idle", hint: t("rail.delete.busy"), run: () => deleteConversation(a) },
   ], a.name);
   fill($("#agents"), ...roots.map(a =>
@@ -203,6 +181,50 @@ function deliveredNote(as) {
 }
 
 const laneOf = (agentId) => document.querySelector(`.lane[data-agent="${agentId}"]`);
+
+/** 主会话的标题：点击就地编辑，失焦或 Enter 保存；同步状态时不覆盖正在编辑的文字。 */
+function conversationTitle(agentId) {
+  const errorId = `title-error-${agentId}`;
+  const name = h("input", { class: "lane-title-input", type: "text", maxlength: 64, required: true, autocomplete: "off", hidden: true,
+    "aria-label": t("lane.rename.name"), "aria-describedby": errorId });
+  const failure = h("span", { class: "lane-title-error", id: errorId, role: "alert", hidden: true });
+  let editing = false, saving = false;
+  const clearError = () => { failure.hidden = true; name.removeAttribute("aria-invalid"); };
+  const finish = () => { editing = false; name.hidden = true; button.hidden = false; clearError(); };
+  const fail = (message) => { failure.textContent = message; failure.hidden = false; name.setAttribute("aria-invalid", "true"); };
+  const button = h("button", { class: "lane-title-button", type: "button", "aria-label": t("lane.rename"), onclick: () => {
+    name.value = agentOf(agentId).name;
+    editing = true;
+    clearError();
+    button.hidden = true;
+    name.hidden = false;
+    name.focus();
+    name.select();
+  } }, h("strong", {}));
+  const save = async () => {
+    if (!editing || saving) return;
+    const title = name.value.trim();
+    if (!title) { fail(t("lane.rename.empty")); return; }
+    if (title === agentOf(agentId)?.name) { finish(); return; }
+    saving = true;
+    name.readOnly = true;
+    clearError();
+    try { onAgent(await xsb.renameConversation(agentId, title)); finish(); }
+    catch (e) { fail(t("lane.rename.failed", { error: e.message })); }
+    finally { saving = false; name.readOnly = false; }
+  };
+  name.onblur = save;
+  name.oninput = clearError;
+  name.onkeydown = (e) => {
+    if (e.isComposing || !["Enter", "Escape"].includes(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (saving) return;
+    if (e.key === "Escape") { finish(); button.focus(); }
+    else { name.blur(); }
+  };
+  return h("div", { class: "lane-title" }, button, name, failure);
+}
 
 /** 主会话在中央打开，任务会话在所属工作流的侧栏打开。 */
 export function focusLane(agentId) {
@@ -283,7 +305,7 @@ function openLane(agentId, panel, readonly) {
     h("header", { class: "bar lane-head" },
       panel ? h("span", { class: "lane-avatar" })
         : h("button", { class: "lane-avatar", type: "button", title: t("lane.icon"), "aria-label": t("lane.icon"), "aria-haspopup": "dialog", onclick: (e) => pickIcon(agentId, e.currentTarget) }),
-      h("strong", {}), h("span", { class: "lane-backend" }),
+      panel ? h("strong", {}) : conversationTitle(agentId), h("span", { class: "lane-backend" }),
       h("span", { class: "lane-state" }, h("i", { class: "state" }), h("span", {})),
       h("button", { class: "icon-btn", title: t("lane.close"), "aria-label": t("lane.close"), html: ICON.close, hidden:!!panel, onclick: () => {closeLane(agentId); renderSide();} })),
     h("div", { class: "transcript" }, h("button", { class: "btn history-more", hidden: state.history?.[agentId] == null, onclick: () => loadHistory(agentId) }, t("history.more")), h("div", { class: "entries" })),
@@ -401,6 +423,8 @@ function syncLane(agentId) {
   lane.picker?.update();
   fill(lane.querySelector(".lane-avatar"), avatarImage(agentOf(agentId)));
   lane.querySelector(".lane-head strong").textContent = name;
+  const titleButton = lane.querySelector(".lane-title-button");
+  if (titleButton) titleButton.title = name;
   fill(lane.querySelector(".lane-backend"), backendMark(backend));
   lane.querySelector(".lane-state .state").dataset.state = shownState(agentOf(agentId));
   lane.querySelector(".lane-state span").textContent = STATE_TEXT[shownState(agentOf(agentId))];

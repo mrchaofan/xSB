@@ -249,6 +249,15 @@ body:not(.no-workspace) .welcome { display: none; }
 .lane + .lane { border-left: 1px solid var(--line); }
 .lane-head { gap: var(--space-2); padding-left: var(--space-3); }
 .lane-head strong { flex: 0 1 auto; min-width: 0; font-weight: 600; font-size: var(--text-lg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lane-title { position: relative; flex: 0 1 auto; min-width: 0; -webkit-app-region: no-drag; }
+.lane-title:has(.lane-title-input:not([hidden])) { flex: 1 1 auto; }
+.lane-title-button { display: block; max-width: 100%; padding: var(--space-1) 0; border-radius: var(--radius-xs); text-align: left; -webkit-app-region: no-drag; }
+.lane-title-button:hover { background: var(--hover); }
+.lane-title-button strong { display: block; }
+.lane-title-input { width: 100%; min-width: 0; height: var(--control-md); padding: 0 var(--space-1); border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--paper); color: var(--ink); font: 600 var(--text-lg) / var(--leading-tight) var(--sans); -webkit-app-region: no-drag; user-select: text; }
+.lane-title-input[aria-invalid="true"] { border-color: var(--danger); }
+.lane-title-error { position: absolute; top: calc(100% + var(--space-1)); left: 0; z-index: 10; width: max-content; max-width: min(320px, 100cqw); padding: var(--space-1) var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); color: var(--danger); box-shadow: var(--shadow); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.lane-title-button[hidden], .lane-title-input[hidden], .lane-title-error[hidden] { display: none; }
 .lane-backend { flex: none; display: inline-flex; align-items: center; }
 .lane-state { flex: none; margin-left: auto; display: flex; align-items: center; gap: var(--space-1h); color: var(--ink-3); font-size: var(--text-sm); }
 
