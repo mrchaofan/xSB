@@ -8,13 +8,13 @@ function tool(name: string, description: string, properties: Record<string, unkn
 const main = [
   tool(
     "plan",
-    "xSB workflow: save one candidate workflow (a DAG of task nodes) for review, in place of any earlier candidate. One JSON object per line: {node,prompt,input?,model?,schema?,multi?}, {node,kind:'end'}, or {from,to,case?}. Task and end node names are shown to the user: write them in the conversation language declared in the system prompt. xSB names the version; the workflow context shows it with the graph.",
+    "xSB workflow: save one candidate workflow (a DAG of task nodes) for review, in place of any earlier candidate. One JSON object per line: {node,prompt,input?,model?,schema?,multi?,agent?:{systemPrompt?,skills?:[{name,description,content}]}}, {node,kind:'end'}, or {from,to,case?}. Generate a short stable agent role and reusable skills when useful; keep assignment facts in prompt/input. Limits: systemPrompt 2048 estimated tokens, at most 8 skills, directory 1024 estimated tokens, each skill body 8192 estimated tokens. A reused node inherits omitted systemPrompt/skills and cannot change them. Task and end node names are shown to the user: write them in the conversation language declared in the system prompt. xSB names the version; the workflow context shows it with the graph.",
     { graphJsonl: string },
     ["graphJsonl"],
   ),
   tool(
     "execute",
-    "xSB workflow: adopt and run a workflow. With no arguments, adopt the candidate the workflow context shows; or supply a complete graphJsonl, or one complete replaceNode definition. Name new task and end nodes in the conversation language declared in the system prompt; preserve existing names when updating the same responsibility.",
+    "xSB workflow: adopt and run a workflow. With no arguments, adopt the candidate the workflow context shows; or supply a complete graphJsonl, or one complete replaceNode definition. Name new task and end nodes in the conversation language declared in the system prompt; preserve existing names when updating the same responsibility. A task node may configure agent:{systemPrompt?,skills?:[{name,description,content}]}; reused nodes inherit omitted settings and reject changes to systemPrompt or skills. Use a new node name for a different role or skill set.",
     { graphJsonl: string, replaceNode: obj },
   ),
   tool(
@@ -40,6 +40,7 @@ const main = [
   }),
 ];
 const task = [
+  tool("load_skill", "Read a fixed skill from this task agent's assignment skill directory before applying it. This loads Hub-managed instructions, not a backend-native slash command. Long content is retained with a read_context reference.", { name: string }, ["name"]),
   tool(
     "finish",
     "Stage this assignment's delivery. It is accepted only on a normal end.",

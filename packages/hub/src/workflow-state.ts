@@ -133,6 +133,20 @@ export function adopt(f: Flow, args: Record<string, any>, plan: boolean) {
     if (f.candidate.base !== f.active) throw Error("Candidate is stale: plan it again on the active workflow");
     graph = f.versions[f.candidate.version];
   }
+  // Validate before touching versions, candidates, instances or running work.
+  // Omitted immutable fields inherit; an explicit different value is rejected.
+  graph = structuredClone(graph);
+  const priorNodes = new Map(old?.nodes.map(n => [n.node, n]));
+  for (const n of graph.nodes) {
+    const prior = priorNodes.get(n.node);
+    if (!prior || prior.kind !== n.kind || n.kind !== "task") continue;
+    const agent = { ...prior.agent, ...n.agent };
+    if (canonical({ systemPrompt: agent.systemPrompt ?? "", skills: agent.skills ?? [] }) !==
+        canonical({ systemPrompt: prior.agent?.systemPrompt ?? "", skills: prior.agent?.skills ?? [] }))
+      throw Error(`Agent systemPrompt and skills are immutable for reused node "${n.node}"; use a new node name for a different agent`);
+    if (Object.keys(agent).length) n.agent = agent;
+    else delete n.agent;
+  }
   const key = canonical(graph);
   let version = Object.keys(f.versions).find((v) => canonical(f.versions[v]) === key);
   if (!version) {

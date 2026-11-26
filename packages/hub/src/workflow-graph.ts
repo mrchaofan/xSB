@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import type { Edge, NodeDef, WorkflowGraph } from "@xsb/protocol";
+import { nodeAgent } from "./workflow-agent.ts";
 
 const validator = new Ajv({ strict: true, ownProperties: true, addUsedSchema: false });
 export function validateResult(schema: object, result: unknown) {
@@ -29,7 +30,7 @@ export const fingerprint = (v: unknown) => createHash("sha256").update(canonical
 
 export function nodeDefinition(value: unknown): NodeDef {
   if (!object(value)) throw Error("Expected a node definition");
-  const { node, kind = "task", input = {}, prompt, model, schema, multi = false } = value;
+  const { node, kind = "task", input = {}, prompt, model, schema, multi = false, agent } = value;
   word(node, "node name");
   if (
     node in Object.prototype ||
@@ -39,9 +40,10 @@ export function nodeDefinition(value: unknown): NodeDef {
     typeof multi !== "boolean"
   )
     throw Error("Invalid node definition");
-  if (Object.keys(value).some((k) => !["node", "kind", "input", "prompt", "model", "schema", "multi"].includes(k)))
+  if (Object.keys(value).some((k) => !["node", "kind", "input", "prompt", "model", "schema", "multi", "agent"].includes(k)))
     throw Error("Unknown node field");
   if (kind === "task") word(prompt, "task prompt");
+  if (agent !== undefined && kind !== "task") throw Error("Only task nodes can configure an agent");
   if (model !== undefined) word(model, "model");
   if (schema !== undefined) {
     if (!object(schema)) throw Error("Expected a JSON Schema object");
@@ -55,6 +57,7 @@ export function nodeDefinition(value: unknown): NodeDef {
     ...(prompt !== undefined && { prompt }),
     ...(model !== undefined && { model }),
     ...(schema !== undefined && { schema }),
+    ...(agent !== undefined && { agent: nodeAgent(agent) }),
   };
 }
 
@@ -167,12 +170,13 @@ export function parseGraph(raw: string): WorkflowGraph {
 
 /** A graph in the JSONL a model writes it in, leaving out the fields it can leave out: parsed back, it is the same graph. */
 export function graphJsonl({ nodes, edges }: WorkflowGraph): string {
-  const node = ({ node, kind, prompt, input, model, schema, multi }: NodeDef) => ({
+  const node = ({ node, kind, prompt, input, model, schema, multi, agent }: NodeDef) => ({
     node,
     ...(kind === "end" ? { kind } : { prompt }),
     ...(Object.keys(input).length > 0 && { input }),
     ...(model !== undefined && { model }),
     ...(schema !== undefined && { schema }),
+    ...(agent !== undefined && { agent }),
     ...(multi && { multi }),
   });
   return [...nodes.map(node), ...edges].map((v) => JSON.stringify(v)).join("\n");

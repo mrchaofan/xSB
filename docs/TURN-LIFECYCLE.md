@@ -192,6 +192,8 @@ turn 因非取消原因失败时，已发出但没有插入回执的输入可能
 
 模型摘要由 `prompts.ts` 的 `TASK_LIFECYCLE_RULES` 注入主 Agent 与任务 Agent 的系统说明；没有 systemPrompt 能力的后端通过第一条 standing-instructions preface 获得同样规则。修改本契约时须同步该摘要与对应场景测试。
 
+工作流重用节点的 `agent.systemPrompt` 与 `agent.skills` 不可变；省略时继承，显式变更在采用/规划提交前整体拒绝。任务会话的完整常驻提示词在创建事务中固化，重启和后端重绑定沿用原文；历史会话在首次绑定前固化。固定提示词不是授权来源，最新运行时停止与权限校验仍然生效。详情见 [任务 Agent 配置与缓存](WORKFLOW-AGENT-CONFIG.md)。
+
 ## 7. 后端运行与回合外输出
 
 会话维护当前 run 及其 `turnId`（无主时为 `null`），不再用 `backendIdle/ranSince` 代替执行归属。只有属于当前 turn 的 run 结束才结束该 turn；无主 run 的 idle 不能结束仍在等 prompt 回执的 turn，也不能确认任务停止。回合已有 run 结束时仍等在途 prompt 的真实回执；后端把后续 prompt 插入自己的下一段执行时，仍由同一逻辑 turn 认领。已结束 run 的迟到输出保持结束状态。

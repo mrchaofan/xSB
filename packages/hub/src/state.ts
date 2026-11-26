@@ -17,6 +17,8 @@ import path from "node:path";
 export type SessionRec = {
   id: string;
   agentId: string;
+  /** Exact standing prefix of a task conversation, pinned before its first backend bind. */
+  workflowPrompt?: string;
   /** The user renamed this conversation; backend-generated titles no longer replace it. */
   titleEdited?: boolean;
   /** The backend's own session id, once one exists. */

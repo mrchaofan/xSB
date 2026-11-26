@@ -35,7 +35,7 @@ DAG 的任务节点和结束节点使用系统提示词声明的对话语言，�
 
 全文随时可凭 `graphRef` 用 `read_context` 读取。主对话的消息只交给主 Agent，任务 Agent 收不到；上下文里只有工作流的状态和交付摘要，没有任务 Agent 的对话。
 
-JSONL 中每个节点和每条边各占一行。任务节点支持 `input`、`model` 和结果的 JSON Schema `schema`。下面的审片图通过后直接汇总，需要修订时先执行修图。
+JSONL 中每个节点和每条边各占一行。任务节点支持 `input`、`model`、结果的 JSON Schema `schema`，以及固定的 `agent:{systemPrompt?,skills?:[{name,description,content}]}` 配置。主 Agent 为新职责生成简短角色和可复用的技能正文；同名同类型节点重用时，省略的角色和技能配置自动继承，显式改动被运行时拒绝。完整规则与 ACP 能力边界见 [任务 Agent 配置与缓存](WORKFLOW-AGENT-CONFIG.md)。下面的审片图通过后直接汇总，需要修订时先执行修图。
 
 ```jsonl
 {"node":"绘制","prompt":"绘制并登记定妆图。"}
@@ -99,3 +99,5 @@ JSONL 中每个节点和每条边各占一行。任务节点支持 `input`、`mo
 普通 Agent 调用不默认回传结果 prompt。追加工作完成后保存到节点 additionalResults，节点视图提供结果摘要，主会话不因此被唤醒或收到 additionalResult prompt。DAG 完成、分支选择与升级控制通知仍由图规则产生。
 
 重启前未确认输入终结且不补发；不得恢复原邮件、加入欠交清单或将原文再次注入。明确 resume 可以继续保存的工作流 assignment；已接收用户插话的继续请求只引用原消息 ID，如果上下文已经缺失要求用户重新发送，不复制原文。
+
+Hub 在发送 assignment 时直接生成 Markdown：任务要求、输入材料、前置成果与材料版本各自分段；追加任务和继续任务有明确标题，旧任务撤回提示仍可见。任务 ID、依据和模型等信息放在可展开的详情中。模型和 transcript 收到同一份正文，桌面端沿用普通 Markdown 渲染和原文复制，不按消息文案做正则解析。JSONL 图定义和工具参数继续使用结构化协议。
