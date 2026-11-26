@@ -68,7 +68,7 @@ export function turnsSinceCleared(store: Store, agentId: string, sessionId: stri
   let chars = 0;
   for (const rec of store.readBackward(Paths.transcript(agentId, sessionId))) {
     const boundary = boundaryOf(rec.update);
-    if (boundary?.kind === "cleared" || (bounds?.stopAtRenewal && boundary?.handoff)) break;
+    if ((boundary?.kind === "cleared" || boundary?.kind === "not_restored") || (bounds?.stopAtRenewal && boundary?.handoff)) break;
     chars += JSON.stringify(rec).length;
     if (bounds && chars > bounds.maxChars) break;
     records.push(rec as { ts: string; update: any });

@@ -21,9 +21,10 @@ import type { WebAnnotation } from "./page-annotations.ts";
  * What was said, by the user, a peer or the agent, is content (content.ts).
  */
 export type Entry = { id: string } & (
-  /** `discarded`: the model never saw it, and never will. `pending`: sent, and not in the conversation yet. */
+  /** `discarded`: this delivery ended without confirmation. `pending`: waiting for insertion evidence. */
   | { kind: "input"; origin: OriginMeta; content: Content; discarded?: boolean; pending?: boolean;
-      /** Why the model did not see it; `detail` is the error. `unsent`: xsb never had it (sent again under its id). */
+      delivery?: "waiting" | "queued" | "sending"; canCancel?: boolean; canSendNow?: boolean; isQueueHead?: boolean; targetTurnId?: string; sendNowBlockedBy?: "sending" | "stopping" | "waiting";
+      /** Why delivery ended; `detail` is the error. `unsent`: xsb never had it (sent again under its id). */
       reason?: DiscardReason; detail?: string; unsent?: boolean;
       /** Owed: given to the model with the user's next message. `redelivered`: it was. `resentAs`: the user sent it again. */
       owed?: boolean; redelivered?: boolean; resentAs?: string;

@@ -71,7 +71,7 @@ const settle = () => hooks.settled();
   const t = handed(give(A, B, "done"));
   kernel.complete(t, "completed", "DONE", []);
   assert.deepEqual(state.tasks.get(t.id)!.ended, { reason: "completed", stopper: agentPrincipal("b") });
-  assert.equal(results(A, t.id).length, 1, "the dispatcher is notified");
+  assert.equal(results(A, t.id).length, 0, "ordinary task results do not prompt the dispatcher");
   const u = handed(give(A, B, "stopped"));
   const stopped = kernel.stop(u, agentPrincipal("a"), { status: "cancelled", reason: "cancelled", result: "no" });
   assert.ok(!isVeto(stopped));
@@ -79,7 +79,7 @@ const settle = () => hooks.settled();
   assert.ok([...state.mail.values()].some((m) => m.to.sessionId === "sb" && m.pref === "lazy" && m.content?.includes(`a cancelled the task "stopped"`)), "an idle executor finds a word of it in its inbox");
   const v = handed(give(A, B, "by the user"));
   kernel.stop(v, USER, { status: "cancelled", reason: "cancelled", result: "Cancelled by the user." });
-  assert.equal(results(A, v.id).length, 1, "the user stopped it: the dispatcher is notified");
+  assert.equal(results(A, v.id).length, 0, "stopping an ordinary task does not prompt its dispatcher");
   console.log("ok 1 one end for done and stopped");
 }
 
@@ -136,13 +136,8 @@ const settle = () => hooks.settled();
   const wake = handed(give(A, B, "wake", { deliveryPref: "wake" }));
   kernel.complete(wake, "completed", "", []);
   await settle();
-  const routeOf = (id: string) => routed.find((r) => r.item.results?.taskIds[0] === id)?.route;
-  assert.deepEqual([routeOf(lazy.id), routeOf(sync.id), routeOf(wake.id)], ["inbox", "return", "turn"]);
-  assert.equal(state.ledger.get(results(A, lazy.id)[0].id)!.state, "inboxed");
-  assert.ok(kernel.inbox("sa").some((m) => m.results?.taskIds[0] === lazy.id));
-  assert.ok(!kernel.inbox("sa").some((m) => m.results?.taskIds[0] === wake.id));
-  for (const id of [lazy.id, sync.id, wake.id]) assert.ok(delivered.includes(results(A, id)[0].id), "notified, whatever the route");
-  console.log("ok 4 notified is not woken");
+  for (const id of [lazy.id, sync.id, wake.id]) assert.equal(results(A, id).length, 0, "ordinary calls have no automatic return regardless of legacy preference");
+  console.log("ok 4 ordinary calls do not return results as prompts");
 }
 
 // §7.1 on the same pipeline: the user's word never waits. A peer's goes into a turn that is an agent's, and waits
@@ -205,12 +200,14 @@ const settle = () => hooks.settled();
 // Implicit completion: a turn's end ends the session's tasks with its last words, unless something started for one is
 // to come back; one without the asset it has to produce is asked again (QualityGate), then fails.
 {
-  const waiting = handed(give(A, B, "waits for a child"));
-  const child = give(B, C, "child", { deliveryPref: "wake" });
-  assert.ok(child.parents!.includes(waiting.id));
   const plain = handed(give(A, B, "implicit"));
   kernel.turnEnded("sb", "end_turn", () => "THE ANSWER");
   assert.deepEqual([state.tasks.get(plain.id)!.status, state.tasks.get(plain.id)!.result], ["completed", "THE ANSWER"]);
+  const waiting = handed(give(A, B, "waits for a child"));
+  const child = give(B, C, "child", { deliveryPref: "wake" });
+  assert.ok(child.parents!.includes(waiting.id));
+  kernel.subscribe(B, [child], "all", "explicit dependency");
+  kernel.turnEnded("sb", "end_turn", () => "WAITING");
   assert.equal(state.tasks.get(waiting.id)!.status, "running", "its child is to wake it");
   kernel.complete(handed(state.tasks.get(child.id)!), "completed", "", []);
   kernel.turnEnded("sb", "end_turn", () => "still waiting");
@@ -242,14 +239,14 @@ const settle = () => hooks.settled();
   assert.equal(state.ledger.get("m2")!.state, "discarded_unseen", "-32800: it never got in");
   hooks.emit("acp.session_update", { agentId: "b", sessionId: "sx", source: { agentId: "b", sessionId: "sx", turnId: null }, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "on" } } as any });
   await settle();
-  assert.equal(state.ledger.get("m1")!.state, "seen", "seen when the session goes on");
+  assert.equal(state.ledger.get("m1")!.state, "inserted_unprocessed", "output does not prove model receipt");
   kernel.mark("m1", "queued");
-  assert.equal(state.ledger.get("m1")!.state, "seen", "never back");
+  assert.equal(state.ledger.get("m1")!.state, "inserted_unprocessed", "never back");
   receipt("m3");
   hooks.emit("acp.turn_ended", { agentId: "b", sessionId: "sx", turnId: "turn-sx", stopReason: "cancelled", failed: false });
   hooks.emit("acp.session_renewed", { agentId: "b", sessionId: "sx" });
   await settle();
-  assert.equal(state.ledger.get("m3")!.state, "discarded_unseen", "its session is gone");
+  assert.equal(state.ledger.get("m3")!.state, "inserted_unprocessed", "renewal cannot revoke the original insertion");
   console.log("ok 7 ledger");
 }
 

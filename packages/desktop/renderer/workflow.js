@@ -111,7 +111,7 @@ function diagram(nodes, edges, active, choose) {
           "data-agent": n.agentId,
           "data-state": n.status,
           "aria-pressed": String(!disabled && active === n.agentId),
-          title: [n.name, label, deps, n.summary].filter(Boolean).join("\n"),
+          title: [n.name, label, deps, n.summary, ...(n.additionalResults ?? []).map(r => r.summary)].filter(Boolean).join("\n"),
           "aria-label": [n.name, label, deps].filter(Boolean).join(", "),
           onclick: () => choose(n.agentId),
         },

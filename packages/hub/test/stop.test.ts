@@ -127,7 +127,8 @@ test("pending results survive as passive facts, but cancelled instructions do no
   const { state, kernel, A, B, give, hand } = setup(t);
   const work = hand(give(B, A, "finished", { deliveryPref: "wake" }));
   kernel.complete(work, "completed", "FACT", []);
-  const oldResult = [...state.mail.values()].find((m) => m.results?.taskIds.includes(work.id))!;
+  assert.ok(![...state.mail.values()].some(m => m.results?.taskIds.includes(work.id)), "ordinary calls have no automatic result prompt");
+  const oldResult = kernel.post({ to: B, from: { kind: "system" }, kind: "results", results: { taskIds: [work.id] }, pref: "wake" }).item;
   const message = kernel.post({ to: B, from: { kind: "agent", ...A }, kind: "message", content: "do old work" }).item;
   kernel.stopSession(B, []);
   assert.equal(state.mail.has(oldResult.id), false);
@@ -150,15 +151,12 @@ test("late results and retired subscriptions cannot revive stopped work, includi
   const resumed = new Kernel(restored, hooks, () => ({ exists: true, busy: false, awaits: () => false }));
   assert.equal(resumed.generation(B.sessionId), 1);
   resumed.complete(restored.tasks.get(work.id)!, "completed", "LATE FACT", []);
-  const result = resumed.inbox(B.sessionId).find((m) => m.results?.taskIds.includes(work.id));
-  assert.ok(result, "late result stays inboxed after recovery");
-  assert.equal(restored.ledger.get(result.id)?.state, "inboxed");
+  assert.ok(!resumed.inbox(B.sessionId).some(m => m.results?.taskIds.includes(work.id)), "ordinary task completion does not prompt its caller after restart");
   const fresh = resumed.dispatch(B, A, { title: "fresh", topic: "fresh", instructions: "fresh", after: [], deliveryPref: "wake" });
   assert.ok(!isVeto(fresh));
   resumed.started(fresh.id);
   resumed.complete(restored.tasks.get(fresh.id)!, "completed", "NEW", []);
-  const newResult = [...restored.mail.values()].find((m) => m.results?.taskIds.includes(fresh.id))!;
-  assert.equal(restored.ledger.get(newResult.id)?.state, "submitted", "new work retains wake delivery");
+  assert.ok(![...restored.mail.values()].some(m => m.results?.taskIds.includes(fresh.id)), "wake preference does not turn an ordinary call into a return prompt");
 });
 
 test("ordinary task cancellation preserves unrelated queued work", (t) => {

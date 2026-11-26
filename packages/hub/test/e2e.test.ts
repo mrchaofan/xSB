@@ -1,3 +1,4 @@
+import { MessageDelivery } from "@xsb/protocol";
 /**
  * End to end: a real hub, real sockets, the real MCP bridge, and scripted
  * agents in place of models: test/mock-agent.ts speaks ACP itself, and
@@ -404,7 +405,7 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   assert.deepEqual(seen.filter((l) => l.startsWith("in")), ["in mine-1", "in mine-2 steered", "in mine-3 steered"]);
   assert.deepEqual(seen.filter((l) => l.startsWith("out")).sort(), ["out ONE", "out TWO"]);
   // None of them was ever queued: the ledger has them seen, and never "queued".
-  for (const id of ["mine-1", "mine-2", "mine-3"]) await until(`${id} seen`, () => hub.state.ledger.get(id)?.state === "seen");
+  for (const id of ["mine-1", "mine-2", "mine-3"]) await until(`${id} inserted`, () => hub.state.ledger.get(id)?.state === "inserted");
   const ledger = hub.state.store.read(F.ledger).map((r: any) => r.entry).filter((e: any) => e.messageId.startsWith("mine-"));
   assert.ok(!ledger.some((e: any) => e.state === "queued"), "the user's word is never queued");
   // An agent has one conversation: another client's new session of it is that one. A client that did not opt in is not
@@ -444,7 +445,7 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
 // terminal intermediate task and a queued ordering-only dependency.
 {
   const [parent,middle,leaf,waiting]=await Promise.all([create(),create(),create(),create()]);
-  const give=(from:LiveSession,to:LiveSession,title:string,after:string[]=[])=>dispatch(from,to.agentId,{title,topic:title,instructions:"!sleep 2400",after});
+  const give=(from:LiveSession,to:LiveSession,title:string,after:string[]=[])=>dispatch(from,to.agentId,{title,topic:title,instructions:"!sleep 10000",after});
   const started=(t:Task)=>until("inserted "+t.title,()=>hub.session(t.to.sessionId).current?.inserted);
   const p=give(root,parent,"parent"); await started(p);
   const x=give(parent,middle,"middle"); await started(x);
@@ -468,7 +469,9 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
     const blocked = dispatch(hub.session(a), agentId, { title: `stop blocked ${backend}`, topic: "stop queue", instructions: "!say OLD-BLOCKED", after: [work.id] });
     const ordinary = hub.kernel.post({ to: addr(session), from: { kind: "agent", ...addr(hub.session(a)) }, kind: "message", content: "OLD-MESSAGE", pref: "wake" }).item;
     const fact = dispatch(session, b.agentId, { title: `stop fact ${backend}`, topic: "stop queue", instructions: "!say SAVED-FACT", after: [] });
-    await until("fact queued", () => hub.state.tasks.get(fact.id)?.status === "completed" && [...hub.state.mail.values()].some((m) => m.to.sessionId === sessionId && m.results?.taskIds.includes(fact.id)));
+    await until("fact completed", () => hub.state.tasks.get(fact.id)?.status === "completed");
+    assert.ok(![...hub.state.mail.values()].some(m => m.results?.taskIds.includes(fact.id)), "ordinary agent calls do not send return prompts");
+    hub.kernel.post({ to: addr(session), from: { kind: "system" }, kind: "results", results: { taskIds: [fact.id] }, pref: "lazy" });
     conn.notify("session/cancel", { sessionId });
     // Same connection preserves the boundary: this prompt arrives after stop, while confirmation can still be pending.
     await conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "!say FRESH-WORK" }] });
@@ -646,6 +649,8 @@ let refusedId: string;
   hub.backends.stop(agentId);
   await prompt(sessionId, "!say AGAIN");
   assert.deepEqual(boundaries(), ["not_restored"]);
+  const restoredInput = received(agentId).at(-1)!.text;
+  assert.ok(!restoredInput.includes("USED"), "missing old context is not reconstructed as a handoff");
   console.log("ok 43b a new conversation's backend session, given nothing");
 }
 
@@ -749,25 +754,49 @@ let refusedId: string;
   await until("first extra resumed",()=>state().instances.A.work?.inserted && state().instances.A.work?.attempt);
   assert.notEqual(state().instances.A.work?.attempt,first.attempt);
   assert.equal(state().instances.A.sessionId,id);
-  const notices=()=>received(main.agentId).filter(i=>i.text.startsWith('{"additionalResult":"A"'));
-  await until("two distinct additional results",()=>notices().length===2);
-  assert.notEqual(JSON.parse(notices()[0].text).id,JSON.parse(notices()[1].text).id);
+  const returned=()=>received(main.agentId).filter(i=>i.text.startsWith('{"additionalResult":"A"'));
+  await until("two additional deliveries in the ledger",()=>state().instances.A.additionalResults?.length === 2);
+  assert.equal(returned().length, 0, "additional calls do not prompt results to their caller");
+  const deliveries = state().instances.A.additionalResults!;
+  assert.notEqual(deliveries[0].id, deliveries[1].id);
   assert.equal(state().instances.A.extras.length,0);
   assert.equal(state().instances.A.work,undefined);
   assert.equal(state().instances.A.last!.summary,"base");
-  console.log("ok two additional results across restart, explicit resume and isolated receipts");
+  console.log("ok additional results persist across restart without return prompts");
 
-  // Pause after the result has been queued behind a busy main turn. Its old
-  // transport receipt becomes terminal. Resume must still deliver the result.
   await idle(main.agentId);
   const busy = prompt(owner,call("prompt",{node:"A",text:finish})+"\n!sleep 1200");
-  const posted = await until("result queued behind main turn",() => state().outbox.find(n => n.text.includes("additionalResult"))?.posted);
-  await conn.request(Workflow.pause,{sessionId:owner});
+  await until("additional result stored while caller is busy",() => state().instances.A.additionalResults?.length === 3);
+  assert.ok(!state().outbox.some(n => n.text.includes("additionalResult")));
   await busy;
-  await until("paused notification withdrawn",() => hub.state.ledger.get(posted)?.state === "discarded_unseen");
-  await conn.request(Workflow.resume,{sessionId:owner});
-  await until("retry acknowledged once",() => notices().length === 3 && !state().outbox.length);
-  console.log("ok queued additional delivery retries after pause with a fresh insertion receipt");
+  assert.equal(returned().length, 0);
+  console.log("ok additional completion does not queue a return prompt behind a busy caller");
+}
+
+// Queue controls cross the real ACP connection, preserving the unresolved head.
+{
+  const session = await create();
+  const running = prompt(session.id, "!sleep 2500\n!say USER-WORK");
+  await until("protected turn for queue controls", () => session.current?.inserted);
+  const one = dispatch(hub.session(a), session.agentId, { title: "queued first", topic: "queue", instructions: "!say FIRST-QUEUE", after: [] });
+  const two = dispatch(hub.session(a), session.agentId, { title: "queued second", topic: "queue", instructions: "!say MUST-NOT-SEND", after: [] });
+  const idOf = (task: Task) => [...hub.state.mail.values()].find(m => m.taskId === task.id)?.id;
+  const first = await until("first queued message", () => idOf(one));
+  const second = await until("second queued message", () => idOf(two));
+  const queueView = (id: string) => hub.state.store.read(Paths.transcript(session.agentId, session.id))
+    .map(r => r.update?._meta?.[MessageDelivery.key]).filter(v => v?.messageId === id).at(-1);
+  await until("head control published", () => queueView(first)?.canSendNow);
+  const turnId = session.current!.id;
+  await assert.rejects(conn.request(MessageDelivery.sendNow, { sessionId: session.id, messageId: second, targetTurnId: turnId }), /queue head/);
+  await conn.request(MessageDelivery.sendNow, { sessionId: session.id, messageId: first, targetTurnId: turnId });
+  assert.equal(queueView(second)?.isHead, false);
+  await assert.rejects(conn.request(MessageDelivery.cancel, { sessionId: session.id, messageId: first }), /no longer queued/);
+  await conn.request(MessageDelivery.cancel, { sessionId: session.id, messageId: second });
+  await until("queued cancellation committed", () => hub.state.tasks.get(two.id)?.status === "cancelled");
+  await running;
+  await until("first queued input inserted", () => hub.state.ledger.get(first)?.state === "inserted");
+  assert.ok(!received(session.agentId).some(i => i.text.includes("MUST-NOT-SEND")));
+  console.log("ok queue head send-now and cancellation over ACP v2");
 }
 
 await hub.shutdown();

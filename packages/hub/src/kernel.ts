@@ -30,6 +30,7 @@ import { ledgerHook } from "./ledger.ts";
 import { abandonNotice, contractReminder, endNotice } from "./prompts.ts";
 import type { Gate, MailItem, State } from "./state.ts";
 import { ops } from "./state.ts";
+import { Paths } from "./paths.ts";
 import { doom, doomMany, releasable } from "./task-graph.ts";
 import { newId, now } from "./util.ts";
 
@@ -261,7 +262,7 @@ export class Kernel {
   private awaited(task: Task): boolean {
     const { state } = this;
     const children = [...state.tasks.values()].filter((c) => c.parents?.includes(task.id));
-    if (children.some((c) => !isTerminal(c.status) && (c.tool || c.deliveryPref === "wake" || c.deliveryPref === "sync"))) return true;
+    if (children.some((c) => !isTerminal(c.status) && c.tool)) return true;
     if ([...state.gates.values()].some((g) => g.owner.sessionId === task.to.sessionId)) return true;
     const ids = new Set(children.map((c) => c.id));
     return [...state.mail.values()].some((m) => m.to.sessionId === task.to.sessionId && m.results?.taskIds.some((id) => ids.has(id)) && state.ledger.get(m.id)?.state !== "inboxed");
@@ -452,7 +453,6 @@ export class Kernel {
   turnEnded(sessionId: string, stopReason: StopReason, record: (task: Task) => string, failure?: string, consumed: string[] = []): void {
     this.state.atomic(() => {
       this.ack(consumed);
-      if (!failure && stopReason === "end_turn") for (const id of consumed) this.mark(id, "seen");
       for (const task of this.openTasks(sessionId)) {
         if (failure) {
           this.fail(task, failure);
@@ -693,7 +693,7 @@ export class Kernel {
       const gate = [...gates.values()].find((g) => g.owner.sessionId === task.from!.sessionId && g.taskIds.includes(task.id));
       if (!gate) {
         const from: MailItem["from"] = task.tool ? { kind: "system" } : { kind: "agent", ...task.to };
-        if (!silent) mail.push({ id: newId("m"), to: task.from, from, kind: "results", topic: task.topic, results: { taskIds: [task.id] }, workGeneration: task.workGeneration ?? 0, pref: task.deliveryPref ?? "lazy", ts: now() });
+        if (!silent && task.tool) mail.push({ id: newId("m"), to: task.from, from, kind: "results", topic: task.topic, results: { taskIds: [task.id] }, workGeneration: task.workGeneration ?? 0, pref: task.deliveryPref ?? "lazy", ts: now() });
         continue;
       }
       const waits = silent ? { ...gate, taskIds: gate.taskIds.filter((id) => id !== task.id) } : gate;
@@ -711,7 +711,7 @@ export class Kernel {
         list.push(ops.openGate(waits));
       }
     }
-    for (const held of releasable(state, ended).filter((t) => !t.stopping)) {
+    for (const held of releasable(state, ended).filter((t) => !t.stopping && !ended.has(t.id))) {
       const released: Task = { ...held, status: "queued", updatedAt: now() };
       list.push(ops.putTask(released));
       mail.push(taskMail(released));
@@ -754,8 +754,9 @@ export class Kernel {
    * The ledger moves one way: a message that reached a state does not go back to an earlier one, and one that was
    * seen or discarded stays so.
    */
-  mark(messageId: string, state: LedgerState, about?: Receipt["about"]): void {
-    const entry = this.ledgerEntry(messageId, state, about);
+  mark(messageId: string, state: LedgerState, about?: Receipt["about"], discardReason?: import("@xsb/protocol").DiscardReason): void {
+    const base = this.ledgerEntry(messageId, state, about);
+    const entry = base && { ...base, ...(discardReason ? { discardReason } : {}) };
     if (!entry) return;
     this.state.commit([ops.mark(entry)]);
     this.state.afterCommit(() => this.ledgerChanged(entry));
@@ -937,16 +938,40 @@ export class Kernel {
     const uncertain = "xsb stopped while this was in the conversation, so how far it got is unknown. It was not given again; verify its results before going on.";
     for (const item of [...this.state.mail.values()]) {
       const entry = this.state.ledger.get(item.id);
-      if (entry?.offered && !TAKEN_IN.has(entry.state) && !["discarded_unseen", "insertion_uncertain"].includes(entry.state)) this.mark(item.id, "insertion_uncertain");
+      if (!TAKEN_IN.has(entry?.state ?? "inboxed") && !["discarded_unseen", "insertion_uncertain"].includes(entry?.state ?? "")) {
+        // Never replay pre-restart instructions. Only retained system facts may wait passively in the inbox.
+        if (item.results && item.from.kind === "system") { this.reroute(item, "lazy"); continue; }
+        this.state.atomic(() => {
+          this.mark(item.id, entry?.offered ? "insertion_uncertain" : "discarded_unseen", undefined, "interrupted");
+          const task = item.taskId ? this.state.tasks.get(item.taskId) : undefined;
+          const origin = { ...item.from, messageId: item.id, ...(item.taskId ? { taskId: item.taskId } : {}) };
+          const content = item.prompt ?? [{ type: "text", text: item.content ?? task?.instructions ?? "" }];
+          this.state.commit([{ file: Paths.transcript(item.to.agentId, item.to.sessionId), rec: { ts: now(), update: {
+            sessionUpdate: "session_info_update", _meta: { "dev.xsb/discarded": { messageId: item.id, origin, content, reason: "interrupted" } },
+          } } }]);
+          this.ack([item.id]);
+          if (task && item.kind === "task" && !isTerminal(task.status)) this.fail(task, "Sending was interrupted by restart. This input was not sent again.");
+        });
+        continue;
+      }
       if (this.settleTerminalInput(item)) continue;
-      if (item.workflowHeld) continue;
-      if (!TAKEN_IN.has(this.state.ledger.get(item.id)?.state ?? "inboxed")) { this.route(item); continue; }
       (taken.get(item.to.sessionId) ?? taken.set(item.to.sessionId, []).get(item.to.sessionId)!).push(item);
       const task = item.taskId ? this.state.tasks.get(item.taskId) : undefined;
       this.state.atomic(() => {
         this.ack([item.id]);
         if (task && item.kind === "task") this.fail(task, uncertain);
       });
+    }
+    // Blocked tasks have no mailbox entry yet. Settle them too, before deferred route observers can run.
+    const unfinished = [...this.state.tasks.values()].filter(task => !task.tool && !isTerminal(task.status));
+    if (unfinished.length) this.finish(unfinished.map(task => ({ task, status: "failed" as const,
+      result: "Sending was interrupted by restart. This work was not resumed automatically.", reason: "error" as const, stopper: SYSTEM })));
+    for (const item of [...this.state.mail.values()]) {
+      if (this.settleTerminalInput(item)) continue;
+      if (item.results && item.from.kind === "system") this.reroute(item, "lazy");
+      else if (!TAKEN_IN.has(this.state.ledger.get(item.id)?.state ?? "inboxed")) {
+        this.state.atomic(() => { this.mark(item.id, "discarded_unseen", undefined, "interrupted"); this.ack([item.id]); });
+      }
     }
     return taken;
   }

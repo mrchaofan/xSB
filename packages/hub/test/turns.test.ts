@@ -87,7 +87,7 @@ function setup(t: test.TestContext, reopen?: string) {
     heldReplies.delete(id); reply.resolve(`receipt:${id}`);
   };
   const unread = (id: string, user = false) => {
-    heldMessageIds.add(id);
+    if (!(session as any).sendingBatch) heldMessageIds.add(id);
     const item: MailItem = { id, to: B, from: user ? { kind: "user" } : { kind: "agent", ...C }, kind: "message", content: id, pref: "wake", ts: "" };
     state.commit([ops.enqueue(item)]);
     kernel.mark(id, "submitted");
@@ -342,7 +342,8 @@ test("replacement of a mixed-owner turn queues without partially cancelling its 
   const { kernel, state, A, B, C, session, give, settle, idle } = setup(t);
   const foreign = give(C, B, "foreign work"); await settle();
   const child = kernel.dispatch(B, C, { title: "foreign child", topic: "foreign", instructions: "wait", after: [], deliveryPref: "wake" });
-  assert.ok(!isVeto(child)); await settle();
+  assert.ok(!isVeto(child));
+  kernel.subscribe(B, [child], "all", "explicit dependency"); await settle();
   idle(); await settle();
   assert.equal(state.tasks.get(foreign.id)!.status, "running");
   const own = give(A, B, "own work"); await settle();
@@ -563,7 +564,8 @@ test("a resumed turn retains its open task context and cannot detach jobs from a
   const { state, kernel, A, B, C, session, give, settle, idle, stop } = setup(t);
   const root = give(A, B, "root"); await settle();
   const child = kernel.dispatch(B, C, { title: "child", topic: "child", instructions: "child", after: [], deliveryPref: "wake" });
-  assert.ok(!isVeto(child)); await settle();
+  assert.ok(!isVeto(child));
+  kernel.subscribe(B, [child], "all", "explicit dependency"); await settle();
   idle(); await settle();
   assert.equal(state.tasks.get(root.id)!.status, "running");
   kernel.tell(B, "root", "resume"); await settle();
@@ -645,7 +647,7 @@ test("after a restart, what the backend had already taken in is not given again;
   first.session.onBackendUpdate({ sessionUpdate: "user_message", messageId: "echo", content: [text("also delete old files")], _meta: { [OriginExt.key]: { messageId: spoken.id } } });
   first.session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("deleting…") });
   await first.settle();
-  assert.equal(first.state.ledger.get(spoken.id)?.state, "seen");
+  assert.equal(first.state.ledger.get(spoken.id)?.state, "inserted");
   const before = first.prompts.length;
 
   const second = setup(t, first.dir);
@@ -674,7 +676,7 @@ test("a prompt whose connection closes before its receipt is uncertain: kept, sa
   assert.equal(session.busy, false);
 });
 
-test("after a restart, input offered to the backend without a receipt is uncertain, not replayed; a declined one is given again", async (t) => {
+test("after a restart, neither an unanswered nor a declined pre-restart input is replayed", async (t) => {
   const first = setup(t);
   const backend = await (first.session as any).ensureBackend();
   backend.prompt = (_id: string, blocks: any[]) => { first.prompts.push(blocks.map((b: any) => b.text).join("\n")); return new Promise<string>(() => {}); };
@@ -689,7 +691,7 @@ test("after a restart, input offered to the backend without a receipt is uncerta
   assert.equal(second.state.ledger.get(offered.messageId)?.state, "insertion_uncertain");
   assert.ok(!second.state.mail.has(offered.messageId));
   assert.equal(second.state.tasks.get(task.id)!.status, "failed");
-  assert.match(second.state.tasks.get(task.id)!.result ?? "", /could not be confirmed/);
+  assert.match(second.state.tasks.get(task.id)!.result ?? "", /interrupted by restart/);
 
   // The backend's own -32800 is an answer: that input was not inserted, so a restart gives it again.
   const third = setup(t);
@@ -701,8 +703,9 @@ test("after a restart, input offered to the backend without a receipt is uncerta
   assert.equal(third.state.ledger.get(item.id)?.offered, undefined, "the refusal cleared the offer");
   const fourth = setup(t, third.dir);
   fourth.kernel.resume(); await fourth.settle();
-  assert.notEqual(fourth.state.ledger.get(item.id)?.state, "insertion_uncertain");
-  assert.ok(fourth.prompts.some((p) => p.includes("declined once")), "known not to be in the conversation: given again");
+  assert.equal(fourth.state.ledger.get(item.id)?.state, "discarded_unseen");
+  assert.deepEqual(fourth.prompts, []);
+  assert.ok(!fourth.state.mail.has(item.id), "old declined input is settled, not queued");
 });
 
 test("while the hub stops, no turn starts: what waits runs on the next start", async (t) => {
@@ -978,7 +981,7 @@ test("autonomous execution cannot ask for a pending turn's permissions", async (
   assert.equal(result.outcome.outcome, "cancelled");
 });
 
-test("a user's message that failed to reach the model goes with the next one, once; sending it again after that is refused", async (t) => {
+test("failed user input stays in history but is not automatically added to the next prompt", async (t) => {
   const { session, state, hub, settle, prompts, idle, B } = setup(t);
   const backend = await (session as any).ensureBackend();
   const real = backend.prompt;
@@ -990,21 +993,14 @@ test("a user's message that failed to reach the model goes with the next one, on
   const client: any = { echo: true };
   await assert.rejects(hub.delivery.fromUser(session, [text("FIRST")], { kind: "user", messageId: "u1" }, client), /rate limited/);
   await settle();
-  assert.deepEqual(session.rec.owed, ["u1"], "owed, and kept on disk");
-  const discarded = metas(state, B).map((u) => u._meta?.["dev.xsb/discarded"]).filter(Boolean);
-  assert.deepEqual(discarded.map((d: any) => [d.messageId, d.reason, d.owed]), [["u1", "failed", true]], "recorded as not seen, why, and owed");
-  const second = hub.delivery.fromUser(session, [text("SECOND")], { kind: "user", messageId: "u2" }, client);
-  await settle(); await second;
-  assert.match(prompts.at(-1)!, /did not reach you[^]*FIRST[^]*new message:\nSECOND/, "given first, and said so");
-  assert.equal(session.rec.owed?.length ?? 0, 0, "settled once it was in");
-  assert.deepEqual(metas(state, B).map((u) => u._meta?.["dev.xsb/redelivered"]).filter(Boolean), [{ messageIds: ["u1"], with: "u2" }]);
+  assert.equal(session.rec.owed, undefined);
+  assert.ok(metas(state, B).some(u => u._meta?.["dev.xsb/discarded"]?.messageId === "u1"));
+  await hub.delivery.fromUser(session, [text("SECOND")], { kind: "user", messageId: "u2" }, client);
+  await settle();
+  assert.doesNotMatch(prompts.at(-1)!, /(?:^|\n)FIRST(?:\n|$)|did not reach you/);
   idle(); await settle();
-  const third = hub.delivery.fromUser(session, [text("THIRD")], { kind: "user", messageId: "u3" }, client);
-  await settle(); await third;
-  assert.doesNotMatch(prompts.at(-1)!, /FIRST/, "never given twice");
-  idle(); await settle();
-  await assert.rejects(hub.delivery.fromUser(session, [text("FIRST")], { kind: "user", messageId: "u4", resendOf: "u1" }, client), /already reached the model/);
-  assert.ok(!prompts.some((p) => p.split("\nFIRST\n").length > 2), "its content is in one prompt once");
+  await hub.delivery.fromUser(session, [text("FIRST")], { kind: "user", messageId: "u3", resendOf: "u1" }, client);
+  assert.match(prompts.at(-1)!, /FIRST/);
 });
 
 test("sending the same message again (its answer was lost) reaches the model once, and xsb says what became of it", async (t) => {
@@ -1103,27 +1099,29 @@ test("job provenance is durable before delayed dispatch and hooks cannot retarge
   assert.equal(restored.tasks.get(job.id)!.source?.turnId, old);
 });
 
-test("standard prompt receipts keep a priority correction separate from a deferred command", async (t) => {
-  const { session, hub, settle } = setup(t);
-  await hub.delivery.fromUser(session, [text("first")], { kind: "user", messageId: "priority-first" });
-  const turn = session.current!, backend = await session.ensureBackend();
+test("user prompts wait for each real insertion receipt, without waiting for turn completion", async (t) => {
+  const { session, hub, settle, state } = setup(t);
+  const backend = await session.ensureBackend();
   const replies: ((id: string) => void)[] = [];
-  (backend as any).caps.steering = true; // A legacy advertisement must have no effect on transport selection.
-  (backend as any).steer = () => { throw new Error("legacy transport invoked"); };
-  (backend as any).prompt = () => new Promise<string>(resolve => replies.push(resolve));
-  const command = hub.delivery.fromUser(session, [text("/compact")], { kind: "user", messageId: "deferred-command" });
-  const correction = hub.delivery.fromUser(session, [text("change the target")], { kind: "user", messageId: "priority-correction" });
-  await settle();
-  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "native-correction", content: text("change the target") });
-  assert.equal(turn.inputs.find(i => i.messageId === "deferred-command")!.in, undefined);
-  assert.equal(turn.inputs.find(i => i.messageId === "priority-correction")!.in, undefined, "anonymous echo cannot select among pending batches");
-  replies[1]("native-correction"); await correction; await settle();
-  assert.equal(turn.inputs.find(i => i.messageId === "priority-correction")!.in, true);
-  assert.equal(turn.inputs.find(i => i.messageId === "deferred-command")!.in, undefined);
-  assert.equal(session.current, turn);
-  replies[0]("native-command"); await command; await settle();
-  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
-  await settle(); assert.equal(session.busy, false);
+  const offered: string[] = [];
+  (backend as any).prompt = (_id: string, _blocks: any[], origin: any) => {
+    offered.push(origin.messageId);
+    return new Promise<string>(resolve => replies.push(resolve));
+  };
+  const first = hub.delivery.fromUser(session, [text("first")], { kind: "user", messageId: "serial-first" }); await settle();
+  const second = hub.delivery.fromUser(session, [text("second")], { kind: "user", messageId: "serial-second" });
+  const third = hub.delivery.fromUser(session, [text("third")], { kind: "user", messageId: "serial-third" }); await settle();
+  assert.deepEqual(offered, ["serial-first"]);
+  assert.equal(session.current!.protected, true);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("old output") });
+  assert.deepEqual(offered, ["serial-first"], "output cannot release the input slot");
+  replies[0]("native-first"); await first; await settle();
+  assert.deepEqual(offered, ["serial-first", "serial-second"]);
+  replies[1]("native-second"); await second; await settle();
+  assert.deepEqual(offered, ["serial-first", "serial-second", "serial-third"]);
+  replies[2]("native-third"); await third; await settle();
+  assert.equal(state.ledger.get("serial-third")?.state, "inserted");
 });
 
 test("a targeted standard prompt inserted before idle may acknowledge after idle without losing completion", async (t) => {
@@ -1156,5 +1154,104 @@ test("an exact prompt receipt settles an unowned execution that already ended wi
   assert.equal(session.busy, false);
   const output = metas(state, B).find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text === "before the response");
   assert.equal(output._meta[RunExt.key].turnId, null, "already displayed output keeps its original attribution");
-  assert.equal(state.ledger.get("late-owned-input")?.state, "seen", "normal completion settles the inserted input without resending it");
+  assert.equal(state.ledger.get("late-owned-input")?.state, "inserted", "completion does not add a model-read claim");
+});
+
+test("only the queue head can be sent now and its in-flight receipt blocks the next head", async t => {
+  const { hub, session, state, hooks, A, B, give, settle, holdPrompts, acceptHeld } = setup(t);
+  await hub.delivery.fromUser(session, [text("user work")], { kind: "user", messageId: "owner" });
+  await settle();
+  const one = give(A, B, "first queued"), two = give(A, B, "second queued"), three = give(A, B, "third queued");
+  await settle();
+  const idOf = (task: Task) => [...state.mail.values()].find(m => m.taskId === task.id)!.id;
+  const firstId = idOf(one), secondId = idOf(two), thirdId = idOf(three);
+  const view = (id: string) => metas(state, B).filter(u => u._meta?.["dev.xsb/input_delivery"]?.messageId === id).at(-1)!._meta!["dev.xsb/input_delivery"];
+  assert.equal(view(firstId).canSendNow, true);
+  assert.equal(view(secondId).isHead, false);
+  assert.throws(() => session.sendQueued(secondId, session.current!.id), /queue head/);
+  assert.throws(() => session.sendQueued(firstId, "stale-turn"), /queue head/);
+  holdPrompts();
+  const turn = session.current!;
+  session.sendQueued(firstId, turn.id);
+  assert.equal(view(firstId).state, "sending");
+  assert.equal(view(secondId).isHead, false, "the unsettled first item reserves the head");
+  assert.throws(() => session.sendQueued(secondId, turn.id), /queue head/);
+  assert.throws(() => session.cancelQueued(firstId), /no longer queued/);
+  session.cancelQueued(thirdId);
+  await settle();
+  assert.equal(state.tasks.get(three.id)?.status, "cancelled");
+  acceptHeld(firstId); await settle();
+  assert.equal(session.current, turn);
+  assert.equal(turn.protected, true);
+  assert.equal(state.ledger.get(firstId)?.state, "inserted");
+  assert.equal(view(secondId).canSendNow, true);
+  void hub.delivery.fromUser(session, [text("another user correction")], { kind: "user", messageId: "serial-extra" }).catch(() => {});
+  await settle();
+  assert.equal(view(secondId).canSendNow, false, "a user prompt reserves the same transport slot");
+  acceptHeld("serial-extra"); await settle();
+  assert.equal(view(secondId).canSendNow, true);
+  hooks.decider("task.pre_stop", p => {
+    assert.throws(() => session.sendQueued(secondId, turn.id), /queue head/, "a cancellation cannot be raced by a reentrant send-now");
+    return p;
+  });
+  session.cancelQueued(secondId); await settle();
+  assert.equal(state.tasks.get(two.id)?.status, "cancelled");
+  assert.ok(!state.mail.has(thirdId));
+});
+
+test("a durable insertion cannot survive without its history when storage fails between transaction records", async t => {
+  const { hub, session, state, settle, dir, B } = setup(t);
+  const backend = await session.ensureBackend();
+  (backend as any).prompt = () => new Promise(() => {});
+  void hub.delivery.fromUser(session, [text("durable original")], { kind: "user", messageId: "atomic-input" }).catch(() => {});
+  await settle();
+  const input = session.current!.first;
+  state.store.failpoint = at => { if (at === "after-op-0") throw new Error("power lost"); };
+  assert.throws(() => (session as any).receipt(input, true), /power lost/);
+  const restored = new State(new Store(new Paths(dir).dir)); restored.load();
+  assert.equal(restored.ledger.get("atomic-input")?.state, "inserted");
+  assert.ok(metas(restored, B).some(u => u.sessionUpdate === "user_message_chunk" && u.messageId === "atomic-input"));
+});
+
+test("acceptance is durable with the mailbox before any backend submission", async t => {
+  const { hub, session, state, prompts, dir, B } = setup(t);
+  state.store.failpoint = at => { if (at === "after-op-0") throw new Error("power lost during acceptance"); };
+  await assert.rejects(hub.delivery.fromUser(session, [text("original before send")], { kind: "user", messageId: "atomic-accept" }), /power lost/);
+  assert.deepEqual(prompts, []);
+  const restored = new State(new Store(new Paths(dir).dir)); restored.load();
+  assert.ok(restored.mail.has("atomic-accept"));
+  assert.ok(metas(restored, B).some(u => u._meta?.["dev.xsb/accepted"]?.messageId === "atomic-accept"));
+});
+
+test("restart withdraws unsent, in-flight and blocked old work without releasing a successor", async t => {
+  const first = setup(t);
+  const backend = await first.session.ensureBackend();
+  (backend as any).prompt = () => new Promise(() => {});
+  void first.hub.delivery.fromUser(first.session, [text("old user input")], { kind: "user", messageId: "restart-first" }).catch(() => {});
+  await first.settle();
+  void first.hub.delivery.fromUser(first.session, [text("old queued correction")], { kind: "user", messageId: "restart-second" }).catch(() => {});
+  await first.settle();
+  const root = first.kernel.userTask(first.B.sessionId)!;
+  const blocked = first.give(first.A, first.B, "old blocked", [root.id]);
+  const second = setup(t, first.dir);
+  second.kernel.resume(); await second.settle();
+  assert.deepEqual(second.prompts, []);
+  assert.equal(second.state.tasks.get(blocked.id)?.status, "failed");
+  for (const id of ["restart-first", "restart-second"]) {
+    assert.ok(!second.state.mail.has(id));
+    assert.ok(metas(second.state, second.B).some(u => u._meta?.["dev.xsb/discarded"]?.messageId === id && u._meta["dev.xsb/discarded"].reason === "interrupted"));
+  }
+});
+
+test("disconnect during user stop remains unconfirmed instead of claiming the model never received it", async t => {
+  const { hub, session, state, settle, B } = setup(t);
+  const backend = await session.ensureBackend();
+  (backend as any).prompt = () => new Promise(() => {});
+  const waiting = hub.delivery.fromUser(session, [text("possibly inserted")], { kind: "user", messageId: "stop-uncertain" }).catch(() => {});
+  await settle();
+  hub.delivery.userStop(session);
+  session.onBackendGone(backend, "disconnected during stop");
+  await settle(); await waiting;
+  assert.equal(state.ledger.get("stop-uncertain")?.state, "insertion_uncertain");
+  assert.ok(metas(state, B).some(u => u._meta?.["dev.xsb/discarded"]?.messageId === "stop-uncertain" && u._meta["dev.xsb/discarded"].reason === "uncertain"));
 });

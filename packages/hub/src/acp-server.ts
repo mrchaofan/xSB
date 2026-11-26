@@ -5,7 +5,7 @@ import { Auth } from "./auth.ts";
  * Each new ACP session starts an independent main conversation. Extensions expose
  * its workflow, active task conversations, workspace assets and installed backends.
  */
-import { Answer, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, LANGUAGES, LanguageExt, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
+import { Answer, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, LANGUAGES, LanguageExt, MessageDelivery, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
 import type { Connection, HistoryImage, OriginMeta } from "@xsb/protocol";
 import { describeBackends, loadProjectConfig, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
@@ -167,6 +167,17 @@ export class Client {
         hub.workflows.discarded(session, messageId);
         throw e;
       });
+    });
+
+    conn.onRequest(MessageDelivery.cancel, (p) => {
+      if (typeof p.messageId !== "string") throw RpcError.invalidParams("messageId is required");
+      this.own(p.sessionId).cancelQueued(p.messageId);
+      return {};
+    });
+    conn.onRequest(MessageDelivery.sendNow, (p) => {
+      if (typeof p.messageId !== "string" || typeof p.targetTurnId !== "string") throw RpcError.invalidParams("messageId and targetTurnId are required");
+      this.own(p.sessionId).sendQueued(p.messageId, p.targetTurnId);
+      return {};
     });
 
     conn.onRequest(Ledger.status, (p) => {

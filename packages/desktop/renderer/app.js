@@ -189,9 +189,9 @@ function inputState(entry) {
   if (entry.redelivered) return { tag: t("entry.tag.redelivered"), title: t("entry.tag.redelivered.title") };
   if (entry.discarded && entry.resentAs) return { tag: t("entry.tag.resent"), title: why };
   if (entry.discarded && entry.owed) return { tag: t("entry.tag.owed"), title: [t("entry.tag.owed.title"), why].filter(Boolean).join("\n") };
-  if (entry.discarded && entry.reason === "uncertain") return { tag: t("entry.tag.uncertain"), title: [t("entry.tag.uncertain.title"), entry.detail].filter(Boolean).join("\n") };
-  if (entry.discarded) return { tag: t("entry.tag.discarded"), title: [t("entry.tag.discarded.title"), why].filter(Boolean).join("\n") };
-  if (entry.pending) return { tag: t("entry.tag.pending"), title: t("entry.tag.pending.title") };
+  if (entry.discarded && ["uncertain", "interrupted"].includes(entry.reason)) return { tag: t("entry.tag.uncertain"), title: [t("entry.tag.uncertain.title"), entry.detail].filter(Boolean).join("\n") };
+  if (entry.discarded) return { tag: t(entry.reason === "stopped" ? "entry.tag.cancelled" : "entry.tag.discarded"), title: [t("entry.tag.discarded.title"), why].filter(Boolean).join("\n") };
+  if (entry.pending) return { tag: t(entry.delivery === "queued" ? "entry.tag.queued" : entry.delivery === "waiting" ? "entry.tag.waiting" : "entry.tag.pending"), title: t("entry.tag.pending.title") };
   return { tag: entry.origin.steered ? t("entry.tag.interjected") : null };
 }
 
@@ -482,11 +482,11 @@ function entryNode(agentId, entry) {
   if (entry.kind === "input" && entry.reply && !entry.discarded && !entry.unsent) return h("div", { ...base, hidden: true });
   if (entry.kind === "input") {
     const o = entry.origin;
-    // 用户看到的就是模型看到的：每条输入标明模型是否收到。模型没收到的照样留在记录里，写明原因，从不删除。
+    // 每条输入显示送达状态；未确认终结仍保留原文和删除线，不推断模型是否读取。
     const { tag, title } = inputState(entry);
-    const unseen = entry.discarded && !entry.redelivered && entry.reason !== "uncertain";
+    const terminated = entry.discarded && !entry.redelivered;
     const resendable = entry.discarded && o.kind === "user" && !entry.redelivered && !entry.resentAs;
-    return h("div", { ...base, "data-origin": o.kind, "data-discarded": unseen, "data-pending": entry.pending || entry.unsent, title },
+    return h("div", { ...base, "data-origin": o.kind, "data-discarded": terminated, "data-pending": entry.pending || entry.unsent, title },
       o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId)),
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
       o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),
@@ -496,6 +496,14 @@ function entryNode(agentId, entry) {
       }) })),
       entry.deliveredAs && h("div", { class: "delivered-as" }, deliveredNote(entry.deliveredAs)),
       tag && h("span", { class: "tag" }, tag),
+      entry.pending && entry.canCancel && h("button", { class: "btn sm", onclick: e => {
+        e.currentTarget.disabled = true;
+        xsb.cancelMessage(agentId, entry.id).catch(error => { e.target.disabled = false; e.target.title = error.message; });
+      } }, t("entry.cancel")),
+      entry.pending && entry.isQueueHead && h("button", { class: "btn sm", disabled: !entry.canSendNow, title: entry.sendNowBlockedBy ? t("entry.sendNow." + entry.sendNowBlockedBy) : undefined, onclick: e => {
+        e.currentTarget.disabled = true;
+        xsb.sendMessageNow(agentId, entry.id).catch(error => { e.target.disabled = false; e.target.title = error.message; });
+      } }, t("entry.sendNow")),
       resendable && h("button", { class: "btn sm resend", onclick: (e) => {
         e.currentTarget.disabled = true;
         xsb.resend(agentId, entry.id).catch((error) => { e.target.disabled = false; e.target.title = error.message; });
