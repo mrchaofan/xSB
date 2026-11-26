@@ -10,6 +10,10 @@ on:
         description: Exact version commit to build
         type: string
         required: true
+      build_packages:
+        description: Build application archives for a release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,6 +41,7 @@ jobs:
 
   package:
     name: Package ${{ matrix.target }}
+    if: ${{ inputs.build_packages == true }}
     needs: checks
     timeout-minutes: 30
     strategy:

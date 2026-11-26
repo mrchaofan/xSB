@@ -69,6 +69,7 @@ jobs:
     uses: ./.github/workflows/desktop.yml
     with:
       ref: ${{ needs.version.outputs.commit }}
+      build_packages: true
 
   publish:
     name: Tag and publish application
