@@ -43,6 +43,10 @@ jobs:
     name: Package ${{ matrix.target }}
     if: ${{ inputs.build_packages == true }}
     needs: checks
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -63,6 +67,16 @@ jobs:
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
+      - name: Require hosted release workflow
+        env:
+          CALLER_WORKFLOW: ${{ github.workflow_ref }}
+          SELECTED_REF: ${{ github.ref }}
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$TRIGGER" = workflow_dispatch
+          test "$SELECTED_REF" = refs/heads/main
+          test "$CALLER_WORKFLOW" = "$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.ref || github.sha }}
@@ -75,13 +89,14 @@ jobs:
       - name: Package application
         working-directory: packages/desktop
         run: npx --no-install electron-builder --config electron-builder.config.mjs --${{ matrix.platform }} --${{ matrix.arch }} --publish never
-      - name: Verify archive and write checksum
+      - name: Record archive checksum and actual build source
         env:
           APP_TARGET: ${{ matrix.target }}
         run: |
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
           import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
           const { version } = JSON.parse(fs.readFileSync('packages/desktop/package.json', 'utf8'));
           const file = `xsb-${version}-${process.env.APP_TARGET}.zip`;
           const archive = `packages/desktop/release/${file}`;
@@ -89,7 +104,33 @@ jobs:
           if (!bytes.length) throw new Error(`Empty application archive: ${file}`);
           const digest = createHash('sha256').update(bytes).digest('hex');
           fs.writeFileSync(`${archive}.sha256`, `${digest}  ${file}\n`);
+          // The version commit is created after workflow dispatch; it differs from GITHUB_SHA.
+          fs.writeFileSync(`${archive}.build.json`, JSON.stringify({
+            schemaVersion: 1,
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            workflowSha: process.env.GITHUB_SHA,
+            sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+            version,
+            target: process.env.APP_TARGET,
+            archive: file,
+            sha256: digest,
+          }, null, 2) + '\n');
           NODE
+      - name: Attest application and build record
+        id: provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            packages/desktop/release/*.zip
+            packages/desktop/release/*.zip.build.json
+      - name: Keep signed bundle with application
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          for archive in packages/desktop/release/*.zip; do
+            cp "$BUNDLE_PATH" "$archive.attestation.jsonl"
+          done
       - name: Archive application
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -97,6 +138,8 @@ jobs:
           path: |
             packages/desktop/release/*.zip
             packages/desktop/release/*.zip.sha256
+            packages/desktop/release/*.zip.build.json
+            packages/desktop/release/*.zip.attestation.jsonl
           if-no-files-found: error
           compression-level: 0
           overwrite: true
