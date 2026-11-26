@@ -291,7 +291,7 @@ async function newTab() {
   if (rootSession() === owner) $("#web-url").focus();
 }
 
-/** 一个网页新开或者变了。用户新开的成为当前标签，右栏收起时把它打开；智能体开的只在标签栏出现，不抢当前标签。 */
+/** 新网页切换展示并打开右栏；只有用户新开的聚焦网页，智能体新开的保留宿主焦点。已有网页更新不切换标签。 */
 export function onPage(page) {
   const known = state.pages.find(p => p.id === page.id);
   if (!page.sessionId) page.sessionId = known?.sessionId ?? rootSession();
@@ -300,11 +300,11 @@ export function onPage(page) {
   if (known) Object.assign(known, page);
   else {
     state.pages.push(page);
-    if (here && !page.background) {
+    if (here) {
       rememberPosition();
       state.tab = page.id;
       revealArtifacts();
-      focusPage = true;
+      focusPage = !page.background;
     }
   }
   if (here) renderSide(focusPage);

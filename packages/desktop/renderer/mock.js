@@ -195,6 +195,7 @@
     page: async (id, op) => { if (op === "close") emit({ removedPage: id }); },
     readClipboardImages: async () => null,
     copyText: (text) => navigator.clipboard.writeText(text),
+    contextMenu: async () => null, // Native menus exist only in Electron.
     pathOf: (file) => file.name,
     openArtifact: async () => structuredClone(art),
     revealArtifact: async () => {},

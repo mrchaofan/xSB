@@ -18,7 +18,7 @@ import { sessionPages, onPage, onPageRemoved, renderSide, selectTab } from "./pa
 import { closeSettings, showSettings } from "./settings.js";
 import { migrateWorkspaceState, onPreferencesChanged, syncWindowColors } from "./preferences.js";
 import { confirmDialog, openDialog } from "./form.js";
-import { openContextMenu } from "./menu.js";
+import { openNativeContextMenu } from "./menu.js";
 import { questionRecord, syncAskPanel } from "./ask.js";
 import { bindArtifactResize } from "./resize.js";
 
@@ -139,9 +139,9 @@ async function deleteConversation(agent) {
 function renderRail() {
   applyProviderTheme();
   const roots = state.agents.filter(a => !a.workflowOwner);
-  const menu = (e, a) => openContextMenu(e, [
-    { label: t("rail.delete"), icon: "trash", danger: true, disabled: a.state !== "idle", hint: t("rail.delete.busy"), run: () => deleteConversation(a) },
-  ], a.name);
+  const menu = (e, a) => openNativeContextMenu(e, [
+    { label: t("rail.delete"), disabled: a.state !== "idle", hint: t("rail.delete.busy"), run: () => deleteConversation(a) },
+  ]);
   fill($("#agents"), ...roots.map(a =>
     h("button", { class:"row session-row", "aria-pressed":String(state.open.includes(a.id)),title:a.name,onclick:() => focusLane(a.id),
       oncontextmenu: (e) => menu(e, a) },
@@ -296,7 +296,7 @@ function openLane(agentId, panel, readonly) {
   editor.el.onfocus = () => {
     setReferenceTarget(agentId);
   };
-  const capabilities = composerCapabilities(agentId, editor, () => { saveDraft(key, editor.snapshot()); syncLane(agentId); });
+  const capabilities = composerCapabilities(editor);
   const controls = composerSettings(agentId, value => capabilities.update(value));
   // 主会话可以换后端（任务节点的后端由工作流决定）。
   const picker = panel ? null : backendPicker(agentId);
@@ -310,7 +310,7 @@ function openLane(agentId, panel, readonly) {
       h("button", { class: "icon-btn", title: t("lane.close"), "aria-label": t("lane.close"), html: ICON.close, hidden:!!panel, onclick: () => {closeLane(agentId); renderSide();} })),
     h("div", { class: "transcript" }, h("button", { class: "btn history-more", hidden: state.history?.[agentId] == null, onclick: () => loadHistory(agentId) }, t("history.more")), h("div", { class: "entries" })),
     h("div", { class: "composer" },
-      editor.tray, editor.el, editor.error, !readonly && capabilities.el,
+      editor.tray, editor.el, editor.error,
       h("div", { class: "composer-row" },
         h("span", { class: "hint", role: "status" }, h("i", { class: "state" }), h("span", {})),
         picker?.el, controls.el, controls.usage, h("button", { class: "send", onclick: press }))));
@@ -419,7 +419,7 @@ function syncLane(agentId) {
   if (!lane) return;
   const { state: s, name, backend } = agentOf(agentId);
   lane.dataset.state = s;
-  lane.capabilities?.refresh();
+  lane.capabilities?.refresh(t(s === "idle" ? "lane.placeholder" : "lane.placeholder.busy"));
   lane.picker?.update();
   fill(lane.querySelector(".lane-avatar"), avatarImage(agentOf(agentId)));
   lane.querySelector(".lane-head strong").textContent = name;
@@ -428,7 +428,6 @@ function syncLane(agentId) {
   fill(lane.querySelector(".lane-backend"), backendMark(backend));
   lane.querySelector(".lane-state .state").dataset.state = shownState(agentOf(agentId));
   lane.querySelector(".lane-state span").textContent = STATE_TEXT[shownState(agentOf(agentId))];
-  lane.querySelector(".editor").dataset.placeholder = t(s === "idle" ? "lane.placeholder" : "lane.placeholder.busy");
   const control = lane.querySelector(".task-control");
   if (control) {
     const node = currentFlow()?.nodes.find(n => n.agentId === agentId);

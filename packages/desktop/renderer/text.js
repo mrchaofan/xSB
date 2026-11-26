@@ -2,7 +2,7 @@
 // 键是"所在位置.含义"。值是字符串（占位符写成 {name}），措辞随数量或条件变化时是函数 (v) => 字符串。
 export const TEXT = {
   "zh-CN": {
-    "composer.suggestions": "后续输入建议",
+    "composer.suggestionPlaceholder": "{prompt}（Tab 补全）",
     "flow.sessions": "会话",
     "flow.new": "新建会话",
     "flow.empty": "开始一次新的对话",
@@ -533,7 +533,7 @@ export const TEXT = {
   },
 
   en: {
-    "composer.suggestions": "Suggested next prompts",
+    "composer.suggestionPlaceholder": "{prompt} (Tab to complete)",
     "flow.sessions": "Sessions",
     "flow.new": "New session",
     "flow.empty": "Start a conversation",

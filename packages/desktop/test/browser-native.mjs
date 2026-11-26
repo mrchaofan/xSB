@@ -33,7 +33,7 @@ try {
   await build({ input: fileURLToPath(new URL("browser-native.electron.ts", import.meta.url)), platform: "node", external: ["electron"], output: { file, format: "cjs" } });
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require("electron"), [file, directory], { env, stdio: "inherit" });
+  const child = spawn(require("electron"), [file, directory, ...(process.argv.includes("--tabs-only") ? ["--tabs-only"] : [])], { env, stdio: "inherit" });
   const timer = setTimeout(() => child.kill("SIGKILL"), 60000);
   const code = await new Promise((resolve) => child.on("exit", (code) => resolve(code)));
   clearTimeout(timer);

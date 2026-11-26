@@ -150,6 +150,7 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
   const error = h("div", { class: "content-error", role: "status", hidden: true });
   let pending = Promise.resolve();
   let reading = 0;
+  let completion = [];
   const blocks = new WeakMap();      // 小方块的节点 → 它代表的块
   const isNote = (block) => block.type === "web_annotation";
   let notes = [];
@@ -268,6 +269,12 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
   el.ondragover = (e) => e.preventDefault();
   el.ondrop = (e) => { e.preventDefault(); take(e.dataTransfer); };
   el.onkeydown = (e) => {
+    if (e.key === "Tab" && !e.isComposing && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey
+      && completion.length && !reading && !read(false).length) {
+      e.preventDefault();
+      insert(completion);
+      return;
+    }
     if (e.key !== "Enter" || e.isComposing) return;
     e.preventDefault();
     if (e.shiftKey) insert([{ type: "text", text: "\n" }]);
@@ -303,5 +310,6 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
   }
 
   return { el, error, tray, isReading: () => reading > 0, ready, insert, read, snapshot: () => read(false), restore, removeAnnotations,
+    setPlaceholder: (text, prompt = []) => { el.dataset.placeholder = text; completion = prompt; },
     clear: () => { el.replaceChildren(); notes = []; renderTray(); onChange(); } };
 }
