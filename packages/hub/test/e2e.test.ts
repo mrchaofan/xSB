@@ -9,9 +9,9 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { F } from "../src/state.ts";
+import { F, State } from "../src/state.ts";
 import { Workflow, Agents, SessionControls, Assets, Backends, Boundaries, Connection, Discarded, History, Ledger, RunExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Tasks, explain, languageOf } from "@xsb/protocol";
-import type { Language, Task } from "@xsb/protocol";
+import type { AgentInfo, Language, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { isVeto } from "../src/hooks.ts";
 import { isTerminal as isTerminalStatus } from "@xsb/protocol";
@@ -210,15 +210,17 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   assert.equal(joined.busy, false);
   console.log("ok native background runs, history boundaries and insertion-based ownership");
 }
-// Switching a conversation's backend. The agent program is not called before the first message, so a conversation
-// with nothing said yet simply runs on the other. One its program has moves to a new conversation, whose model is told
-// so with its first message and reads the old one with previous_conversation; never while a turn runs.
+// Switching a conversation's backend. A new conversation may already have a backend session, opened for its settings;
+// one without records simply runs on the other. One with records moves to a new conversation, whose model is told so
+// with its first message and reads the old one with previous_conversation; never while a turn runs.
 {
   const empty = await create("mock");
   const controls = await conn.request(SessionControls.get, { sessionId: empty.id, discover: true });
-  assert.equal(controls.lazy, true, "settings wait for the first message");
-  assert.equal(hub.session(empty.id).rec.backendSessionId, undefined, "no backend session before the first message");
+  assert.equal(controls.connected, true, "a new conversation's settings come from its backend session");
+  assert.ok(hub.session(empty.id).rec.backendSessionId, "opened before the first message");
+  assert.ok(!(await conn.request(Agents.list)).agents.find((x: any) => x.id === empty.agentId).conversed, "no records yet");
   await conn.request(Agents.set, { agentId: empty.agentId, backend: "steerable" });
+  assert.equal(hub.session(empty.id).rec.backendSessionId, undefined, "the old backend session held nothing and is dropped");
   await prompt(empty.id, "!say ON-STEERABLE");
   assert.match(said.get(empty.id)!, /ON-STEERABLE/);
   const marks = (sid: string, agentId: string) => hub.state.store.read(Paths.transcript(agentId, sid)).map((r: any) => r.update?._meta?.["dev.xsb/boundary"]?.kind).filter(Boolean);
@@ -226,8 +228,13 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
 
   const talked = await create("mock");
   await prompt(talked.id, "!say REMEMBER-THE-RED-COAT");
-  assert.equal((await conn.request(Agents.list)).agents.find((x: any) => x.id === talked.agentId).backendStarted, true);
+  assert.equal((await conn.request(Agents.list)).agents.find((x: any) => x.id === talked.agentId).conversed, true);
   await assert.rejects(conn.request(Agents.set, { agentId: talked.agentId, backend: "steerable" }), /moves it to a new conversation/);
+  // Records outlast the backend session: a cleared context still cannot switch in place.
+  const cleared = await create("mock");
+  await prompt(cleared.id, "!say SAID");
+  await conn.request(Boundaries.clear, { sessionId: cleared.id });
+  await assert.rejects(conn.request(Agents.set, { agentId: cleared.agentId, backend: "steerable" }), /moves it to a new conversation/);
   const running = conn.turn(talked.id, "!sleep 400");
   await until("turn running", () => hub.session(talked.id).busy);
   await assert.rejects(conn.request(Agents.migrate, { agentId: talked.agentId, backend: "steerable" }), /current turn has not ended/);
@@ -236,7 +243,7 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   await assert.rejects(conn.request(Agents.migrate, { agentId: talked.agentId, backend: "no-such-backend" }), /backend/);
   const { agent: moved } = await conn.request(Agents.migrate, { agentId: talked.agentId, backend: "steerable" });
   assert.equal(moved.backend, "steerable");
-  assert.ok(!moved.backendStarted, "lazy too: nothing called yet");
+  assert.ok(!moved.conversed, "no records yet: its own backend can still change");
   const next = moved.mainSessionId;
   assert.deepEqual(marks(next, moved.id), ["migrated"]);
   await prompt(next, `!echo\n${call("previous_conversation", { offset: 0 })}`);
@@ -246,7 +253,7 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   await prompt(next, "!echo");
   assert.doesNotMatch(said.get(next)!.split("!echo").at(-1)!, /continues an earlier one/);
   assert.equal(hub.agent(talked.agentId).backend, "mock", "the old conversation stays as it was");
-  console.log("ok backend switch: lazy before the first message, a new conversation after it");
+  console.log("ok backend switch: in place without records, a new conversation with them");
 }
 // A conversation's icon is the user's to choose, kept with the agent and told to every observer.
 {
@@ -259,6 +266,40 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   await assert.rejects(conn.request(Agents.set, { agentId: root.agentId, avatar: "../x" }), /bundled avatar/);
   assert.equal((await conn.request(Agents.set, { agentId: root.agentId, avatar: "" })).agent.avatar, undefined);
   console.log("ok conversation icon");
+}
+// User titles persist, are broadcast, and win over backend suggestions even when renamed during a turn.
+{
+  const session = await create("mock");
+  const updates: any[] = [];
+  const observer = await client("rename observer", { _meta: { [Agents.capability]: {} } });
+  observer.onNotification(Agents.update, ({ agent }) => updates.push(agent));
+  const set = (title: unknown, extra = {}) => conn.request(Agents.set, { agentId: session.agentId, title, ...extra });
+  await prompt(session.id, "!title Automatic title");
+  assert.equal(hub.agentInfo(hub.agent(session.agentId)).name, "Automatic title");
+  const running = prompt(session.id, "!sleep 500\n!title Late automatic title\n!say FINISHED");
+  await until("rename turn running", () => hub.session(session.id).current?.started);
+  const turn = hub.session(session.id).current;
+  const { agent } = await set("  用户指定的名称  ");
+  assert.equal(agent.name, "用户指定的名称");
+  assert.equal(hub.session(session.id).current, turn, "renaming keeps the current turn");
+  await until("rename broadcast", () => updates.some(a => a.id === session.agentId && a.name === agent.name));
+  assert.equal((await running).stopReason, "end_turn");
+  assert.match(said.get(session.id)!, /FINISHED/);
+  assert.equal(hub.session(session.id).rec.title, agent.name, "late backend title cannot overwrite the user's title");
+  for (const title of ["", "   ", "x".repeat(65), 42, null]) await assert.rejects(set(title), /title must be/);
+  await assert.rejects(set("", { avatar: "animal-fox" }), /title must be/);
+  assert.equal(hub.agent(session.agentId).avatar, undefined, "invalid rename changes nothing else");
+  assert.equal((await conn.request<{ agents: AgentInfo[] }>(Agents.list)).agents.find(a => a.id === session.agentId)?.name, agent.name);
+  assert.equal((await conn.request<{ sessions: { sessionId: string; title: string }[] }>("session/list", {})).sessions.find(s => s.sessionId === session.id)?.title, agent.name);
+  const replay = new State(hub.state.store); replay.load();
+  assert.equal(replay.sessions.get(session.id)?.title, agent.name);
+  assert.equal(replay.sessions.get(session.id)?.titleEdited, true);
+  const empty = await create("mock");
+  await conn.request(Agents.set, { agentId: empty.agentId, title: "Named before chatting" });
+  await prompt(empty.id, "!say FIRST MESSAGE");
+  assert.equal(hub.session(empty.id).rec.title, "Named before chatting");
+  observer.close();
+  console.log("ok conversation rename: persistence, broadcasts, backend titles and running turn");
 }
 // 5. The user's word never waits. To a backend that holds what comes while it works (as codex does), it goes in when
 // the work it does is done, and the turn goes on with it: one turn, answered when the message is inserted.
@@ -577,26 +618,28 @@ let refusedId: string;
   console.log("ok 43 pending handoffs and selected model survive restart");
 }
 
-// 43b. Settings are not a reason to call the agent program: a new conversation opens its backend session with its first
-// message. One that was given input and cannot be resumed still says so.
+// 43b. A new conversation's backend session is opened for its settings and given nothing: one that cannot be resumed
+// is replaced without a boundary, keeping the settings chosen. One that was given input and cannot be resumed says so.
 {
   const { sessionId } = await conn.request("session/new", { cwd: project, mcpServers: [], _meta: { [Workflow.backend]: "forgetful" } });
-  await conn.request(SessionControls.get, { sessionId, discover: true });
+  const controls = await conn.request(SessionControls.get, { sessionId, discover: true });
   const agentId = hub.session(sessionId).agentId;
-  assert.equal(hub.session(sessionId).rec.backendSessionId, undefined);
-  // A choice before then is kept, for the first message to apply; it calls no backend either.
+  assert.ok(Array.isArray(controls.configOptions) && controls.configOptions.length, "settings before the first message");
+  assert.equal(hub.session(sessionId).rec.backendFresh, true);
   await conn.request("session/set_config_option", { sessionId, configId: "model", type: "id", value: "x" });
   assert.equal(hub.session(sessionId).rec.selectedConfig?.model, "x");
-  assert.equal(hub.session(sessionId).rec.backendSessionId, undefined);
   const boundaries = () => hub.state.store.read(Paths.transcript(agentId, sessionId))
     .map((r: any) => r.update?._meta?.["dev.xsb/boundary"]?.kind).filter(Boolean);
-  assert.equal(hub.session(sessionId).rec.contextHandoffPending, undefined);
-  await prompt(sessionId, "!say USED");
+  hub.backends.stop(agentId);
+  await prompt(sessionId, "!say USED\n!model");
+  assert.deepEqual(boundaries(), [], "nothing to hand over");
+  assert.match(said.get(sessionId)!, /model: x/, "the choice made before the first message holds");
   assert.equal(hub.session(sessionId).rec.backendFresh, undefined);
+  assert.equal(hub.session(sessionId).rec.conversed, true);
   hub.backends.stop(agentId);
   await prompt(sessionId, "!say AGAIN");
   assert.deepEqual(boundaries(), ["not_restored"]);
-  console.log("ok 43b no backend session before the first message");
+  console.log("ok 43b a new conversation's backend session, given nothing");
 }
 
 // 43c. A setting the backend no longer offers is dropped; it does not undo a resume that worked.

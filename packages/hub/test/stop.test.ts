@@ -3,6 +3,8 @@ import { contextPolicy } from "../src/context.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
 import test from "node:test";
 import type { Addr, Task } from "@xsb/protocol";
 import { Store } from "@xsb/store";
@@ -10,10 +12,12 @@ import { Hooks, isVeto } from "../src/hooks.ts";
 import { Kernel, USER } from "../src/kernel.ts";
 import { State, ops } from "../src/state.ts";
 import type { Input } from "../src/session.ts";
+import type { Hub } from "../src/hub.ts";
+import { Jobs } from "../src/jobs.ts";
 
-function setup(t: test.TestContext) {
+function setup(t: test.TestContext, cleanup = true) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-stop-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  if (cleanup) t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const state = new State(new Store(dir));
   state.load();
   const A = { agentId: "a", sessionId: "sa" }, B = { agentId: "b", sessionId: "sb" }, C = { agentId: "c", sessionId: "sc" };
@@ -33,6 +37,39 @@ function setup(t: test.TestContext) {
   const stopped = (task: Task) => state.tasks.get(task.id)!.status === "cancelled";
   return { dir, state, hooks, busy, kernel, A, B, C, give, hand, stopped };
 }
+
+test("background calls of the same tool start together and cancellation preserves the other calls", { timeout: 10000 }, async (t) => {
+  const { dir, state, kernel, hooks, A } = setup(t, false);
+  const hub = {
+    state, kernel, stopping: false,
+    agent: (id: string) => state.agents.get(id)!,
+    toolServers: () => [{ server: { type: "stdio", name: "render", command: process.execPath,
+      args: [fileURLToPath(new URL("./mock-generator.ts", import.meta.url))] } }],
+  };
+  new Jobs(hub as unknown as Hub);
+  t.after(async () => {
+    kernel.stopSession(A, []);
+    await hooks.settled();
+    hub.stopping = true;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const tasks = Array.from({ length: 6 }, (_, i) => {
+    const job = kernel.createJob(A, { title: `render-${i}`, topic: "renders",
+      tool: { server: "render", name: "render", arguments: { prompt: `shot-${i}`, ms: 200 } } });
+    assert.ok(!isVeto(job));
+    return job;
+  });
+  await hooks.settled();
+  assert.ok(tasks.every(task => state.tasks.get(task.id)?.status === "running"), "all six calls start without a concurrency queue");
+  assert.ok(!isVeto(kernel.stop(tasks[0], USER, { status: "cancelled", reason: "cancelled", result: "stop one call" })));
+  assert.ok(tasks.slice(1).every(task => state.tasks.get(task.id)?.status === "running"));
+  for (let n = 0; n < 100 && tasks.slice(1).some(task => state.tasks.get(task.id)?.status === "running"); n++) await sleep(30);
+  assert.equal(state.tasks.get(tasks[0].id)?.status, "cancelled");
+  for (const task of tasks.slice(1)) {
+    assert.equal(state.tasks.get(task.id)?.status, "completed");
+    assert.match(state.tasks.get(task.id)?.result ?? "", /rendered: shot-/);
+  }
+});
 
 test("user stop cancels the entire accepted backlog before after can release it", async (t) => {
   const { state, hooks, busy, kernel, A, B, C, give, hand, stopped } = setup(t);
@@ -204,6 +241,32 @@ test("an already attached MCP connection is rejected after its bridge is revoked
   handlers.get(BRIDGE_ATTACH)!({ token: "old" });
   valid = false;
   await assert.rejects(handlers.get("tools/call")!({ name: "dispatch_task", arguments: {} }), /bridge revoked/);
+});
+
+test("ask is xSB's own tool, served apart from the workflow tools, and logs no workflow call", async () => {
+  const { serveMcp, BRIDGE_ATTACH, XSB_SERVER, bridgeServer } = await import("../src/mcp.ts");
+  const serve = (server?: string) => {
+    const handlers = new Map<string, (params: any) => any>();
+    const logged: unknown[] = [], asked: unknown[] = [];
+    const session: any = { agentId: "a", current: { started: true, id: "t" }, acceptsTools: true, observeExecution() {}, toolOutput() {}, recordWorkflow: (_: string, d: unknown) => logged.push(d) };
+    const hub: any = { agent: () => ({}), policy: () => ({ outputTokens: 4000 }), paths: {}, questions: { ask: (_: unknown, args: unknown) => (asked.push(args), "shown") } };
+    serveMcp(hub, { onRequest(name: string, handler: (params: any) => any) { handlers.set(name, handler); } } as any, () => session);
+    handlers.get(BRIDGE_ATTACH)!({ token: "x", ...(server ? { server } : {}) });
+    return { handlers, logged, asked };
+  };
+  const workflow = serve();
+  assert.ok(!workflow.handlers.get("tools/list")!({}).tools.some((t: any) => t.name === "ask"), "not among the workflow tools");
+  const own = serve(XSB_SERVER);
+  assert.deepEqual(own.handlers.get("tools/list")!({}).tools.map((t: any) => t.name), ["ask"]);
+  assert.equal(own.handlers.get("initialize")!({}).serverInfo.name, "xsb");
+  const result = await own.handlers.get("tools/call")!({ name: "ask", arguments: { questions: [] }, _meta: { "dev.xsb/call-id": "c1" } });
+  assert.equal(result.content[0].text, "shown");
+  assert.deepEqual(own.asked, [{ questions: [] }]);
+  assert.deepEqual(own.logged, [], "no workflow log");
+  assert.ok((await own.handlers.get("tools/call")!({ name: "execute", arguments: {}, _meta: { "dev.xsb/call-id": "c2" } })).isError, "no workflow tool here");
+  const entry: any = bridgeServer("/s", "tok", XSB_SERVER);
+  assert.equal(entry.name, "xsb");
+  assert.ok(entry.env.some((e: any) => e.name === "XSB_MCP_SERVER" && e.value === "xsb"));
 });
 
 test("an attached but idle/stopped MCP caller cannot detach new work from a stopped turn", async () => {

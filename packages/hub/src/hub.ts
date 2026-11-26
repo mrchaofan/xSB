@@ -52,7 +52,7 @@ import path from "node:path";
 import type { ToolOrigin } from "./prompts.ts";
 import { LiveSession } from "./session.ts";
 import type { MailItem, SessionRec } from "./state.ts";
-import { State, ops, topicKey } from "./state.ts";
+import { State, conversed, ops, topicKey } from "./state.ts";
 import { newId, now } from "./util.ts";
 
 export class Hub {
@@ -185,7 +185,7 @@ export class Hub {
       ...(rec?.title && !agent.workflowOwner && { name: rec.title }),
       state,
       mainSessionId: rec?.id,
-      ...(rec?.backendSessionId && !rec.backendFresh ? { backendStarted: true } : {}),
+      ...(rec && conversed(rec) ? { conversed: true } : {}),
       ...(rec?.question ? { asking: true } : {}),
       ...(turn ? { currentTurnId: turn.id, turnProtected: turn.protected } : {}),
       ...(agent.workflowOwner && this.workflows.retired(agent.id) ? { retired: true } : {}),
@@ -424,7 +424,7 @@ export class Hub {
 
   /** A record an earlier version let be named after xsb's own words is named again, as it was first: after the user's. */
   private titled(rec: SessionRec): SessionRec {
-    if (!rec.title || !isXsbText(rec.title)) return rec;
+    if (rec.titleEdited || !rec.title || !isXsbText(rec.title)) return rec;
     const said = turnsSinceCleared(this.state.store, rec.agentId, rec.id).flatMap((turn) => turn.inputs);
     const first = said.find((input) => input.origin.kind === "user" && input.text.trim() && !isXsbText(input.text));
     const named = { ...rec, title: first?.text.trim().slice(0, 64) };

@@ -14,8 +14,9 @@ import type { Hub } from "./hub.ts";
 import { shipped } from "./paths.ts";
 
 import type { LiveSession } from "./session.ts";
-import { checkArguments, workflowTools } from "./workflow-tools.ts";
-import { WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT } from "./prompts.ts";
+import { workflowTools } from "./workflow-tools.ts";
+import { WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT, XSB_TOOLS_ABOUT } from "./prompts.ts";
+import { ASK_TOOL } from "./questions.ts";
 import { boundedText } from "./context.ts";
 import { newId, VERSION } from "./util.ts";
 import { serveToolContext } from "./tool-context.ts";
@@ -27,14 +28,19 @@ const BRIDGE = path.join(shipped("bin"), "xsb-mcp-bridge");
 export const BRIDGE_ATTACH = "_xsb/attach";
 export const BRIDGE_SOCKET_ENV = "XSB_MCP_SOCKET";
 export const BRIDGE_TOKEN_ENV = "XSB_MCP_TOKEN";
+export const BRIDGE_SERVER_ENV = "XSB_MCP_SERVER";
 
+/** The workflow tools. */
 export const WORKFLOW_SERVER = "workflow";
+/** xSB's own tools that are no workflow's, though usable in one: `ask` (questions.ts). */
+export const XSB_SERVER = "xsb";
+type Server = typeof WORKFLOW_SERVER | typeof XSB_SERVER;
 
-/** The `mcpServers` entry that gives a backend session the hub's tools. */
-export function bridgeServer(socketPath: string, token: string): McpServer {
+/** An `mcpServers` entry that gives a backend session the hub's tools: each server is a bridge of its own. */
+export function bridgeServer(socketPath: string, token: string, name: Server = WORKFLOW_SERVER): McpServer {
   return {
     type: "stdio",
-    name: WORKFLOW_SERVER,
+    name,
     command: process.execPath,
     args: [BRIDGE],
     env: [
@@ -43,6 +49,7 @@ export function bridgeServer(socketPath: string, token: string): McpServer {
       { name: "ELECTRON_RUN_AS_NODE", value: "1" },
       { name: BRIDGE_SOCKET_ENV, value: socketPath },
       { name: BRIDGE_TOKEN_ENV, value: token },
+      { name: BRIDGE_SERVER_ENV, value: name },
     ],
   };
 }
@@ -58,6 +65,7 @@ export function serveMcp(
   const connectionId = newId("mcp");
   let session: LiveSession | undefined;
   let token: string | undefined;
+  let server: Server = WORKFLOW_SERVER;
   const attached = (): LiveSession => {
     if (!session || !token || lookup(token) !== session)
       throw new RpcError(-32600, "not attached or bridge revoked");
@@ -68,21 +76,24 @@ export function serveMcp(
     session = lookup(p.token);
     if (!session) throw RpcError.invalidParams("unknown bridge token");
     token = p.token;
+    server = p.server === XSB_SERVER ? XSB_SERVER : WORKFLOW_SERVER;
     return {};
   });
   conn.onRequest("initialize", (p) => ({
     protocolVersion: MCP_VERSIONS.includes(p.protocolVersion) ? p.protocolVersion : MCP_VERSIONS[0],
     capabilities: { tools: {} },
-    serverInfo: { name: WORKFLOW_SERVER, version: VERSION },
+    serverInfo: { name: server, version: VERSION },
     // Shown to the model by agent programs that pass server instructions on: what these tools are, before it guesses.
     instructions: (() => {
+      if (server === XSB_SERVER) return XSB_TOOLS_ABOUT;
       try { return hub.agent(attached().agentId).workflowOwner ? WORKFLOW_TASK_ABOUT : WORKFLOW_MAIN_ABOUT; }
       catch { return WORKFLOW_MAIN_ABOUT; }
     })(),
   }));
   conn.onRequest("ping", () => ({}));
   conn.onRequest("tools/list", () => {
-    return { tools: workflowTools(!!hub.agent(attached().agentId).workflowOwner) };
+    const session = attached();
+    return { tools: server === XSB_SERVER ? [ASK_TOOL] : workflowTools(!!hub.agent(session.agentId).workflowOwner) };
   });
   conn.onRequest("tools/call", async (p, ctx) => {
     const owner = attached();
@@ -103,10 +114,9 @@ export function serveMcp(
     };
     try {
       let result: unknown;
-      if (p.name === "ask") {
-        hub.workflows.accessible(owner);
-        checkArguments(p.name, args);
-        result = hub.questions.ask(owner, args.questions);
+      if (server === XSB_SERVER) {
+        if (p.name !== ASK_TOOL.name) throw Error(`Unknown tool ${p.name}`);
+        result = hub.questions.ask(owner, args);
       } else result = hub.workflows.call(owner, p.name, args, receipt);
       const answer = boundedText(
         hub.paths,
@@ -114,12 +124,12 @@ export function serveMcp(
         typeof result === "string" ? result : JSON.stringify(result, null, 2),
         budget,
       );
-      owner.recordWorkflow(turnId, { ...log, result: answer });
+      if (server === WORKFLOW_SERVER) owner.recordWorkflow(turnId, { ...log, result: answer });
       owner.toolOutput(answer);
       return { content: [{ type: "text", text: answer }] };
     } catch (error) {
       const message = (error as Error).message;
-      owner.recordWorkflow(turnId, { ...log, error: message });
+      if (server === WORKFLOW_SERVER) owner.recordWorkflow(turnId, { ...log, error: message });
       return { content: [{ type: "text", text: message }], isError: true };
     }
   });

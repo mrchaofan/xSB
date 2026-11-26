@@ -1,5 +1,5 @@
 // 输入框里的后端切换：一个只显示后端图标的按钮，点开下拉列出可用的后端（claude、codex …）。
-// 后端会话在第一条消息发出时才建立。还没建立的对话直接切换；已经建立的不能原地换，确认后新建一个用新后端的对话，
+// 没有对话记录的对话（哪怕已为读取设置建立了后端会话）直接切换；有记录的不能原地换，确认后新建一个用新后端的对话，
 // 新对话的模型用 previous_conversation 工具按需读取原对话（只迁移主对话，工作流不迁移），原对话保留。
 // 当前一轮还没结束时不能切换。
 import { agentOf, focusLane, onAgent, state } from "./app.js";
@@ -22,7 +22,7 @@ export function backendPicker(agentId) {
       return;
     }
     try {
-      if (!agent.backendStarted) return onAgent(await xsb.setBackend(agentId, name));
+      if (!agent.conversed) return onAgent(await xsb.setBackend(agentId, name));
       if (!(await confirmDialog(t("composer.backend.confirmTitle", { name }),
         [h("p", {}, t("composer.backend.confirmBody", { from: agent.backend, to: name }))], t("composer.backend.confirm")))) return;
       const moved = await xsb.migrate(agentId, name);

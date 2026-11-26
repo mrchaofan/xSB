@@ -163,6 +163,8 @@ export function backendControls(backend, onChange = () => {}, { card = false } =
       description.textContent = arkProblem ? t(`backend.detail.ark.${arkProblem}`, { name }) : t("backend.detail.viaArk", { name, model: arkModelLabel(backend.ark.model) });
     if (!cli && presentation.state === "found") description.textContent = t("backend.detail.custom");
     if (!cli && presentation.state === "missing") description.textContent = t("backend.detail.customMissing");
+    if (card) description.hidden = !error && (["checking", "installing", "locating"].includes(presentation.state) ||
+      (!backend.ark && ["found", "ready"].includes(presentation.state)));
     if (!card) {
       const viaArk = backend.ark && ["found", "ready", "unauthenticated", "unknown"].includes(presentation.state);
       description.hidden = ["found", "ready"].includes(presentation.state) && !viaArk;

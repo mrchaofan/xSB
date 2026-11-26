@@ -7,6 +7,7 @@ import { Question, text } from "@xsb/protocol";
 import type { NodeDef } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { Paths } from "../src/paths.ts";
+import { conversationPrompt, WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT } from "../src/prompts.ts";
 import { ops } from "../src/state.ts";
 import { deferred, newId } from "../src/util.ts";
 import type { LiveSession, Turn } from "../src/session.ts";
@@ -21,12 +22,12 @@ const end = (node = "end") => ({ node, kind: "end" });
 const edge = (from: string, to: string, choice?: string) => ({ from, to, case: choice });
 const build = (graphJsonl: string) => {
   const f = empty("root");
-  adopt(f, { graphJsonl }, 100000, false);
+  adopt(f, { graphJsonl }, false);
   normalize(f);
   return f;
 };
 const replace = (f: Flow, node: string, prompt: string) => {
-  adopt(f, { replaceNode: task(node, prompt) }, 100000, false);
+  adopt(f, { replaceNode: task(node, prompt) }, false);
   normalize(f);
 };
 const deliver = (f: Flow, node: string, summary = node) => {
@@ -42,7 +43,28 @@ const select = (f: Flow, from: string, cases: string[]) => {
   normalize(f);
 };
 
-test("validation exhausts a single budget and returns a counterexample for an ambiguous route", () => {
+test("workflow examples and task/end node names follow the system prompt's conversation language", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-language-"));
+  const hub = new Hub(dir); hub.stopping = true;
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const root = hub.createConversation();
+  for (const language of ["zh-CN", "en"] as const) {
+    const prompt = conversationPrompt(hub.agent(root.agentId), language, "");
+    assert.match(prompt, language === "zh-CN" ? /Name every task and end node in Simplified Chinese/ : /Name every task and end node in English/);
+    const example = prompt.split("Graph JSONL example:\n")[1].split("\nUse case")[0];
+    const parsed = parseGraph(example);
+    const expected = language === "zh-CN" ? ["起草", "审阅", "完成"] : ["Draft", "Review", "Done"];
+    assert.deepEqual(new Set(parsed.nodes.map(n => n.node)), new Set(expected));
+    const f = build(example);
+    deliver(f, expected[0]);
+    deliver(f, expected[1]);
+    assert.ok(settled(f), "localized names survive assignment and delivery matching");
+    const taskPrompt = conversationPrompt({ ...hub.agent(root.agentId), workflowOwner: root.id, workflowNode: expected[0] }, language, "");
+    assert.ok(taskPrompt.includes(`node "${expected[0]}"`), "task conversations retain the localized node name");
+  }
+});
+
+test("validation returns a counterexample for an ambiguous route", () => {
   const invalid = graph(
     { ...task("R"), multi: true },
     end("x"),
@@ -55,7 +77,6 @@ test("validation exhausts a single budget and returns a counterexample for an am
   assert.throws(() => parseGraph(graph(task("a"), edge("a", "x"))), /endpoint/);
   assert.throws(() => parseGraph(graph(task("a"), edge("a", "a"))), /cycle/);
   assert.throws(() => parseGraph(graph(task("a"))), /leaf/);
-  assert.throws(() => parseGraph(graph(task("a"), end(), edge("a", "end")), 3), /分支组合过多/);
   assert.throws(
     () =>
       validateResult(
@@ -68,6 +89,15 @@ test("validation exhausts a single budget and returns a counterexample for an am
       ),
     /string/,
   );
+});
+
+test("valid branch combinations beyond the former step cap are all checked", () => {
+  const nodes = Array.from({ length: 14 }, (_, i) => `branch-${i}`);
+  const jsonl = graph(...nodes.map(n => task(n)), end(),
+    ...nodes.flatMap(n => [edge(n, "end", "left"), edge(n, "end", "right")]));
+  assert.equal(parseGraph(jsonl).nodes.length, 15);
+  const f = empty("uncapped");
+  assert.equal(adopt(f, { graphJsonl: jsonl }, true), "plan-1");
 });
 
 test("adoption invalidates in-flight consumers before redispatch, keeps siblings and unions actual predecessors", () => {
@@ -93,11 +123,10 @@ test("adoption invalidates in-flight consumers before redispatch, keeps siblings
         ...f.versions[oldVersion].edges,
       ),
     },
-    100000,
     true,
   );
   assert.equal(f.instances.D.work, firstD);
-  adopt(f, {}, 100000, false);
+  adopt(f, {}, false);
   normalize(f);
   assert.equal(f.instances.A.id, a);
   assert.equal(f.instances.D.work, undefined);
@@ -200,7 +229,7 @@ test("pause sources stack; edits clear only a superseded redirection; extra goal
   additional(f, "A", "again");
   f.instances.A.replan = "redirect";
   control(f, true, ["A", "B"]);
-  adopt(f, { graphJsonl: graphJsonl(f.versions[f.active!]) }, 100000, false);
+  adopt(f, { graphJsonl: graphJsonl(f.versions[f.active!]) }, false);
   normalize(f);
   assert.ok(f.instances.A.replan);
   replace(f, "A", "half body");
@@ -223,15 +252,15 @@ test("incoming edge change reuses a node, candidate adoption and version names a
   const f = build(first),
     id = f.instances.D.id;
   assert.equal(f.active, "plan-1");
-  assert.throws(() => adopt(f, {}, 100000, false), /No candidate/);
-  assert.equal(adopt(f, { graphJsonl: second }, 100000, true), "plan-2");
-  assert.equal(adopt(f, { graphJsonl: second }, 100000, true), "plan-2", "the same graph keeps its name");
-  assert.equal(adopt(f, { graphJsonl: first }, 100000, true), "plan-1");
-  assert.throws(() => adopt(f, { replaceNode: task("A") }, 100000, true), /single adoption/);
-  adopt(f, { graphJsonl: second }, 100000, true);
+  assert.throws(() => adopt(f, {}, false), /No candidate/);
+  assert.equal(adopt(f, { graphJsonl: second }, true), "plan-2");
+  assert.equal(adopt(f, { graphJsonl: second }, true), "plan-2", "the same graph keeps its name");
+  assert.equal(adopt(f, { graphJsonl: first }, true), "plan-1");
+  assert.throws(() => adopt(f, { replaceNode: task("A") }, true), /single adoption/);
+  adopt(f, { graphJsonl: second }, true);
   replace(f, "A", "updated");
-  assert.throws(() => adopt(f, {}, 100000, false), /stale/);
-  adopt(f, { graphJsonl: second }, 100000, false);
+  assert.throws(() => adopt(f, {}, false), /stale/);
+  adopt(f, { graphJsonl: second }, false);
   normalize(f);
   deliver(f, "A");
   assert.equal(f.instances.D.id, id);
@@ -452,7 +481,7 @@ test("an adopted version keeps the one it replaced; a dropped node's conversatio
 
   const next = structuredClone(hub.workflows.read(root.id));
   const first = next.active;
-  adopt(next, { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, 100000, false);
+  adopt(next, { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, false);
   normalize(next);
   hub.state.commit([ops.workflow(next)]);
   const shown = view(hub.workflows.read(root.id));
@@ -468,7 +497,7 @@ test("an adopted version keeps the one it replaced; a dropped node's conversatio
   assert.equal(hub.agentInfo(hub.agent(node.agentId)).retired, true);
 
   const again = structuredClone(hub.workflows.read(root.id));
-  adopt(again, { graphJsonl: graphJsonl(again.versions[again.active!]) }, 100000, false);
+  adopt(again, { graphJsonl: graphJsonl(again.versions[again.active!]) }, false);
   assert.equal(again.history!.length, 1, "adopting the active version again records nothing");
 });
 
@@ -522,6 +551,8 @@ test("agents are told what their built-in workflow tools are, and a task agent s
   assert.match(main, /mcp__workflow__/, "and how an agent program shows them");
   assert.match(main, /workflow 技能/, "what a user calls them");
   assert.match(main, /escalate/, "and what a task agent's escalation is");
+  assert.match(main, /MCP server named "xsb"[^]*not a workflow tool/, "ask is xSB's own tool, not a workflow one");
+  assert.doesNotMatch(WORKFLOW_MAIN_ABOUT + WORKFLOW_TASK_ABOUT, /\bask\b/, "and no workflow tool list names it");
   hub.workflows.call(root, "execute", { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, newId("call"));
   const f = structuredClone(hub.workflows.read(root.id)), w = claim(f, "A")!;
   const worker = hub.createConversation("claude", "A", { owner: root.id, node: "A", bind: (agentId, sessionId) => {
@@ -643,8 +674,8 @@ test("ask: questions are shown, and the user's next message answers, skips or re
 
   for (const bad of [[], [budget, budget, budget, budget, budget], [{ question: "x", kind: "single", options: ["a"] }],
     [{ question: "x", kind: "text", options: ["a", "b"] }], [{ question: "x", kind: "multi", options: ["a", "a"] }], [{ question: " ", kind: "text" }]])
-    assert.throws(() => hub.questions.ask(root, bad as never), /ask takes|question \d/);
-  assert.match(hub.questions.ask(root, [budget, scenery, city] as never), /End your turn/);
+    assert.throws(() => hub.questions.ask(root, { questions: bad }), /ask takes|question \d|must/);
+  assert.match(hub.questions.ask(root, { questions: [budget, scenery, city] }), /End your turn/);
   const open = questions().at(-1);
   assert.equal(open.state, "open");
   assert.deepEqual(open.questions.map((q: any) => q.kind), ["single", "multi", "text"]);
@@ -658,14 +689,14 @@ test("ask: questions are shown, and the user's next message answers, skips or re
   hub.questions.reply(root, "m2");
   assert.equal(hub.questions.scope("m2"), undefined, "with no question open a message is just a message");
 
-  hub.questions.ask(root, [city] as never);
+  hub.questions.ask(root, { questions: [city] });
   const first = questions().at(-1).id;
-  hub.questions.ask(root, [budget] as never);
+  hub.questions.ask(root, { questions: [budget] });
   assert.deepEqual(questions().slice(-2).map((q) => q.state), ["superseded", "open"], "a new question replaces the open one");
   hub.questions.reply(root, "m3", { questionId: first, answers: ["杭州"] });
   assert.equal(questions().at(-1).state, "superseded", "an answer to a replaced question is other words");
   assert.match(hub.questions.scope("m3")!, /did not answer/);
-  hub.questions.ask(root, [budget] as never);
+  hub.questions.ask(root, { questions: [budget] });
   hub.questions.reply(root, "m4", { questionId: questions().at(-1).id, skipped: true });
   assert.equal(questions().at(-1).state, "skipped");
   assert.match(hub.questions.scope("m4")!, /skipped/);
@@ -688,7 +719,7 @@ test("ask in a task: the work waits for the reply, which continues it as the sam
     return ops.workflow(f);
   } });
   const asking = turnFor(worker, w.attempt!);
-  hub.questions.ask(worker, [{ question: "横版还是竖版？", kind: "single", options: ["横版", "竖版"] }] as never);
+  hub.questions.ask(worker, { questions: [{ question: "横版还是竖版？", kind: "single", options: ["横版", "竖版"] }] });
   assert.ok(runtime.read(root.id).instances.A.work!.asking);
   const outbox = runtime.read(root.id).outbox.length;
   worker.current = undefined;
@@ -717,7 +748,7 @@ test("ask in a task: the work waits for the reply, which continues it as the sam
   const h = structuredClone(runtime.read(root.id)), extra = claim(h, "A")!;
   hub.state.commit([ops.workflow(h)]);
   const again = turnFor(worker, extra.attempt!);
-  hub.questions.ask(worker, [{ question: "颜色？", kind: "text" }] as never);
+  hub.questions.ask(worker, { questions: [{ question: "颜色？", kind: "text" }] });
   hub.questions.reply(worker, "inside", { questionId: worker.rec.question!, answers: ["蓝"] });
   runtime.ended(worker, again, { stopReason: "end_turn" });
   assert.equal(runtime.read(root.id).instances.A.work?.state, "suspended");

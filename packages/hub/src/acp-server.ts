@@ -11,7 +11,7 @@ import type { Hub } from "./hub.ts";
 import { isVeto } from "./hooks.ts";
 import { USER } from "./kernel.ts";
 import { Paths } from "./paths.ts";
-import { ops } from "./state.ts";
+import { conversed, ops } from "./state.ts";
 import type { LiveSession } from "./session.ts";
 import { historyPage, historyImage } from "./history.ts";
 import { newId, VERSION } from "./util.ts";
@@ -173,9 +173,8 @@ export class Client {
 
     conn.onRequest(SessionControls.get, async (p) => {
       const session = this.own(p.sessionId);
-      // Only a conversation the agent program already has is resumed for its settings: a new one calls no backend
-      // until its first message (`ComposerState.lazy`).
-      if (p.discover === true && session.rec.backendSessionId) await session.ensureBackend();
+      // Its settings are the backend session's: a new conversation opens one here, given nothing yet (`backendFresh`).
+      if (p.discover === true) await session.ensureBackend();
       return session.composerState();
     });
 
@@ -188,11 +187,12 @@ export class Client {
     }));
     conn.onRequest(ToolServers.apply, () => ({ waiting: hub.applyTools() }));
 
-    // The user's choice of icon for a main conversation. Only bundled IDs reach here; "" goes back to the default.
-    // The user's choices for a main conversation: its icon (bundled IDs only; "" is the default) and its backend.
+    // The user's choices for a main conversation: its title, icon and backend.
     conn.onRequest(Agents.set, (p) => {
       const agent = hub.state.agents.get(p?.agentId);
-      if (!agent || agent.workflowOwner) throw RpcError.notFound(`agent ${p?.agentId}`);
+      if (!agent || hub.isDeleted(agent) || agent.workflowOwner) throw RpcError.notFound(`agent ${p?.agentId}`);
+      if (p.title !== undefined && (typeof p.title !== "string" || !p.title.trim() || p.title.trim().length > 64))
+        throw RpcError.invalidParams("title must be a nonempty string of at most 64 characters");
       let next = agent;
       if (p.avatar !== undefined) {
         if (typeof p.avatar !== "string" || p.avatar.length > 64 || !/^[a-z0-9-]*$/.test(p.avatar)) throw RpcError.invalidParams("avatar must be a bundled avatar id");
@@ -204,16 +204,17 @@ export class Client {
         hub.backends.spec({ ...agent, backend: p.backend });
         const session = hub.mainSession(agent.id);
         if (session.busy) throw new RpcError(-32602, "The conversation's current turn has not ended; switch its backend once it has.", { errorKind: "turn_running" });
-        // Only a conversation never given to its agent program changes backend in place; one that was moves to a
-        // new conversation (`Agents.migrate`), whose model reads this one as history.
-        if (session.rec.backendSessionId && !session.rec.backendFresh)
-          throw new RpcError(-32602, "This conversation has been given to its agent program; switching backends moves it to a new conversation.", { errorKind: "backend_started" });
+        // A conversation without records changes backend in place; one with records moves to a new conversation
+        // (`Agents.migrate`), whose model reads this one as history.
+        if (conversed(session.rec))
+          throw new RpcError(-32602, "This conversation has records; switching backends moves it to a new conversation.", { errorKind: "backend_started" });
         next = { ...next, backend: p.backend };
-        // A session opened only to read settings held nothing: the first message opens one on the new backend.
+        // Its backend session held nothing: the new backend opens its own.
         if (session.rec.backendSessionId) session.save({ backendSessionId: undefined, backendFresh: undefined, backend: undefined, selectedConfig: undefined });
         hub.backends.stop(agent.id);
       }
       hub.state.commit([ops.putAgent(next)]);
+      if (p.title !== undefined) hub.mainSession(agent.id).save({ title: p.title.trim(), titleEdited: true });
       hub.agentChanged(agent.id);
       return { agent: hub.agentInfo(hub.agent(agent.id)) };
     });

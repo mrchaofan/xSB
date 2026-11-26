@@ -81,19 +81,14 @@ export function indexGraph(nodes: NodeDef[], edges: Edge[]) {
   return { incoming, outgoing };
 }
 
-export function parseGraph(raw: string, limit = 100000): WorkflowGraph {
+export function parseGraph(raw: string): WorkflowGraph {
   const nodes: NodeDef[] = [],
     edges: Edge[] = [];
   const seen = new Set<string>(),
     edgeSet = new Set<string>();
-  let remaining = limit;
-  const step = () => {
-    if (--remaining < 0) throw Error("分支组合过多 (workflow validation budget exceeded)");
-  };
   for (const line of word(raw, "graphJsonl")
     .split(/\r?\n/)
     .filter((l) => l.trim())) {
-    step();
     const v = JSON.parse(line);
     if (!object(v)) throw Error("Expected one graph object per line");
     if ("node" in v) {
@@ -120,11 +115,9 @@ export function parseGraph(raw: string, limit = 100000): WorkflowGraph {
   const order = nodes.filter((n) => !incoming.get(n.node)!.length);
   const degrees = new Map(nodes.map((n) => [n.node, incoming.get(n.node)!.length]));
   for (const n of order) {
-    step();
     const out = outgoing.get(n.node)!;
     if ((n.kind === "end") !== !out.length) throw Error("Every leaf must be an end and end nodes must be leaves");
     for (const e of out) {
-      step();
       const degree = degrees.get(e.to)! - 1;
       degrees.set(e.to, degree);
       if (!degree) order.push(byName.get(e.to)!);
@@ -136,18 +129,13 @@ export function parseGraph(raw: string, limit = 100000): WorkflowGraph {
     return options.length ? [{ n, options, count: n.multi ? 2 ** options.length : options.length, i: 0 }] : [];
   });
   for (;;) {
-    step();
     const choices = new Map(
       branches.map(({ n, options, i }) => {
-        step();
         return [
           n.node,
           new Set(
             n.multi
-              ? options.filter((_o, j) => {
-                  step();
-                  return Math.floor(i / 2 ** j) % 2;
-                })
+              ? options.filter((_o, j) => Math.floor(i / 2 ** j) % 2)
               : [options[i]],
           ),
         ] as const;
@@ -156,10 +144,8 @@ export function parseGraph(raw: string, limit = 100000): WorkflowGraph {
     const skipped = new Set<string>();
     let ends = 0;
     for (const n of order) {
-      step();
       const gate = entrance(
         incoming.get(n.node)!.map((edge) => {
-          step();
           const skip =
             skipped.has(edge.from) || (edge.case !== undefined && !choices.get(edge.from)!.has(edge.case));
           return { edge, signal: { state: skip ? "skipped" : "ready" } };

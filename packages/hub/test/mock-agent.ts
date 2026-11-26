@@ -106,6 +106,8 @@ async function step(session: Session, line: string): Promise<void> {
   switch (directive) {
     case "say":
       return say(session, rest + "\n");
+    case "title":
+      return update(session, { sessionUpdate: "session_info_update", title: rest });
     case "busy":
       return void (await new Promise((resolve) => setTimeout(resolve, Number(rest))));
     case "background": {

@@ -66,11 +66,11 @@ export type AgentInfo = AgentSpec & {
   /** A workflow node's agent whose node an adopted version dropped: its conversation can be read, not continued. */
   retired?: boolean;
   /**
-   * Its conversation has been given to the agent program (a backend session holds it): its backend cannot change in
-   * place any more; switching moves the conversation to a new one (`Agents.migrate`). Before that, the backend is
-   * not called at all and switching is free.
+   * Its conversation has records: something was given to its model. Its backend cannot change in place any more;
+   * switching moves the conversation to a new one (`Agents.migrate`). Before that, switching is free, though a backend
+   * session may already be open for its settings.
    */
-  backendStarted?: boolean;
+  conversed?: boolean;
   /** The agent asked the user something (`Question`) and waits for the reply; its state stays what its work is. */
   asking?: boolean;
 };
@@ -84,8 +84,6 @@ export const SessionControls = {
 
 export type ComposerState = {
   connected: boolean;
-  /** No backend session yet: it is made with the first message, and its settings are offered from then on. */
-  lazy?: boolean;
   configOptions: unknown;
   selected: Record<string, string>;
   used?: number;
@@ -99,6 +97,9 @@ export const Agents = {
   list: `_${NS}/agents/list`,
   update: `_${NS}/agents/update`,
   removed: `_${NS}/agents/removed`,
+  /** Set a main conversation's title (trimmed, 1–64 characters), avatar or backend; titles override backend suggestions.
+   * request _dev.xsb/agents/set { agentId, title?, avatar?, backend? } -> { agent: AgentInfo }
+   */
   set: `_${NS}/agents/set`,
   asks: `_${NS}/agents/asks`,
   /**
