@@ -49,6 +49,13 @@ const pages = {
   name: "pages",
   writeBundle() {
     fs.rmSync("dist/presets", { recursive:true,force:true });
+    // Retired shipped plugins must not survive an incremental build.
+    const shippedPlugins = new Set(fs.readdirSync("plugins"));
+    if (fs.existsSync("dist/plugins")) {
+      for (const name of fs.readdirSync("dist/plugins")) {
+        if (!shippedPlugins.has(name)) fs.rmSync(`dist/plugins/${name}`, { recursive: true, force: true });
+      }
+    }
     const current = new Set(fs.readdirSync("renderer/avatars"));
     for (const name of fs.readdirSync("dist/renderer/avatars")) {
       if (name.endsWith(".png") && !current.has(name)) fs.unlinkSync(`dist/renderer/avatars/${name}`);
@@ -69,7 +76,6 @@ export default defineConfig([
   program("xsb-mcp-bridge", "../hub/bin/xsb-mcp-bridge"),
   program("claude-agent-acp", wrapper("claude-agent-acp")),
   program("codex-acp", wrapper("codex-acp")),
-  plugin("media", "../media-mcp/bin/xsb-media-mcp"),
   plugin("browser", "src/browser-mcp.ts"),
   { platform: "browser", input: "renderer/main.js", output: { dir: "dist/renderer", format: "iife", entryFileNames: "main.js" }, plugins: [pages] },
   // The page of a web page's own window.

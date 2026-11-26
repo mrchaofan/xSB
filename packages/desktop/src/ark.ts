@@ -5,7 +5,7 @@
  * optional dependency of package.json that is copied into the app as published, not bundled (electron-builder.config.mjs).
  * Those packages are the program alone; `@volcengine/ark-cli`, which wraps them, downloads it in its own install
  * script and adds arkcli's skills to every agent it finds, so it is not used. xSB's arkcli is always this one, the
- * version xSB was released with; the user's own, if any, is theirs. It is also the one the media plugin runs: it is
+ * version xSB was released with; the user's own, if any, is theirs. It is also available to the programs the app starts:
  * on the PATH of what the app starts, by its name (clis.ts, builtin/bin). Its credentials are arkcli's own, shared with any arkcli of the user's (`~/.arkcli`).
  *
  * Each step is the user's, confirmed in main before it runs (main.ts): signing in with `arkcli auth login volc-sso`,

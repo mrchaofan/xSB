@@ -743,7 +743,7 @@ void app.whenReady().then(() => {
   // Before the launchers are first written: they carry the Ark plan each of xSB's agents uses, and its key comes from
   // the arkcli shipped with the app (ark.ts), which has also written the program Claude is started through by then.
   ark = new Ark({ resync: () => clis.resync(), env: () => clis.env() }, backendsDir);
-  // The built-in arkcli is also on the PATH of what the app starts, by its name: the media plugin runs it so.
+  // Make the built-in arkcli available by name to the programs the app starts.
   clis = new Clis(backendsDir, {
     builtins: { arkcli: ark.program },
     launchEnv: (program, windows, locate) =>
