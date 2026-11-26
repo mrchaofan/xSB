@@ -85,3 +85,13 @@ test("an oversized latest input still hands off the recent decision without enla
   assert.ok(!text.includes("There is no earlier conversation to tell."));
   assert.ok(text.length < 42_000);
 });
+
+test("confirmed input is projected at its native insertion position even when output precedes the response", async () => {
+  const { InsertionTrace } = await import("@xsb/protocol");
+  const marker = { sessionUpdate: "session_info_update", _meta: { [InsertionTrace.key]: { phase: "observed", backendSessionId: "native", nativeMessageId: "message" } } };
+  const receipt = { ...input("hub-message", "Do the task"), _meta: { [OriginExt.key]: { kind: "agent", agentId: "sender", taskId: "task", role: "task" }, [InsertionTrace.key]: { phase: "linked", backendSessionId: "native", nativeMessageId: "message" } } };
+  const turns = readTurns([marker, reply("Produced before acknowledgement"), receipt]);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].reply, "Produced before acknowledgement");
+  assert.deepEqual(turns[0].inputs.map(i => i.text), ["Do the task"]);
+});

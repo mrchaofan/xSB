@@ -329,7 +329,7 @@ export class Workflows {
         (m) =>
           !m.workflowNotice &&
           (this.hub.state.agents.get(m.to.agentId)?.workflowOwner === f.owner || (m.to.sessionId === f.owner && interruptions.has(m.id))) &&
-          !["inserted", "seen", "inserted_unprocessed", "discarded_unseen"].includes(this.hub.state.ledger.get(m.id)?.state ?? ""),
+          !["inserted", "seen", "inserted_unprocessed", "discarded_unseen", "insertion_uncertain"].includes(this.hub.state.ledger.get(m.id)?.state ?? ""),
       );
       this.save(f, [...held.map((item) => ops.ack(item.id)), ...heldInputs.map((item) => ops.enqueue({ ...item, workflowHeld: true }))]);
     }

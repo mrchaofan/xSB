@@ -4,6 +4,7 @@
  */
 import { RpcError, failure } from "@xsb/protocol";
 import type { AgentSpec } from "@xsb/protocol";
+import type { BackendEvents } from "./backend.ts";
 import { Backend } from "./backend.ts";
 import { backends, globalConfigPath } from "./config.ts";
 import type { BackendSpec } from "./config.ts";
@@ -16,9 +17,11 @@ export class BackendPool {
   /** The hub is stopping: no process starts any more (`close`). */
   private closed = false;
   private log: (line: string) => void;
+  private events: Pick<BackendEvents, "url" | "urlComplete">;
 
-  constructor(log: (line: string) => void) {
+  constructor(log: (line: string) => void, events: Pick<BackendEvents, "url" | "urlComplete"> = {}) {
     this.log = log;
+    this.events = events;
   }
 
   /** How to start the backend an agent names. Throws `backend_unknown`. */
@@ -43,6 +46,7 @@ export class BackendPool {
     const starting: Promise<Backend> = (async () => {
       await this.stopping.get(agent.id);
       return Backend.start(agent.id, agent.backend, this.spec(agent), agent.workspace, {
+        ...this.events,
         onExit: (reason) => {
           this.log(`backend ${agent.id} ${reason}`);
           forget();
@@ -69,6 +73,8 @@ export class BackendPool {
     });
     this.stopping.set(agentId, ended);
   }
+
+  async stopAndWait(agentId: string): Promise<void> { this.stop(agentId); await this.stopping.get(agentId); }
 
   /** Stop every process, start none from now on, and wait for all of them to exit. */
   async close(): Promise<void> {

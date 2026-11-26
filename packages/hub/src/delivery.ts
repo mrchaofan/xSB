@@ -48,7 +48,7 @@ export class Delivery {
     // The user's message that ended without the session recording it (dropped, refused, abandoned at quit, or settled on a
     // restart) is recorded as discarded: what the user sees of it is what became of it.
     hooks.on("message.discarded", (entry) => {
-      if (entry.from.kind === "user") this.hub.live.get(entry.sessionId)?.unaccepted(entry.messageId, this.hub.stopping ? "abandoned" : "refused");
+      if (entry.from.kind === "user") this.hub.live.get(entry.sessionId)?.unaccepted(entry.messageId, entry.state === "insertion_uncertain" ? "uncertain" : this.hub.stopping ? "abandoned" : "refused");
     });
     hooks.on("message.withdrawn", (items) => {
       for (const item of items) this.hub.live.get(item.to.sessionId)?.withdraw((m) => m.id === item.id);
@@ -73,6 +73,7 @@ export class Delivery {
     const session = known && this.hub.workflows?.available(known) !== false ? known : undefined;
     return {
       exists: !!session,
+      source: session?.source(),
       busy: !!session?.busy,
       ...(session?.current && !session.current.cancelledBy ? {
         turn: { id: session.current.id, protected: session.current.protected, taskIds: session.taskIds() },
@@ -263,6 +264,7 @@ export class Delivery {
   private async again(session: LiveSession, messageId: string): Promise<{ messageId: string }> {
     const state = this.hub.state.ledger.get(messageId)?.state;
     if (state && TAKEN_IN.has(state)) return { messageId };
+    if (state === "insertion_uncertain") throw new RpcError(-32602, "Insertion could not be confirmed. Verify the outcome before sending new instructions.", { errorKind: "execution_uncertain" });
     if (state === "discarded_unseen") throw new RpcError(-32602, "This message did not get into the model's conversation; it is recorded so.", { errorKind: "discarded" });
     const pending = this.inserted.get(messageId)?.done.promise ?? session.insertionOf(messageId);
     if (pending) { await pending; return { messageId }; }
@@ -382,6 +384,7 @@ export class Delivery {
 /** Why the user's message did not get to the session: its rejection, worded as a `DiscardReason`. */
 function reasonOf(e: unknown): DiscardReason {
   const message = errorMessage(e);
+  if (e instanceof RpcError && (e.data as any)?.errorKind === "execution_uncertain") return "uncertain";
   if (e instanceof RpcError && e.code === RpcError.CANCELLED) return "stopped";
   if (/Target turn has ended or changed|no longer exists|not registered|no longer active|expired/.test(message)) return "expired";
   return "refused";

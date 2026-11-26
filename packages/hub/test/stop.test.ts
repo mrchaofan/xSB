@@ -1,3 +1,4 @@
+import { Lifecycle } from "../src/lifecycle.ts";
 import assert from "node:assert/strict";
 import { contextPolicy } from "../src/context.ts";
 import fs from "node:fs";
@@ -41,7 +42,7 @@ function setup(t: test.TestContext, cleanup = true) {
 test("background calls of the same tool start together and cancellation preserves the other calls", { timeout: 10000 }, async (t) => {
   const { dir, state, kernel, hooks, A } = setup(t, false);
   const hub = {
-    state, kernel, stopping: false,
+    state, kernel, lifecycle: new Lifecycle(hooks), stopping: false,
     agent: (id: string) => state.agents.get(id)!,
     toolServers: () => [{ server: { type: "stdio", name: "render", command: process.execPath,
       args: [fileURLToPath(new URL("./mock-generator.ts", import.meta.url))] } }],
@@ -191,7 +192,7 @@ test("cancelled idle waits for an in-flight prompt's real insertion receipt", as
   pending.batch = [pending];
   const turn = { id: "old", protected: true, first, inputs: [first, pending], held: [], items: [], inserted: true, started: true, done: deferred<any>() };
   session.current = turn;
-  Object.assign(session, { backend: { cancel() {}, caps: { steering: false, orderedCancellation: true } } });
+  Object.assign(session, { backend: { cancel() {}, caps: { orderedCancellation: true } } });
   session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
   session.beginUserStop();
   session.cancelUserWork();
@@ -248,8 +249,8 @@ test("ask is xSB's own tool, served apart from the workflow tools, and logs no w
   const serve = (server?: string) => {
     const handlers = new Map<string, (params: any) => any>();
     const logged: unknown[] = [], asked: unknown[] = [];
-    const session: any = { agentId: "a", current: { started: true, id: "t" }, acceptsTools: true, observeExecution() {}, toolOutput() {}, recordWorkflow: (_: string, d: unknown) => logged.push(d) };
-    const hub: any = { agent: () => ({}), policy: () => ({ outputTokens: 4000 }), paths: {}, questions: { ask: (_: unknown, args: unknown) => (asked.push(args), "shown") } };
+    const session: any = { source: () => ({ agentId: "a", sessionId: "sa", turnId: "t" }), withStep: (_: unknown, call: () => unknown) => call(), agentId: "a", current: { started: true, id: "t" }, acceptsTools: true, observeExecution() {}, toolOutput() {}, recordWorkflow: (_: string, d: unknown) => logged.push(d) };
+    const hub: any = { lifecycle: new Lifecycle(new Hooks<any, any>({ log() {}, vetoed() {}, deadLetter() {} })), agent: () => ({}), policy: () => ({ outputTokens: 4000 }), paths: {}, questions: { ask: (_: unknown, args: unknown) => (asked.push(args), "shown") } };
     serveMcp(hub, { onRequest(name: string, handler: (params: any) => any) { handlers.set(name, handler); } } as any, () => session);
     handlers.get(BRIDGE_ATTACH)!({ token: "x", ...(server ? { server } : {}) });
     return { handlers, logged, asked };

@@ -461,3 +461,31 @@ test("a message xsb recorded follows its records: waiting, owed, given later, an
   assert.ok(!third.pending);
   ws.close();
 });
+
+test("standard tool starts and split UTF-8 terminal bytes update a tool without changing foreground activity", async () => {
+  const peer = new Peer(); snapshot(peer, [agent("a")]);
+  const ws = workspace(peer); await ws.load(); ws["sessionAgent"].set("s", "a");
+  const emit = update => peer.emit("session/update", { sessionId: "s", update });
+  emit({ sessionUpdate: "tool_call", toolCallId: "c", title: "Run command", status: "in_progress", content: [{ type: "terminal", terminalId: "terminal" }] });
+  const bytes = Buffer.from("输出");
+  emit({ sessionUpdate: "terminal_output_chunk", terminalId: "terminal", data: bytes.subarray(0, 2).toString("base64") });
+  emit({ sessionUpdate: "terminal_output_chunk", terminalId: "terminal", data: bytes.subarray(2).toString("base64") });
+  let tool = ws["transcripts"].get("a").find(e => e.kind === "tool");
+  assert.equal(tool.title, "Run command"); assert.equal(tool.terminalOutput, "输出");
+  emit({ sessionUpdate: "terminal_update", terminalId: "terminal", output: { data: Buffer.from("snapshot").toString("base64") }, exitStatus: { exitCode: 0 } });
+  tool = ws["transcripts"].get("a").find(e => e.kind === "tool");
+  assert.equal(tool.terminalOutput, "snapshot", "snapshot replaces rather than duplicates prior chunks");
+  ws.close();
+});
+
+test("idle does not fail background tool cards, including opaque terminal IDs distinct from tool IDs", async () => {
+  const peer = new Peer(); snapshot(peer, [{ ...agent("a"), mainSessionId: "s" }]);
+  const ws = workspace(peer); await ws.load(); ws["sessionAgent"].set("s", "a");
+  const emit = update => peer.emit("session/update", { sessionId: "s", update });
+  emit({ sessionUpdate: "tool_call", toolCallId: "call:opaque", title: "Independent work", status: "in_progress", content: [{ type: "terminal", terminalId: "terminal:opaque" }] });
+  emit({ sessionUpdate: "state_update", state: "idle", background: [{ type: "terminal", terminalId: "terminal:opaque" }] });
+  const tool = ws["transcripts"].get("a").find(e => e.kind === "tool");
+  assert.equal(tool.status, "running");
+  assert.equal(ws["activities"].get("a"), undefined);
+  ws.close();
+});

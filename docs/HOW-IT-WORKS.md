@@ -188,7 +188,7 @@ You are "导演" (agent id: director1). 统筹全片：定创作方向，把工�
 
 **插话看这一轮属于谁**（[KERNEL.md](KERNEL.md) 6）。用户开启或插过话的一轮属于用户：对方在忙时，Agent 发来的消息排在这一轮之后，排队期间对方的模型看不到它。Agent 开启、用户没插过话的一轮属于 Agent：别的 Agent 发来的任务、消息和结果直接插进这一轮。用户的话总是插进去，并把这一轮变成用户的。中枢自己的通知（比如任务被取消）也插进去。要停下对方正在做的事，用 `dispatch_task` 的 `onBusy: "replace"` 改派（见下文"派发"）。
 
-**`message_status(message_id)`** 查对方的模型有没有看到这条消息，返回台账的状态：`queued`（还在排队）、`inserted`（进了对方的对话，还没往下做）、`seen`（看到了）、`discarded_unseen`（没看到，也不会看到）等。不要用它轮询。
+**`message_status(message_id)`** 查对方的模型有没有看到这条消息，返回台账的状态：`queued`（还在排队）、`inserted`（进了对方的对话，还没往下做）、`seen`（看到了）、`discarded_unseen`（没看到，也不会看到）、`insertion_uncertain`（交给后端后连接中断，是否进入对话无法确认，没有重发）等。不要用它轮询。
 
 **场景一：通知。** 用户刚把主演定为 `candidate/阿宁-2`，导演通知美术指导：
 

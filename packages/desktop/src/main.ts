@@ -1,3 +1,4 @@
+import { terminalAuth } from "./terminal-auth.ts";
 /**
  * The desktop app's main process: windows, and what only the operating system
  * can do for them (folder dialog, file protocol, reveal in Finder).
@@ -467,7 +468,26 @@ function connect(paths: Paths): Promise<Workspace> {
       const { title, body } = TEXT[language()].notice(n);
       notice(win, title, body, () => win.webContents.send("xsb:event", { showAgent: n.agentId } satisfies Event));
     };
-    pending = Workspace.open(paths, clis.env(), language(), say, send, notify)
+    const shownWindow = () => {
+      const [id] = [...windows].find(([, shown]) => shown === project) ?? [];
+      return id === undefined ? undefined : BrowserWindow.fromWebContents(webContents.fromId(id)!);
+    };
+    pending = Workspace.open(paths, clis.env(), language(), say, send, notify, {
+      url: async (request, signal) => {
+        const win = shownWindow();
+        if (!win || signal.aborted) return { action: "cancel" };
+        const url = new URL(request.url);
+        if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) return { action: "decline" };
+        const zh = language() === "zh-CN";
+        const choice = await dialog.showMessageBox(win, { type: "question", message: request.message, detail: url.href,
+          buttons: zh ? ["取消", "打开授权页面"] : ["Cancel", "Open authorization page"], defaultId: 1, cancelId: 0, signal });
+        if (signal.aborted) return { action: "cancel" };
+        if (choice.response !== 1) return { action: "decline" };
+        await shell.openExternal(url.href);
+        return { action: "accept" };
+      },
+      terminal: (request, signal) => terminalAuth(request, clis.env(), signal),
+    })
       .then((created) => {
         current?.close();
         projects.set(project, created);
@@ -534,7 +554,7 @@ ipcMain.handle("xsb", async (event, method: string, ...args: any[]) => {
   }
 });
 
-function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): unknown {
+async function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): Promise<unknown> {
   const win = BrowserWindow.fromWebContents(event.sender)!;
   const workspace = workspaceOf(event.sender.id);
   // The caller's pages: those of its side panel, or, for a page's own window, those the page is among.
@@ -672,6 +692,16 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
   }
   if (!workspace) throw new Error("this window has no workspace open");
   // A message's id is the workspace's to choose: the renderer sends content, or names an entry to send again.
+  if (method === "authenticate") {
+    const methods = await workspace.authenticationMethods(args[0]);
+    const zh = language() === "zh-CN";
+    if (!methods.length) throw new Error(zh ? "后端未提供 ACP 登录方式，请使用其命令行登录。" : "The agent offers no ACP login method. Use its CLI to sign in.");
+    const choice = await dialog.showMessageBox(win, { type: "question", message: zh ? "选择登录方式" : "Choose a sign-in method",
+      buttons: [zh ? "取消" : "Cancel", ...methods.map(m => m.name)], defaultId: 1, cancelId: 0 });
+    if (!choice.response) return;
+    await workspace.authenticate(args[0], methods[choice.response - 1].methodId);
+    return workspace.composerState(args[0], true);
+  }
   if (method === "send") return workspace.send(args[0], args[1], typeof args[2] === "string" ? args[2] : undefined, undefined, answerOf(args[4]));
   if (method === "resend" && (typeof args[0] !== "string" || typeof args[1] !== "string")) throw new Error("resend takes an agent and an entry");
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);

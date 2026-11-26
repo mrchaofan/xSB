@@ -2,6 +2,10 @@
 // 键是"所在位置.含义"。值是字符串（占位符写成 {name}），措辞随数量或条件变化时是函数 (v) => 字符串。
 export const TEXT = {
   "zh-CN": {
+    "composer.commands": "命令与技能",
+    "composer.suggestions": "后续输入建议",
+    "composer.skillName": "技能：{name}",
+    "composer.signIn": "登录智能体",
     "flow.sessions": "会话",
     "flow.new": "新建会话",
     "flow.empty": "开始一次新的对话",
@@ -250,6 +254,8 @@ export const TEXT = {
     "entry.tag.interjected": "插话",
     "entry.tag.discarded": "模型未看到",
     "entry.tag.discarded.title": "这条消息没有进入模型的对话。需要的话可以重新发送。",
+    "entry.tag.uncertain": "送达未确认",
+    "entry.tag.uncertain.title": "连接或进程在确认前中断，无法确定这条消息是否进入了对话。xsb 没有自动重发；请先核对结果，需要时再重新发送。",
     "entry.tag.pending": "尚未送达",
     "entry.tag.pending.title": "已发送，模型还没收到这条消息",
     "entry.tag.unsent": "未送达",
@@ -266,6 +272,7 @@ export const TEXT = {
     "entry.reason.refused": "被拒绝",
     "entry.reason.expired": "目标已失效",
     "entry.reason.abandoned": "退出时放弃",
+    "entry.reason.uncertain": "送达未确认",
     "entry.delivered.images": "模型看不到图片（{count} 张）",
     "entry.delivered.spilled": "过长，模型收到开头和全文文件（{count} 段）",
     "entry.delivered.scope": "附带了针对当前工作的说明",
@@ -541,6 +548,10 @@ export const TEXT = {
   },
 
   en: {
+    "composer.commands": "Commands and skills",
+    "composer.suggestions": "Suggested next prompts",
+    "composer.skillName": "Skill: {name}",
+    "composer.signIn": "Sign in to agent",
     "flow.sessions": "Sessions",
     "flow.new": "New session",
     "flow.empty": "Start a conversation",
@@ -789,6 +800,8 @@ export const TEXT = {
     "entry.tag.interjected": "Interjected",
     "entry.tag.discarded": "Not seen by the model",
     "entry.tag.discarded.title": "This message did not reach the model's conversation. You can send it again.",
+    "entry.tag.uncertain": "Delivery unconfirmed",
+    "entry.tag.uncertain.title": "The connection or process ended before confirmation, so whether this message entered the conversation is unknown. xsb did not send it again; check the results first, then send it again if needed.",
     "entry.tag.pending": "Not delivered yet",
     "entry.tag.pending.title": "Sent; the model has not received this message yet",
     "entry.tag.unsent": "Not delivered",
@@ -805,6 +818,7 @@ export const TEXT = {
     "entry.reason.refused": "refused",
     "entry.reason.expired": "its target is gone",
     "entry.reason.abandoned": "dropped when quitting",
+    "entry.reason.uncertain": "delivery unconfirmed",
     "entry.delivered.images": "The model cannot see images ({count})",
     "entry.delivered.spilled": "Too long: the model got its start and a file with all of it ({count})",
     "entry.delivered.scope": "A note about the current work went with it",

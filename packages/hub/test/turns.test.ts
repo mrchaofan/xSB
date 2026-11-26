@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { text, RunExt, TurnExt, TurnFailure, RpcError } from "@xsb/protocol";
+import { text, RunExt, TurnExt, TurnFailure, RpcError, OriginExt, CONNECTION_CLOSED } from "@xsb/protocol";
 import type { Addr, Task } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Delivery } from "../src/delivery.ts";
@@ -38,19 +38,23 @@ function setup(t: test.TestContext, reopen?: string) {
   const kernel = new Kernel(state, hooks, (to) => hub.delivery.recipient(to));
   hub.kernel = kernel;
   hub.delivery = new Delivery(hub);
+  const heldMessageIds = new Set<string>();
+  const heldReplies = new Map<string, { session: LiveSession; resolve(id: string): void }>();
+  let holdSteered = false;
   for (const to of [A, B, C]) {
     const session = new LiveSession(hub, state.sessions.get(to.sessionId)!);
     hub.live.set(to.sessionId, session);
     let generation = 0;
+    const pending = new Set<(error: unknown) => void>();
     const backend = {
-      caps: { steering: true, orderedCancellation: true },
-      async prompt(_id: string, blocks: any[]) {
+      caps: { orderedCancellation: true },
+      async prompt(_id: string, blocks: any[], origin?: any) {
         prompts.push(blocks.map((b) => b.text).join("\n"));
+        if (heldMessageIds.delete(origin?.messageId) || holdSteered && origin?.steered) return new Promise<string>((resolve, reject) => { pending.add(reject); heldReplies.set(origin.messageId, { session, resolve }); });
         session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
         return "receipt";
       },
-      async steer() { return "injected"; },
-      cancel() { effects.push("cancel"); }, close(id: string) { effects.push(`close ${id}`); }, stop() { effects.push("close transport"); },
+      cancel() { effects.push("cancel"); for (const reject of pending) reject(RpcError.cancelled()); pending.clear(); }, close(id: string) { effects.push(`close ${id}`); }, stop() { effects.push("close transport"); },
     };
     (session as any).ensureBackend = async () => {
       if (!(session as any).backend) {
@@ -76,7 +80,14 @@ function setup(t: test.TestContext, reopen?: string) {
     session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
     session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: reason });
   };
+  const holdPrompts = () => { holdSteered = true; };
+  const acceptHeld = (id: string) => {
+    const reply = heldReplies.get(id); assert.ok(reply, `pending standard prompt ${id}`);
+    reply.session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+    heldReplies.delete(id); reply.resolve(`receipt:${id}`);
+  };
   const unread = (id: string, user = false) => {
+    heldMessageIds.add(id);
     const item: MailItem = { id, to: B, from: user ? { kind: "user" } : { kind: "agent", ...C }, kind: "message", content: id, pref: "wake", ts: "" };
     state.commit([ops.enqueue(item)]);
     kernel.mark(id, "submitted");
@@ -89,7 +100,7 @@ function setup(t: test.TestContext, reopen?: string) {
     for (const live of hub.live.values()) live.releaseUserStop(false);
     if (!reopen) fs.rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, paths, state, hooks, kernel, hub, effects, prompts, A, B, C, session, give, settle, stop, idle, unread };
+  return { dir, paths, state, hooks, kernel, hub, effects, prompts, A, B, C, session, give, settle, stop, idle, unread, holdPrompts, acceptHeld };
 }
 
 test("context refusal recovers the same task without publishing a terminal result, and records the attempt", async (t) => {
@@ -177,14 +188,15 @@ test("a task ended before deferred delivery never opens a turn", async (t) => {
 });
 
 test("a queued task completed by its executor is discarded at dequeue instead of run again", async (t) => {
-  const { kernel, state, A, B, give, settle, idle, prompts, session, unread } = setup(t);
+  const { kernel, state, A, B, give, settle, idle, prompts, session, unread, acceptHeld } = setup(t);
   give(A, B, "current"); await settle();
   // The user spoke into it: the turn is the user's, and an agent's task waits its turn.
   unread("the user", true);
   const task = give(A, B, "queued but already completed"); await settle();
   kernel.complete(task, "completed", "done in the current work", []);
   idle(); await settle();
-  // The user's word was not read in that turn: it is carried into the next, then the queue is reached.
+  // A deferred standard prompt is still owned by its original turn until insertion is confirmed.
+  acceptHeld("the user"); await settle();
   idle(); await settle();
   assert.equal(session.busy, false);
   assert.ok(!prompts.some(p => p.includes('title="queued but already completed"')));
@@ -262,7 +274,7 @@ test("a late receipt from the refused binding cannot land the replacement's inpu
     return new Promise<void>((resolve) => replies.push(resolve));
   };
   give(A, B, "late receipt"); await settle();
-  session.onBackendUpdate({ sessionUpdate: "user_message", messageId: "first", content: [text("late receipt")] });
+  session.onBackendUpdate({ sessionUpdate: "user_message", messageId: "first", content: [text("late receipt")], _meta: { [OriginExt.key]: { messageId: session.current!.first.messageId } } });
   session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "Internal error: Prompt is too long" } });
   await settle();
   assert.equal(replies.length, 2);
@@ -361,7 +373,7 @@ test("replacement runs first, then unread prompts retain FIFO order ahead of the
   idle(); await settle(); assert.equal(session.current!.first.messageId, "one");
   idle(); await settle(); assert.equal(session.current!.first.messageId, "two");
   idle(); await settle(); assert.equal(session.current!.first.item!.taskId, queued.id);
-  assert.ok(prompts.findIndex((p) => p.includes('title="replacement"')) < prompts.findIndex((p) => p === "one"));
+  assert.ok(prompts.findIndex((p) => p.includes('title="replacement"')) < prompts.findLastIndex((p) => p === "one"));
 });
 
 test("explicit stop recovers mixed unread prompts in order, including when the queue was empty", async (t) => {
@@ -519,8 +531,9 @@ test("user input after replacement commit joins and protects the replacement tur
 });
 
 test("an unread append expires on normal completion instead of becoming another turn", async (t) => {
-  const { hub, state, A, B, session, give, settle, idle, effects } = setup(t);
+  const { hub, state, A, B, session, give, settle, idle, effects, holdPrompts } = setup(t);
   const old = give(A, B, "old"); await settle();
+  holdPrompts();
   const append = hub.delivery.append(session, session.current!.id, A, "unread append");
   await settle();
   assert.ok(session.current!.inputs.some((i) => i.item?.targetTurnId && !i.in));
@@ -532,8 +545,9 @@ test("an unread append expires on normal completion instead of becoming another 
 });
 
 test("confirmed stop discards an unread targeted append while preserving the conversation", async (t) => {
-  const { hub, state, A, B, session, give, settle, stop, idle, effects } = setup(t);
+  const { hub, state, A, B, session, give, settle, stop, idle, effects, holdPrompts } = setup(t);
   const old = give(A, B, "old"); await settle();
+  holdPrompts();
   const backendId = session.rec.backendSessionId;
   const append = hub.delivery.append(session, session.current!.id, A, "unread append");
   const rejected = assert.rejects(append, /ended or changed/);
@@ -587,7 +601,7 @@ test("idle before the deferred halt still cancels the stopped turn and preserves
 });
 
 test("a peer's work goes into an agent's turn; once the user spoke into it, the turn is the user's and peers wait", async (t) => {
-  const { state, A, B, C, session, give, settle, idle, unread } = setup(t);
+  const { state, A, B, C, session, give, settle, idle, unread, acceptHeld } = setup(t);
   const current = give(A, B, "current"); await settle();
   const turn = session.current!;
   assert.equal(turn.protected, false);
@@ -602,6 +616,8 @@ test("a peer's work goes into an agent's turn; once the user spoke into it, the 
   assert.ok(!session.taskIds().includes(later.id));
   assert.equal(state.tasks.get(later.id)!.status, "queued");
   idle(); await settle();
+  assert.equal(state.tasks.get(current.id)!.status, "running", "a held standard prompt awaits its receipt");
+  acceptHeld("the user"); await settle(); idle(); await settle();
   assert.equal(state.tasks.get(current.id)!.status, "completed");
   assert.equal(state.tasks.get(peer.id)!.status, "completed");
 });
@@ -626,7 +642,7 @@ test("after a restart, what the backend had already taken in is not given again;
   // The user speaks into the running turn; the backend takes it in, works on it, and xsb is killed before the turn ends.
   const spoken = first.kernel.post({ to: first.B, from: { kind: "user" }, kind: "message", prompt: [text("also delete old files")], pref: "wake" }).item;
   await first.settle();
-  first.session.onBackendUpdate({ sessionUpdate: "user_message", messageId: "echo", content: [text("also delete old files")] });
+  first.session.onBackendUpdate({ sessionUpdate: "user_message", messageId: "echo", content: [text("also delete old files")], _meta: { [OriginExt.key]: { messageId: spoken.id } } });
   first.session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("deleting…") });
   await first.settle();
   assert.equal(first.state.ledger.get(spoken.id)?.state, "seen");
@@ -643,6 +659,50 @@ test("after a restart, what the backend had already taken in is not given again;
   const said = records.filter((u: any) => u.sessionUpdate === "user_message_chunk").map((u: any) => u.content.text);
   assert.equal(said.filter((x: string) => x === "also delete old files").length, 1, "shown once");
   assert.ok(records.some((u: any) => u._meta?.[TurnFailure.key]?.data?.errorKind === "execution_uncertain"), "the user is told");
+});
+
+test("a prompt whose connection closes before its receipt is uncertain: kept, said so, never given again", async (t) => {
+  const { state, session, give, settle, prompts, A, B } = setup(t);
+  const backend = await (session as any).ensureBackend();
+  backend.prompt = async (_id: string, blocks: any[]) => { prompts.push(blocks.map((b) => b.text).join("\n")); throw new RpcError(CONNECTION_CLOSED, "backend: connection closed"); };
+  const task = give(A, B, "maybe taken"); await settle();
+  const entry = [...state.ledger.values()].find((e) => e.taskId === task.id)!;
+  assert.equal(entry.state, "insertion_uncertain", "neither inserted nor known to be unseen");
+  assert.ok(!state.mail.has(entry.messageId), "it does not wait to be given again");
+  assert.equal(state.tasks.get(task.id)!.status, "failed");
+  assert.equal(prompts.length, 1, "one copy only was ever offered");
+  assert.equal(session.busy, false);
+});
+
+test("after a restart, input offered to the backend without a receipt is uncertain, not replayed; a declined one is given again", async (t) => {
+  const first = setup(t);
+  const backend = await (first.session as any).ensureBackend();
+  backend.prompt = (_id: string, blocks: any[]) => { first.prompts.push(blocks.map((b: any) => b.text).join("\n")); return new Promise<string>(() => {}); };
+  const task = first.give(first.A, first.B, "power lost"); await first.settle();
+  const offered = [...first.state.ledger.values()].find((e) => e.taskId === task.id)!;
+  assert.equal(offered.state, "submitted");
+  assert.equal(offered.offered?.backendSessionId, first.session.rec.backendSessionId, "the offer is durable before the write");
+
+  const second = setup(t, first.dir);
+  second.kernel.resume(); await second.settle();
+  assert.deepEqual(second.prompts, [], "nothing is given to the backend again");
+  assert.equal(second.state.ledger.get(offered.messageId)?.state, "insertion_uncertain");
+  assert.ok(!second.state.mail.has(offered.messageId));
+  assert.equal(second.state.tasks.get(task.id)!.status, "failed");
+  assert.match(second.state.tasks.get(task.id)!.result ?? "", /could not be confirmed/);
+
+  // The backend's own -32800 is an answer: that input was not inserted, so a restart gives it again.
+  const third = setup(t);
+  const item: MailItem = { id: "declined", to: third.B, from: { kind: "agent", ...third.C }, kind: "message", content: "declined once", pref: "wake", ts: "" };
+  const about = { agentId: third.B.agentId, sessionId: third.B.sessionId, from: item.from };
+  third.state.commit([ops.enqueue(item)]);
+  third.kernel.offered([{ messageId: item.id, about }], "backend-b-1", item.id);
+  third.kernel.declined([item.id]);
+  assert.equal(third.state.ledger.get(item.id)?.offered, undefined, "the refusal cleared the offer");
+  const fourth = setup(t, third.dir);
+  fourth.kernel.resume(); await fourth.settle();
+  assert.notEqual(fourth.state.ledger.get(item.id)?.state, "insertion_uncertain");
+  assert.ok(fourth.prompts.some((p) => p.includes("declined once")), "known not to be in the conversation: given again");
 });
 
 test("while the hub stops, no turn starts: what waits runs on the next start", async (t) => {
@@ -687,7 +747,6 @@ test("a turn that fails with input given and unanswered fences the backend befor
   const { session, effects, unread, give, settle, A, B } = setup(t);
   give(A, B, "work"); await settle();
   const backend = (session as any).backend;
-  backend.caps.steering = false;
   backend.caps.orderedCancellation = false;
   let answer: () => void = () => {};
   backend.prompt = (_id: string) => new Promise<string>((resolve) => { answer = () => resolve("late receipt"); });
@@ -798,7 +857,7 @@ test("an insertion receipt claims an unowned run from that point, preserving ear
   const sent = hub.delivery.fromUser(session, [text("join this execution")], { kind: "user", messageId: "claim-run" });
   await settle();
   const turn = session.current!;
-  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "echo-claim", content: text("join this execution") });
+  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "echo-claim", content: text("join this execution"), _meta: { [OriginExt.key]: { messageId: "claim-run" } } });
   assert.equal(turn.inserted, true);
   assert.equal(session.acceptsTools, true);
   session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("after insertion") });
@@ -834,7 +893,6 @@ test("a turn waits for pending prompt receipts and can own several backend execu
   await settle();
   const turn = session.current!, runs: any[] = [];
   hooks.on("acp.run_started", (event: any) => { runs.push(event.run); });
-  (backend as any).caps.steering = false;
   let receipt!: () => void;
   (backend as any).prompt = () => new Promise<void>(resolve => { receipt = resolve; });
   const later = hub.delivery.fromUser(session, [text("later")], { kind: "user", messageId: "multi-later" });
@@ -857,7 +915,6 @@ test("running never associates a later queued prompt with the first prompt's exe
   await hub.delivery.fromUser(session, [text("first")], { kind: "user", messageId: "early-first" });
   await settle();
   const turn = session.current!;
-  (backend as any).caps.steering = false;
   let receipt!: () => void;
   (backend as any).prompt = () => new Promise<void>(resolve => { receipt = resolve; });
   const later = hub.delivery.fromUser(session, [text("later")], { kind: "user", messageId: "early-later" });
@@ -890,7 +947,7 @@ test("user corrections still join and protect a pending turn while backend execu
   assert.ok(turn.inputs.some(i => i.messageId === "pending-correction"));
   assert.equal(session.acceptsTools, false);
   receipt(); await first; await settle();
-  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "echo-correction", content: text("correction") });
+  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "echo-correction", content: text("correction"), _meta: { [OriginExt.key]: { messageId: "pending-correction" } } });
   await correction;
   assert.equal(session.current, turn);
   session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
@@ -972,8 +1029,9 @@ test("sending the same message again (its answer was lost) reaches the model onc
 });
 
 test("a user stop records what it took from the model: queued user mail is shown as not seen, not dropped silently", async (t) => {
-  const { session, state, hub, settle, B, give, A, idle } = setup(t);
+  const { session, state, hub, settle, B, give, A, idle, holdPrompts } = setup(t);
   give(A, B, "work"); await settle();
+  holdPrompts();
   const client: any = { echo: true };
   const waiting = hub.delivery.fromUser(session, [text("LATER")], { kind: "user", messageId: "s1" }, client);
   await settle();
@@ -1006,4 +1064,97 @@ test("a backend session named after xsb's own words does not rename the conversa
     assert.equal(title(own), "做一支短片");
   }
   assert.equal(title("短片的分镜"), "短片的分镜");
+});
+
+test("native background steps finish under their original turn while a later turn executes", async (t) => {
+  const { session, A, B, give, settle, hooks } = setup(t);
+  const ended: any[] = [];
+  hooks.on("step.ended", event => { ended.push(event); });
+  give(A, B, "first"); await settle();
+  const old = session.current!.id;
+  session.onBackendUpdate({ sessionUpdate: "tool_call", toolCallId: "bg", title: "Background", status: "in_progress" });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn", background: [{ type: "tool_call", toolCallId: "bg" }] });
+  await settle();
+  assert.equal(session.current, undefined, "background work does not extend a turn");
+  assert.equal(ended.length, 0, "background step remains observable after foreground idle");
+  give(A, B, "second"); await settle();
+  const next = session.current!.id;
+  session.onBackendUpdate({ sessionUpdate: "tool_call_update", toolCallId: "bg", status: "completed", _meta: { [TurnExt.key]: { id: old } } });
+  await settle();
+  assert.equal(session.current!.id, next);
+  assert.equal(session.current!.executed, undefined, "old tool update is not execution evidence for the new turn");
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0].source.turnId, old);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn", background: [] });
+  await settle();
+});
+
+test("job provenance is durable before delayed dispatch and hooks cannot retarget its turn", async (t) => {
+  const { session, A, B, give, settle, kernel, state, dir, hooks } = setup(t);
+  give(A, B, "create work"); await settle();
+  const old = session.current!.id;
+  hooks.decider("task.pre_create", ({ task }) => ({ task: { ...task, source: { ...task.source, turnId: "spoof" } } }));
+  const job = kernel.createJob(B, { title: "job", topic: "topic", tool: { server: "render", name: "render", arguments: {} } });
+  assert.ok(!isVeto(job));
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  await settle();
+  assert.equal(state.tasks.get(job.id)!.source?.turnId, old);
+  const restored = new State(new Store(new Paths(dir).dir)); restored.load();
+  assert.equal(restored.tasks.get(job.id)!.source?.turnId, old);
+});
+
+test("standard prompt receipts keep a priority correction separate from a deferred command", async (t) => {
+  const { session, hub, settle } = setup(t);
+  await hub.delivery.fromUser(session, [text("first")], { kind: "user", messageId: "priority-first" });
+  const turn = session.current!, backend = await session.ensureBackend();
+  const replies: ((id: string) => void)[] = [];
+  (backend as any).caps.steering = true; // A legacy advertisement must have no effect on transport selection.
+  (backend as any).steer = () => { throw new Error("legacy transport invoked"); };
+  (backend as any).prompt = () => new Promise<string>(resolve => replies.push(resolve));
+  const command = hub.delivery.fromUser(session, [text("/compact")], { kind: "user", messageId: "deferred-command" });
+  const correction = hub.delivery.fromUser(session, [text("change the target")], { kind: "user", messageId: "priority-correction" });
+  await settle();
+  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "native-correction", content: text("change the target") });
+  assert.equal(turn.inputs.find(i => i.messageId === "deferred-command")!.in, undefined);
+  assert.equal(turn.inputs.find(i => i.messageId === "priority-correction")!.in, undefined, "anonymous echo cannot select among pending batches");
+  replies[1]("native-correction"); await correction; await settle();
+  assert.equal(turn.inputs.find(i => i.messageId === "priority-correction")!.in, true);
+  assert.equal(turn.inputs.find(i => i.messageId === "deferred-command")!.in, undefined);
+  assert.equal(session.current, turn);
+  replies[0]("native-command"); await command; await settle();
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  await settle(); assert.equal(session.busy, false);
+});
+
+test("a targeted standard prompt inserted before idle may acknowledge after idle without losing completion", async (t) => {
+  const { session, hub, give, A, B, settle, effects } = setup(t);
+  give(A, B, "first"); await settle();
+  const backend = await session.ensureBackend();
+  let receipt!: (id: string) => void;
+  (backend as any).prompt = () => new Promise<string>(resolve => receipt = resolve);
+  const appended = hub.delivery.append(session, session.current!.id, A, "apply before finishing");
+  await settle();
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  receipt("late append response"); await appended; await settle();
+  assert.equal(session.busy, false);
+  assert.ok(!effects.includes("revoke"), "an inserted append does not need expiry isolation");
+});
+
+test("an exact prompt receipt settles an unowned execution that already ended without replay or retroactive ownership", async (t) => {
+  const { session, hub, state, B, settle } = setup(t);
+  const backend = await session.ensureBackend();
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  let receipt!: (id: string) => void;
+  (backend as any).prompt = () => new Promise<string>(resolve => receipt = resolve);
+  const input = hub.delivery.fromUser(session, [text("input")], { kind: "user", messageId: "late-owned-input" });
+  await settle();
+  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "native-input", content: text("input") });
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("before the response") });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  assert.ok(session.current, "wait for exact insertion correlation");
+  receipt("native-input"); await input; await settle();
+  assert.equal(session.busy, false);
+  const output = metas(state, B).find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text === "before the response");
+  assert.equal(output._meta[RunExt.key].turnId, null, "already displayed output keeps its original attribution");
+  assert.equal(state.ledger.get("late-owned-input")?.state, "seen", "normal completion settles the inserted input without resending it");
 });

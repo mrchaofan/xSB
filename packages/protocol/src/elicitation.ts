@@ -1,5 +1,5 @@
 /** ACP forms projected onto the same questions used by xSB's own ask UI. */
-import type { ElicitationRequest } from "./acp.ts";
+import type { FormElicitationRequest } from "./acp.ts";
 import type { QuestionAnswer, QuestionItem } from "./ext.ts";
 import { RpcError } from "./jsonrpc.ts";
 
@@ -7,7 +7,7 @@ type Field = { key: string; schema: any; choices: { label: string; value: unknow
 export type ElicitationForm = { questions: QuestionItem[]; fields: Field[] };
 const fail = (message: string): never => { throw RpcError.invalidParams(message); };
 
-export function elicitationForm(request: ElicitationRequest): ElicitationForm {
+export function elicitationForm(request: FormElicitationRequest): ElicitationForm {
   const schema = request.requestedSchema;
   if (request.mode !== "form" || schema?.type !== "object" || !schema.properties || typeof schema.properties !== "object" || Array.isArray(schema.properties))
     return fail("Unsupported elicitation form");
@@ -15,7 +15,8 @@ export function elicitationForm(request: ElicitationRequest): ElicitationForm {
   const companions = new Map<string, string>();
   for (const [key, prop] of Object.entries(props)) {
     const codex = prop?._meta?.codex;
-    const target = codex?.role === "user_note" ? codex.questionId
+    const custom = prop?._meta?.jetbrains?.air?.customAnswer ?? prop?._meta?._askUserQuestionCustomAnswer;
+    const target = custom?.isCustomAnswer === true ? custom.questionId : codex?.role === "user_note" ? codex.questionId
       : /^question_\d+_custom$/.test(key) && prop?.title === "Other" ? key.slice(0, -7) : undefined;
     if (prop?.type === "string" && typeof target === "string" && props[target]) companions.set(target, key);
   }

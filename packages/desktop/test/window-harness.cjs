@@ -43,6 +43,7 @@ fs.writeFileSync(
     version: 1,
     backends: {
       mock: { command: process.env.XSB_TEST_NODE, args: [path.join(root, "packages/hub/test/mock-agent.ts")] },
+      ...(process.env.XSB_TEST_CAPABILITY_AGENT ? { capabilities: { command: process.env.XSB_TEST_NODE, args: [path.join(root, "packages/hub/test/capability-agent.ts")] } } : {}),
     },
   }),
 );

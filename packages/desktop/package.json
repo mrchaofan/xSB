@@ -14,8 +14,8 @@
     "@volcengine/ark-cli-win32-x64": "1.0.65"
   },
   "devDependencies": {
-    "@agentclientprotocol/claude-agent-acp": "^0.107.0",
-    "@agentclientprotocol/codex-acp": "^2.6.0",
+    "@agentclientprotocol/claude-agent-acp": "0.112.0",
+    "@agentclientprotocol/codex-acp": "2.12.0",
     "@types/cross-spawn": "^6.0.6",
     "@xsb/hub": "1.0.7",
     "@xsb/protocol": "1.0.7",

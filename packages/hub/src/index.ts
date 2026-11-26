@@ -15,3 +15,8 @@ export { settingsBundle, restoreSettingsBundle, validateSettingsBundle } from ".
 export type { SettingsBundle } from "./settings-backup.ts";
 export { atomicWrite } from "@xsb/store";
 export { updateJsonFile } from "./config-files.ts";
+
+export { Hooks, isVeto } from "./hooks.ts";
+export { Lifecycle } from "./lifecycle.ts";
+export type { LifecycleEvent, LifecyclePoint } from "./lifecycle.ts";
+export type { KernelHooks } from "./kernel.ts";

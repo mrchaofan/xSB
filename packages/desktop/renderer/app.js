@@ -1,3 +1,4 @@
+import { composerCapabilities } from "./capabilities.js";
 // 窗口本身：打开工作区、左栏、对话栏、制品栏。
 // 只通过 window.xsb 取数据和发指令，不知道背后是 mock 还是 Electron 的 preload。
 // xsb 是全局对象：Electron 里由 preload 注入，浏览器里直接打开时由 mock.js 提供。
@@ -188,6 +189,7 @@ function inputState(entry) {
   if (entry.redelivered) return { tag: t("entry.tag.redelivered"), title: t("entry.tag.redelivered.title") };
   if (entry.discarded && entry.resentAs) return { tag: t("entry.tag.resent"), title: why };
   if (entry.discarded && entry.owed) return { tag: t("entry.tag.owed"), title: [t("entry.tag.owed.title"), why].filter(Boolean).join("\n") };
+  if (entry.discarded && entry.reason === "uncertain") return { tag: t("entry.tag.uncertain"), title: [t("entry.tag.uncertain.title"), entry.detail].filter(Boolean).join("\n") };
   if (entry.discarded) return { tag: t("entry.tag.discarded"), title: [t("entry.tag.discarded.title"), why].filter(Boolean).join("\n") };
   if (entry.pending) return { tag: t("entry.tag.pending"), title: t("entry.tag.pending.title") };
   return { tag: entry.origin.steered ? t("entry.tag.interjected") : null };
@@ -272,7 +274,8 @@ function openLane(agentId, panel, readonly) {
   editor.el.onfocus = () => {
     setReferenceTarget(agentId);
   };
-  const controls = composerSettings(agentId);
+  const capabilities = composerCapabilities(agentId, editor, () => { saveDraft(key, editor.snapshot()); syncLane(agentId); });
+  const controls = composerSettings(agentId, value => capabilities.update(value));
   // 主会话可以换后端（任务节点的后端由工作流决定）。
   const picker = panel ? null : backendPicker(agentId);
 
@@ -285,13 +288,14 @@ function openLane(agentId, panel, readonly) {
       h("button", { class: "icon-btn", title: t("lane.close"), "aria-label": t("lane.close"), html: ICON.close, hidden:!!panel, onclick: () => {closeLane(agentId); renderSide();} })),
     h("div", { class: "transcript" }, h("button", { class: "btn history-more", hidden: state.history?.[agentId] == null, onclick: () => loadHistory(agentId) }, t("history.more")), h("div", { class: "entries" })),
     h("div", { class: "composer" },
-      editor.tray, editor.el, editor.error,
+      editor.tray, editor.el, editor.error, !readonly && capabilities.el,
       h("div", { class: "composer-row" },
         h("span", { class: "hint", role: "status" }, h("i", { class: "state" }), h("span", {})),
         picker?.el, controls.el, controls.usage, h("button", { class: "send", onclick: press }))));
   lane.picker = picker;
   lane.editor = editor;
   lane.controls = controls;
+  lane.capabilities = capabilities;
   lane.send = send;
   lane.saveDraft = () => saveDraft(key, editor.snapshot());
   lane.updateSession = (previous) => {
@@ -393,6 +397,7 @@ function syncLane(agentId) {
   if (!lane) return;
   const { state: s, name, backend } = agentOf(agentId);
   lane.dataset.state = s;
+  lane.capabilities?.refresh();
   lane.picker?.update();
   fill(lane.querySelector(".lane-avatar"), avatarImage(agentOf(agentId)));
   lane.querySelector(".lane-head strong").textContent = name;
@@ -479,7 +484,7 @@ function entryNode(agentId, entry) {
     const o = entry.origin;
     // 用户看到的就是模型看到的：每条输入标明模型是否收到。模型没收到的照样留在记录里，写明原因，从不删除。
     const { tag, title } = inputState(entry);
-    const unseen = entry.discarded && !entry.redelivered;
+    const unseen = entry.discarded && !entry.redelivered && entry.reason !== "uncertain";
     const resendable = entry.discarded && o.kind === "user" && !entry.redelivered && !entry.resentAs;
     return h("div", { ...base, "data-origin": o.kind, "data-discarded": unseen, "data-pending": entry.pending || entry.unsent, title },
       o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId)),
@@ -506,7 +511,7 @@ function entryNode(agentId, entry) {
     return h("details", { ...base, ontoggle: e => {
       if (e.currentTarget.open && !body.childNodes.length) fill(body,
         entry.title && h("pre", { class: "tool-description" }, entry.title),
-        part("tool.input", entry.input), part("tool.output", entry.output),
+        part("tool.input", entry.input), part("tool.output", entry.terminalOutput ?? entry.output),
         artifact && h("button", { class: "chip", "data-artifact": artifact.id, "aria-pressed": String(artifact.id === state.artifactId), html: ICON.file, onclick: () => showArtifact(artifact.id) }, artifact.name));
     } },
       h("summary", { title: t("tool.details") },

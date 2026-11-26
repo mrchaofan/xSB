@@ -83,12 +83,20 @@ export const SessionControls = {
 } as const;
 
 export type ComposerState = {
+  background?: Record<string, unknown>[];
+  commands?: import("./acp.ts").AvailableCommand[];
+  suggestions?: import("./acp.ts").PromptSuggestion[];
+  skill?: { inline: boolean };
   connected: boolean;
   configOptions: unknown;
   selected: Record<string, string>;
   used?: number;
   size?: number;
 };
+
+/** Native insertion evidence and its later association with a Hub input. Never a model-execution receipt. */
+export const InsertionTrace = { key: `${NS}/insertion` };
+export type InsertionTrace = { phase: "observed" | "linked"; backendSessionId: string; nativeMessageId: string };
 
 export const Agents = {
   capability: `${NS}/agents`,
@@ -207,7 +215,11 @@ export type DeliveryPref = "sync" | "wake" | "lazy";
  */
 export type Grant = { cap: "dispatch" | "message"; to?: string[] };
 
+/** Captured when work is accepted, independent of the turn active when an observer handles it. */
+export type ExecutionSource = { agentId: string; sessionId: string; turnId: string | null; backendSessionId?: string; contextEpoch?: number; stepId?: string };
+
 export type Task = {
+  source?: ExecutionSource;
   id: string;
   title: string;
   topic: string;
@@ -271,19 +283,20 @@ export const Tasks = {
  *
  *   inboxed               kept for the agent; comes with its next turn            (a notification that wakes nobody)
  *   queued                waits in xsb behind the running turn; the model knows nothing of it
- *   submitted             given to the session, not yet to the model               (held until the backend can take it)
- *   inserted              in the model's conversation, not yet acted upon
+ *   submitted             routed/submitted; no insertion receipt yet
+ *   inserted              accepted by the backend conversation, not proof of model execution
  *   seen                  the model went on after it
  *   inserted_unprocessed  in the conversation, but the turn was stopped before the model went on; it is seen
  *                         when the session goes on, and discarded if it never does
- *   discarded_unseen      never reached the model, and never will
+ *   discarded_unseen      delivery revoked/declined; not automatically retried
+ *   insertion_uncertain   offered before a connection/power failure; insertion could not be confirmed
  *
  * The signals are ACP v2's: "inserted" is the answer to `session/prompt` (its insertion), "discarded_unseen" the
  * -32800 of a prompt cancelled before it; "seen" is anything the backend reports after an insertion, or its idle that
  * ended the work normally.
  */
-export type LedgerState = "inboxed" | "queued" | "submitted" | "inserted" | "seen" | "inserted_unprocessed" | "discarded_unseen";
-export type LedgerEntry = { messageId: string; agentId: string; sessionId: string; from: Origin; taskId?: string; state: LedgerState; ts: string };
+export type LedgerState = "inboxed" | "queued" | "submitted" | "inserted" | "seen" | "inserted_unprocessed" | "discarded_unseen" | "insertion_uncertain";
+export type LedgerEntry = { messageId: string; agentId: string; sessionId: string; from: Origin; taskId?: string; state: LedgerState; ts: string; offered?: { backendSessionId: string; key: string } };
 export const Ledger = {
   update: `_${NS}/messages/update`,
   /**
@@ -353,7 +366,7 @@ export const Discarded = { key: `${NS}/discarded` } as const;
 export type Discarded = { messageId: string; origin: OriginMeta; content: ContentBlock[]; reason?: DiscardReason; detail?: string; owed?: boolean;
   /** The user sent it again, as this message: it is no longer owed. */
   resentAs?: string };
-export type DiscardReason = "stopped" | "failed" | "too_large" | "refused" | "expired" | "abandoned";
+export type DiscardReason = "stopped" | "failed" | "too_large" | "refused" | "expired" | "abandoned" | "uncertain";
 
 /**
  * The user's message as xsb accepted it, before it is in the model's conversation: recorded, so that a reader of the

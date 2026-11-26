@@ -15,7 +15,7 @@ export type Veto = { veto: string };
 export const isVeto = (x: unknown): x is Veto => typeof x === "object" && x !== null && "veto" in x;
 
 type Points = Record<string, unknown>;
-type Observer = (event: any) => void | Promise<void>;
+type Observer = { handler: (event: any) => void | Promise<void>; retries: number };
 
 export type HookReports = {
   log(line: string): void;
@@ -31,6 +31,7 @@ export class Hooks<Decide extends Points, Observe extends Points> {
   private observers = new Map<keyof Observe, Observer[]>();
   private pending: { point: keyof Observe; event: unknown }[] = [];
   private draining?: Promise<void>;
+  private active = new Set<Promise<void>>();
   private reports: HookReports;
 
   constructor(reports: HookReports) {
@@ -41,9 +42,10 @@ export class Hooks<Decide extends Points, Observe extends Points> {
     this.deciders.set(point, [...(this.deciders.get(point) ?? []), handler]);
   }
 
-  on<K extends keyof Observe>(point: K, handler: (event: Observe[K]) => void | Promise<void>): () => void {
-    this.observers.set(point, [...(this.observers.get(point) ?? []), handler]);
-    return () => this.observers.set(point, (this.observers.get(point) ?? []).filter((h) => h !== handler));
+  on<K extends keyof Observe>(point: K, handler: (event: Observe[K]) => void | Promise<void>, options: { retries?: number } = {}): () => void {
+    const observer = { handler, retries: options.retries ?? RETRIES };
+    this.observers.set(point, [...(this.observers.get(point) ?? []), observer]);
+    return () => this.observers.set(point, (this.observers.get(point) ?? []).filter((h) => h !== observer));
   }
 
   decide<K extends keyof Decide>(point: K, payload: Decide[K]): Decide[K] | Veto {
@@ -52,6 +54,10 @@ export class Hooks<Decide extends Points, Observe extends Points> {
       let next: Decide[K] | Veto;
       try {
         next = handler(current);
+        if (next && typeof (next as any).then === "function") {
+          void Promise.resolve(next).catch(() => {});
+          next = { veto: `${String(point)}: decision hooks must be synchronous` };
+        }
       } catch (e) {
         next = { veto: `${String(point)}: ${e instanceof Error ? e.message : String(e)}` };
       }
@@ -75,6 +81,11 @@ export class Hooks<Decide extends Points, Observe extends Points> {
     while (this.draining) await this.draining;
   }
 
+  /** Explicit observer barrier, never part of ending a turn. */
+  async completed(): Promise<void> {
+    do { await this.settled(); await Promise.all([...this.active]); } while (this.draining || this.active.size);
+  }
+
   private drain(): void {
     for (let next = this.pending.shift(); next; next = this.pending.shift()) {
       for (const handler of this.observers.get(next.point) ?? []) this.attempt(String(next.point), handler, next.event, 0);
@@ -84,13 +95,17 @@ export class Hooks<Decide extends Points, Observe extends Points> {
 
   private attempt(point: string, handler: Observer, event: unknown, tries: number): void {
     const failed = (e: unknown): void => {
-      if (tries < RETRIES) return this.attempt(point, handler, event, tries + 1);
+      if (tries < handler.retries) return this.attempt(point, handler, event, tries + 1);
       this.reports.log(`hook ${point}: dead letter after ${tries + 1} tries: ${e instanceof Error ? e.stack : String(e)}`);
       this.reports.deadLetter(point, event, e);
     };
     try {
-      const done = handler(event);
-      if (done instanceof Promise) done.catch(failed);
+      const done = handler.handler(event);
+      if (done && typeof done.then === "function") {
+        const work = Promise.resolve(done).then(() => {}, failed);
+        this.active.add(work);
+        void work.then(() => this.active.delete(work), () => this.active.delete(work));
+      }
     } catch (e) {
       failed(e);
     }

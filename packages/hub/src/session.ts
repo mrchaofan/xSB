@@ -1,3 +1,5 @@
+import { airSuggestions } from "./air-compat.ts";
+import { Lifecycle } from "./lifecycle.ts";
 import fs from "node:fs";
 import path from "node:path";
 /**
@@ -15,13 +17,12 @@ import path from "node:path";
  * next turn's.
  *
  * Every input has a receipt: it is inserted into the backend's conversation
- * (the answer to `session/prompt`, or for `_session/steering` the backend
- * showing it), or it never will be in this turn: -32800, dropped by a stop, or
+ * (the response to `session/prompt`, or a correlated backend echo), or it never will be in this turn: -32800, dropped by a stop, or
  * stopped while the hub still held it. The user's is then kept for the next
  * turn; mail waits for a turn of its own.
  */
-import { SessionControls, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, Redelivered, RunExt, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
-import type { BackendRun, RunUpdate, Boundary, ContentBlock, DiscardReason, ElicitationRequest, ElicitationResponse, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
+import { SessionControls, InsertionTrace, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, Redelivered, RunExt, TurnExt, TurnFailure, RpcError, CONNECTION_CLOSED, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
+import type { ExecutionSource, BackendRun, RunUpdate, Boundary, ContentBlock, DiscardReason, ElicitationResponse, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
@@ -74,10 +75,12 @@ export type Input = Discarded &
   TurnRequest & {
     inserted: Deferred<void>;
     shown?: boolean;
-    /** Given to the backend and not answered yet: as a prompt, or into the work under way (`_session/steering`). */
-    sent?: "prompt" | "steering";
+    /** Submitted through ACP session/prompt; execution and insertion settle separately. */
+    sent?: "prompt";
     /** Execution associated with this request, even if its insertion receipt follows that execution's idle. */
     runId?: string;
+    backendSessionId?: string;
+    backendMessageId?: string;
     /** The inputs it was given with, in one prompt. */
     batch?: Input[];
     /** What went in front of that prompt (instructions, a handoff, workflow context): owed again if it is refused. */
@@ -170,12 +173,15 @@ export class LiveSession {
   private turnWindows: TurnWindow[] = [];
   /** What `session/new` or `session/resume` of the backend answered: config options, commands. */
   setup: { configOptions?: unknown; availableCommands?: unknown } = {};
+  private suggestions: import("@xsb/protocol").PromptSuggestion[] = [];
   /** MCP servers the creating client asked for, passed on next to the hub's own. */
   clientMcp: McpServer[] = [];
   /** The tools and prompt its backend session was last started with (Hub.toolsKeyFor): plugin changes compare to it. */
   toolsKey?: string;
 
   private hub: Hub;
+  private lifecycle: Lifecycle;
+  private suggestionFormat?: "standard" | "air";
   /** Input that waits for a turn of its own. */
   private queue: Input[] = [];
   /** What the user said that a stop kept from the model: it goes first when the next turn starts. */
@@ -190,6 +196,7 @@ export class LiveSession {
   private stopTimer?: NodeJS.Timeout;
   /** The id of the input the backend showed last. */
   private echoed?: string;
+  private insertionRuns = new Map<string, BackendRun | null>();
   private backend?: Backend;
   private binding?: Promise<void>;
   /** Text to put in front of the next prompt. */
@@ -210,11 +217,44 @@ export class LiveSession {
   private estimated = 0;
   private standingTokens = 0;
   private currentRun?: BackendRun;
+  private toolSteps = new Map<string, ReturnType<Hub["lifecycle"]["step"]>>();
+  private toolSources = new Map<string, { source: ExecutionSource; run: BackendRun }>();
+  private terminalSources = new Map<string, { source: ExecutionSource; run?: BackendRun; toolCallId?: string }>();
+  private background: Record<string, any>[] = [];
+  private backgroundSteps = new Set<string>();
+  private mcpSources: ExecutionSource[] = [];
+  source(turnId: string | null = this.current?.id ?? null): ExecutionSource {
+    return this.mcpSources.at(-1) ?? { agentId: this.agentId, sessionId: this.id, turnId,
+      backendSessionId: this.rec.backendSessionId, contextEpoch: this.rec.contextEpoch ?? 0 };
+  }
+  withStep<T>(source: ExecutionSource, call: () => T): T {
+    this.mcpSources.push(source);
+    try { return call(); } finally { this.mcpSources.pop(); }
+  }
+  private closeSteps(reason: string, all = false): void {
+    for (const [id, step] of this.toolSteps) if (all || !this.backgroundSteps.has(id)) { step.end({ reason }); this.toolSteps.delete(id); }
+    if (all) { this.backgroundSteps.clear(); this.background = []; this.toolSources.clear(); this.terminalSources.clear(); }
+  }
+  private backgroundSnapshot(items: Record<string, any>[]): void {
+    if (JSON.stringify(this.background) === JSON.stringify(items)) return;
+    this.background = structuredClone(items);
+    const ids = new Set(items.map(i => i.toolCallId ?? this.terminalSources.get(i.terminalId)?.toolCallId ?? i.terminalId).filter((id): id is string => typeof id === "string"));
+    for (const id of this.backgroundSteps) if (!ids.has(id)) { this.toolSteps.get(id)?.end({ reason: "background_completed" }); this.toolSteps.delete(id); }
+    this.backgroundSteps = ids;
+    this.lifecycle.emit("session.background_changed", this.source(), { items: this.background.map(item => ({ ...item,
+      source: (item.type === "terminal" ? this.terminalSources.get(item.terminalId)?.source : this.toolSources.get(item.toolCallId)?.source) ?? { ...this.source(null), turnId: null } })) });
+    this.notifyControls();
+  }
+  private bound(resumed: boolean): void {
+    this.lifecycle.emit("session.bound", this.source(), { resumed });
+  }
   private announcedRun?: BackendRun;
   private lastRun?: RunUpdate;
+  private lastRunEnd?: TurnEnd;
 
   constructor(hub: Hub, rec: SessionRec) {
     this.hub = hub;
+    this.lifecycle = hub.lifecycle ?? new Lifecycle(hub.kernel.hooks);
     this.rec = rec;
     this.clientMcp = rec.clientMcp ?? [];
     this.used = rec.used;
@@ -240,6 +280,9 @@ export class LiveSession {
   get agentId(): string {
     return this.rec.agentId;
   }
+  get configurationIdle(): boolean { return !this.busy && !this.currentRun && !this.background.length && !this.binding && !this.userStopping; }
+  resumeAfterAuth(): void { this.pump(); }
+
   get busy(): boolean {
     return !!this.current || this.queue.length > 0;
   }
@@ -288,6 +331,10 @@ export class LiveSession {
   }
 
   private async bind(backend: Backend): Promise<void> {
+    this.closeSteps("rebound", true);
+    this.insertionRuns.clear();
+    this.suggestions = [];
+    this.suggestionFormat = undefined;
     this.finishRun({ stopReason: "cancelled" });
     this.lastRun = undefined;
     const agent = this.hub.agent(this.agentId);
@@ -327,6 +374,7 @@ export class LiveSession {
         // Settings the backend no longer offers are dropped (`restoreConfig`); they do not undo the resume.
         await this.restoreConfig(backend, prior);
         this.backend = backend;
+        this.bound(true);
         this.estimated = this.used ?? this.standingTokens;
         this.notifyControls();
         // A resumed adapter without systemPrompt must also receive updated lifecycle/role instructions.
@@ -356,6 +404,7 @@ export class LiveSession {
       ...(renewal === "backend_changed" ? { contextRenewAt: undefined, contextRecovery: undefined, selectedConfig: undefined } : {}) });
     backend.open(created.sessionId, this);
     this.backend = backend;
+    this.bound(false);
     this.estimated = this.standingTokens;
     if (renewal && checkpoint !== undefined) {
       this.forget();
@@ -506,9 +555,15 @@ export class LiveSession {
     return result;
   }
 
+  clearSuggestions(): void { if (this.suggestions.length) { this.suggestions = []; this.notifyControls(); } }
+
   composerState() {
     return { connected: !!this.backend, configOptions: this.backend ? this.setup.configOptions ?? [] : [],
-      selected: this.rec.selectedConfig ?? {}, used: this.used, size: this.contextSize };
+      selected: this.rec.selectedConfig ?? {}, used: this.used, size: this.contextSize,
+      commands: this.backend && Array.isArray(this.setup.availableCommands) ? this.setup.availableCommands.filter(c => c && typeof c.name === "string" && (c.type === "command" || c.type === "skill" && this.backend?.caps.skill)) : [],
+      suggestions: this.suggestions,
+      background: this.background,
+      ...(this.backend?.caps.skill ? { skill: { inline: !!this.backend.caps.inlineSkill } } : {}) };
   }
 
   notifyControls(): void {
@@ -592,6 +647,9 @@ export class LiveSession {
   /** The backend process is gone; the next turn binds to a new one. A turn it was running fails. */
   onBackendGone(backend: Backend, reason: string): void {
     if (this.backend !== backend) return;
+    this.lifecycle.emit("session.unbound", this.source(), { reason });
+    this.closeSteps("disconnected", true);
+    this.suggestions = [];
     this.finishRun({ stopReason: "error", failure: new Error(`the agent program ${reason}`) });
     this.backend = undefined;
     this.notifyControls();
@@ -605,7 +663,7 @@ export class LiveSession {
     return this.hub.permissions.request(this, request);
   }
 
-  onBackendElicitation(request: ElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
+  onBackendElicitation(request: import("@xsb/protocol").FormElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
     const target = (request._meta?.[TurnExt.key] as { id?: string } | undefined)?.id ??
       (request._meta?.[OriginExt.key] as OriginMeta | undefined)?.turnId;
     if (signal.aborted || request.sessionId !== this.rec.backendSessionId || !this.current?.started || !this.acceptsTools ||
@@ -629,8 +687,15 @@ export class LiveSession {
     const correlation = update._meta?.[TurnExt.key] as { id?: string } | undefined;
     const origin = update._meta?.[OriginExt.key] as OriginMeta | undefined;
     const turnId = correlation?.id ?? origin?.turnId;
-    if (turnId && turnId !== turn?.id) return;
-    if (turn?.recovering) return;
+    if ((!turnId || turnId === turn?.id) && !turn?.recovering && update.sessionUpdate === "terminal_update" && typeof update.terminalId === "string" && !this.terminalSources.has(update.terminalId)) {
+      const running = this.currentRun;
+      this.terminalSources.set(update.terminalId, { source: this.source(running?.turnId ?? null), ...(running ? { run: { ...running } } : {}) });
+    }
+    const tracked = update.sessionUpdate === "tool_call_update" ? this.toolSources.get(update.toolCallId) :
+      update.sessionUpdate === "terminal_update" || update.sessionUpdate === "terminal_output_chunk" ? this.terminalSources.get(update.terminalId) : undefined;
+    const late = !!tracked && tracked.source.turnId !== turn?.id;
+    if (turnId && turnId !== turn?.id && (!tracked || tracked.source.turnId !== turnId)) return;
+    if (turn?.recovering && !late) return;
     const executing = this.currentRun ?? this.lastRun;
     const belongs = executing ? executing.turnId === turn?.id && !("state" in executing && executing.state === "idle") : !!turn?.started;
     const said = update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" ? update.content.text :
@@ -639,22 +704,52 @@ export class LiveSession {
       (turn.refusalChunks ??= []).push(update);
       return;
     }
-    if (turn && belongs && !turn.runEnd && (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update" || update.sessionUpdate === "agent_message" || update.sessionUpdate === "agent_thought_chunk" ||
+    if (turn && !late && belongs && !turn.runEnd && (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update" || update.sessionUpdate === "agent_message" || update.sessionUpdate === "agent_thought_chunk" ||
       (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" && update.content.text?.trim() && !contextOverflow(update.content.text)))) this.observeExecution();
+    if (update.sessionUpdate === "tool_call" && typeof update.toolCallId === "string" && this.currentRun) {
+      const id = update.toolCallId;
+      if (!this.toolSteps.has(id)) {
+        const step = this.lifecycle.step(this.source(this.currentRun.turnId), `acp:${this.currentRun.id}:${id}`, { title: update.title });
+        this.toolSteps.set(id, step);
+        this.toolSources.set(id, { source: step.source, run: { ...this.currentRun } });
+        if (this.toolSources.size > 512) { const oldest = [...this.toolSources.keys()].find(key => !this.toolSteps.has(key)); if (oldest) this.toolSources.delete(oldest); }
+      }
+    }
+    if ((update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") && Array.isArray(update.content)) {
+      const owner = this.toolSources.get(update.toolCallId);
+      if (owner) for (const ref of update.content) if (ref.type === "terminal" && typeof ref.terminalId === "string") this.terminalSources.set(ref.terminalId, { ...owner, toolCallId: update.toolCallId });
+    }
+    if (update.sessionUpdate === "terminal_update" && update.exitStatus) {
+      const owner = this.terminalSources.get(update.terminalId);
+      if (owner?.toolCallId) { this.toolSteps.get(owner.toolCallId)?.end({ status: update.exitStatus.exitCode === 0 ? "completed" : "failed" }); this.toolSteps.delete(owner.toolCallId); }
+    }
+    if ((update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") && ["completed", "failed", "cancelled"].includes(update.status)) {
+      this.toolSteps.get(update.toolCallId)?.end({ status: update.status });
+      this.toolSteps.delete(update.toolCallId);
+    }
     switch (update.sessionUpdate) {
       case "user_message":
       case "user_message_chunk": {
-        // The backend shows input as it takes it into the conversation, in the order it was given: it is in. This, not
-        // the answer to the prompt, is what places it: an answer is handled after the updates read with it, such as
-        // the idle of the work that took it. Input given with `_session/steering` has no other sign.
+        // Record native insertion position; the original response links its message ID to the exact batch.
+        // Responses may follow idle, and a priority prompt can overtake a deferred command.
         const id = String(update.messageId ?? "");
-        const input = turn && id !== this.echoed ? turn.inputs.find((i) => i.sent && !i.in) : undefined;
+        const pending = turn && id !== this.echoed ? turn.inputs.filter((i) => i.sent && !i.in) : [];
+        if (id && id !== this.echoed) {
+          this.insertionRuns.set(id, this.currentRun ? { ...this.currentRun } : null);
+          this.emit({ sessionUpdate: "session_info_update", _meta: { [InsertionTrace.key]: {
+            phase: "observed", backendSessionId: this.rec.backendSessionId, nativeMessageId: id,
+          } } });
+        }
+        // The response links this native ID to its exact request, including when it arrives after idle.
+        // An echo alone acknowledges input only with an explicit Hub message identity.
+        const input = origin?.messageId ? pending.find(i => i.messageId === origin.messageId) : undefined;
         this.echoed = id;
-        if (input) this.landed(input.batch!);
+        if (input) this.landed(input.batch!, this.insertionRuns.get(id), id);
         break;
       }
       case "state_update":
         if (!isStateUpdate(update)) break;
+        if (Array.isArray(update.background)) this.backgroundSnapshot(update.background);
         if (update.state === "running" || update.state === "requires_action") this.startRun();
         else if (update.state === "idle") {
           const stopReason = update.stopReason ?? "end_turn";
@@ -663,6 +758,13 @@ export class LiveSession {
         }
         break;
       case "session_info_update": {
+        const legacy = airSuggestions(update);
+        if (legacy) {
+          if (this.suggestionFormat !== "standard") { this.suggestionFormat = "air"; this.suggestions = legacy; this.notifyControls(); }
+          // Suggestion metadata is ephemeral; retain unrelated metadata and the title below.
+          update = { ...update, _meta: { ...update._meta } };
+          delete update._meta!.promptSuggestions;
+        }
         const title = typeof update.title === "string" ? conversationTitle(update.title) : "";
         if (!this.hub.agent(this.agentId).workflowOwner && !this.rec.titleEdited && title && title !== this.rec.title && !isXsbText(title)) {
           this.save({ title });
@@ -671,6 +773,15 @@ export class LiveSession {
         }
         break;
       }
+      case "available_commands_update":
+        this.setup.availableCommands = update.availableCommands ?? [];
+        this.notifyControls();
+        break;
+      case "prompt_suggestions_update":
+        this.suggestionFormat = "standard";
+        this.suggestions = Array.isArray(update.suggestions) ? update.suggestions.filter((s: any) => Array.isArray(s.prompt) && s.prompt.length && s.prompt.every((b: ContentBlock) => b?.type === "text" || b?.type === "resource_link") && s.prompt.some((b: ContentBlock) => b.type === "resource_link" || b.text?.trim())) : [];
+        this.notifyControls();
+        return; // Ephemeral UI state; history replay must not restore stale drafts.
       case "config_option_update":
         if (Array.isArray(update.configOptions)) {
           this.setup.configOptions = update.configOptions;
@@ -697,11 +808,12 @@ export class LiveSession {
         break;
     }
     // Attribution is supplied by the hub, never trusted from backend metadata. Late output after idle stays settled.
-    const run = this.currentRun ? { ...this.currentRun, state: "running" as const } : this.lastRun;
+    const run = tracked ? tracked.run && { ...tracked.run, state: this.currentRun?.id === tracked.run.id ? "running" as const : "idle" as const } : this.currentRun ? { ...this.currentRun, state: "running" as const } : this.lastRun;
     const attributed = { ...update, _meta: { ...update._meta } };
+    delete attributed._meta[InsertionTrace.key];
     if (run) attributed._meta[RunExt.key] = { ...run };
     else delete attributed._meta[RunExt.key];
-    this.hub.kernel.hooks.emit("acp.session_update", { agentId: this.agentId, sessionId: this.id, update: attributed });
+    this.hub.kernel.hooks.emit("acp.session_update", { agentId: this.agentId, sessionId: this.id, source: structuredClone(tracked?.source ?? this.source(run?.turnId ?? null)), update: attributed });
     if (!OWN.has(update.sessionUpdate)) this.emit(attributed);
   }
 
@@ -740,7 +852,9 @@ export class LiveSession {
     if (!run) return;
     // A decision hook can synchronously close an execution before its start was announced.
     this.runStarted();
+    this.closeSteps(end.stopReason);
     this.currentRun = undefined;
+    this.lastRunEnd = end;
     this.lastRun = { ...run, state: "idle", stopReason: end.stopReason, ...(origin !== undefined ? { origin } : {}) };
     if (this.current?.id === run.turnId) this.current.runEnd = end;
     this.emit({ sessionUpdate: "session_info_update", _meta: { [RunExt.key]: { ...this.lastRun } } });
@@ -764,7 +878,7 @@ export class LiveSession {
   /** The state of the session's work, as its clients see it: the hub's turns, not the backend's runs. */
   private state(state: "running" | "idle", end?: TurnEnd): void {
     const error = end?.failure ? { code: end.failure instanceof RpcError ? end.failure.code : -32603, message: errorMessage(end.failure), data: (end.failure as RpcError).data } : undefined;
-    const update = { sessionUpdate: "state_update", state, ...(end ? { stopReason: end.stopReason } : {}), ...(error ? { error } : {}) };
+    const update = { sessionUpdate: "state_update", state, background: this.background, ...(end ? { stopReason: end.stopReason } : {}), ...(error ? { error } : {}) };
     for (const client of this.clients) client.conn.notify("session/update", { sessionId: this.id, update });
   }
 
@@ -776,8 +890,9 @@ export class LiveSession {
     this.emitInput(input);
   }
 
-  private emitInput({ messageId, origin, content, from, deliveredAs }: Input): void {
-    const meta = { [OriginExt.key]: origin, ...(deliveredAs ? { [DeliveredAs.key]: deliveredAs } : {}) };
+  private emitInput({ messageId, origin, content, from, deliveredAs, backendSessionId, backendMessageId }: Input): void {
+    const meta = { [OriginExt.key]: { ...origin, ...(this.current ? { turnId: this.current.id } : {}) },
+      ...(backendSessionId && backendMessageId ? { [InsertionTrace.key]: { phase: "linked", backendSessionId, nativeMessageId: backendMessageId } } : {}), ...(deliveredAs ? { [DeliveredAs.key]: deliveredAs } : {}) };
     const except = from?.echo ? undefined : from;
     for (const block of content) {
       this.emit({ sessionUpdate: "user_message_chunk", content: block, messageId, _meta: meta }, except);
@@ -877,7 +992,7 @@ export class LiveSession {
     const { messageId, origin, content } = input;
     const kind = (why as RpcError | undefined)?.data && typeof (why as RpcError).data === "object" ? ((why as RpcError).data as { errorKind?: string }).errorKind : undefined;
     reason ??= this.userStopping || !why || (why instanceof RpcError && why.code === RpcError.CANCELLED) ? "stopped"
-      : kind === "input_too_large" ? "too_large" : /Target turn has ended or changed/.test(errorMessage(why)) ? "expired" : "failed";
+      : kind === "execution_uncertain" ? "uncertain" : kind === "input_too_large" ? "too_large" : /Target turn has ended or changed/.test(errorMessage(why)) ? "expired" : "failed";
     const owed = users(input) && reason === "failed";
     if (owed) this.owe(input);
     if (this.settled.has(messageId) && !input.shown) return void this.receipt(input, false, why);
@@ -891,8 +1006,9 @@ export class LiveSession {
   private receipt(input: Input, inserted: boolean, why: unknown = RpcError.cancelled()): void {
     if (inserted && input.receipted) return;
     const about = { agentId: this.agentId, sessionId: this.id, from: fromOf(input.origin), ...(input.origin.taskId ? { taskId: input.origin.taskId } : {}) };
-    this.hub.kernel.mark(input.messageId, inserted ? "inserted" : "discarded_unseen", about);
-    this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: input.messageId, about, inserted });
+    const unknown = !inserted && (why as RpcError)?.data && ((why as RpcError).data as any).errorKind === "execution_uncertain";
+    this.hub.kernel.mark(input.messageId, inserted ? "inserted" : unknown ? "insertion_uncertain" : "discarded_unseen", about);
+    this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: input.messageId, about, inserted, outcome: inserted ? "inserted" : unknown ? "unknown" : "not_inserted" });
     if (inserted) {
       input.receipted = true;
       this.hub.workflows?.inserted(this,input.messageId);
@@ -934,6 +1050,7 @@ export class LiveSession {
    * model goes first, as a turn of its own, once something else is to run (docs/DESIGN.md 3.1, 8).
    */
   pump(): void {
+    if (this.hub.authentication?.busy(this.agentId)) return;
     // While the hub stops, nothing starts: what waits is in the inbox, and runs on the next start.
     if (this.userStopping || this.current || this.hub.stopping) return;
     if (this.hub.workflows?.available(this) === false) {
@@ -972,10 +1089,13 @@ export class LiveSession {
   }
 
   private async run(first: Input, more: Input[] = []): Promise<void> {
+    this.suggestions = [];
+    this.notifyControls();
     const turn: Turn = { id: newId("turn"), protected: [first, ...more].some(users), first, inputs: [first, ...more], order: [first, ...more], held: [...more], inserted: false, items: itemsOf([first, ...more]), started: false, done: deferred() };
     turn.recoveryAttempts = this.rec.contextRecovery?.messageId === first.messageId ? this.rec.contextRecovery.attempts : 0;
     turn.taskIds = this.hub.kernel.openTasks(this.id).filter((t) => !t.stopping).map((t) => t.id);
     this.current = turn;
+    this.lifecycle.emit("turn.started", this.source(), { protected: turn.protected, taskIds: turn.taskIds });
     this.turnChanged();
     this.hub.agentChanged(this.agentId);
     this.state("running");
@@ -1053,9 +1173,8 @@ export class LiveSession {
   }
 
   /**
-   * Give the backend input as one prompt. Into work under way, a backend with `steering` takes it with
-   * `_session/steering`; one without, and one that has no work running, with `session/prompt` (backend.ts). Only
-   * the turn's first prompt carries more than one input: what came in the inbox comes with it.
+   * Give input through standard ACP session/prompt, including input offered to active work.
+   * Only the turn's first prompt carries more than one input: its inbox comes with it.
    */
   private send(batch: Input[]): void {
     const turn = this.current!;
@@ -1113,40 +1232,50 @@ export class LiveSession {
     for (const input of batch) input.prefaces = carried;
     this.estimated += tokens;
     if (this.rec.backendFresh || !this.rec.conversed) this.save({ backendFresh: undefined, conversed: true });
-    const prompt = (): Promise<boolean> => {
-      if (this.current !== turn || turn.cancelledBy) return Promise.reject(RpcError.cancelled());
-      for (const input of batch) input.sent = "prompt";
-      return backend.prompt(sessionId, content, { ...batch[0].origin, turnId: turn.id }).then(() => true);
-    };
-    for (const input of batch) input.batch = batch;
-    // The tasks it brings are the executor's from now: its tools (and calls of them) may come before the answer.
-    this.hub.delivery.given(itemsOf(batch));
-    // Steered: it is in once the backend shows it (`onBackendUpdate`). With no work to steer into, it is a prompt.
-    const given = turn.inserted && backend.caps.steering
-      ? ((batch[0].sent = "steering"), backend.steer(sessionId, content).then((how) => (how === "idle" ? prompt() : false)))
-      : prompt();
+    for (const input of batch) {
+      input.batch = batch; input.sent = "prompt"; input.backendSessionId = sessionId;
+      if (input.item?.targetTurnId && this.currentRun?.turnId === turn.id) input.runId = this.currentRun.id;
+    }
+    // The tasks are the executor's before tools or output can arrive.
+    this.hub.state.atomic(() => {
+      this.hub.delivery.given(itemsOf(batch));
+      this.hub.kernel.offered(batch.map(input => ({ messageId: input.messageId, about: { agentId: this.agentId, sessionId: this.id, from: fromOf(input.origin), ...(input.origin.taskId ? { taskId: input.origin.taskId } : {}) } })), sessionId, batch[0].messageId);
+    });
+    this.hub.state.afterCommit(() => {
+    const given = this.current === turn && !turn.cancelledBy && !this.hub.stopping && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })
+      ? backend.prompt(sessionId, content, { ...batch[0].origin, turnId: turn.id })
+      : Promise.reject(RpcError.cancelled());
     given.then(
-      (answered) => {
-        if (this.backend !== backend || this.rec.backendSessionId !== sessionId) return;
-        if (answered) this.landed(batch);
+      (messageId) => {
+        if (this.backend === backend && this.rec.backendSessionId === sessionId) {
+          const run = this.insertionRuns.get(messageId);
+          this.insertionRuns.delete(messageId);
+          this.landed(batch, run, messageId);
+        }
       },
       (e) => {
         if (this.backend === backend && this.rec.backendSessionId === sessionId) this.refused(batch, e, backend);
       },
     );
+    });
   }
 
   /**
    * Input got into the conversation: the backend showed it, or answered the prompt it was. What the hub held until
    * the turn's first got in goes now, each on its own.
    */
-  private landed(batch: Input[]): void {
+  private landed(batch: Input[], insertionRun?: BackendRun | null, backendMessageId?: string): void {
     const turn = this.current;
     // In already, or its turn is over: what became of it was settled then.
     if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) return;
+    if (insertionRun) for (const input of batch) input.runId = insertionRun.id;
+    if (backendMessageId) for (const input of batch) input.backendMessageId = backendMessageId;
     // A later prompt held by the backend belongs to the next execution of this same logical turn. The first
     // prompt's receipt may simply follow the idle of its own execution, in which case its end must be retained.
     if (turn.runEnd && !turn.cancelledBy && batch.every(i => i.runId !== this.lastRun?.id)) turn.runEnd = undefined;
+    // A native echo can precede its response and the whole execution can finish in between.
+    // Correlation settles that completed execution without inventing a new run or retagging old output.
+    if (!turn.runEnd && insertionRun && insertionRun.id === this.lastRun?.id && this.lastRunEnd) turn.runEnd = this.lastRunEnd;
     turn.inserted = true;
     // Input inserted into an autonomous execution claims it from this point; earlier output keeps its null owner.
     if (this.currentRun?.turnId === null && !turn.runEnd && !turn.cancelledBy) {
@@ -1174,10 +1303,13 @@ export class LiveSession {
     const turn = this.current;
     if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) return;
     if (e instanceof RpcError && e.code === RpcError.CANCELLED) {
+      this.hub.kernel.declined(batch.map((i) => i.messageId));
       this.restorePrefaces(batch, turn);
       for (const input of batch) this.leave(input);
       return this.settle();
     }
+    if (e instanceof RpcError && e.code === CONNECTION_CLOSED) return this.end({ stopReason: "error", failure: new RpcError(CONNECTION_CLOSED,
+      "The connection ended before insertion could be confirmed. The original input was preserved; verify the outcome before continuing.", { errorKind: "execution_uncertain" }) });
     if (contextOverflow(e) && this.canRecover(turn)) return void this.recover(turn, e);
     const failure = this.explain(e, backend);
     // What came in front of it (instructions, a handoff) was not given: it goes in front of the next prompt.
@@ -1236,7 +1368,17 @@ export class LiveSession {
     if (!turn.inserted && !turn.cancelledBy) return;
     // A prompt receipt can follow idle. Wait for it on normal completion and stop; a failed execution instead
     // cancels and fences the unanswered requests in end(), so a broken backend cannot hold the turn forever.
-    if (!turn.runEnd?.failure && turn.inputs.some((i) => i.sent === "prompt" && !i.in)) return;
+    if (!turn.runEnd?.failure && turn.inputs.some((i) => i.sent === "prompt" && !i.in)) {
+      if (turn.inputs.some(i => i.sent === "prompt" && !i.in && !i.item?.targetTurnId)) return;
+      const end = turn.runEnd;
+      // Drain responses already received with idle. A targeted append cannot hold its turn open
+      // solely to become a later execution; if still unconfirmed, end() fences the old binding.
+      setImmediate(() => {
+        if (this.current === turn && turn.runEnd === end && this.runEndedFor(turn) &&
+          !turn.inputs.some(i => i.sent === "prompt" && !i.in && !i.item?.targetTurnId)) this.end(end ?? { stopReason: "cancelled" });
+      });
+      return;
+    }
     this.end(turn.runEnd ?? { stopReason: "cancelled" });
   }
 
@@ -1286,6 +1428,7 @@ export class LiveSession {
   private end(end: TurnEnd): void {
     const turn = this.current;
     if (!turn) return;
+    const source = this.source(turn.id);
     if (end.failure && contextOverflow(end.failure) && this.canRecover(turn)) return void this.recover(turn, end.failure);
     this.hub.elicitations?.cancel(this);
     if (this.currentRun?.turnId === turn.id) this.finishRun(end);
@@ -1319,7 +1462,11 @@ export class LiveSession {
       for (const input of out) this.leave(input);
     } else {
       // Stopped or failed: the backend drops what it did not take. Ended: it runs it next, a turn of its own (3.1, 5).
-      if (turn.cancelledBy || end.failure || !turn.started || expiredAppend) for (const input of out) this.leave(input);
+      if (turn.cancelledBy || end.failure || !turn.started || expiredAppend) for (const input of out) {
+        if (!turn.cancelledBy && input.sent && (end.failure as RpcError)?.data && ((end.failure as RpcError).data as any).errorKind === "execution_uncertain") {
+          this.drop(input); this.discard(input, end.failure, "uncertain");
+        } else this.leave(input);
+      }
       else next = out;
     }
     const recovered = (turn.recovered ?? []).sort((a, b) => order.indexOf(a) - order.indexOf(b));
@@ -1350,6 +1497,7 @@ export class LiveSession {
       this.backend.cancel(this.rec.backendSessionId!);
       this.backend.close?.(this.rec.backendSessionId!);
       this.hub.rotateBridge(this);
+      this.hub.backends.stop(this.agentId);
       this.backend = undefined;
       this.save({ backendSessionId: undefined, renew: "isolated" });
     }
@@ -1360,12 +1508,14 @@ export class LiveSession {
       // Its failure goes into the transcript, where the user sees it: the prompt that started it may have been answered long ago.
       if (end.failure) this.emit({ sessionUpdate: "session_info_update", _meta: { [TurnFailure.key]: { message: errorMessage(end.failure), data: (end.failure as RpcError).data } } } as SessionUpdate);
       this.hub.state.atomic(() => {
+        this.hub.state.afterCommit(() => this.lifecycle.emit("turn.ended", source, { stopReason: end.stopReason, failed: !!end.failure }));
         this.hub.state.afterCommit(() => this.hub.kernel.hooks.emit("acp.turn_ended", { agentId: this.agentId, sessionId: this.id, turnId: turn.id, stopReason: end.stopReason, failed: !!end.failure }));
         this.hub.workflows?.ended(this,turn,end);
         this.hub.delivery.turnEnded(this, turn, end);
         this.hub.state.afterCommit(() => this.hub.agentChanged(this.agentId));
       });
     }
+    if (this.hub.stopping) this.lifecycle.emit("turn.ended", source, { stopReason: end.stopReason, failed: !!end.failure, shutdown: true });
     this.state("idle", end);
     turn.done.resolve(end);
     this.releaseUserStop(false);
@@ -1444,13 +1594,14 @@ export class LiveSession {
 
   /**
    * Input given into work that ended without taking it is the next turn: the backend runs it next (a prompt waits
-   * in the backend for the work under way), or it dropped it (input given with `_session/steering`), and it is given
+   * in the backend for later work), or was cancelled before insertion, and it is given
    * again, as a prompt.
    */
   private resume(inputs: Input[], previous: Turn): void {
     const turn: Turn = { id: newId("turn"), protected: inputs.some(users), first: inputs[0], inputs, order: [...inputs], held: [], inserted: false, items: itemsOf(inputs), started: true, done: deferred() };
     turn.taskIds = this.hub.kernel.openTasks(this.id).filter((t) => !t.stopping).map((t) => t.id);
     this.current = turn;
+    this.lifecycle.emit("turn.started", this.source(), { protected: turn.protected, taskIds: turn.taskIds });
     this.turnChanged();
     this.hub.workflows?.inheritSeen(previous,turn);
     this.users(inputs[0]);
@@ -1486,7 +1637,7 @@ export class LiveSession {
       this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id }) || (targetTurnId && targetTurnId !== turn.id)) return undefined;
     // An agent's word goes into an agent's turn only; once the user's (protected), it waits its turn (`enqueue`).
     if (req.origin.kind === "agent" && !targetTurnId && turn.protected) return undefined;
-    if (req.origin.kind === "user") turn.protected = true;
+    if (req.origin.kind === "user") { turn.protected = true; this.suggestions = []; this.notifyControls(); }
     const input = inputOf({ ...req, origin: { ...req.origin, steered: true } });
     turn.order ??= [...turn.inputs];
     turn.order.push(input);

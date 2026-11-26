@@ -240,7 +240,7 @@ const settle = () => hooks.settled();
   await settle();
   assert.equal(state.ledger.get("m1")!.state, "inserted_unprocessed");
   assert.equal(state.ledger.get("m2")!.state, "discarded_unseen", "-32800: it never got in");
-  hooks.emit("acp.session_update", { agentId: "b", sessionId: "sx", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "on" } } as any });
+  hooks.emit("acp.session_update", { agentId: "b", sessionId: "sx", source: { agentId: "b", sessionId: "sx", turnId: null }, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "on" } } as any });
   await settle();
   assert.equal(state.ledger.get("m1")!.state, "seen", "seen when the session goes on");
   kernel.mark("m1", "queued");

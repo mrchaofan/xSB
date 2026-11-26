@@ -32,7 +32,7 @@ export type Entry = { id: string } & (
       /** It answers or skips a question: the question's card shows it. */
       reply?: boolean }
   | { kind: "output"; content: Content; streaming?: boolean; run?: BackendRun; stopReason?: string; runOrigin?: unknown }
-  | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string; name?: string; input?: unknown; output?: unknown }
+  | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string; name?: string; input?: unknown; output?: unknown; terminalOutput?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
   /** What the agent asked the user (the `ask` tool) and what became of it. Its reply's own message is not shown apart. */
   | { kind: "question"; questionId: string; questions: QuestionItem[]; state: QuestionState; answers?: QuestionAnswer[]; source?: "acp"; delivery?: "async" }

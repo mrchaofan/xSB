@@ -22,7 +22,7 @@
  * settles, the tasks it releases. Done and stopped differ only in what the end says.
  */
 import { isTerminal, textOf } from "@xsb/protocol";
-import type { Addr, Asset, BackendRun, ContentBlock, DeliveryPref, EndReason, LedgerEntry, LedgerState, Origin, Principal, SessionUpdate, StopReason, Task, TaskStatus } from "@xsb/protocol";
+import type { Addr, Asset, ExecutionSource, BackendRun, ContentBlock, DeliveryPref, EndReason, LedgerEntry, LedgerState, Origin, Principal, SessionUpdate, StopReason, Task, TaskStatus } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import type { Hooks, Veto } from "./hooks.ts";
 import { isVeto } from "./hooks.ts";
@@ -42,6 +42,7 @@ export type Route = "return" | "turn" | "interject" | "inbox" | "drop";
 
 /** What the kernel is to know of a session to route to it. The effectors that run sessions answer (delivery.ts). */
 export type Recipient = {
+  source?: ExecutionSource;
   /** Its agent exists. */
   exists: boolean;
   /** It works on something, or has something waiting to run. */
@@ -70,9 +71,9 @@ export type KernelDecide = {
   "acp.pre_unowned_run": { agentId: string; sessionId: string; run: BackendRun; action: "show" | "stop" };
 };
 
-export type Receipt = { messageId: string; about: Omit<LedgerEntry, "messageId" | "state" | "ts">; inserted: boolean };
+export type Receipt = { messageId: string; about: Omit<LedgerEntry, "messageId" | "state" | "ts">; inserted: boolean; outcome?: "inserted" | "not_inserted" | "unknown" };
 
-export type KernelObserve = {
+export type KernelObserve = Record<import("./lifecycle.ts").LifecyclePoint, import("./lifecycle.ts").LifecycleEvent> & {
   "task.created": Task;
   /** It reached its executor: the model was given it, or the job's call began. */
   "task.started": Task;
@@ -92,7 +93,7 @@ export type KernelObserve = {
   "message.discarded": LedgerEntry;
   /** Every change of the ledger. */
   "message.ledger": LedgerEntry;
-  "acp.session_update": { agentId: string; sessionId: string; update: SessionUpdate };
+  "acp.session_update": { agentId: string; sessionId: string; source: ExecutionSource; update: SessionUpdate };
   /** Also emitted when an insertion receipt claims an already-running, unowned execution. */
   "acp.run_started": { agentId: string; sessionId: string; run: BackendRun };
   "acp.run_ended": { agentId: string; sessionId: string; run: BackendRun; stopReason: StopReason; origin?: unknown };
@@ -320,9 +321,13 @@ export class Kernel {
 
   /** Record a task; unless it is held back (or a job, which has nobody to be given to), give it to its executor. */
   private create(draft: Task, withoutMail: boolean, mail?: { prompt: ContentBlock[]; id: string }): Task | Veto {
-    const decided = this.hooks.decide("task.pre_create", { task: draft });
+    const source = draft.from ? structuredClone(this.recipient(draft.from).source ?? {
+      ...draft.from, turnId: this.recipient(draft.from).turn?.id ?? null,
+    }) : undefined;
+    const decided = this.hooks.decide("task.pre_create", { task: { ...draft, ...(source ? { source: structuredClone(source) } : {}) } });
     if (isVeto(decided)) return decided;
-    const { task } = decided;
+    const task = { ...decided.task, ...(source ? { source } : {}) };
+    if (source?.turnId && this.recipient(source).turn?.id !== source.turnId) return { veto: "The originating turn ended; no new work was submitted." };
     if (task.from && (this.sourceStopped(task.from) || task.parents?.some((id) => {
       const parent = this.state.tasks.get(id);
       return parent?.stopping || parent?.cascadeStopped || parent?.status === "cancelled" || parent?.status === "interrupted";
@@ -756,19 +761,40 @@ export class Kernel {
     this.state.afterCommit(() => this.ledgerChanged(entry));
   }
 
+  /** Durable intent before a backend write; restart cannot mistake an unanswered submission for unsent mail. */
+  offered(inputs: { messageId: string; about: Receipt["about"] }[], backendSessionId: string, key: string): void {
+    const entries: LedgerEntry[] = inputs.flatMap(({ messageId, about }) => {
+      const prior = this.state.ledger.get(messageId);
+      if (prior && (TAKEN_IN.has(prior.state) || prior.state === "discarded_unseen" || prior.state === "insertion_uncertain")) return [];
+      return [{ ...(prior ?? about), messageId, state: "submitted", ts: now(), offered: { backendSessionId, key } }];
+    });
+    if (!entries.length) return;
+    this.state.commit(entries.map(ops.mark));
+    this.state.afterCommit(() => { for (const entry of entries) this.ledgerChanged(entry); });
+  }
+
+  /** The backend answered that it did not take them: a restart no longer has their insertion in doubt. */
+  declined(messageIds: string[]): void {
+    const entries = messageIds.flatMap((id) => {
+      const prior = this.state.ledger.get(id);
+      return prior?.offered ? [{ ...prior, offered: undefined }] : [];
+    });
+    if (entries.length) this.state.commit(entries.map(ops.mark));
+  }
+
   private ledgerEntry(messageId: string, state: LedgerState, about?: Receipt["about"]): LedgerEntry | undefined {
     const prior = this.state.ledger.get(messageId);
     if (prior && RANK[state] <= RANK[prior.state]) return;
     // What got into the conversation is not said afterwards never to have: only a renewed session drops it unprocessed.
     if (state === "discarded_unseen" && prior?.state === "inserted") return;
     if (!prior && !about) return;
-    return { ...(prior ?? about!), messageId, state, ts: now() };
+    return { ...(prior ?? about!), messageId, state, ts: now(), ...(state !== "insertion_uncertain" ? { offered: undefined } : {}) };
   }
 
   private ledgerChanged(entry: LedgerEntry): void {
     this.hooks.emit("message.ledger", entry);
     if (entry.state === "seen") this.hooks.emit("message.seen", entry);
-    if (entry.state === "discarded_unseen") this.hooks.emit("message.discarded", entry);
+    if (entry.state === "discarded_unseen" || entry.state === "insertion_uncertain") this.hooks.emit("message.discarded", entry);
   }
 
   /**
@@ -803,12 +829,12 @@ export class Kernel {
   /** Terminal input/task state is authoritative at routing, deferred delivery and dequeue, not just on restart. */
   settleTerminalInput(item: MailItem): boolean {
     const task = item.kind === "task" ? this.state.tasks.get(item.taskId!) : undefined;
-    const discarded = this.state.ledger.get(item.id)?.state === "discarded_unseen";
+    const discarded = ["discarded_unseen", "insertion_uncertain"].includes(this.state.ledger.get(item.id)?.state ?? "");
     if (discarded || (task && isTerminal(task.status))) {
       // A durable terminal receipt/task cannot become executable again after restart or a deferred route.
       const remove = [ops.ack(item.id)];
       if (discarded && task && !isTerminal(task.status) && !task.stopping) {
-        this.finish([{ task, status: "failed", result: "The input was discarded; it was not replayed.", reason: "error", stopper: SYSTEM }], remove);
+        this.finish([{ task, status: "failed", result: this.state.ledger.get(item.id)?.state === "insertion_uncertain" ? "Insertion could not be confirmed after interruption. Verify the outcome; this input was not replayed." : "The input was discarded; it was not replayed.", reason: "error", stopper: SYSTEM }], remove);
       } else this.state.commit(remove);
       return true;
     }
@@ -910,6 +936,9 @@ export class Kernel {
     const taken = new Map<string, MailItem[]>();
     const uncertain = "xsb stopped while this was in the conversation, so how far it got is unknown. It was not given again; verify its results before going on.";
     for (const item of [...this.state.mail.values()]) {
+      const entry = this.state.ledger.get(item.id);
+      if (entry?.offered && !TAKEN_IN.has(entry.state) && !["discarded_unseen", "insertion_uncertain"].includes(entry.state)) this.mark(item.id, "insertion_uncertain");
+      if (this.settleTerminalInput(item)) continue;
       if (item.workflowHeld) continue;
       if (!TAKEN_IN.has(this.state.ledger.get(item.id)?.state ?? "inboxed")) { this.route(item); continue; }
       (taken.get(item.to.sessionId) ?? taken.set(item.to.sessionId, []).get(item.to.sessionId)!).push(item);
@@ -926,4 +955,4 @@ export class Kernel {
 /** Ledger states of mail a backend had taken into its conversation. */
 export const TAKEN_IN = new Set<LedgerState>(["inserted", "seen", "inserted_unprocessed"]);
 
-const RANK: Record<LedgerState, number> = { inboxed: 0, queued: 0, submitted: 1, inserted: 2, inserted_unprocessed: 3, seen: 4, discarded_unseen: 4 };
+const RANK: Record<LedgerState, number> = { inboxed: 0, queued: 0, submitted: 1, inserted: 2, inserted_unprocessed: 3, seen: 4, discarded_unseen: 4, insertion_uncertain: 1.5 };
