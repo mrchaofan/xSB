@@ -76,7 +76,7 @@ export function markdownView(text, openLink, className = "md") {
     } });
     const wrapper = h("div", { class: "table-block" }, h("div", { class: "table-toolbar" }, h("span", {}, t("content.table")), expand));
     table.replaceWith(wrapper);
-    wrapper.append(table);
+    wrapper.append(h("div", { class: "table-scroll" }, table));
   });
   el.querySelectorAll("pre > code").forEach((code) => {
     const pre = code.parentElement;

@@ -2,7 +2,7 @@
 // namespaced by the folder; they never change the hub's team configuration.
 const GLOBAL_KEY = "xsb.ui.global";
 const workspaceKey = (path) => `xsb.ui.workspace:${path}`;
-export const GLOBAL_DEFAULTS = { theme: "light", density: "comfortable", showTools: true };
+export const GLOBAL_DEFAULTS = { theme: "light", showTools: true };
 export const WORKSPACE_DEFAULTS = { showCompleted: false };
 
 function read(key, defaults) {
@@ -11,7 +11,6 @@ function read(key, defaults) {
     return Object.fromEntries(Object.entries(defaults).map(([name, fallback]) => {
       const value = saved?.[name];
       const valid = name === "theme" ? ["light", "dark", "system"].includes(value)
-        : name === "density" ? ["comfortable", "compact"].includes(value)
         : typeof value === "boolean";
       return [name, valid ? value : fallback];
     }));
@@ -31,7 +30,7 @@ export function saveWorkspacePreferences(path, patch) {
 export function applyPreferences() {
   const prefs = globalPreferences();
   document.documentElement.dataset.theme = prefs.theme;
-  document.documentElement.dataset.density = prefs.density;
+  delete document.documentElement.dataset.density;
   document.documentElement.classList.toggle("hide-tools", !prefs.showTools);
   syncWindowColors();
 }

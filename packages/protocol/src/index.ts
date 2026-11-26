@@ -13,3 +13,4 @@ export * from "./ext.ts";
 export * from "./errors.ts";
 export * from "./tool-context.ts";
 export * from "./workflow.ts";
+export * from "./elicitation.ts";

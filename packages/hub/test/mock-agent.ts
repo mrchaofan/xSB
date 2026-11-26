@@ -40,6 +40,7 @@ type Held = { prompt: any[]; resolve: (r: { messageId: string }) => void; reject
 type Session = {
   id: string;
   mcp?: Connection;
+  xsb?: Connection;
   running: boolean;
   cancelled: boolean;
   lines: string[];
@@ -68,17 +69,18 @@ const flags = process.argv.slice(2);
 const steering = flags.includes("--steering");
 const steerExt = flags.includes("--steer-ext");
 let counter = 0;
+let formElicitation = false;
 let rejectedContext = false;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
   const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], steered: [], images: [] };
-  const server = mcpServers.find((s) => s.name === "workflow");
-  if (server) {
+  for (const server of mcpServers.filter((s) => s.name === "workflow" || s.name === "xsb")) {
     const env = Object.fromEntries(server.env.map((e: any) => [e.name, e.value]));
     const proc = spawn(server.command, server.args, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "inherit"] });
-    session.mcp = new Connection(proc.stdout, proc.stdin, "mcp");
-    await session.mcp.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "mock", version: "0" } });
-    session.mcp.notify("notifications/initialized");
+    const bridge = new Connection(proc.stdout, proc.stdin, "mcp");
+    if (server.name === "xsb") session.xsb = bridge; else session.mcp = bridge;
+    await bridge.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "mock", version: "0" } });
+    bridge.notify("notifications/initialized");
   }
   sessions.set(id, session);
   return session;
@@ -95,7 +97,7 @@ async function tool(session: Session, name: string, args: unknown): Promise<stri
   const toolCallId = `call_${++counter}`;
   session.message = undefined;
   update(session, { sessionUpdate: "tool_call_update", toolCallId, title: name, name: `mcp__workflow__${name}`, status: "in_progress" });
-  const result = await session.mcp!.request("tools/call", { name, arguments: args });
+  const result = await (name === "ask" ? session.xsb! : session.mcp!).request("tools/call", { name, arguments: args });
   update(session, { sessionUpdate: "tool_call_update", toolCallId, status: result.isError ? "failed" : "completed" });
   return result.content[0].text;
 }
@@ -108,6 +110,11 @@ async function step(session: Session, line: string): Promise<void> {
       return say(session, rest + "\n");
     case "title":
       return update(session, { sessionUpdate: "session_info_update", title: rest });
+    case "titlelater": {
+      const [delay, ...words] = rest.split(" ");
+      setTimeout(() => update(session, { sessionUpdate: "session_info_update", title: words.join(" ") }), Number(delay));
+      return;
+    }
     case "busy":
       return void (await new Promise((resolve) => setTimeout(resolve, Number(rest))));
     case "background": {
@@ -169,6 +176,13 @@ async function step(session: Session, line: string): Promise<void> {
         ],
       });
       return say(session, `perm: ${answer.outcome.outcome} ${answer.outcome.optionId ?? ""}\n`);
+    }
+    case "elicit": {
+      if (!formElicitation) return say(session, "native forms disabled\n");
+      update(session, { sessionUpdate: "state_update", state: "requires_action" });
+      const answer = await conn.request("elicitation/create", { ...JSON.parse(rest), mode: "form", sessionId: session.id });
+      if (!session.cancelled) update(session, { sessionUpdate: "state_update", state: "running" });
+      return say(session, `native answer: ${JSON.stringify(answer)}\n`);
     }
   }
 }
@@ -232,7 +246,9 @@ async function work(session: Session, origin?: unknown): Promise<void> {
   }
 }
 
-conn.onRequest("initialize", (p) => ({
+conn.onRequest("initialize", (p) => {
+  formElicitation = p.capabilities?.elicitation?.form != null;
+  return ({
   protocolVersion: flags.includes("--protocol") ? Number(flags[flags.indexOf("--protocol") + 1]) : Math.min(2, p.protocolVersion),
   info: { name: "mock", version: "0" },
   authMethods: [{ methodId: "login", name: "Log in with the mock CLI", type: "agent" }],
@@ -243,7 +259,8 @@ conn.onRequest("initialize", (p) => ({
     },
   },
   _meta: { ...(flags.includes("--no-turn-isolation") ? {} : { [TurnIsolation.key]: { version: TurnIsolation.version, afterIdle: true } }), ...(steerExt ? { steering: { supported: true } } : {}) },
-}));
+});
+});
 conn.onRequest("_session/steering", (p) => {
   const session = sessions.get(p.sessionId);
   if (!steerExt || !session) throw new RpcError(-32601, "Method not found");

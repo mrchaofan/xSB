@@ -43,6 +43,7 @@ import { randomBytes } from "node:crypto";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
 import { Questions } from "./questions.ts";
+import { Elicitations } from "./elicitations.ts";
 import { conversationPrompt, conversationRecord, isXsbText } from "./prompts.ts";
 import { contextRef } from "./context.ts";
 import { turnsSinceCleared } from "./transcript.ts";
@@ -66,6 +67,7 @@ export class Hub {
   readonly jobs: Jobs;
   readonly permissions: Permissions;
   readonly questions: Questions;
+  readonly elicitations: Elicitations;
   readonly assets: Assets;
   readonly workflows: Workflows;
   /** Set by `shutdown`: turns that die with it stay unacknowledged and run again on the next start. */
@@ -96,8 +98,10 @@ export class Hub {
     });
     this.permissions = new Permissions(this);
     this.questions = new Questions(this);
+    this.elicitations = new Elicitations(this);
     this.assets = new Assets(this);
     this.workflows = new Workflows(this);
+    hooks.on("acp.turn_changed", ({ sessionId }) => this.workflows.runtimeChanged(sessionId));
     // One conversation per agent (docs/DESIGN.md): sessions a client once opened besides it are history, not live.
     for (const rec of this.state.sessions.values()) if (rec.main) this.track(new LiveSession(this, this.titled(rec)));
   }
@@ -112,6 +116,7 @@ export class Hub {
     fs.mkdirSync(this.paths.run, { recursive: true });
     fs.mkdirSync(this.paths.shared, { recursive: true });
     fs.mkdirSync(this.paths.assets, { recursive: true });
+    this.elicitations.restart();
     this.workflows.restart();
     await this.listen(this.paths.socket("acp"), (socket) => {
       const client = new Client(this, new Connection(socket, socket, "client"));
@@ -158,6 +163,7 @@ export class Hub {
     // From here no turn starts and no backend is started (LiveSession.pump, BackendPool.for): what waits, waits for
     // the next start.
     this.stopping = true;
+    for (const session of this.live.values()) this.elicitations.cancel(session);
     this.contextTokens.clear();
     for (const conn of this.mcpClients) conn.close();
     for (const server of this.servers) server.close();
@@ -178,7 +184,7 @@ export class Hub {
   agentInfo(agent: AgentSpec): AgentInfo {
     const rec = this.state.mainSession(agent.id);
     const session = rec && this.live.get(rec.id);
-    const state = this.permissions.waitingOn(agent.id) ? "requires_action" : session?.busy ? "running" : "idle";
+    const state = this.permissions.waitingOn(agent.id) || this.elicitations.waitingOn(agent.id) ? "requires_action" : session?.busy ? "running" : "idle";
     const turn = session?.current;
     return {
       ...agent,
@@ -289,6 +295,7 @@ export class Hub {
       main: true,
       clientMcp: task ? this.session(task.owner).clientMcp : clientMcp,
       title: title?.trim() || undefined,
+      ...(title?.trim() && !task ? { titleEdited: true } : {}),
       createdAt: now(),
       updatedAt: now(),
     };
@@ -375,7 +382,7 @@ export class Hub {
       throw failure("conversation_busy", { agent: agent.name });
     const main = this.state.mainSession(agentId)?.id;
     if (main && this.state.workflows.has(main)) {
-      try { this.workflows.clientControl(main, true); } catch { /* no graph running: nothing to pause */ }
+      try { this.workflows.control(main, "pause"); } catch { /* no graph running: nothing to pause */ }
     }
     const queued = [...this.state.mail.values()].filter((m) => sessions.has(m.to.sessionId)).map((m) => ops.ack(m.id));
     this.state.commit([...queued, ops.putAgent({ ...agent, deleted: now() })]);

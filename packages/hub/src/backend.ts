@@ -133,6 +133,8 @@ export class Backend {
     let stderrTail: string[] = [];
     const conn = new Connection(proc.stdout!, proc.stdin!, `backend:${name}`);
     const backend = new Backend(proc, conn);
+    // Codex's turn-bound native forms cannot retain xSB ask's reply-after-turn interaction.
+    const nativeForms = backendName !== "codex" && !/(^|[/\\])codex-acp(?:\.cmd|\.exe)?$/.test(spec.command);
 
     let exited = false;
     let exitReason = "";
@@ -171,14 +173,20 @@ export class Backend {
       if (!session) throw RpcError.notFound(`session ${p.sessionId}`);
       return session.onBackendPermission(p);
     });
+    conn.onRequest("elicitation/create", (p, ctx) => {
+      if (!nativeForms) return { action: "cancel" };
+      const session = backend.sessions.get(p.sessionId);
+      if (!session) return { action: "cancel" };
+      return session.onBackendElicitation(p, ctx.signal);
+    });
 
     // The hub offers no editor surface: agents use their own file and shell tools.
     const init = await conn
       .request<InitializeResponse>("initialize", {
         protocolVersion: PROTOCOL_VERSION,
         info: { name: "xsb", title: "xsb hub", version: VERSION },
-        // Reports of the backend's own compaction (`compaction_update`), for the transcript to mark where it cut.
-        capabilities: { session: { compaction: {} } },
+        // v2 compaction reports are standard session updates and need no client capability.
+        capabilities: nativeForms ? { elicitation: { form: {} } } : {},
       })
       .catch(async (e) => {
         // A process that died during startup is the real story, not the closed pipe.

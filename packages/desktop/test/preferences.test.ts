@@ -21,12 +21,16 @@ const prefs = await import("../renderer/preferences.js");
 beforeEach(() => { values.clear(); classes.clear(); failWrites = false; prefs.applyPreferences(); });
 
 test("appearance survives a reload while each workspace retains its own task filter", async () => {
-  prefs.saveGlobalPreferences({ theme: "dark", density: "compact" });
+  values.set("xsb.ui.global", '{"density":"compact"}');
+  dataset.density = "compact";
+  prefs.saveGlobalPreferences({ theme: "dark" });
   prefs.saveWorkspacePreferences("/films/one", { showCompleted: true });
   const reloaded = await import("../renderer/preferences.js?reload");
   assert.equal(reloaded.globalPreferences().theme, "dark");
   assert.equal(dataset.theme, "dark");
-  assert.equal(dataset.density, "compact");
+  assert.equal(dataset.density, undefined);
+  assert.equal("density" in reloaded.globalPreferences(), false);
+  assert.equal("density" in JSON.parse(values.get("xsb.ui.global")!), false);
   assert.equal(reloaded.workspacePreferences("/films/one").showCompleted, true);
   assert.equal(reloaded.workspacePreferences("/films/two").showCompleted, false);
   assert.equal(reloaded.globalPreferences().showTools, true);

@@ -274,6 +274,9 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   const observer = await client("rename observer", { _meta: { [Agents.capability]: {} } });
   observer.onNotification(Agents.update, ({ agent }) => updates.push(agent));
   const set = (title: unknown, extra = {}) => conn.request(Agents.set, { agentId: session.agentId, title, ...extra });
+  await prompt(session.id, "!titlelater 100 First generated title\n!say READY");
+  await until("automatic title published after idle", () => !session.busy && updates.some(a => a.id === session.agentId && a.name === "First generated title"));
+  assert.equal(session.rec.title, "First generated title");
   await prompt(session.id, "!title Automatic title");
   assert.equal(hub.agentInfo(hub.agent(session.agentId)).name, "Automatic title");
   const running = prompt(session.id, "!sleep 500\n!title Late automatic title\n!say FINISHED");
@@ -298,6 +301,9 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   await conn.request(Agents.set, { agentId: empty.agentId, title: "Named before chatting" });
   await prompt(empty.id, "!say FIRST MESSAGE");
   assert.equal(hub.session(empty.id).rec.title, "Named before chatting");
+  const explicit = await conn.request("session/new", { title: "Title chosen on creation", _meta: { [Workflow.backend]: "mock" } });
+  await prompt(explicit.sessionId, "!title Backend title");
+  assert.equal(hub.session(explicit.sessionId).rec.title, "Title chosen on creation");
   observer.close();
   console.log("ok conversation rename: persistence, broadcasts, backend titles and running turn");
 }

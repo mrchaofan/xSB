@@ -15,3 +15,13 @@ Agent 用 `ask` 问用户 1–4 个问题，每题是单选、多选或填空；
 ## 在工作流里
 
 任务 Agent 在执行指派时提问：这一轮没调 `finish` 就结束，也不算未完成，工作保持进行、等待回答；回答所在的那一轮接续同一项工作，在其中 `finish`。回答若赶在提问那一轮结束前送到，会并入那一轮，那一轮仍须 `finish`。节点被暂停或中枢重启后，等待取消，之后的回答按普通插话处理。
+
+## Claude 原生提问
+
+保留上述自研工具，同时接入 Claude 的 `AskUserQuestion`：Hub 对 Claude 声明 `capabilities.elicitation.form: {}`，通过 `elicitation/create` 转交给支持表单的桌面客户端。Codex 不声明表单能力，继续使用自研 ask，避免 codex-acp 2.6.0 的异步问题在 turn 结束时失效。
+
+两条路径复用同一个分页、数字键、单选/多选、其他答案及问答记录 UI。原生 schema 的字段名、枚举值与展示文字分别保存，Claude 的 `question_n_custom` 合并为对应问题的“其他”；可选字段可留空，默认值可修改后提交。Hub 验证回传内容，答案通过原 ACP 请求返回，跳过返回 `decline`，取消返回 `cancel`。
+
+原生提问会等待回答并继续同一 turn，不要求模型提前结束。请求绑定 turn 和后端会话；提交用户答案时保护该 turn。停止、turn 结束、后端取消或断线使请求失效，迟到答案不转成下一条 prompt。原生记录标记 `source: "acp"`，重启时未完成请求标记取消；自研 ask 的消息式回复保持原有行为。新用户消息也可以取消原生表单，作为普通输入交给 Hub。
+
+协议能力范围及版本差异见 [ACP 客户端能力](ACP-CLIENT-CAPABILITIES.md)。

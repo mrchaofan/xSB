@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { Paths } from "@xsb/hub";
-import { Workflow, Agents, Assets, Connection, History, RunExt, Tasks } from "@xsb/protocol";
+import { Workflow, Agents, Assets, Connection, History, Question, RunExt, Tasks } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
@@ -52,6 +52,33 @@ test("node controls carry the workflow session and selected node names", async (
   peer.requests.set(Workflow.pause, params => calls.push(params));
   await ws.workflowControl("main",true,["A"]);
   assert.deepEqual(calls,[{sessionId:"main",nodes:["A"]}]);
+  ws.close();
+});
+
+test("tool status patches retain input/output and the original tool description", async () => {
+  const peer = new Peer(); snapshot(peer, [agent("a")]);
+  const ws = workspace(peer); await ws.load(); ws["sessionAgent"].set("s", "a");
+  const emit = (update: object) => peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "tool_call_update", toolCallId: "c", ...update } });
+  emit({ title: "Read files\nFull command", name: "read", status: "in_progress", rawInput: { paths: ["a.ts"] } });
+  emit({ status: "completed", rawOutput: { count: 1 } });
+  const tool = ws["transcripts"].get("a").find(e => e.kind === "tool");
+  assert.equal(tool.title, "Read files\nFull command");
+  assert.equal(tool.name, "read");
+  assert.equal(tool.status, "done");
+  assert.deepEqual(tool.input, { paths: ["a.ts"] });
+  assert.deepEqual(tool.output, { count: 1 });
+  ws.close();
+});
+
+test("a native form arriving before the first snapshot waits for session mapping and answers via its request", async () => {
+  const peer = new Peer(); snapshot(peer, [{ ...agent("a"), mainSessionId: "s" }]);
+  const ws = workspace(peer), abort = new AbortController();
+  const request = { sessionId: "s", mode: "form", message: "Choose", requestedSchema: { type: "object", properties: { choice: { type: "string", enum: ["A", "B"] } } }, _meta: { [Question.key]: { id: "native" } } };
+  const response = peer.requests.get("elicitation/create")(request, { signal: abort.signal });
+  await ws.load();
+  peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "session_info_update", _meta: { [Question.key]: { id: "native", source: "acp", state: "open", questions: [{ question: "Choose", kind: "single", options: ["A", "B"] }] } } } });
+  await ws.send("a", [], undefined, undefined, { questionId: "native", answers: ["B"] });
+  assert.deepEqual(await response, { action: "accept", content: { choice: "B" } });
   ws.close();
 });
 

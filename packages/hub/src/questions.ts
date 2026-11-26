@@ -55,6 +55,7 @@ const SCOPES: Record<Exclude<QuestionState, "open">, string> = {
   answered: "[xSB] The user's answers to the questions you asked (ask).",
   skipped: "[xSB] The user skipped the questions you asked (ask). Go on with sensible choices of your own and say which you made.",
   superseded: "[xSB] The user did not answer the questions you asked (ask) and wrote this instead.",
+  cancelled: "[xSB] The question was cancelled.",
 };
 
 function checkQuestions(questions: QuestionItem[]): QuestionItem[] {

@@ -85,5 +85,42 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await echoed("[xSB] The user did not answer the questions you asked (ask) and wrote this instead.");
   assert.equal(await js(q(card("superseded") + " .ask-record-head small") + ".textContent"), text["ask.state.superseded"]);
   assert.equal(await has(lane + " .ask-panel"), false);
+  // Backend-native ACP forms share the same UI, but return through the request rather than session/prompt.
+  const native = { message: "原生提问：使用哪个数据库？", requestedSchema: { type: "object", properties: {
+    question_0: { type: "string", oneOf: [{ const: "sqlite", title: "SQLite", description: "本地保存" }, { const: "pg", title: "Postgres" }] },
+    question_0_custom: { type: "string", title: "Other" },
+  } } };
+  await send(lane, "!elicit " + JSON.stringify(native));
+  await until(() => has(panel), "native ACP form reuses ask panel");
+  assert.equal(await js("document.querySelectorAll(" + JSON.stringify(panel + " .ask-row") + ").length"), 3);
+  await click(panel + " .ask-row:first-child");
+  await shoot("ask-native");
+  await click(panel + " .ask-next");
+  await echoed('"question_0":"sqlite"');
+  await untilJS('xsb.load().then(s=>s.transcripts[' + JSON.stringify(agent.id) + '].some(e=>e.kind==="question"&&e.source==="acp"&&e.state==="answered"))', "native question answered");
+  assert.equal(await has(panel), false);
+
+  // Delivered workflows expose no meaningless pause/resume control.
+  const graph = [{ node: "审阅", prompt: '!call finish {"summary":"已审阅","assets":[]}' }, { node: "完成", kind: "end" }, { from: "审阅", to: "完成" }].map(v => JSON.stringify(v)).join("\n");
+  await send(lane, '!call execute ' + JSON.stringify({ graphJsonl: graph }));
+  await untilJS('xsb.load().then(s=>Object.values(s.workflows).some(f=>f.state==="completed"))', "workflow delivered and queried as completed");
+  await untilJS('document.querySelector("#flow-heading")?.textContent.includes(' + JSON.stringify(text["flow.finished"]) + ')', "completed workflow badge");
+  assert.equal(await js('document.querySelectorAll("#flow-heading .btn").length'), 0);
+
+  await send(lane, '!say | 日期 | 推荐安排 |\n!say | --- | --- |\n!say | 1月1日：抵达与休息 | 北京直飞珠海，入住后在附近散步。 |\n!say | 1月2日：东澳岛 | 上午去、下午回，午餐与安静休息。 |');
+  await until(() => has(lane + " .md tbody td"), "markdown table");
+  const sizes = await js('(()=>{const cell=document.querySelector(' + JSON.stringify(lane + " .md tbody td") + ');const c=getComputedStyle(cell);const b=document.querySelector("#settings");return {left:c.paddingLeft,top:c.paddingTop,button:b.getBoundingClientRect().height,icon:b.querySelector("svg").getBoundingClientRect().width};})()');
+  assert.deepEqual(sizes, { left: "12px", top: "8px", button: 36, icon: 16 });
+  await shoot("workflow-completed-table");
+  const tool = lane + " .entry.tool";
+  assert.ok(await js('[...document.querySelectorAll(' + JSON.stringify(tool) + ')].every(e=>e.tagName==="DETAILS"&&!e.open)'), "tools are one-line collapsed details");
+  assert.equal(await js('getComputedStyle(document.querySelector(' + JSON.stringify(tool + " summary") + ')).height'), "24px");
+  await click(tool + " summary");
+  await untilJS('document.querySelector(' + JSON.stringify(tool) + ').open', "tool expanded on request");
+  assert.equal(await js('document.querySelector(' + JSON.stringify(tool + " .tool-status") + ').textContent'), text["tool.status.done"]);
+  await click(tool + " summary");
+  await send(lane, "!titlelater 120 珠海亲子旅行");
+  await untilJS('xsb.load().then(s=>s.agents.find(a=>a.id===' + JSON.stringify(agent.id) + ').name==="珠海亲子旅行")', "native title update after idle");
+  assert.equal(await js(q(row + " .row-text strong") + '.textContent'), "珠海亲子旅行");
   console.log("Electron + real Hub/ACP: ask card with single, multi and text questions; answered, skipped and superseded replies passed");
 });

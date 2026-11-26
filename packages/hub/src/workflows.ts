@@ -13,6 +13,7 @@ import {
   adopt,
   blocked,
   claim,
+  completed,
   control,
   empty,
   graphOf,
@@ -52,7 +53,31 @@ export class Workflows {
   get(owner: string) {
     const session = this.hub.session(owner);
     if (this.owner(session) !== owner) throw Error("Expected a main session");
-    return view(this.read(owner));
+    const snapshot = view(this.read(owner));
+    // A correction being handled by the main conversation is active work, not a failed interruption to resume.
+    if (!snapshot.paused && snapshot.interrupted && session.busy && snapshot.state !== "completed") {
+      snapshot.state = "running";
+      snapshot.controls = { pause: true, resume: false };
+    }
+    for (const node of snapshot.nodes) if (node.interrupted && node.status === "running" && node.sessionId && this.hub.live.get(node.sessionId)?.busy)
+      node.controls!.resume = false;
+    return snapshot;
+  }
+  list() {
+    return [...this.hub.state.workflows.keys()].map((owner) => this.get(owner));
+  }
+  /** Controls depend on live execution as well as the persisted graph. */
+  runtimeChanged(sessionId: string) {
+    const session = this.hub.live.get(sessionId);
+    if (!session) return;
+    const owner = this.owner(session), f = this.read(owner);
+    if (!f.active || f.paused) return;
+    const node = this.hub.agent(session.agentId).workflowNode;
+    const interruptions = node ? f.instances[node]?.interruptions : f.interruptions;
+    if (interruptions?.length) this.publish(owner);
+  }
+  private publish(owner: string) {
+    this.hub.broadcast(Workflow.update, { workflow: this.get(owner) });
   }
   private save(f: Flow, extra: Op[] = [], userStops?: Set<LiveSession>) {
     normalize(f);
@@ -95,7 +120,7 @@ export class Workflows {
         session.halt(current.id);
     }
     for (const session of userStops ?? []) this.hub.delivery.userStop(session);
-    this.hub.broadcast(Workflow.update, { workflow: view(this.read(f.owner)) });
+    this.publish(f.owner);
     this.schedule(f.owner);
   }
   private schedule(owner: string) {
@@ -192,7 +217,7 @@ export class Workflows {
             return ops.workflow(f);
           },
         });
-        this.hub.broadcast(Workflow.update, { workflow: view(this.read(owner)) });
+        this.publish(owner);
       } else this.save(f);
       if (!this.acceptsAttempt(session, work.attempt!)) continue;
       // The short form only where the conversation still has the assignment: not after it was renewed.
@@ -283,7 +308,7 @@ export class Workflows {
     for (const state of this.hub.state.workflows.values()) {
       const f = structuredClone(state);
       if (!f.active && !f.candidate) continue;
-      f.paused = true;
+      f.paused = !completed(f);
       // Notices acknowledged by ACP never become a second input after a crash.
       const held = [...this.hub.state.mail.values()].filter((m) => m.workflowNotice && m.to.sessionId === f.owner);
       f.outbox = f.outbox.filter(
@@ -332,13 +357,15 @@ export class Workflows {
     const spec = this.hub.agent(s.agentId);
     return !spec.workflowOwner || this.read(spec.workflowOwner).instances[spec.workflowNode!]?.work?.attempt === id;
   }
-  clientControl(owner: string, pause: boolean, nodes?: string[]) {
+  control(owner: string, action: "pause" | "resume", nodes?: string[]) {
+    const pause = action === "pause";
     if (!graphOf(this.read(owner))) throw Error("No active workflow");
     const f = structuredClone(this.read(owner));
+    if (completed(f)) { control(f, pause, nodes); return this.get(owner); }
     control(f, pause, nodes);
     if (!pause) this.allowInterruptionRetry(f, nodes);
     this.save(f);
-    return view(f);
+    return this.get(owner);
   }
   private allowInterruptionRetry(f: Flow, nodes?: string[]) {
     for (const n of f.outbox) if (n.posted && !this.hub.state.mail.has(n.posted)) delete n.posted;

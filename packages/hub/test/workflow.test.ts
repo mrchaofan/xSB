@@ -3,7 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Question, text } from "@xsb/protocol";
+import { Question, Workflow, text } from "@xsb/protocol";
 import type { NodeDef } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { Paths } from "../src/paths.ts";
@@ -42,6 +42,66 @@ const select = (f: Flow, from: string, cases: string[]) => {
   f.instances[from].last!.choice = { id: newId("choice"), cases };
   normalize(f);
 };
+
+test("workflow queries distinguish completed delivery from pending notifications and controls cannot replay a completed graph", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-completed-query-"));
+  const hub = new Hub(dir); hub.stopping = true;
+  t.after(async () => { await hub.shutdown(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const root = hub.createConversation();
+  const f = build(graph(task("A"), end(), edge("A", "end"))); f.owner = root.id;
+  deliver(f, "A");
+  hub.state.commit([ops.workflow(f)]);
+  assert.equal(hub.workflows.get(root.id).state, "running", "the completion notice still needs delivery");
+  f.outbox = []; f.paused = true;
+  hub.state.commit([ops.workflow(f)]);
+  assert.equal(hub.workflows.get(root.id).state, "completed");
+  assert.deepEqual(hub.workflows.get(root.id).controls, { pause: false, resume: false });
+  assert.deepEqual(hub.workflows.list(), [hub.workflows.get(root.id)]);
+  hub.workflows.restart();
+  assert.equal(hub.workflows.read(root.id).paused, false);
+  const delivery = hub.workflows.read(root.id).instances.A.last!.id;
+  hub.workflows.control(root.id, "resume");
+  hub.workflows.control(root.id, "pause");
+  assert.equal(hub.workflows.get(root.id).state, "completed");
+  assert.equal(hub.workflows.read(root.id).instances.A.last!.id, delivery);
+  assert.equal(hub.workflows.read(root.id).instances.A.work, undefined);
+  const unfinished = structuredClone(hub.workflows.read(root.id));
+  unfinished.instances.A.extras.push({ text: "more work", predecessors: [] });
+  hub.state.commit([ops.workflow(unfinished)]);
+  assert.equal(hub.workflows.get(root.id).state, "running");
+  hub.workflows.restart();
+  assert.equal(hub.workflows.get(root.id).state, "paused");
+  assert.deepEqual(hub.workflows.get(root.id).controls, { pause: false, resume: true });
+});
+
+test("a delivered predecessor can still pause its unfinished branch", () => {
+  const f = build(graph(task("A"), task("B"), end(), edge("A", "B"), edge("B", "end")));
+  deliver(f, "A");
+  assert.equal(view(f).nodes.find(n => n.name === "A")!.controls!.pause, true);
+  control(f, true, ["A"]);
+  assert.equal(view(f).nodes.find(n => n.name === "A")!.controls!.resume, true);
+  assert.equal(claim(f, "B"), undefined);
+});
+
+test("runtime-only turn changes publish fresh workflow controls for a pending correction", async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-controls-"));
+  const hub = new Hub(dir); hub.stopping = true;
+  t.after(async () => { await hub.shutdown(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const root = hub.createConversation(), f = build(graph(task("A"), end(), edge("A", "end")));
+  f.owner = root.id; f.interruptions = [{ id: "correction", target: f.active!, prompt: [text("Change the plan")] }];
+  hub.state.commit([ops.workflow(f)]);
+  const snapshots: any[] = [];
+  hub.broadcast = (method, params: any) => { if (method === Workflow.update) snapshots.push(params.workflow); };
+  root.current = { id: "handling" } as Turn;
+  hub.kernel.hooks.emit("acp.turn_changed", { agentId: root.agentId, sessionId: root.id });
+  await hub.kernel.hooks.settled();
+  assert.deepEqual(snapshots.at(-1).controls, { pause: true, resume: false });
+  root.current = undefined;
+  hub.kernel.hooks.emit("acp.turn_changed", { agentId: root.agentId, sessionId: root.id });
+  await hub.kernel.hooks.settled();
+  assert.deepEqual(snapshots.at(-1).controls, { pause: false, resume: true });
+  assert.equal(hub.workflows.read(root.id).interruptions[0].id, "correction", "query publication does not consume input");
+});
 
 test("workflow examples and task/end node names follow the system prompt's conversation language", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-language-"));
@@ -357,7 +417,7 @@ test("receipt replay, exact asset grants, pinned base, staged finish, interrupt 
   assert.equal(restored.instances.A.work?.selected.base, "v1");
   const live = restarted.session(worker.id),
     answer = turnFor(live, "user-correction");
-  restarted.workflows.clientControl(root.id, false);
+  restarted.workflows.control(root.id, "resume");
   assert.equal(restarted.workflows.read(root.id).instances.end.last, undefined);
   live.current = undefined;
   restarted.workflows.ended(live, answer, { stopReason: "end_turn" });
@@ -619,10 +679,10 @@ test("versions are xSB's: the model plans and executes by graph, and a fresh con
   assert.equal(await shown("after-refresh"), undefined);
 
   // What it cannot learn otherwise is told at once: here, the user paused the workflow.
-  runtime.clientControl(root.id, true);
+  runtime.control(root.id, "pause");
   assert.equal((await shown("paused")).paused, true);
   assert.equal(await shown("still-paused"), undefined);
-  runtime.clientControl(root.id, false);
+  runtime.control(root.id, "resume");
   assert.equal((await shown("resumed")).paused, false);
 
   // The backend compacted the conversation: the graph is shown whole again; so is it to a renewed context.

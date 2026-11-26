@@ -144,7 +144,7 @@ export function renderWorkflow(flow) {
   const folded = !!collapsed.get(flow.sessionId);
   const id = selected.get(flow.sessionId) ?? state.referenceAgent;
   const error = h("small", { class: "error", role: "alert" }, flow.error);
-  const held = flow.paused || (flow.interrupted && state.agents.find((a) => a.mainSessionId === flow.sessionId)?.state === "idle");
+  const held = flow.controls?.resume;
   const button = (pause, names, label) => h("button", { class: "btn sm",
     onclick: () => xsb.workflowControl(flow.sessionId, pause, names).catch((e) => (error.textContent = e.message)) }, label);
   const look = (version) => { viewing.set(flow.sessionId, version === flow.version ? null : version); renderWorkflow(flow); };
@@ -166,7 +166,8 @@ export function renderWorkflow(flow) {
     history,
     shown.kind === "history" && h("span", { class: "flow-badge" }, t("flow.version.readonly")),
     // 主会话的插话挡住了整张图（它那一轮失败或被停了）：和暂停一样，给"继续"。
-    shown.kind === "active" && button(!held, undefined, t(held ? "flow.resume" : "flow.pause")),
+    shown.kind === "active" && flow.state === "completed" && h("span", { class: "flow-badge" }, t("flow.finished")),
+    shown.kind === "active" && (held ? flow.controls?.resume : flow.controls?.pause) && button(!held, undefined, t(held ? "flow.resume" : "flow.pause")),
     error);
   document.querySelector("#side-workflow").classList.toggle("flow-folded", folded);
   const map = $("#flow-map");

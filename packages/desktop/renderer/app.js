@@ -179,7 +179,7 @@ function renderRail() {
 // ---------- 对话栏 ----------
 
 /** 节点停在那里等用户：暂停了、挂起了，或者被一条还没处理完的插话挡住（它那一轮失败或被停了）。 */
-const resumable = (node) => node.paused || node.status === "suspended" || (node.interrupted && node.status === "paused" && agentOf(node.agentId)?.state === "idle");
+const resumable = (node) => !!node.controls?.resume;
 
 /** 一条输入在模型那边的状态：标签和说明（原因写进说明）。 */
 function inputState(entry) {
@@ -404,6 +404,7 @@ function syncLane(agentId) {
   if (control) {
     const node = currentFlow()?.nodes.find(n => n.agentId === agentId);
     control.textContent = t(node && resumable(node) ? "flow.resume" : "flow.stop");
+    control.hidden = s === "idle" && !(node && resumable(node));
   }
 
   const action = s !== "idle" && !lane.editor.read().length && !lane.editor.isReading() ? "stop" : "send";
@@ -440,6 +441,7 @@ function upsertEntry(agentId, entry) {
   const pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
   const old = lane.querySelector(`.entry[data-id="${entry.id}"]`);
   const node = entryNode(agentId, entry);
+  if (entry.kind === "tool" && old?.tagName === "DETAILS") node.open = old.open;
   if (old) old.replaceWith(node); else lane.querySelector(".entries").append(node);
   if (entry.kind === "question") syncAsk(agentId);
   if (pinned) scroller.scrollTop = scroller.scrollHeight;
@@ -497,10 +499,20 @@ function entryNode(agentId, entry) {
 
   if (entry.kind === "tool") {
     const artifact = entry.artifactId && artifactOf(entry.artifactId);
-    return h("div", base,
-      h("i", { class: "state", "data-state": entry.status === "running" ? "running" : entry.status === "failed" ? "failed" : "done" }),
-      h("span", {}, entry.title),
-      artifact && h("button", { class: "chip", "data-artifact": artifact.id, "aria-pressed": String(artifact.id === state.artifactId), html: ICON.file, onclick: () => showArtifact(artifact.id) }, artifact.name));
+    const title = entry.title.split(/\r?\n/)[0].trim() || entry.name || t("tool.call");
+    const body = h("div", { class: "tool-body" });
+    const format = value => typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    const part = (label, value) => value !== undefined && h("div", { class: "tool-part" }, h("small", {}, t(label)), h("pre", {}, format(value)));
+    return h("details", { ...base, ontoggle: e => {
+      if (e.currentTarget.open && !body.childNodes.length) fill(body,
+        entry.title && h("pre", { class: "tool-description" }, entry.title),
+        part("tool.input", entry.input), part("tool.output", entry.output),
+        artifact && h("button", { class: "chip", "data-artifact": artifact.id, "aria-pressed": String(artifact.id === state.artifactId), html: ICON.file, onclick: () => showArtifact(artifact.id) }, artifact.name));
+    } },
+      h("summary", { title: t("tool.details") },
+        h("span", { class: "tool-chevron", "aria-hidden": "true", html: ICON.forward }),
+        h("i", { class: "state", "data-state": entry.status === "running" ? "running" : entry.status === "failed" ? "failed" : "done" }),
+        h("span", { class: "tool-title" }, title), h("small", { class: "tool-status" }, t(`tool.status.${entry.status}`))), body);
   }
 
   // permission

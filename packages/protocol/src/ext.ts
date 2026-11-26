@@ -393,12 +393,15 @@ export type QuestionItem = {
   options?: string[];
   /** single/multi: the user may also write an answer of their own. */
   other?: boolean;
+  optional?: boolean;
+  default?: QuestionAnswer;
+  optionDescriptions?: string[];
 };
-export type QuestionState = "open" | "answered" | "skipped" | "superseded";
+export type QuestionState = "open" | "answered" | "skipped" | "superseded" | "cancelled";
 /** `reply`: the user's message that closed it (answered, skipped or superseded). */
-export type Question = { id: string; state: QuestionState; questions?: QuestionItem[]; answers?: QuestionAnswer[]; reply?: string };
+export type Question = { id: string; state: QuestionState; questions?: QuestionItem[]; answers?: QuestionAnswer[]; reply?: string; source?: "acp"; delivery?: "async" };
 /** One answer per question, in order: an option or text for single and text, a list for multi. */
-export type QuestionAnswer = string | string[];
+export type QuestionAnswer = string | string[] | null;
 /** `_meta` of the `session/prompt` that answers or skips a question. */
 export const Answer = { key: `${NS}/answer` } as const;
 export type Answer = { questionId: string; answers?: QuestionAnswer[]; skipped?: boolean };
