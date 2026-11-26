@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "browser": {
+      "command": "node",
+      "args": ["./server.mjs"],
+      "env": { "XSB_BROWSER_SOCKET": "${XSB_BROWSER_SOCKET}" }
+    }
+  }
+}

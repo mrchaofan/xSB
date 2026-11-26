@@ -41,7 +41,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { PLUGINS_ENV, findCommand, withhold, updateJsonFile } from "@xsb/hub";
+import { findCommand, withhold, updateJsonFile } from "@xsb/hub";
 import { SOCKET_ENV } from "./browser.ts";
 
 /** The hub's built-in backends: each is named after the program of the user's machine it is, or is built around. */
@@ -54,8 +54,6 @@ const WRAPPERS: Record<string, { command: string; env: string }> = {
 };
 /** Where the app's own programs are bundled (rolldown.config.js). */
 const SHIPPED = fileURLToPath(new URL("../bin/", import.meta.url));
-/** The plugins shipped with the app: beside the code, outside any archive, in development as when packed. */
-const PLUGINS = fileURLToPath(new URL("../plugins/", import.meta.url));
 const windows = process.platform === "win32";
 /** A native program's file name for a command: Windows finds a program on PATH by its extension. */
 const programFile = (command: string): string => `${command}${windows ? ".exe" : ""}`;
@@ -187,8 +185,7 @@ export class Clis {
     return withhold({
       ...process.env,
       PATH: this.path(),
-      // The plugins shipped with the app, and where the browser plugin connects.
-      [PLUGINS_ENV]: PLUGINS,
+      // Where the browser plugin connects.
       [SOCKET_ENV]: this.browserSocket,
     });
   }

@@ -142,11 +142,11 @@
   }
   // 插件：三处文件夹，规则与中枢 plugins.ts 相同（后面的地方代替同名的，工作区插件需确认）。
   const plugins = [
-    { name: "browser", scope: "builtin", dir: "<app>/plugins/browser", description: L(label("右栏浏览器", "The side panel browser")), runs: "XSB_BROWSER_SOCKET=${env:XSB_BROWSER_SOCKET} node server.mjs" },
-    { name: "media", scope: "builtin", dir: "<app>/plugins/media", description: L(label("生成图片和视频", "Generate images and videos")), runs: "PATH=${env:PATH} node server.mjs" },
-    { name: "search", scope: "global", dir: "~/.xsb2_global/plugins/search", description: label("网页搜索", "Web search"), runs: "node index.js" },
+    { name: "browser", scope: "builtin", dir: "<app>/plugins/browser", runs: "XSB_BROWSER_SOCKET=${XSB_BROWSER_SOCKET} node ./server.mjs" },
+    { name: "media", scope: "builtin", dir: "<app>/plugins/media", runs: "PATH=${PATH} node ./server.mjs" },
+    { name: "search", scope: "global", dir: "~/.xsb2_global/plugins/search", runs: "npx -y search-mcp\nhttps://example.com/mcp" },
     { name: "broken", scope: "global", dir: "~/.xsb2_global/plugins/broken", problem: "bad_json" },
-    { name: "render", scope: "project", dir: ".xsb2/plugins/render", runs: "node dist/server.js", approved: false },
+    { name: "render", scope: "project", dir: ".xsb2/plugins/render", runs: "node ./dist/server.js", approved: false },
   ];
   const off = { global: new Set(), project: new Set() };
   function pluginViews() {

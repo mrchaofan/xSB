@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "media": {
+      "command": "node",
+      "args": ["./server.mjs"],
+      "env": { "PATH": "${PATH}" }
+    }
+  }
+}

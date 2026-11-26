@@ -1,18 +1,25 @@
 /**
- * Plugins: tool servers (MCP), one folder each, in three places of the same layout:
+ * Plugins: one folder each, in three plugin folders of the same layout:
  *
- *   <app>/plugins/<name>/package.json       shipped with the app (XSB_PLUGINS names the folder)
- *   ~/.xsb2_global/plugins/<name>/package.json      added on this machine
- *   <project>/.xsb2/plugins/<name>/package.json   added for one project
+ *   <app>/plugins/<name>/             shipped with the app: beside the code, wherever the app is
+ *   ~/.xsb2_global/plugins/<name>/    added on this machine
+ *   <project>/.xsb2/plugins/<name>/   added for one project
  *
- * A later place replaces a plugin of the same name. Adding one is putting its folder there; every conversation
- * reads the folders when its backend starts, so a restart (or `_dev.xsb/tools/apply`) is all it takes.
+ * The three differ in nothing but where the plugin folder is. A later one replaces a plugin of the same name. Adding
+ * a plugin is putting its folder there; every conversation reads the folders when its backend starts, so a restart
+ * (or `_dev.xsb/tools/apply`) is all it takes.
  *
- * A plugin is an npm package (it need not be published): its folder's package.json says what it is. `main` is the
- * file the plugin runs, as in npm (index.js when it says none); it must be in the folder. It runs on the Node the
- * app runs on, as an MCP server on stdio. `description` is what conversations are told about it. Its own
- * variables go in `xsb.env`, where `${pluginDir}` is its folder, `${node}` the app's Node and `${env:NAME}` a
- * variable of the hub's environment. The plugin's name is its folder's, not the package's.
+ * A plugin's folder has the layout agent programs share:
+ *
+ *   <name>/.mcp.json    its tool servers, as MCP clients write them:
+ *                       { "mcpServers": { "<server>": { "command", "args", "env" } | { "type": "http", "url", "headers" } } }
+ *   <name>/README.md    for people (not read here)
+ *
+ * (commands/, agents/, skills/ and hooks/ of that layout are not used yet.) Nothing in a plugin says where it is:
+ * a command or argument starting with `./` is a file of its folder, `${CLAUDE_PLUGIN_ROOT}` is the folder, as plugins
+ * written for Claude Code say it, and `${NAME}` / `${NAME:-default}` a variable of the hub's environment. The command
+ * `node` is the Node the app runs on. What a server tells a model about itself is its own `instructions` (MCP's
+ * `initialize`), not a file here.
  *
  * Settings live in the config files (config.ts): `plugins.<name>.enabled: false` turns one off on this machine or in
  * a project. A project's plugins travel with its folder and may come from someone else: they start once this
@@ -26,22 +33,20 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { McpServer } from "@xsb/protocol";
-import { globalDir, globalConfiguration, machineConfig, projectConfig, updateGlobalConfig, updateProjectConfig } from "./config.ts";
+import { globalDir, globalConfiguration, projectConfig, updateGlobalConfig, updateProjectConfig } from "./config.ts";
 import { approvedFingerprints, recordPluginApproval } from "./trust.ts";
-import type { Paths } from "./paths.ts";
+import { shipped, type Paths } from "./paths.ts";
 
-export const PLUGINS_ENV = "XSB_PLUGINS";
 export type PluginScope = "builtin" | "global" | "project";
 
 /** Why a plugin cannot be used; a client words it. */
-export type PluginProblem = "no_manifest" | "bad_json" | "bad_name" | "no_main" | "bad_field";
+export type PluginProblem = "no_manifest" | "bad_json" | "bad_name" | "bad_field";
 
 export type PluginView = {
   name: string;
   scope: PluginScope;
   dir: string;
-  description?: string;
-  /** What it starts: its variables, as written, and its main file. */
+  /** What it starts, a line for each server: its variables, command and arguments, as written. */
   runs?: string;
   problem?: PluginProblem;
   /** Turned off by the setting of its own scope, or of the project for any plugin. */
@@ -55,41 +60,39 @@ export type PluginView = {
   active: boolean;
 };
 
-/** What xSB reads of a plugin's package.json. */
-type Manifest = { description?: string; main?: string; xsb?: { env?: Record<string, string> } };
-/** `entry`: the main file, resolved in the folder. `text`: the package.json as written, for the fingerprint. */
-type Found = { name: string; scope: PluginScope; dir: string; manifest?: Manifest; entry?: string; text?: string; problem?: PluginProblem };
+/** A server of `.mcp.json`, as written. */
+type Declared = { type?: string; command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> };
+/** `servers`: by name, as written. `text`: the `.mcp.json` as written, for the fingerprint. */
+type Found = { name: string; scope: PluginScope; dir: string; servers?: Record<string, Declared>; text?: string; problem?: PluginProblem };
 
+export const MANIFEST = ".mcp.json";
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-/** The hub's own tools go by these names (mcp.ts); a plugin cannot take them. */
+/** The hub's own tools go by these names (mcp.ts); neither a plugin nor a server of one can take them. */
 const RESERVED = new Set(["workflow", "xsb"]);
+const named = (name: string) => NAME.test(name) && !RESERVED.has(name);
 
-/** The folder of each place. */
+/** The plugin folder of each place: all that tells the places apart. */
 export function pluginRoot(scope: PluginScope, paths?: Paths): string | undefined {
-  if (scope === "builtin") return process.env[PLUGINS_ENV];
+  if (scope === "builtin") return shipped("plugins");
   if (scope === "global") return path.join(globalDir(), "plugins");
   return paths && path.join(paths.dir, "plugins");
 }
 
-const isMap = (v: unknown) => v === undefined || (!!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((x) => typeof x === "string"));
+const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const isMap = (v: unknown) => v === undefined || (isObject(v) && Object.values(v).every((x) => typeof x === "string"));
+const isServer = (v: unknown): boolean => isObject(v) && (v.type === "http"
+  ? typeof v.url === "string" && isMap(v.headers)
+  : (v.type === undefined || v.type === "stdio") && typeof v.command === "string" && !!v.command.trim()
+    && (v.args === undefined || (Array.isArray(v.args) && v.args.every((x) => typeof x === "string"))) && isMap(v.env));
 
-function check(m: unknown): PluginProblem | undefined {
-  if (!m || typeof m !== "object" || Array.isArray(m)) return "bad_json";
-  const s = m as Manifest;
-  if (s.description !== undefined && typeof s.description !== "string") return "bad_field";
-  if (s.main !== undefined && (typeof s.main !== "string" || !s.main.trim())) return "no_main";
-  if (s.xsb !== undefined && (!s.xsb || typeof s.xsb !== "object" || Array.isArray(s.xsb) || !isMap(s.xsb.env))) return "bad_field";
-  return undefined;
-}
-
-/** The main file, as npm finds it, if it is a file inside the folder: a link or `..` out of it is none. */
-function entryOf(dir: string, main = "index.js"): string | undefined {
-  const file = path.resolve(dir, main);
-  try {
-    const real = fs.realpathSync(file), root = fs.realpathSync(dir);
-    const inside = path.relative(root, real);
-    return inside && !inside.startsWith("..") && !path.isAbsolute(inside) && fs.statSync(real).isFile() ? file : undefined;
-  } catch { return undefined; }
+/** The servers of a `.mcp.json`: under `mcpServers`, or the file itself as some write it. */
+function read(text: string): Record<string, Declared> | PluginProblem {
+  let json: unknown;
+  try { json = JSON.parse(text); } catch { return "bad_json"; }
+  if (!isObject(json)) return "bad_json";
+  const servers = "mcpServers" in json ? json.mcpServers : json;
+  if (!isObject(servers) || !Object.values(servers).every(isServer)) return "bad_field";
+  return Object.keys(servers).every(named) ? servers as Record<string, Declared> : "bad_name";
 }
 
 /** The plugins of one place, in name order. A folder that is not there is no plugin. */
@@ -100,15 +103,31 @@ function scan(scope: PluginScope, paths?: Paths): Found[] {
   catch { return []; }
   return names.map((name) => {
     const dir = path.join(root!, name);
-    if (!NAME.test(name) || RESERVED.has(name)) return { name, scope, dir, problem: "bad_name" as const };
+    if (!named(name)) return { name, scope, dir, problem: "bad_name" as const };
     let text: string;
-    try { text = fs.readFileSync(path.join(dir, "package.json"), "utf8"); } catch { return { name, scope, dir, problem: "no_manifest" as const }; }
-    let manifest: unknown;
-    try { manifest = JSON.parse(text); } catch { return { name, scope, dir, text, problem: "bad_json" as const }; }
-    const problem = check(manifest);
-    if (problem) return { name, scope, dir, text, problem };
-    const entry = entryOf(dir, (manifest as Manifest).main);
-    return entry ? { name, scope, dir, text, entry, manifest: manifest as Manifest } : { name, scope, dir, text, problem: "no_main" as const };
+    try { text = fs.readFileSync(path.join(dir, MANIFEST), "utf8"); } catch { return { name, scope, dir, problem: "no_manifest" as const }; }
+    const servers = read(text);
+    return typeof servers === "string" ? { name, scope, dir, text, problem: servers } : { name, scope, dir, text, servers };
+  });
+}
+
+/** A value of `.mcp.json` where the plugin is now: its folder and the hub's variables filled in, `./` in its folder. */
+function fill(p: Found, value: string): string {
+  const s = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, name, fallback) =>
+    name === "CLAUDE_PLUGIN_ROOT" ? p.dir : process.env[name] ?? fallback ?? "");
+  return s.startsWith("./") ? path.join(p.dir, s) : s;
+}
+
+/** A plugin's servers as `mcpServers` entries of a backend session, in name order. */
+function serversOf(p: Found): McpServer[] {
+  const pairs = (map: Record<string, string> = {}) => Object.entries(map).map(([name, value]) => ({ name, value: fill(p, value) }));
+  return Object.entries(p.servers ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, s]): McpServer => {
+    if (s.type === "http") return { type: "http", name, url: fill(p, s.url!), headers: pairs(s.headers) };
+    const args = (s.args ?? []).map((a) => fill(p, a));
+    // `node` is the app's Node, which is Electron: told to run as Node, as the hub's own bridge is (mcp.ts).
+    return s.command === "node"
+      ? { type: "stdio", name, command: process.execPath, args, env: [{ name: "ELECTRON_RUN_AS_NODE", value: "1" }, ...pairs(s.env)] }
+      : { type: "stdio", name, command: fill(p, s.command!), args, env: pairs(s.env) };
   });
 }
 
@@ -122,12 +141,19 @@ const approvedIn = (config: { approvedPlugins?: unknown }): Set<string> =>
   new Set(Array.isArray(config.approvedPlugins) ? config.approvedPlugins.filter((x): x is string => typeof x === "string") : []);
 
 /**
- * What a project plugin was approved as: its package.json and the main file it runs. A change to either asks again.
- * (Files the main file loads in turn are not in it; the approval says to check the folder.)
+ * What a project plugin was approved as: its `.mcp.json` and the files of its folder that its servers are started
+ * with. A change to either asks again. (Files those load in turn are not in it; the approval says to check the folder.)
  */
 const fingerprint = (p: Found, paths: Paths) => {
   const hash = createHash("sha256").update(JSON.stringify([paths.project, p.name, p.text]));
-  try { if (p.entry) hash.update(fs.readFileSync(p.entry)); } catch { /* gone since the scan: no match */ }
+  for (const server of serversOf(p)) {
+    if (server.type !== "stdio") continue;
+    for (const file of [server.command, ...server.args ?? []]) {
+      const inside = path.relative(p.dir, file);
+      if (!path.isAbsolute(file) || !inside || inside.startsWith("..") || path.isAbsolute(inside)) continue;
+      try { hash.update(inside).update(fs.readFileSync(file)); } catch { /* not a file: nothing of it to approve */ }
+    }
+  }
   return hash.digest("hex");
 };
 
@@ -141,10 +167,10 @@ function survey(paths?: Paths): { found: Found; view: PluginView }[] {
   return found.map((p) => {
     const enabled = configuration.available && !(p.scope === "project" ? offProject : offGlobal).has(p.name) && !offProject.has(p.name);
     const ok = p.scope !== "project" || (!!paths && approved.has(fingerprint(p, paths)));
-    const m = p.manifest;
     const view: PluginView = {
-      name: p.name, scope: p.scope, dir: p.dir, problem: p.problem, description: m?.description,
-      runs: m && p.entry && [...Object.entries(m.xsb?.env ?? {}).map(([k, v]) => `${k}=${v}`), "node", path.relative(p.dir, p.entry)].join(" "),
+      name: p.name, scope: p.scope, dir: p.dir, problem: p.problem,
+      runs: p.servers && Object.values(p.servers).map((s) => s.type === "http" ? s.url
+        : [...Object.entries(s.env ?? {}).map(([k, v]) => `${k}=${v}`), s.command, ...s.args ?? []].join(" ")).join("\n"),
       enabled, ...(p.scope === "project" ? { approved: ok, ...(ok && paths ? { approvalFingerprint: fingerprint(p, paths) } : {}) } : {}),
       replaced: !p.problem && last.get(p.name) !== p,
       active: !p.problem && last.get(p.name) === p && enabled && ok,
@@ -155,19 +181,13 @@ function survey(paths?: Paths): { found: Found; view: PluginView }[] {
 
 export const listPlugins = (paths?: Paths): PluginView[] => survey(paths).map((x) => x.view);
 
-/** The plugins a conversation of the project gets, in name order: the same set gives the same prompt. */
-export const activePlugins = (paths?: Paths): { server: McpServer; about?: string }[] =>
-  survey(paths).filter((x) => x.view.active).sort((a, b) => a.found.name.localeCompare(b.found.name))
-    .map(({ found }) => ({ server: serverOf(found), about: found.manifest!.description }));
-
-/** A plugin as the `mcpServers` entry of a backend session: its main file on the app's Node, its variables filled in. */
-function serverOf(p: Found): McpServer {
-  const fill = (s: string) => s.replace(/\$\{(pluginDir|node|env:([A-Za-z_][A-Za-z0-9_]*))\}/g, (_, key, name) =>
-    key === "pluginDir" ? p.dir : key === "node" ? process.execPath : process.env[name] ?? "");
-  const env = Object.entries(p.manifest!.xsb?.env ?? {}).map(([name, value]) => ({ name, value: fill(value) }));
-  // The app's Node is Electron: told to run as Node, as the hub's own bridge is (mcp.ts).
-  return { type: "stdio", name: p.name, command: process.execPath, args: [p.entry!], env: [{ name: "ELECTRON_RUN_AS_NODE", value: "1" }, ...env] };
-}
+/**
+ * The servers a conversation of the project gets, in name order: the same set gives the same prompt. Of two servers
+ * of one name, the later plugin's is it.
+ */
+export const activePlugins = (paths?: Paths): { server: McpServer }[] =>
+  [...new Map(survey(paths).filter((x) => x.view.active).flatMap(({ found }) => serversOf(found)).map((server) => [server.name, server])).values()]
+    .sort((a, b) => a.name.localeCompare(b.name)).map((server) => ({ server }));
 
 /** Turn a plugin on or off on this machine (`global`) or in the project (`project`). */
 export function setPluginEnabled(scope: "global" | "project", name: string, enabled: boolean, paths?: Paths): void {
@@ -195,7 +215,6 @@ export function ensurePluginRoot(scope: "global" | "project", paths?: Paths): st
   return root;
 }
 
-/** Fingerprint of what a set of tool servers starts and tells, without the per-session tokens: equal means no change. */
-export const toolsKey = (tools: { server: McpServer; about?: string }[]): string =>
-  JSON.stringify(tools.map(({ server, about }) => [server, about]));
+/** Fingerprint of what a set of tool servers starts, without the per-session tokens: equal means no change. */
+export const toolsKey = (tools: { server: McpServer }[]): string => JSON.stringify(tools.map(({ server }) => server));
 

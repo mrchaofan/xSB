@@ -156,6 +156,7 @@ export function main(env: NodeJS.ProcessEnv = process.env): void {
     protocolVersion: p.protocolVersion,
     capabilities: { tools: {} },
     serverInfo: { name: "xsb-media-mcp", version: "0.1.0" },
+    instructions: "Generate an image or video from a prompt using the configured provider.",
   }));
   conn.onRequest("tools/list", () => ({
     tools: [
