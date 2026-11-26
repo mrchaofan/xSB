@@ -345,11 +345,11 @@ xsb.on(event => {
   // The screenshot must also leave a different foreground window and its editor alone.
   const other = new BrowserWindow({ show: false });
   await other.loadURL('data:text/html,<input id="otherEditor">');
+  host.hide();
   other.show();
   other.focus();
   await until(() => other.isFocused());
   await other.webContents.executeJavaScript("document.querySelector('#otherEditor').focus(); true");
-  host.hide();
   checkDrawing(other);
   await invoke('browser_screenshot');
   pages.drawn = drawn;

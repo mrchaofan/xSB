@@ -11,6 +11,7 @@
     "node": ">=22.18"
   },
   "scripts": {
+    "postinstall": "node packages/desktop/scripts/patch-electron.mjs",
     "test": "npm test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

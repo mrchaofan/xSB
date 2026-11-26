@@ -20,7 +20,9 @@ npm start -w @xsb/desktop -- <文件夹>      # 直接打开一个工作区
 | [src/browser.ts](src/browser.ts) | browser use：Agent 经 MCP 操控右栏的网页，走 CDP（`webContents.debugger`） |
 | [renderer/](renderer) | 界面。打包后在浏览器里直接打开 `dist/renderer/index.html`，会用 `mock.js` 的假数据运行 |
 
-Electron 用的是带 `<webview2>` 的私有构建：`npm install` 后 [scripts/patch-electron.mjs](scripts/patch-electron.mjs) 给 `electron` 包打补丁（[patches/](patches)），首次运行时它按 [.electron.mirror.mjs](.electron.mirror.mjs) 从私有镜像下载二进制。版本在 `package.json` 里写死为 43.8.1。
+Electron 用的是带 `<webview2>` 的私有构建：根项目和桌面包的 `postinstall` 都运行 [scripts/patch-electron.mjs](scripts/patch-electron.mjs)，覆盖 `npm install` 与 `npm ci`。脚本从 Git 根目录应用补丁，并逐项核对已安装内容，适用于普通仓库、linked worktree 和源码目录；重复执行只校验，补丁缺失或不完整时安装失败。首次运行时下载器按 [.electron.mirror.mjs](.electron.mirror.mjs) 从私有镜像下载二进制。版本在 `package.json` 里写死为 43.8.1。
+
+Electron 43.8.1 npm 包自身没有 `preinstall/install/postinstall`；它在首次 `require('electron')` 时才调用下载器。因此依赖安装先完成，项目 `postinstall` 只解析 Electron 的 `package.json` 并修改下载器，最后启动时才按镜像下载。回归测试校验这三个钩子均不存在，并通过真实 `npm install`、`npm ci` 检验项目钩子确实执行；Electron 升级若改变这个顺序，须先调整安装机制。
 
 代码由 Rolldown 打进 `dist/`（[rolldown.config.js](rolldown.config.js)），`npm start` 会先打包；单独打包用 `npm run build -w @xsb/desktop`。`npm run package -w @xsb/desktop` 用 electron-builder 把 `dist/` 做成当前平台的应用（[electron-builder.config.mjs](electron-builder.config.mjs)），产物在 `release/`：macOS arm64 与 Windows x64 各一个 zip，各自在对应平台上打包（CI 按平台分别打包），不签名（macOS 只做 ad-hoc）。随包但不经 Rolldown 打包的只有 `package.json` 的生产依赖：各平台的 arkcli（`optionalDependencies`，npm 只安装当前平台那一个，见 [docs/ARK-SETUP.md](../../docs/ARK-SETUP.md)）。里面的 Electron 同样来自私有镜像；图标在 [build/](build)。
 
