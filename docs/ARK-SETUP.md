@@ -19,7 +19,7 @@
 - `packages/desktop/package.json` 的 `optionalDependencies` 精确锁定各平台的 `@volcengine/ark-cli-<platform>-<arch>`（目前是 1.0.65）。npm 只安装与当前平台匹配的那一个。它们是生产依赖，不经 rolldown 打包，由 electron-builder 按发布时的原样复制到应用的 `node_modules`，运行时按路径执行（`shippedArkcli`：`bin/arkcli-<os>-<cpu>[.exe]`）。
 - 不依赖包装包 `@volcengine/ark-cli`：它的 postinstall 会从 CDN 下载二进制，并调用 `+connect --refresh` 把 arkcli 的技能装进本机所有智能体。平台包只含程序本身和技能文档，没有安装脚本。
 - 各平台的应用在各自的平台上打包（`.github/workflows/desktop.yml`）。`electron-builder.config.mjs` 的 `afterPack` 会检查应用里有目标平台的 arkcli；跨平台打包时缺少这个程序，打包直接失败。
-- xSB 只使用内置的 arkcli，不在 PATH 中查找，也不使用用户自己装的 arkcli。方舟卡片和启动器按绝对路径调用它；它还以 `arkcli` 为名链接到 `backends/builtin/bin`（见 CLI_SETUP.md 的“可执行文件的布局”），这个目录排在子进程 PATH 中用户 PATH 的前面，所以媒体插件按命令名找到的也是它（除非用户显式设置了 `ARKCLI`）。登录凭据由 arkcli 保存在 `~/.arkcli`，和用户自己的 arkcli 共用。
+- xSB 只使用内置的 arkcli，不在 PATH 中查找，也不使用用户自己装的 arkcli。方舟卡片和启动器按绝对路径调用它；它还以 `arkcli` 为名链接到 `backends/builtin/bin`（见 CLI_SETUP.md 的“可执行文件的布局”），这个目录排在子进程 PATH 中用户 PATH 的前面，供应用启动的程序按命令名调用。登录凭据由 arkcli 保存在 `~/.arkcli`，和用户自己的 arkcli 共用。
 - 内置程序缺失或无法运行时，卡片显示“程序异常”，只提供重新检测，不附加重装建议。
 - 升级 arkcli：改 `optionalDependencies` 中的六个版本号，重新运行 `npm install`，再按下文核对输出格式。
 

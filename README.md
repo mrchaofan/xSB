@@ -4,14 +4,13 @@ xSB 在一个工作区中管理多个独立的 Agent 会话。简单任务直接
 
 ## 结构
 
-npm workspaces 的 monorepo，七个库，依赖只向下（cli 与 desktop 并列，互不依赖）：
+npm workspaces 的 monorepo，六个库，依赖只向下（cli 与 desktop 并列，互不依赖）：
 
 | 库 | 职责 |
 | - | - |
 | [@xsb/desktop](packages/desktop) | 桌面应用（Electron），Hub 的一个 ACP 客户端；设计见 [docs/GUI.md](docs/GUI.md) |
 | [@xsb/cli](packages/cli) | `xsb` 命令，Hub 的一个 ACP 客户端 |
 | [@xsb/hub](packages/hub) | Hub 守护进程：会话与回合、后端进程、邮件与任务、权限、协作工具 |
-| [@xsb/media-mcp](packages/media-mcp) | 图片与视频生成的 MCP server，模型可更换（先接了豆包的 Seedream 与 Seedance） |
 | [@xsb/adapter](packages/adapter) | 把没有 ACP 入口的三方 agent 封装成一个普通后端 |
 | [@xsb/store](packages/store) | 只追加的 JSONL 日志 + 预写日志 |
 | [@xsb/protocol](packages/protocol) | 线上定义：JSON-RPC、ACP 类型、ACP 扩展、错误码 |
