@@ -46,6 +46,9 @@ test("the pinned Electron has no dependency install hook ahead of our patch", ()
   for (const hook of ["preinstall", "install", "postinstall"]) {
     assert.equal(electron.scripts?.[hook], undefined, `Electron must not download through ${hook} before the project's patch`);
   }
+  const dir = path.dirname(require.resolve("electron/package.json"));
+  assert.ok(fs.existsSync(path.join(dir, "mirror-config.js")), "npm postinstall must patch the installed Electron before tests start");
+  assert.equal(patchElectron(dir, path.join(desktop, `patches/electron@${declared}.patch`)), false);
 });
 
 test("the downloader patch applies and verifies inside Git repositories, linked worktrees and extracted sources", (t) => {
