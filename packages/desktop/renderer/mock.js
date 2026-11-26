@@ -161,6 +161,7 @@
     ["toolOutputTokens", 4000, 500, 200000], ["contextRecoveryAttempts", 1, 0, 3]]);
   const limits = { backends: { claude: backendRows(), codex: backendRows() } };
   let projectLanguage = language;
+  let consultation = { global: false, project: null, effective: false };
   window.xsb = {
     language,
     on: (fn) => listeners.add(fn),
@@ -213,6 +214,12 @@
       return structuredClone(limits);
     },
     projectLanguage: async () => projectLanguage,
+    consultationSettings: async () => ({ ...consultation }),
+    setConsultation: async (scope, value) => {
+      consultation[scope] = value;
+      consultation.effective = consultation.project ?? consultation.global;
+      return { ...consultation };
+    },
     setProjectLanguage: async (value) => (projectLanguage = value),
     plugins: async () => pluginViews(),
     setPluginEnabled: async (scope, name, enabled) => { off[scope][enabled ? "delete" : "add"](name); return pluginViews(); },

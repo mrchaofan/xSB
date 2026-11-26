@@ -30,6 +30,7 @@ if (!process.versions.electron) {
   return;
 }
 const { app, BrowserWindow } = require("electron");
+if (["en", "zh-CN"].includes(process.env.XSB_TEST_LANGUAGE)) app.getPreferredSystemLanguages = () => [process.env.XSB_TEST_LANGUAGE];
 const root = path.resolve(__dirname, "../../.."),
   scratch = process.env.XSB_TEST_PROFILE;
 app.setPath("userData", path.join(scratch, "profile"));

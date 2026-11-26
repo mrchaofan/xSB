@@ -29,7 +29,7 @@ import { Client } from "./acp-server.ts";
 import { Assets } from "./assets.ts";
 import { auditHook, auditReports } from "./audit.ts";
 import { BackendPool } from "./backends.ts";
-import { DEFAULT_BACKEND, projectLanguage } from "./config.ts";
+import { consultationSettings, DEFAULT_BACKEND, projectLanguage } from "./config.ts";
 import { contextPolicy } from "./context.ts";
 
 import { Delivery } from "./delivery.ts";
@@ -310,6 +310,7 @@ export class Hub {
       agent,
       projectLanguage(this.paths),
       [this.instructions(agent.id), tools].filter(Boolean).join("\n"),
+      consultationSettings(this.paths).effective,
     );
   }
 

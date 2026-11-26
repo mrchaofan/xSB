@@ -21,7 +21,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, net, protocol, session, shell, webContents } from "electron";
 import type { WebPreferences } from "electron";
-import { Paths, approvePlugin, describeBackends, ensurePluginRoot, findCommand, limitSettings, listPlugins, projectLanguageSetting, setLimit, setPluginEnabled, setProjectLanguage, stopHub, settingsBundle, restoreSettingsBundle, validateSettingsBundle, pluginApprovals, revokePluginApproval, atomicWrite } from "@xsb/hub";
+import { Paths, approvePlugin, consultationSettings, setConsultation, describeBackends, ensurePluginRoot, findCommand, limitSettings, listPlugins, projectLanguageSetting, setLimit, setPluginEnabled, setProjectLanguage, stopHub, settingsBundle, restoreSettingsBundle, validateSettingsBundle, pluginApprovals, revokePluginApproval, atomicWrite } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Answer, Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
@@ -655,6 +655,13 @@ async function call(event: Electron.IpcMainInvokeEvent, method: string, args: an
     case "setProjectLanguage":
       if (!workspace) throw new Error("this window has no workspace open");
       return setProjectLanguage(workspace.paths, args[0]);
+    case "consultationSettings":
+      return consultationSettings(workspace?.paths);
+    case "setConsultation": {
+      const settings = setConsultation(args[0], args[1], workspace?.paths);
+      await toolsChanged(args[0], workspace);
+      return settings;
+    }
     case "reloadPlugins":
       return toolsChanged("global", workspace);
     case "revealPlugins":

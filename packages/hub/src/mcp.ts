@@ -15,7 +15,8 @@ import { shipped } from "./paths.ts";
 
 import type { LiveSession } from "./session.ts";
 import { workflowTools } from "./workflow-tools.ts";
-import { WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT, XSB_TOOLS_ABOUT } from "./prompts.ts";
+import { consultationGuidance, WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT, XSB_TOOLS_ABOUT } from "./prompts.ts";
+import { consultationSettings, projectLanguage } from "./config.ts";
 import { ASK_TOOL } from "./questions.ts";
 import { boundedText } from "./context.ts";
 import { newId, VERSION } from "./util.ts";
@@ -85,7 +86,7 @@ export function serveMcp(
     serverInfo: { name: server, version: VERSION },
     // Shown to the model by agent programs that pass server instructions on: what these tools are, before it guesses.
     instructions: (() => {
-      if (server === XSB_SERVER) return XSB_TOOLS_ABOUT;
+      if (server === XSB_SERVER) return XSB_TOOLS_ABOUT + "\n\n" + consultationGuidance(consultationSettings(hub.paths).effective, projectLanguage(hub.paths));
       try { return hub.agent(attached().agentId).workflowOwner ? WORKFLOW_TASK_ABOUT : WORKFLOW_MAIN_ABOUT; }
       catch { return WORKFLOW_MAIN_ABOUT; }
     })(),

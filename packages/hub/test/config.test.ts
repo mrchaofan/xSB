@@ -6,8 +6,11 @@ import path from "node:path";
 import test from "node:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { BACKEND_LIMITS, GLOBAL_DIR, backendLimit, globalConfigPath, globalDir, globalConfiguration, backends, limitSettings, setLimit, updateGlobalConfig } from "../src/config.ts";
+import { BACKEND_LIMITS, GLOBAL_DIR, backendLimit, consultationSettings, setConsultation, globalConfigPath, globalDir, globalConfiguration, backends, limitSettings, setLimit, updateGlobalConfig, loadProjectConfig, saveProjectConfig } from "../src/config.ts";
 import { Paths } from "../src/paths.ts";
+import { Hub } from "../src/hub.ts";
+import { consultationGuidance, TASK_LIFECYCLE_RULES } from "../src/prompts.ts";
+import { settingsBundle, restoreSettingsBundle } from "../src/settings-backup.ts";
 
 function machine(t: test.TestContext) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-config-"));
@@ -15,6 +18,92 @@ function machine(t: test.TestContext) {
   process.env.XSB_HOME = dir;
   t.after(() => { if (home === undefined) delete process.env.XSB_HOME; else process.env.XSB_HOME = home; fs.rmSync(dir, { recursive: true, force: true }); });
 }
+
+test("consultation defaults, workspace overrides and inheritance survive durable reads", t => {
+  machine(t);
+  const one = new Paths(path.join(process.env.XSB_HOME!, "one"));
+  const two = new Paths(path.join(process.env.XSB_HOME!, "two"));
+  assert.deepEqual(consultationSettings(one), { global: false, project: null, effective: false });
+  setConsultation("global", true);
+  assert.equal(consultationSettings(one).effective, true);
+  saveProjectConfig(one, { version: 2, language: "zh-CN", plugins: { media: { enabled: false } } });
+  setConsultation("project", false, one);
+  assert.deepEqual(consultationSettings(one), { global: true, project: false, effective: false });
+  assert.equal(consultationSettings(two).effective, true);
+  setConsultation("global", false);
+  setConsultation("project", true, one);
+  assert.equal(consultationSettings(one).effective, true, "explicit workspace choice wins in both directions");
+  setConsultation("project", null, one);
+  assert.deepEqual(loadProjectConfig(one), { version: 2, language: "zh-CN", plugins: { media: { enabled: false } } });
+  assert.equal(consultationSettings(one).effective, false);
+  assert.equal(JSON.parse(fs.readFileSync(globalConfigPath(), "utf8")).consultUser, false);
+});
+
+test("invalid consultation values and damaged settings cannot overwrite user configuration", t => {
+  machine(t);
+  const paths = new Paths(path.join(process.env.XSB_HOME!, "workspace"));
+  for (const value of ["true", 1, {}, undefined]) {
+    assert.throws(() => setConsultation("global", value), /boolean/);
+    assert.throws(() => setConsultation("project", value, paths), /boolean/);
+  }
+  assert.throws(() => setConsultation("global", null), /boolean/);
+  assert.throws(() => setConsultation("project", true), /workspace/);
+  assert.throws(() => setConsultation("other" as any, true, paths), /scope/);
+  assert.throws(() => saveProjectConfig(paths, { version: 2, consultUser: "yes" as any }), /consultation/);
+  assert.throws(() => updateGlobalConfig(c => ({ ...c, consultUser: "yes" as any })), /consultation/);
+  fs.writeFileSync(globalConfigPath(), '{"version":1,"consultUser":"true"}');
+  assert.equal(consultationSettings().global, false, "invalid values never enable consultation");
+  setConsultation("global", true);
+  const broken = "{ damaged";
+  fs.writeFileSync(globalConfigPath(), broken);
+  assert.equal(consultationSettings().global, true, "use the last valid configuration");
+  assert.throws(() => setConsultation("global", false), /invalid_json|JSON/);
+  assert.equal(fs.readFileSync(globalConfigPath(), "utf8"), broken);
+  saveProjectConfig(paths, { version: 2 });
+  fs.writeFileSync(paths.config, broken);
+  assert.throws(() => setConsultation("project", true, paths), /invalid_json|JSON/);
+  assert.equal(fs.readFileSync(paths.config, "utf8"), broken);
+});
+
+test("consultation is included in global settings backup and restore", t => {
+  machine(t);
+  setConsultation("global", true);
+  const bundle = settingsBundle();
+  setConsultation("global", false);
+  restoreSettingsBundle(bundle);
+  assert.equal(consultationSettings().global, true);
+});
+
+test("main and task agents get localized effective consultation guidance without interrupting active work", t => {
+  machine(t);
+  const hub = new Hub(path.join(process.env.XSB_HOME!, "workspace"));
+  const session = hub.createConversation("claude");
+  const agent = hub.agent(session.agentId);
+  const stopped: string[] = [];
+  (hub as any).backends = { stop: (id: string) => stopped.push(id) };
+  session.toolsKey = hub.toolsKeyFor(session);
+  assert.match(hub.systemPromptFor(agent), /Current preference: disabled/);
+  hub.applyTools();
+  assert.deepEqual(stopped, []);
+  session.current = { id: "running" } as any;
+  setConsultation("global", true);
+  assert.equal(hub.applyTools(), 1);
+  assert.deepEqual(stopped, [], "running work keeps its current backend");
+  session.current = undefined;
+  hub.applyTools();
+  assert.deepEqual(stopped, [session.agentId], "idle backend refreshes before further work");
+  assert.match(hub.systemPromptFor(agent), /Current preference: enabled/);
+  assert.match(hub.systemPromptFor({ ...agent, workflowOwner: session.id, workflowNode: "Review" }), /Current preference: enabled/);
+  setConsultation("project", false, hub.paths);
+  saveProjectConfig(hub.paths, { ...loadProjectConfig(hub.paths), language: "zh-CN" });
+  assert.match(hub.systemPromptFor(agent), /当前偏好：关闭/);
+  for (const language of ["en", "zh-CN"] as const) for (const enabled of [true, false]) {
+    const guidance = consultationGuidance(enabled, language);
+    assert.ok(guidance.includes("ACP") && guidance.includes("xSB ask"));
+    assert.match(guidance, language === "en" ? /silence as consent/ : /沉默视为同意/);
+  }
+  assert.match(TASK_LIFECYCLE_RULES, /consultation preference[^]*never permission approvals or stop authority/);
+});
 
 test("each backend has its own context limits", (t) => {
   machine(t);

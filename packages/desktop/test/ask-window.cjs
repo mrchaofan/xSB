@@ -22,10 +22,43 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   win.show();
 
   await until(() => has(lane), "first conversation");
+  // Real settings UI -> preload -> main -> durable Hub preference, with workspace inheritance.
+  await click("#settings");
+  const preference = 'dialog [data-setting="consultation"]';
+  await until(() => has(preference), "global consultation setting");
+  assert.equal(await js(q(preference) + ".checked"), false);
+  await click(preference);
+  await untilJS('xsb.consultationSettings().then(s=>s.global===true)', "global preference saved");
+  await untilJS(q(preference) + ".disabled===false", "global save completed");
+  await shoot("consultation-global-settings");
+  await js('[...document.querySelectorAll(".settings-nav-item")].find(e=>e.textContent===' + JSON.stringify(text["settings.workspace"]) + ').click()');
+  await untilJS(q(preference) + '?.tagName==="SELECT"', "workspace consultation setting");
+  assert.equal(await js(q(preference) + ".value"), "inherit");
+  assert.ok((await js(q(preference) + ".selectedOptions[0].textContent")).includes(text["settings.consultation.enabled"]));
+  const setPreference = (value) => js('(()=>{const e=' + q(preference) + ';e.value=' + JSON.stringify(value) + ';e.dispatchEvent(new Event("change",{bubbles:true}));})()');
+  await setPreference("disabled");
+  await untilJS('xsb.consultationSettings().then(s=>s.project===false&&s.effective===false)', "workspace override saved");
+  await untilJS(q(preference) + ".disabled===false", "workspace save completed");
+  await setPreference("inherit");
+  await untilJS('xsb.consultationSettings().then(s=>s.project===null&&s.effective===true)', "inheritance restored");
+  await untilJS(q(preference) + ".disabled===false", "inheritance save completed");
+  const projectConfig = JSON.parse(fs.readFileSync(path.join((await js("xsb.load()")).workspace.path, ".xsb2/config.json"), "utf8"));
+  assert.equal(Object.hasOwn(projectConfig, "consultUser"), false, "inheritance removes the persisted override");
+  await shoot("consultation-workspace-settings");
+  await js('document.querySelector("dialog.settings-dialog").close()');
   const agent = await js('xsb.newSession("mock")');
   await untilJS('document.querySelectorAll("#agents .row").length>=2', "listed");
   await click(await rowOf(agent.id));
   const row = await rowOf(agent.id);
+  const enabled = (await js("xsb.projectLanguage()")) === "zh-CN" ? "当前偏好：开启" : "Current preference: enabled";
+  const disabled = (await js("xsb.projectLanguage()")) === "zh-CN" ? "当前偏好：关闭" : "Current preference: disabled";
+  await send(lane, "!consultation");
+  await echoed(enabled);
+  await untilJS(q(row + " .state") + ".dataset.state==='idle'", "initial instructions completed");
+  await js('xsb.setConsultation("project",false)');
+  await send(lane, "!consultation");
+  await echoed(disabled);
+  await untilJS(q(row + " .state") + ".dataset.state==='idle'", "updated instructions completed");
 
   // Three kinds in one call.
   await send(lane, ask([
@@ -92,6 +125,8 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   } } };
   await send(lane, "!elicit " + JSON.stringify(native));
   await until(() => has(panel), "native ACP form reuses ask panel");
+  await js('xsb.setConsultation("project",true)');
+  assert.equal(await has(panel), true, "preference changes do not cancel the active native callback");
   assert.equal(await js("document.querySelectorAll(" + JSON.stringify(panel + " .ask-row") + ").length"), 3);
   await click(panel + " .ask-row:first-child");
   await shoot("ask-native");
@@ -99,6 +134,8 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await echoed('"question_0":"sqlite"');
   await untilJS('xsb.load().then(s=>s.transcripts[' + JSON.stringify(agent.id) + '].some(e=>e.kind==="question"&&e.source==="acp"&&e.state==="answered"))', "native question answered");
   assert.equal(await has(panel), false);
+
+  await untilJS(q(row + " .state") + ".dataset.state==='idle'", "native turn ended before further work");
 
   // Delivered workflows expose no meaningless pause/resume control.
   const graph = [{ node: "审阅", prompt: '!call finish {"summary":"已审阅","assets":[]}' }, { node: "完成", kind: "end" }, { from: "审阅", to: "完成" }].map(v => JSON.stringify(v)).join("\n");
@@ -122,5 +159,5 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await send(lane, "!titlelater 120 珠海亲子旅行");
   await untilJS('xsb.load().then(s=>s.agents.find(a=>a.id===' + JSON.stringify(agent.id) + ').name==="珠海亲子旅行")', "native title update after idle");
   assert.equal(await js(q(row + " .row-text strong") + '.textContent'), "珠海亲子旅行");
-  console.log("Electron + real Hub/ACP: ask card with single, multi and text questions; answered, skipped and superseded replies passed");
+  console.log("Electron + real Hub/ACP: consultation settings, persisted inheritance, updated model instructions and both ask paths passed");
 });

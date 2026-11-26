@@ -2,9 +2,9 @@
  * User-local defaults and project overrides. Trust records live separately in trust.json.
  *
  *   ~/.xsb2_global/config.json        about this machine: which backends exist and how to start them, plugins turned
- *                             off and project plugins approved (plugins.ts)
+ *                             off and project plugins approved (plugins.ts), and default decision consultation preferences
  *   <project>/.xsb2/config.json about this project: which language its agents work in, and
- *                             plugins turned off here
+ *                             plugins turned off here, and decision consultation overrides
  *
  * xsb starts backends; it does not install them, sign them in, or decide what
  * they may do. Credentials and permission modes are each backend's own
@@ -48,6 +48,8 @@ export const INSTALL_HINT: Record<string, string> = {
 
 export type GlobalConfig = {
   version: 1;
+  /** Invite user input at consequential decisions in complex work. Defaults to false. */
+  consultUser?: boolean;
   backends?: Record<string, BackendSpec>;
   /** Context limits of each backend (`BACKEND_LIMITS`). */
   backendLimits?: Record<string, Partial<Record<BackendLimit, number>>>;
@@ -84,6 +86,8 @@ type Range = { default: number; min: number; max: number };
 export type ProjectConfig = {
   version: 1 | 2;
   language?: Language;
+  /** Overrides the machine preference; absence inherits it. */
+  consultUser?: boolean;
   /** Plugins turned off in this project (plugins.ts). */
   plugins?: Record<string, { enabled?: boolean }>;
 };
@@ -141,6 +145,28 @@ export function setProjectLanguage(paths: Paths, language: unknown): Language {
 /** The project's working language, if it has one; a broken file has none. */
 export const projectLanguageSetting = (paths: Paths): Language | undefined => projectConfig(paths).language;
 
+/** Model behavior belongs in durable Hub configuration, shared by every client and backend. */
+export function consultationSettings(paths?: Paths): { global: boolean; project: boolean | null; effective: boolean } {
+  const global = machineConfig().consultUser === true;
+  const value = paths ? projectConfig(paths).consultUser : undefined;
+  const project = typeof value === "boolean" ? value : null;
+  return { global, project, effective: project ?? global };
+}
+
+export function setConsultation(scope: "global" | "project", value: unknown, paths?: Paths): ReturnType<typeof consultationSettings> {
+  if (scope !== "global" && scope !== "project") throw new Error("Invalid consultation scope");
+  if (typeof value !== "boolean" && !(scope === "project" && value === null)) throw new Error("Consultation preference must be a boolean; null inherits the global preference for a project");
+  if (scope === "global") updateGlobalConfig(config => ({ ...config, consultUser: value as boolean }));
+  else {
+    if (!paths) throw new Error("No workspace is open");
+    updateProjectConfig(paths, config => {
+      const { consultUser: _previous, ...rest } = config;
+      return value === null ? rest : { ...rest, consultUser: value as boolean };
+    });
+  }
+  return consultationSettings(paths);
+}
+
 /** Agents whose spec names no backend get this one. */
 export const DEFAULT_BACKEND = "claude";
 
@@ -177,6 +203,7 @@ const backendSpec = (value: unknown): value is BackendSpec => object(value) && t
 
 export function validateGlobal(config: GlobalConfig): void {
   if (config.version !== 1) throw new Error(`Unsupported global configuration version: ${config.version}`);
+  if (config.consultUser !== undefined && typeof config.consultUser !== "boolean") throw new Error("Invalid consultation preference");
   if (config.backends !== undefined && (!object(config.backends) || Object.values(config.backends).some(v => !backendSpec(v)))) throw new Error("Invalid backend command or arguments");
   if (config.plugins !== undefined && (!object(config.plugins) || Object.values(config.plugins).some(v => !object(v) || v.enabled !== undefined && typeof v.enabled !== "boolean"))) throw new Error("Invalid plugin setting");
   if (config.backendLimits !== undefined && !object(config.backendLimits)) throw new Error("Invalid backend limits");
@@ -191,6 +218,7 @@ export function validateGlobal(config: GlobalConfig): void {
 function validateProject(config: ProjectConfig): void {
   if (![1, CONFIG_VERSION].includes(config.version)) throw new Error(`Unsupported project configuration version: ${config.version}`);
   if (config.language !== undefined && !LANGUAGES.includes(config.language)) throw new Error("Invalid project language");
+  if (config.consultUser !== undefined && typeof config.consultUser !== "boolean") throw new Error("Invalid consultation preference");
 }
 
 /**
@@ -206,6 +234,10 @@ export function globalConfiguration(): { config: GlobalConfig; available: boolea
     const raw = loadGlobalConfig();
     const issues: string[] = [];
     const config: GlobalConfig = { ...raw, backends: {} };
+    if (raw.consultUser !== undefined && typeof raw.consultUser !== "boolean") {
+      delete config.consultUser;
+      issues.push("Invalid consultation preference ignored");
+    }
     if (raw.backends !== undefined && !object(raw.backends)) issues.push("Invalid backends configuration");
     else for (const [name, value] of Object.entries(raw.backends ?? {})) {
       if (backendSpec(value)) config.backends![name] = value;

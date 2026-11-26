@@ -22,7 +22,7 @@ export const ASK_LIMITS = { questions: 4, options: 8, chars: 500 };
 /** The `ask` tool: xSB's own, served apart from the workflow tools (mcp.ts, `XSB_SERVER`). Any agent may use it. */
 export const ASK_TOOL = {
   name: "ask",
-  description: "Ask the user 1 to 4 questions about preferences or choices that change the work and that you cannot reasonably settle yourself; ask them together. kind single: pick one option; multi: pick any; text: a free answer. Options are 2 to 8 short, distinct choices; other:true lets the user also write their own. Returns at once: then end your turn without assuming the answers. The user's reply is their next message: the answers, a skip (go on with sensible choices and say which), or other words instead.",
+  description: "Request user input on decisions that materially affect the outcome. Follow the effective decision consultation preference and existing instructions; review available context first, explain the tradeoff and offer a recommendation when useful. Group 1 to 4 concise questions. kind single: one choice; multi: multiple choices; text: a written answer. Provide 2 to 8 distinct options for choice questions; other:true allows an alternative response. Returns immediately: end your turn and wait for the user's next message. Never assume an answer or treat silence as consent. If optional questions are skipped, proceed with reasonable defaults and state them; required information or authorization must still be obtained.",
   inputSchema: {
     type: "object",
     properties: {
