@@ -1,6 +1,6 @@
 {
   "name": "@xsb/media-mcp",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "A stdio MCP server that generates images and video with replaceable models (Doubao Seedream and Seedance first, through Volcengine's arkcli)",
   "type": "module",
   "private": true,
@@ -8,7 +8,7 @@
     "xsb-media-mcp": "bin/xsb-media-mcp"
   },
   "dependencies": {
-    "@xsb/protocol": "1.0.6"
+    "@xsb/protocol": "1.0.7"
   },
   "engines": {
     "node": ">=22.18"

@@ -1,6 +1,6 @@
 {
   "name": "@xsb/desktop",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "The xsb desktop app: an ACP client of the hub with one window per workspace",
   "type": "module",
   "private": true,
@@ -17,8 +17,8 @@
     "@agentclientprotocol/claude-agent-acp": "^0.107.0",
     "@agentclientprotocol/codex-acp": "^2.6.0",
     "@types/cross-spawn": "^6.0.6",
-    "@xsb/hub": "1.0.6",
-    "@xsb/protocol": "1.0.6",
+    "@xsb/hub": "1.0.7",
+    "@xsb/protocol": "1.0.7",
     "cross-spawn": "^7.0.6",
     "dompurify": "^3.4.18",
     "electron": "43.8.1",
