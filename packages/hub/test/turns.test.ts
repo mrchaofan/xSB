@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { text, TurnExt, TurnFailure, RpcError } from "@xsb/protocol";
+import { text, RunExt, TurnExt, TurnFailure, RpcError } from "@xsb/protocol";
 import type { Addr, Task } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Delivery } from "../src/delivery.ts";
@@ -720,6 +720,206 @@ test("a huge paste is saved whole to a file the agent can read, not rejected; th
 // ---- what the user sees is what the model sees (docs/TURN-LIFECYCLE.md 4) ---------------------------------------
 
 const metas = (state: State, to: Addr) => state.store.read(Paths.transcript(to.agentId, to.sessionId)).map((r: any) => r.update ?? {});
+
+test("autonomous backend runs have durable boundaries without creating turns, tasks or busy state", async (t) => {
+  const { session, state, B, hooks, settle, effects } = setup(t);
+  await session.ensureBackend();
+  const events: any[] = [], shown: any[] = [];
+  hooks.decider("acp.pre_unowned_run", (p: any) => { events.push(["pre", p.run]); return p; });
+  hooks.on("acp.run_started", (event: any) => { events.push(["start", event.run]); });
+  hooks.on("acp.run_ended", (event: any) => { events.push(["end", event.run, event.origin]); });
+  session.clients.add({ conn: { notify(_method: string, params: any) { shown.push(params.update); } } } as any);
+  const taskCount = state.tasks.size;
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "requires_action" });
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("background result") });
+  const origin = { kind: "task-notification" };
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn", _meta: { "_claude/origin": origin } });
+  // Some backends flush final usage/text after idle. That text must remain settled.
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("late tail") });
+  await settle();
+  assert.equal(session.current, undefined);
+  assert.equal(session.busy, false);
+  assert.equal(state.tasks.size, taskCount);
+  assert.deepEqual(effects, []);
+  assert.deepEqual(events.map(e => [e[0], e[1].turnId]), [["pre", null], ["start", null], ["end", null]]);
+  assert.deepEqual(events[2][2], origin);
+  assert.ok(!shown.some(u => u.sessionUpdate === "state_update"));
+  const records = metas(state, B), output = records.filter(u => u.sessionUpdate === "agent_message_chunk");
+  const boundaries = records.filter(u => u.sessionUpdate === "session_info_update" && u._meta?.[RunExt.key]);
+  assert.deepEqual(boundaries.map(u => u._meta[RunExt.key].state), ["running", "idle"]);
+  assert.equal(output[0]._meta[RunExt.key].id, output[1]._meta[RunExt.key].id);
+  assert.equal(output[1]._meta[RunExt.key].state, "idle");
+});
+
+test("an unowned run ending while a new prompt waits cannot finish or execute that turn", async (t) => {
+  const { session, state, hub, B, settle } = setup(t);
+  const backend = await session.ensureBackend();
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  let receipt!: () => void;
+  (backend as any).prompt = () => new Promise<void>(resolve => { receipt = resolve; });
+  const sent = hub.delivery.fromUser(session, [text("new work")], { kind: "user", messageId: "pending-run" });
+  await settle();
+  const turn = session.current!;
+  assert.equal(session.acceptsTools, false, "an unowned run has no right to use the pending turn's tools");
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("earlier background work") });
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("Internal error: Prompt is too long") });
+  assert.equal(turn.executed, undefined);
+  assert.equal(turn.refusalChunks, undefined, "unowned errors are displayed instead of affecting prompt recovery");
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("old late tail") });
+  assert.equal(turn.executed, undefined);
+  assert.equal(session.acceptsTools, false, "late idle work cannot acquire the pending turn's tools");
+  assert.equal((await session.onBackendPermission({ sessionId: session.rec.backendSessionId!, title: "late permission", options: [] } as any)).outcome.outcome, "cancelled");
+  await settle();
+  assert.equal(session.current, turn);
+  assert.equal(turn.inserted, false);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  receipt(); await sent; await settle();
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("new answer") });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  await settle();
+  assert.equal(session.busy, false);
+  const output = metas(state, B).filter(u => u.sessionUpdate === "agent_message_chunk");
+  assert.equal(output[0]._meta[RunExt.key].turnId, null);
+  assert.equal(output.at(-1)._meta[RunExt.key].turnId, turn.id);
+  assert.notEqual(output[0]._meta[RunExt.key].id, output.at(-1)._meta[RunExt.key].id);
+});
+
+test("an insertion receipt claims an unowned run from that point, preserving earlier output attribution", async (t) => {
+  const { session, state, hub, B, settle, hooks } = setup(t);
+  const backend = await session.ensureBackend();
+  const owners: (string | null)[] = [];
+  hooks.on("acp.run_started", ({ run }: any) => { owners.push(run.turnId); });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("before insertion") });
+  let receipt!: () => void;
+  (backend as any).prompt = () => new Promise<void>(resolve => { receipt = resolve; });
+  const sent = hub.delivery.fromUser(session, [text("join this execution")], { kind: "user", messageId: "claim-run" });
+  await settle();
+  const turn = session.current!;
+  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "echo-claim", content: text("join this execution") });
+  assert.equal(turn.inserted, true);
+  assert.equal(session.acceptsTools, true);
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("after insertion") });
+  receipt(); await sent;
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  await settle();
+  const output = metas(state, B).filter(u => u.sessionUpdate === "agent_message_chunk");
+  assert.deepEqual(owners, [null, turn.id]);
+  assert.equal(output[0]._meta[RunExt.key].id, output[1]._meta[RunExt.key].id);
+  assert.deepEqual(output.map(u => u._meta[RunExt.key].turnId), [null, turn.id]);
+  assert.equal(session.busy, false);
+  const task = [...state.tasks.values()].find(task => task.to.sessionId === B.sessionId)!;
+  assert.doesNotMatch(task.result!, /before insertion/);
+  assert.match(task.result!, /after insertion/);
+});
+
+test("owned execution can end before its prompt receipt without losing the turn end", async (t) => {
+  const { session, hub, settle } = setup(t);
+  const backend = await session.ensureBackend();
+  (backend as any).prompt = async () => {
+    session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+    session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  };
+  await hub.delivery.fromUser(session, [text("quick work")], { kind: "user", messageId: "quick-run" });
+  await settle();
+  assert.equal(session.busy, false);
+});
+
+test("a turn waits for pending prompt receipts and can own several backend executions", async (t) => {
+  const { session, hub, settle, hooks } = setup(t);
+  const backend = await session.ensureBackend();
+  await hub.delivery.fromUser(session, [text("first")], { kind: "user", messageId: "multi-first" });
+  await settle();
+  const turn = session.current!, runs: any[] = [];
+  hooks.on("acp.run_started", (event: any) => { runs.push(event.run); });
+  (backend as any).caps.steering = false;
+  let receipt!: () => void;
+  (backend as any).prompt = () => new Promise<void>(resolve => { receipt = resolve; });
+  const later = hub.delivery.fromUser(session, [text("later")], { kind: "user", messageId: "multi-later" });
+  await settle();
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  assert.equal(session.current, turn, "pending receipt keeps the logical turn open");
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  // This execution also ends before its prompt receipt. Its end belongs to this same turn.
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  assert.equal(session.current, turn);
+  receipt(); await later; await settle();
+  assert.deepEqual(runs.map(run => run.turnId), [turn.id]);
+  assert.equal(session.busy, false);
+});
+
+test("running never associates a later queued prompt with the first prompt's execution", async (t) => {
+  const { session, hub, settle } = setup(t);
+  const backend = await session.ensureBackend();
+  (backend as any).prompt = async () => {};
+  await hub.delivery.fromUser(session, [text("first")], { kind: "user", messageId: "early-first" });
+  await settle();
+  const turn = session.current!;
+  (backend as any).caps.steering = false;
+  let receipt!: () => void;
+  (backend as any).prompt = () => new Promise<void>(resolve => { receipt = resolve; });
+  const later = hub.delivery.fromUser(session, [text("later")], { kind: "user", messageId: "early-later" });
+  await settle();
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  assert.equal(turn.inputs.find(i => i.messageId === "early-later")!.runId, undefined);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  receipt(); await later; await settle();
+  assert.equal(session.current, turn);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  assert.equal(session.acceptsTools, true);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  await settle();
+  assert.equal(session.busy, false);
+});
+
+test("user corrections still join and protect a pending turn while backend execution is unowned", async (t) => {
+  const { session, hub, settle } = setup(t);
+  const backend = await session.ensureBackend();
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  let receipt!: () => void;
+  (backend as any).prompt = () => new Promise<void>(resolve => { receipt = resolve; });
+  const first = hub.delivery.fromUser(session, [text("first")], { kind: "user", messageId: "pending-first" });
+  await settle();
+  const turn = session.current!;
+  const correction = hub.delivery.fromUser(session, [text("correction")], { kind: "user", messageId: "pending-correction" });
+  await settle();
+  assert.equal(session.current, turn);
+  assert.equal(turn.protected, true);
+  assert.ok(turn.inputs.some(i => i.messageId === "pending-correction"));
+  assert.equal(session.acceptsTools, false);
+  receipt(); await first; await settle();
+  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "echo-correction", content: text("correction") });
+  await correction;
+  assert.equal(session.current, turn);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  await settle();
+  assert.equal(session.busy, false);
+});
+
+for (const policy of ["stop", "veto", "throw"]) test(`unowned execution policy ${policy} cancels the backend without creating work`, async (t) => {
+  const { session, state, effects, hooks, settle } = setup(t);
+  await session.ensureBackend();
+  hooks.decider("acp.pre_unowned_run", (p: any) => {
+    if (policy === "throw") throw new Error("policy unavailable");
+    return policy === "veto" ? { veto: "no autonomous work" } : { ...p, action: "stop" };
+  });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  assert.deepEqual(effects, ["cancel"]);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" });
+  await settle();
+  assert.equal(session.busy, false);
+  assert.equal(state.tasks.size, 0);
+});
+
+test("autonomous execution cannot ask for a pending turn's permissions", async (t) => {
+  const { session } = setup(t);
+  await session.ensureBackend();
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  const result = await session.onBackendPermission({ sessionId: session.rec.backendSessionId!, title: "background write", options: [] } as any);
+  assert.equal(result.outcome.outcome, "cancelled");
+});
 
 test("a user's message that failed to reach the model goes with the next one, once; sending it again after that is refused", async (t) => {
   const { session, state, hub, settle, prompts, idle, B } = setup(t);

@@ -4,6 +4,7 @@
  *   !say <text>           emit text (one agent message, until the next tool call)
  *   !sleep <ms>           wait (a cancel ends the work here)
  *   !busy <ms>            wait, and finish waiting even if cancelled (a tool call that has to run out)
+ *   !background <delay> <ms> schedule native background notification work after this execution
  *   !call <tool> <json>   call a tool of the "workflow" MCP server and emit its result;
  *                         "$last" in the JSON is the id of the task or job started last,
  *                         "$task" the id of the <xsb-task> it stands in, or else of the one
@@ -107,6 +108,14 @@ async function step(session: Session, line: string): Promise<void> {
       return say(session, rest + "\n");
     case "busy":
       return void (await new Promise((resolve) => setTimeout(resolve, Number(rest))));
+    case "background": {
+      const [delay, duration] = rest.split(" ").map(Number);
+      setTimeout(() => {
+        session.lines = ["!say BACKGROUND START", `!sleep ${duration}`, "!say BACKGROUND END"];
+        void work(session, { kind: "task-notification" });
+      }, delay);
+      return;
+    }
     case "sleep":
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, Number(rest));
@@ -196,7 +205,7 @@ function insert(session: Session, prompt: any[], answer?: (r: { messageId: strin
 }
 
 /** Work until there is nothing left, then take what was held: each held prompt is the next work. */
-async function work(session: Session): Promise<void> {
+async function work(session: Session, origin?: unknown): Promise<void> {
   session.running = true;
   session.cancelled = false;
   session.taskIds = [];
@@ -213,7 +222,7 @@ async function work(session: Session): Promise<void> {
   session.steered = [];
   session.running = false;
   session.message = undefined;
-  update(session, { sessionUpdate: "state_update", state: "idle", stopReason: session.cancelled ? "cancelled" : "end_turn" });
+  update(session, { sessionUpdate: "state_update", state: "idle", stopReason: session.cancelled ? "cancelled" : "end_turn", ...(origin ? { _meta: { "_claude/origin": origin } } : {}) });
   const next = session.held.shift();
   if (next) {
     insert(session, next.prompt, next.resolve);

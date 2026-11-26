@@ -7,8 +7,8 @@
  * @xsb/protocol). So whatever decides what a model sees reads the transcript backward and stops at the first
  * boundary of the kind `cleared`: what lies before it is the user's to keep, not the model's to be given.
  */
-import { Boundaries, OriginExt } from "@xsb/protocol";
-import type { Boundary, ContentBlock, OriginMeta } from "@xsb/protocol";
+import { Boundaries, OriginExt, RunExt } from "@xsb/protocol";
+import type { BackendRun, Boundary, ContentBlock, OriginMeta } from "@xsb/protocol";
 import type { Store } from "@xsb/store";
 import { Paths } from "./paths.ts";
 
@@ -18,6 +18,8 @@ export type PastTurn = {
   inputs: { origin: OriginMeta; text: string }[];
   tools: string[];
   reply: string;
+  /** Backend output without a turn owner remains a separate piece of history. */
+  run?: BackendRun;
 };
 
 /** The boundary a transcript record is, if it is one. */
@@ -51,6 +53,12 @@ export function turnsSinceCleared(store: Store, agentId: string, sessionId: stri
   let tools = new Map<string, number>();
   const turn = (): PastTurn | undefined => turns.at(-1);
   for (const { ts, update } of records) {
+    const run = update?._meta?.[RunExt.key] as BackendRun | undefined;
+    if (run?.turnId === null && ["agent_message_chunk", "agent_message", "tool_call", "tool_call_update"].includes(update.sessionUpdate) && turn()?.run?.id !== run.id) {
+      turns.push({ at: ts, inputs: [], tools: [], reply: "", run: { id: run.id, turnId: null } });
+      tools = new Map();
+      message = undefined;
+    }
     switch (update?.sessionUpdate) {
       case "user_message_chunk": {
         const origin: OriginMeta = update._meta?.[OriginExt.key] ?? { kind: "user" };
@@ -60,7 +68,7 @@ export function turnsSinceCleared(store: Store, agentId: string, sessionId: stri
         }
         const entry = { origin, text: said(update.content) };
         input = { id: update.messageId, entry };
-        if (origin.steered && turn()) turn()!.inputs.push(entry);
+        if (origin.steered && turn() && !turn()!.run) turn()!.inputs.push(entry);
         else {
           turns.push({ at: ts, inputs: [entry], tools: [], reply: "" });
           tools = new Map();
@@ -144,6 +152,8 @@ export function taskRecord(store: Store, agentId: string, sessionId: string, tas
   const entries: Entry[] = [];
   const tools = new Map<string, Extract<Entry, { kind: "tool" }>>();
   for (const update of updates) {
+    // Autonomous backend output is history, not the delivery of the task whose input precedes it.
+    if (update?._meta?.[RunExt.key]?.turnId === null) continue;
     const last = entries.at(-1);
     switch (update?.sessionUpdate) {
       case "user_message_chunk": {

@@ -55,6 +55,20 @@ test("user stop cancels the entire accepted backlog before after can release it"
   assert.equal(state.tasks.get(fresh.id)?.status, "queued");
 });
 
+test("an unowned run ending cannot confirm a stop that waits for a logical turn", async (t) => {
+  const { state, hooks, busy, kernel, A, B, give, hand } = setup(t);
+  const task = hand(give(A, B, "owned work"));
+  busy.add(B.sessionId);
+  assert.ok(!isVeto(kernel.stop(task, USER, { status: "cancelled", reason: "cancelled", result: "stop" })));
+  hooks.emit("acp.run_ended", { ...B, run: { id: "background", turnId: null }, stopReason: "end_turn" });
+  await hooks.settled();
+  assert.ok(state.tasks.get(task.id)!.stopping);
+  assert.equal(state.tasks.get(task.id)!.status, "running");
+  hooks.emit("acp.turn_ended", { ...B, stopReason: "cancelled", failed: false });
+  await hooks.settled();
+  assert.equal(state.tasks.get(task.id)!.status, "cancelled");
+});
+
 test("union cancellation removes a child shared only by stopped roots, and preserves another holder", (t) => {
   const { state, kernel, A, B, C, give, hand, stopped } = setup(t);
   const one = hand(give(A, B, "one"));
@@ -140,7 +154,8 @@ test("cancelled idle waits for an in-flight prompt's real insertion receipt", as
   pending.batch = [pending];
   const turn = { id: "old", protected: true, first, inputs: [first, pending], held: [], items: [], inserted: true, started: true, done: deferred<any>() };
   session.current = turn;
-  Object.assign(session, { backend: { cancel() {}, caps: { steering: false, orderedCancellation: true } }, backendIdle: false });
+  Object.assign(session, { backend: { cancel() {}, caps: { steering: false, orderedCancellation: true } } });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
   session.beginUserStop();
   session.cancelUserWork();
   session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" });
@@ -168,7 +183,8 @@ test("stop timeout revokes the old tools and closes the backend before unfreezin
     prompt: [], content: [], in: true, inserted: deferred<void>(),
   };
   session.current = { id: "old", protected: true, first, inputs: [first], held: [], items: [], inserted: true, started: true, done: deferred<any>() };
-  Object.assign(session, { backend: { cancel() { effects.push("cancel"); }, stop() { effects.push("close transport"); } }, backendIdle: false });
+  Object.assign(session, { backend: { cancel() { effects.push("cancel"); }, stop() { effects.push("close transport"); } } });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
   t.mock.timers.enable({ apis: ["setTimeout"] });
   session.beginUserStop();
   session.cancelUserWork();

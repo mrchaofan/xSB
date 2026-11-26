@@ -274,6 +274,10 @@ body:not(.no-workspace) .welcome { display: none; }
 .input[data-discarded] .said { opacity: .5; text-decoration: line-through; }
 
 .output[data-streaming] .md:last-child > :last-child::after { content: ""; display: inline-block; width: 7px; height: 14px; margin-left: var(--space-0); vertical-align: -2px; background: var(--accent); animation: pulse 1s steps(2) infinite; }
+.output[data-off-turn] { border: 1px dashed var(--line); border-radius: var(--radius); padding: var(--space-3); color: var(--ink-2); }
+.run-label, .run-end { font-size: var(--text-sm); color: var(--ink-3); }
+.run-label { margin-bottom: var(--space-2); }
+.run-end { margin-top: var(--space-2); }
 
 .tool { display: grid; grid-template-columns: 8px minmax(0, 1fr); align-items: center; gap: var(--space-1) var(--space-3); font: var(--text-sm) / var(--leading) var(--mono); color: var(--ink-3); }
 .tool .chip { grid-column: 2; justify-self: start; }

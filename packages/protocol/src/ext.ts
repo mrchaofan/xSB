@@ -12,7 +12,7 @@
  * `initialize`, an unknown request answers -32601 and an unknown notification
  * is ignored.
  */
-import type { ContentBlock, SessionUpdate } from "./acp.ts";
+import type { ContentBlock, SessionUpdate, StopReason } from "./acp.ts";
 
 /** Namespace of the extensions this project defines itself. */
 export const NS = "dev.xsb";
@@ -503,6 +503,12 @@ export const OriginExt = {
 
 /** Correlation for backends that echo it on turn updates. */
 export const TurnExt = { key: `${NS}/turn` } as const;
+
+/** A backend execution, bounded by ACP running/idle, independently of the hub's logical turn. */
+export const RunExt = { key: `${NS}/run` } as const;
+export type BackendRun = { id: string; turnId: string | null };
+/** On session_info_update: a durable boundary. On backend output: the execution it came from. */
+export type RunUpdate = BackendRun & { state: "running" | "idle"; stopReason?: StopReason; origin?: unknown };
 
 export type Origin =
   | { kind: "user" }

@@ -15,8 +15,8 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { Answer, Question, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal } from "@xsb/protocol";
-import type { HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
+import { Answer, Question, RunExt, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal } from "@xsb/protocol";
+import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
@@ -65,8 +65,8 @@ export class Workspace {
   /** Agent id -> its main session, attached to. Where its transcript comes from and its input goes. */
   private mains = new Map<string, Promise<string>>();
   private sessionAgent = new Map<string, string>();
-  /** Agent id -> the output entry that is still growing. */
-  private growing = new Map<string, Extract<Entry, { kind: "output" }>>();
+  /** Agent id -> output segments indexed by run and owner (including legacy output without run metadata). */
+  private growing = new Map<string, Map<string, Extract<Entry, { kind: "output" }>>>();
   /** Messages that answer or skip a question: the question's card shows them, not a message of their own. */
   private replies = new Set<string>();
   /** The user's messages that were sent but are not yet part of a turn, by id: shown, to be replaced by the hub's echo. */
@@ -400,11 +400,15 @@ export class Workspace {
   }
 
   /** The agent's output so far is complete: whatever comes next starts a new entry. */
-  private settle(agentId: string): void {
-    const entry = this.growing.get(agentId);
-    if (!entry) return;
-    this.growing.delete(agentId);
-    this.put(agentId, { ...entry, streaming: false });
+  private settle(agentId: string, runId?: string): void {
+    const entries = this.growing.get(agentId);
+    if (!entries) return;
+    for (const [key, entry] of entries) {
+      if (runId && entry.run?.id !== runId) continue;
+      entries.delete(key);
+      this.put(agentId, { ...entry, streaming: false });
+    }
+    if (!entries.size) this.growing.delete(agentId);
   }
 
   private finishTools(agentId: string): void {
@@ -444,7 +448,23 @@ export class Workspace {
       return;
     }
     update = this.imageReferences(update);
-    if (update.sessionUpdate === "agent_thought_chunk") return this.does(agentId, "thinking");
+    const run = update._meta?.[RunExt.key] as RunUpdate | undefined;
+    const offTurn = run?.turnId === null;
+    if (update.sessionUpdate === "session_info_update" && run) {
+      if (run.state === "idle") {
+        this.settle(agentId, run.id);
+        // Mark every segment of this execution, including output before an insertion claimed it.
+        for (const entry of this.transcripts.get(agentId) ?? []) {
+          if (entry.kind === "output" && entry.run?.id === run.id) this.put(agentId, { ...entry, streaming: false, stopReason: run.stopReason, runOrigin: run.origin });
+        }
+      } else {
+        // An ownership change starts a new segment; it never changes the owner of earlier text.
+        const entries = this.growing.get(agentId);
+        if (entries) for (const entry of entries.values()) if (entry.run?.id === run.id && entry.run.turnId !== run.turnId) this.settle(agentId, run.id);
+      }
+      return;
+    }
+    if (update.sessionUpdate === "agent_thought_chunk") return offTurn || run?.state === "idle" ? undefined : this.does(agentId, "thinking");
     const boundary = update.sessionUpdate === "session_info_update" ? (update._meta?.[Boundaries.key] as Boundary | undefined) : undefined;
     if (boundary) {
       this.settle(agentId);
@@ -509,10 +529,14 @@ export class Workspace {
       return;
     }
     if (update.sessionUpdate === "agent_message_chunk") {
-      this.does(agentId, "writing");
-      const entry = this.growing.get(agentId) ?? { id: this.newId(), kind: "output", content: [], streaming: true };
+      if (!offTurn && run?.state !== "idle") this.does(agentId, "writing");
+      const entries = this.growing.get(agentId) ?? new Map<string, Extract<Entry, { kind: "output" }>>();
+      const key = run ? JSON.stringify([run.id, run.turnId]) : "legacy";
+      const entry = entries.get(key) ?? { id: this.newId(), kind: "output" as const, content: [], streaming: run?.state !== "idle", ...(run ? { run: { id: run.id, turnId: run.turnId } } : {}) };
       entry.content = append(entry.content, update.content);
-      this.growing.set(agentId, entry);
+      if (run?.state === "idle") { entry.streaming = false; entry.stopReason = run.stopReason; entry.runOrigin = run.origin; }
+      entries.set(key, entry);
+      this.growing.set(agentId, entries);
       return this.put(agentId, { ...entry });
     }
     if (update.sessionUpdate === "user_message_chunk") {
@@ -536,7 +560,7 @@ export class Workspace {
       this.unsend(update.messageId);
       this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? { kind: "user" }, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}), ...(this.replies.has(update.messageId) ? { reply: true } : {}) });
     } else if (update.sessionUpdate === "tool_call_update") {
-      this.settle(agentId);
+      this.settle(agentId, run?.id);
       const id = `${sessionId}:${update.toolCallId}`;
       const prior = this.transcripts.get(agentId)!.find((e): e is Tool & { id: string } => e.id === id);
       const directory = this.agents.get(agentId)?.workspace ?? this.paths.project;
@@ -544,6 +568,7 @@ export class Workspace {
       const title = update.title ?? prior?.title ?? update.toolCallId;
       const status = TOOL_STATUS[update.status ?? ""] ?? (update.status ? "running" : (prior?.status ?? "running"));
       this.put(agentId, { id, kind: "tool", title, status, artifactId: files.find((a: Artifact | undefined) => a)?.id ?? prior?.artifactId });
+      if (offTurn || run?.state === "idle") return;
       // While any tool call is open the agent is running tools; once the last one ends, its model reads the results.
       const open = this.tools.get(agentId) ?? new Set<string>();
       this.tools.set(agentId, open);

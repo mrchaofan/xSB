@@ -6,8 +6,8 @@ import path from "node:path";
  *
  * A session does one thing at a time. Input from the user, from peers and from
  * the hub becomes a *turn*, or goes into the one that runs. A turn is one piece
- * of the backend's work: it begins with the input the hub gives the idle
- * backend and ends with the backend's `idle` (docs/DESIGN.md 3.1).
+ * of authorized work. A backend execution (run) is bounded by ACP running/idle;
+ * it may have no turn owner, or be claimed by a turn when its input is inserted.
  *
  * What goes into a running turn goes to the backend at once, each input on its
  * own, once the backend has the turn's first: the hub does not hold it back,
@@ -20,8 +20,8 @@ import path from "node:path";
  * stopped while the hub still held it. The user's is then kept for the next
  * turn; mail waits for a turn of its own.
  */
-import { SessionControls, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, Redelivered, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
-import type { Boundary, ContentBlock, DiscardReason, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
+import { SessionControls, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, Redelivered, RunExt, TurnExt, TurnFailure, RpcError, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
+import type { BackendRun, RunUpdate, Boundary, ContentBlock, DiscardReason, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
@@ -38,6 +38,7 @@ import type { WorkflowTold } from "./workflow-state.ts";
 import { ops } from "./state.ts";
 import type { Deferred } from "./util.ts";
 import { deferred, newId, now } from "./util.ts";
+import { isVeto } from "./hooks.ts";
 
 export type TurnRequest = {
   interruptionId?: string;
@@ -74,6 +75,8 @@ export type Input = Discarded &
     shown?: boolean;
     /** Given to the backend and not answered yet: as a prompt, or into the work under way (`_session/steering`). */
     sent?: "prompt" | "steering";
+    /** Execution associated with this request, even if its insertion receipt follows that execution's idle. */
+    runId?: string;
     /** The inputs it was given with, in one prompt. */
     batch?: Input[];
     /** What went in front of that prompt (instructions, a handoff, workflow context): owed again if it is refused. */
@@ -97,6 +100,7 @@ const inputOf = (req: TurnRequest): Input => {
 /** Input given anew, as the first of a turn of its own; it is answered when this one is. */
 const again = (input: Input): Input => {
   const fresh = inputOf({ ...input, origin: { ...input.origin, steered: undefined } });
+  fresh.runId = undefined;
   fresh.inserted.promise.then(input.inserted.resolve, input.inserted.reject);
   return fresh;
 };
@@ -139,6 +143,8 @@ export type Turn = {
   held: Input[];
   /** Something of the turn is in the conversation: its end is the backend's next idle. */
   inserted: boolean;
+  /** The end of this turn's last owned run; unrelated backend runs cannot end it. */
+  runEnd?: TurnEnd;
   /** The mail this turn gives the model. It leaves the inbox when the turn ends. */
   items: MailItem[];
   /** The backend has been prompted. */
@@ -202,14 +208,9 @@ export class LiveSession {
   private usageRevision = 0;
   private estimated = 0;
   private standingTokens = 0;
-  /** The backend's work is idle, as it last said, and why it stopped. */
-  private backendIdle = true;
-  private lastStop: { stopReason: StopReason; error?: { code: number; message: string; data?: unknown } | null } = { stopReason: "end_turn" };
-  /**
-   * The backend went running since the hub last gave it a prompt. Its answer to the prompt and its report of the work
-   * for it may come in either order: an idle that comes before the answer is the end of that work only if it ran.
-   */
-  private ranSince = false;
+  private currentRun?: BackendRun;
+  private announcedRun?: BackendRun;
+  private lastRun?: RunUpdate;
 
   constructor(hub: Hub, rec: SessionRec) {
     this.hub = hub;
@@ -243,7 +244,9 @@ export class LiveSession {
   }
 
   get acceptsTools(): boolean {
-    return !this.userStopping && !this.current?.cancelledBy && !this.current?.recovering && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id });
+    const ownedExecution = this.currentRun ? this.currentRun.turnId === this.current?.id : !this.current || !this.lastRun;
+    return !this.userStopping && !this.current?.cancelledBy && !this.current?.recovering &&
+      ownedExecution && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id });
   }
 
   protect(): void {
@@ -284,6 +287,8 @@ export class LiveSession {
   }
 
   private async bind(backend: Backend): Promise<void> {
+    this.finishRun({ stopReason: "cancelled" });
+    this.lastRun = undefined;
     const agent = this.hub.agent(this.agentId);
 
     const instructions = this.hub.systemPromptFor(agent, this.clientMcp);
@@ -555,6 +560,8 @@ export class LiveSession {
    */
   clear(): void {
     if (this.busy) throw failure("session_busy", { agent: this.agentId });
+    this.finishRun({ stopReason: "cancelled" });
+    this.lastRun = undefined;
     this.prefaces = [];
     this.backend = undefined;
     this.forget();
@@ -578,12 +585,15 @@ export class LiveSession {
   /** The backend process is gone; the next turn binds to a new one. A turn it was running fails. */
   onBackendGone(backend: Backend, reason: string): void {
     if (this.backend !== backend) return;
+    this.finishRun({ stopReason: "error", failure: new Error(`the agent program ${reason}`) });
     this.backend = undefined;
     this.notifyControls();
     if (this.current?.started) this.end({ stopReason: "error", failure: new Error(`the agent program ${reason}`) });
   }
 
   onBackendPermission(request: PermissionRequest): Promise<PermissionResponse> {
+    if (request.sessionId !== this.rec.backendSessionId || !this.current?.started || !this.acceptsTools ||
+      this.currentRun?.turnId !== this.current.id) return Promise.resolve({ outcome: { outcome: "cancelled" } });
     this.observeExecution();
     return this.hub.permissions.request(this, request);
   }
@@ -604,13 +614,15 @@ export class LiveSession {
     const turnId = correlation?.id ?? origin?.turnId;
     if (turnId && turnId !== turn?.id) return;
     if (turn?.recovering) return;
+    const executing = this.currentRun ?? this.lastRun;
+    const belongs = executing ? executing.turnId === turn?.id && !("state" in executing && executing.state === "idle") : !!turn?.started;
     const said = update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" ? update.content.text :
       update.sessionUpdate === "agent_message" && Array.isArray(update.content) ? update.content.map((b: ContentBlock) => b.type === "text" ? b.text ?? "" : "").join("") : "";
-    if (turn && said?.trim() && contextOverflow(said) && !turn.executed) {
+    if (turn && belongs && !turn.runEnd && said?.trim() && contextOverflow(said) && !turn.executed) {
       (turn.refusalChunks ??= []).push(update);
       return;
     }
-    if (turn && (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update" || update.sessionUpdate === "agent_message" || update.sessionUpdate === "agent_thought_chunk" ||
+    if (turn && belongs && !turn.runEnd && (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update" || update.sessionUpdate === "agent_message" || update.sessionUpdate === "agent_thought_chunk" ||
       (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text" && update.content.text?.trim() && !contextOverflow(update.content.text)))) this.observeExecution();
     switch (update.sessionUpdate) {
       case "user_message":
@@ -626,10 +638,10 @@ export class LiveSession {
       }
       case "state_update":
         if (!isStateUpdate(update)) break;
-        this.backendIdle = update.state === "idle";
-        if (!this.backendIdle) this.ranSince = true;
-        else {
-          this.lastStop = { stopReason: update.stopReason ?? "end_turn", error: update.error };
+        if (update.state === "running" || update.state === "requires_action") this.startRun();
+        else if (update.state === "idle") {
+          const stopReason = update.stopReason ?? "end_turn";
+          this.finishRun({ stopReason, ...(stopReason === "error" ? { failure: new RpcError(update.error?.code ?? -32603, update.error?.message ?? "the agent failed", update.error?.data) } : {}) }, update._meta?.["_claude/origin"]);
           this.idle();
         }
         break;
@@ -661,8 +673,56 @@ export class LiveSession {
         this.notifyControls();
         break;
     }
-    this.hub.kernel.hooks.emit("acp.session_update", { agentId: this.agentId, sessionId: this.id, update });
-    if (!OWN.has(update.sessionUpdate)) this.emit(update);
+    // Attribution is supplied by the hub, never trusted from backend metadata. Late output after idle stays settled.
+    const run = this.currentRun ? { ...this.currentRun, state: "running" as const } : this.lastRun;
+    const attributed = { ...update, _meta: { ...update._meta } };
+    if (run) attributed._meta[RunExt.key] = { ...run };
+    else delete attributed._meta[RunExt.key];
+    this.hub.kernel.hooks.emit("acp.session_update", { agentId: this.agentId, sessionId: this.id, update: attributed });
+    if (!OWN.has(update.sessionUpdate)) this.emit(attributed);
+  }
+
+  private runStarted(): void {
+    const run = this.currentRun!;
+    if (this.announcedRun?.id === run.id && this.announcedRun.turnId === run.turnId) return;
+    this.announcedRun = { ...run };
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [RunExt.key]: { ...run, state: "running" } } });
+    this.hub.kernel.hooks.emit("acp.run_started", { agentId: this.agentId, sessionId: this.id, run: { ...run } });
+    this.hub.kernel.hooks.emit("acp.turn_changed", { agentId: this.agentId, sessionId: this.id });
+  }
+
+  private startRun(): void {
+    if (this.currentRun) return;
+    const turn = this.current;
+    // running is execution evidence, not an insertion receipt. A submitted first prompt can precede its receipt.
+    const pendingNext = turn?.inputs.find(i => i.sent === "prompt" && !i.in && !i.runId);
+    const request = turn?.runEnd ? pendingNext : turn && !turn.inserted ? turn.first : undefined;
+    const owned = turn?.started && (!turn.runEnd || pendingNext) && (turn.inserted || turn.inputs.some(i => i.sent));
+    const run: BackendRun = { id: newId("run"), turnId: owned ? turn!.id : null };
+    this.currentRun = run;
+    if (owned) {
+      turn!.runEnd = undefined;
+      // Other submitted prompts may still be held for later executions; running does not acknowledge them.
+      for (const input of request?.batch ?? (request ? [request] : [])) if (input.sent && !input.in) input.runId = run.id;
+    }
+    const policy = run.turnId === null ? this.hub.kernel.hooks.decide("acp.pre_unowned_run", { agentId: this.agentId, sessionId: this.id, run: { ...run }, action: "show" }) : undefined;
+    if (this.currentRun !== run) return;
+    this.runStarted();
+    // A synchronous hook can change the owner or replace the binding: cancel only this still-unowned execution.
+    if (policy && this.currentRun === run && run.turnId === null && (isVeto(policy) || policy.action !== "show")) this.backend?.cancel(this.rec.backendSessionId!);
+  }
+
+  private finishRun(end: TurnEnd, origin?: unknown): void {
+    const run = this.currentRun;
+    if (!run) return;
+    // A decision hook can synchronously close an execution before its start was announced.
+    this.runStarted();
+    this.currentRun = undefined;
+    this.lastRun = { ...run, state: "idle", stopReason: end.stopReason, ...(origin !== undefined ? { origin } : {}) };
+    if (this.current?.id === run.turnId) this.current.runEnd = end;
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [RunExt.key]: { ...this.lastRun } } });
+    this.hub.kernel.hooks.emit("acp.run_ended", { agentId: this.agentId, sessionId: this.id, run: { ...run }, stopReason: end.stopReason, ...(origin !== undefined ? { origin } : {}) });
+    this.hub.kernel.hooks.emit("acp.turn_changed", { agentId: this.agentId, sessionId: this.id });
   }
 
   /** Record an update and show it to every attached client but `except`. */
@@ -952,7 +1012,6 @@ export class LiveSession {
     }
     this.workflowContext(turn);
     turn.started = true;
-    this.ranSince = false;
     // What waited in the inbox comes with this turn, in its first prompt.
     const digest = this.hub.delivery.digest(this, Math.max(0, this.hub.policy(this.agentId).promptTokens - this.standingTokens - this.hub.policy(this.agentId).reserveTokens - contentTokens(first.content) - contentTokens(turn.held.flatMap(i => i.content)) - contentTokens(this.prefaces.map(text)))).map((d) => inputOf(d));
     turn.inputs.splice(1, 0, ...digest);
@@ -1063,7 +1122,16 @@ export class LiveSession {
     const turn = this.current;
     // In already, or its turn is over: what became of it was settled then.
     if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) return;
+    // A later prompt held by the backend belongs to the next execution of this same logical turn. The first
+    // prompt's receipt may simply follow the idle of its own execution, in which case its end must be retained.
+    if (turn.runEnd && !turn.cancelledBy && batch.every(i => i.runId !== this.lastRun?.id)) turn.runEnd = undefined;
     turn.inserted = true;
+    // Input inserted into an autonomous execution claims it from this point; earlier output keeps its null owner.
+    if (this.currentRun?.turnId === null && !turn.runEnd && !turn.cancelledBy) {
+      this.currentRun.turnId = turn.id;
+      this.runStarted();
+    }
+    if (this.currentRun?.turnId === turn.id) for (const input of batch) input.runId = this.currentRun.id;
     if (this.rec.contextHandoffPending) this.save({ contextHandoffPending: undefined });
     if (this.rec.migratedFrom?.pending) this.save({ migratedFrom: { ...this.rec.migratedFrom, pending: undefined } });
     for (const input of batch) if (input.owedIds) this.redelivered(input);
@@ -1073,7 +1141,7 @@ export class LiveSession {
       this.receipt(input, true);
     }
     for (const input of turn.held.splice(0)) this.send([input]);
-    if (this.idleSince(turn)) this.idle();
+    if (this.runEndedFor(turn)) this.idle();
   }
 
   /**
@@ -1141,14 +1209,13 @@ export class LiveSession {
   /** The backend's work is idle. It ends the turn, unless none of the turn is in the conversation yet. */
   private idle(): void {
     const turn = this.current;
-    if (!turn || !this.idleSince(turn)) return;
+    if (!turn || !this.runEndedFor(turn)) return;
     // The work that ended was not this turn's: the backend has not taken its first input yet.
     if (!turn.inserted && !turn.cancelledBy) return;
-    // A prompt receipt can follow idle. Settle its real insertion outcome before discarding it for user stop.
-    if ((turn.cancelledBy || this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })) && turn.inputs.some((i) => i.sent === "prompt" && !i.in)) return;
-    const { stopReason, error } = this.lastStop;
-    if (stopReason === "error") return this.end({ stopReason, failure: new RpcError(error?.code ?? -32603, error?.message ?? "the agent failed", error?.data) });
-    this.end({ stopReason });
+    // A prompt receipt can follow idle. Wait for it on normal completion and stop; a failed execution instead
+    // cancels and fences the unanswered requests in end(), so a broken backend cannot hold the turn forever.
+    if (!turn.runEnd?.failure && turn.inputs.some((i) => i.sent === "prompt" && !i.in)) return;
+    this.end(turn.runEnd ?? { stopReason: "cancelled" });
   }
 
   /** After a stop or a refusal: a turn that has nothing in the conversation or on its way ends at once; else at the backend's idle. */
@@ -1156,15 +1223,14 @@ export class LiveSession {
     const turn = this.current;
     if (!turn) return;
     if (!turn.inserted && !turn.inputs.some((i) => i.sent)) return this.end({ stopReason: "cancelled" });
-    if (this.idleSince(turn)) this.idle();
+    if (this.runEndedFor(turn)) this.idle();
   }
 
   /**
-   * The backend is idle, and that ends what the hub gave it: it went running since the turn began, or the turn is
-   * being stopped (then nothing will run, and no running will come to say so).
+   * Only the end of an owned execution ends this turn. A stop before execution can finish once the backend is idle.
    */
-  private idleSince(turn: Turn): boolean {
-    return this.backendIdle && (this.ranSince || !!turn.cancelledBy);
+  private runEndedFor(turn: Turn): boolean {
+    return !!turn.runEnd || (!this.currentRun && !!turn.cancelledBy);
   }
 
   /** Take input out of the running turn. */
@@ -1199,6 +1265,7 @@ export class LiveSession {
     const turn = this.current;
     if (!turn) return;
     if (end.failure && contextOverflow(end.failure) && this.canRecover(turn)) return void this.recover(turn, end.failure);
+    if (this.currentRun?.turnId === turn.id) this.finishRun(end);
     if (!turn.cancelledBy) for (const update of turn.refusalChunks ?? []) this.emit(update);
     turn.refusalChunks = [];
     // The backend may report idle before the deferred halt hook runs. The committed
@@ -1293,6 +1360,7 @@ export class LiveSession {
   private async recover(turn: Turn, error: unknown, failed = true): Promise<void> {
     if (this.current !== turn || turn.recovering) return;
     turn.recovering = true;
+    this.finishRun({ stopReason: "error", failure: error });
     turn.refusalChunks = [];
     turn.started = false;
     if (failed) turn.recoveryAttempts = (turn.recoveryAttempts ?? 0) + 1;
@@ -1331,12 +1399,12 @@ export class LiveSession {
           const rendered = this.hub.delivery.render(input.item, this);
           if (rendered) { input.content = rendered.prompt; input.prompt = rendered.prompt; input.gives = rendered.gives; }
         }
-        input.in = false; input.sent = undefined; input.batch = undefined;
+        input.in = false; input.sent = undefined; input.batch = undefined; input.runId = undefined;
       }
       turn.inserted = false;
       turn.started = true;
-      this.ranSince = false;
-      this.backendIdle = true;
+      turn.runEnd = undefined;
+      this.lastRun = undefined;
       turn.held = [];
       this.workflowContext(turn);
       this.send([...turn.inputs]);
@@ -1359,7 +1427,6 @@ export class LiveSession {
     turn.taskIds = this.hub.kernel.openTasks(this.id).filter((t) => !t.stopping).map((t) => t.id);
     this.current = turn;
     this.turnChanged();
-    this.ranSince = false;
     this.hub.workflows?.inheritSeen(previous,turn);
     this.users(inputs[0]);
     this.hub.agentChanged(this.agentId);
@@ -1388,9 +1455,10 @@ export class LiveSession {
    */
   steer(req: TurnRequest, targetTurnId?: string): Input | undefined {
     const turn = this.current;
-    const userDuringRecovery = req.origin.kind === "user" && turn?.recovering && !turn.cancelledBy && !this.userStopping &&
-      !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id });
-    if (!turn || (!this.acceptsTools && !userDuringRecovery) || (targetTurnId && targetTurnId !== turn.id)) return undefined;
+    // Accepting input does not grant execution permissions to an unowned run. Users still join and protect the
+    // logical turn while its first prompt waits for insertion, as they do during context recovery.
+    if (!turn || turn.cancelledBy || this.userStopping || (turn.recovering && req.origin.kind !== "user") ||
+      this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id }) || (targetTurnId && targetTurnId !== turn.id)) return undefined;
     // An agent's word goes into an agent's turn only; once the user's (protected), it waits its turn (`enqueue`).
     if (req.origin.kind === "agent" && !targetTurnId && turn.protected) return undefined;
     if (req.origin.kind === "user") turn.protected = true;

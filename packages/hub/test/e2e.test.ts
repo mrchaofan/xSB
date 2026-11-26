@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { F } from "../src/state.ts";
-import { Workflow, Agents, SessionControls, Assets, Backends, Boundaries, Connection, Discarded, Ledger, TurnFailure, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Tasks, explain, languageOf } from "@xsb/protocol";
+import { Workflow, Agents, SessionControls, Assets, Backends, Boundaries, Connection, Discarded, History, Ledger, RunExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Tasks, explain, languageOf } from "@xsb/protocol";
 import type { Language, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { isVeto } from "../src/hooks.ts";
@@ -178,6 +178,38 @@ await prompt(a,"hello");
 assert.match(said.get(a)!, /echo: hello/);
 assert.equal(hub.state.workflows.size,0);
 await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/Method not found/);
+
+// Native background notifications have real ACP execution boundaries but no hub turn or task of their own.
+{
+  const session = await create("steerable"), updates: any[] = [];
+  conn.updates.push((id, update) => { if (id === session.id) updates.push(update); });
+  await prompt(session.id, "!say FRONT\n!background 100 250");
+  const taskCount = hub.state.tasks.size;
+  await until("native background execution ended", () => updates.some(u => u.sessionUpdate === "session_info_update" && u._meta?.[RunExt.key]?.turnId === null && u._meta[RunExt.key].state === "idle"));
+  const background = updates.filter(u => u._meta?.[RunExt.key]?.turnId === null);
+  assert.deepEqual(background.filter(u => u.sessionUpdate === "session_info_update").map(u => u._meta[RunExt.key].state), ["running", "idle"]);
+  assert.ok(background.filter(u => u.sessionUpdate === "agent_message_chunk").every(u => u._meta[RunExt.key].id === background[0]._meta[RunExt.key].id));
+  assert.deepEqual(background.at(-1)._meta[RunExt.key].origin, { kind: "task-notification" });
+  assert.equal(hub.state.tasks.size, taskCount);
+  assert.equal(session.busy, false);
+  assert.equal(updates.filter(u => u.sessionUpdate === "state_update").length, 2, "only the foreground turn changes agent state");
+  const page = await conn.request(History.page, { sessionId: session.id });
+  assert.deepEqual(page.updates.filter((u: any) => u.sessionUpdate === "session_info_update" && u._meta?.[RunExt.key]?.turnId === null), background.filter(u => u.sessionUpdate === "session_info_update"));
+
+  // The new prompt is inserted into native work: this run gains an owner at the receipt, keeping its original id.
+  const joined = await create("steerable"), joinedUpdates: any[] = [];
+  conn.updates.push((id, update) => { if (id === joined.id) joinedUpdates.push(update); });
+  await prompt(joined.id, "!say FRONT\n!background 100 500");
+  await until("autonomous output before input", () => joinedUpdates.find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("BACKGROUND START")));
+  const unowned = joinedUpdates.find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("BACKGROUND START"))._meta[RunExt.key];
+  await prompt(joined.id, "!say JOINED");
+  const claimed = joinedUpdates.find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("JOINED"))._meta[RunExt.key];
+  assert.equal(unowned.turnId, null);
+  assert.equal(claimed.id, unowned.id);
+  assert.ok(claimed.turnId);
+  assert.equal(joined.busy, false);
+  console.log("ok native background runs, history boundaries and insertion-based ownership");
+}
 // Switching a conversation's backend. The agent program is not called before the first message, so a conversation
 // with nothing said yet simply runs on the other. One its program has moves to a new conversation, whose model is told
 // so with its first message and reads the old one with previous_conversation; never while a turn runs.

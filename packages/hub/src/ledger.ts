@@ -12,6 +12,8 @@
  * `inserted_unprocessed` stays so.
  */
 import type { Kernel } from "./kernel.ts";
+import { RunExt } from "@xsb/protocol";
+import type { RunUpdate } from "@xsb/protocol";
 
 /** Updates of a backend that say the model went on. */
 const OUTPUT = new Set(["agent_message_chunk", "agent_message", "agent_thought_chunk", "agent_thought", "tool_call_update", "tool_call_content_chunk", "plan_update"]);
@@ -34,6 +36,8 @@ export function ledgerHook(kernel: Kernel): void {
     of(inserted, about.sessionId, () => new Set()).add(messageId);
   });
   kernel.hooks.on("acp.session_update", ({ sessionId, update }) => {
+    const run = update._meta?.[RunExt.key] as RunUpdate | undefined;
+    if (run?.turnId === null || run?.state === "idle") return;
     if (OUTPUT.has(update.sessionUpdate)) seen(sessionId);
   });
   kernel.hooks.on("acp.turn_ended", ({ sessionId, stopReason, failed }) => {

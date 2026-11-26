@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { Paths } from "@xsb/hub";
-import { Workflow, Agents, Assets, Connection, History, Tasks } from "@xsb/protocol";
+import { Workflow, Agents, Assets, Connection, History, RunExt, Tasks } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
@@ -152,6 +152,76 @@ test("idle after an abnormal end clears waiting, streaming output and unfinished
   assert.equal(ws["agents"].get("a").state, "idle");
   assert.equal(ws["transcripts"].get("a").find(e => e.kind === "output").streaming, false);
   assert.equal(ws["transcripts"].get("a").find(e => e.kind === "tool").status, "failed");
+  ws.close();
+});
+
+test("execution outside a turn streams and settles without changing activity, agent state or notifications", async () => {
+  const peer = new Peer(), notices: Notice[] = [];
+  snapshot(peer, [agent("a")]);
+  const ws = workspace(peer, notice => notices.push(notice));
+  await ws.load();
+  ws["sessionAgent"].set("s", "a");
+  const run = { id: "background", turnId: null, state: "running" };
+  const update = (sessionUpdate: string, data = {}, meta = run) => peer.emit("session/update", { sessionId: "s", update: { sessionUpdate, ...data, _meta: { [RunExt.key]: meta } } });
+  update("session_info_update");
+  update("agent_thought_chunk");
+  update("tool_call_update", { toolCallId: "bg", status: "completed" });
+  update("agent_message_chunk", { content: { type: "text", text: "background " } });
+  update("agent_message_chunk", { content: { type: "text", text: "result" } });
+  assert.deepEqual(ws.working(), []);
+  assert.equal(ws["activities"].has("a"), false);
+  assert.equal(ws["transcripts"].get("a").find(e => e.kind === "output").streaming, true);
+  const end = { ...run, state: "idle", stopReason: "end_turn", origin: { kind: "task-notification" } };
+  update("session_info_update", {}, end);
+  const output = ws["transcripts"].get("a").find(e => e.kind === "output");
+  assert.equal(output.streaming, false);
+  assert.equal(output.content[0].text, "background result");
+  assert.equal(output.stopReason, "end_turn");
+  assert.deepEqual(output.runOrigin, end.origin);
+  // A final chunk flushed after idle is settled immediately, too.
+  update("agent_message_chunk", { content: { type: "text", text: "tail" } }, end);
+  assert.ok(ws["transcripts"].get("a").filter(e => e.kind === "output").every(e => !e.streaming));
+  assert.deepEqual(notices, []);
+  assert.equal(ws["agents"].get("a").state, "idle");
+  ws.close();
+});
+
+test("claiming a backend run keeps earlier output separate and its end settles all owner segments", async () => {
+  const peer = new Peer();
+  snapshot(peer, [agent("a")]);
+  const ws = workspace(peer);
+  await ws.load();
+  ws["sessionAgent"].set("s", "a");
+  const update = (run, text?: string) => peer.emit("session/update", { sessionId: "s", update: {
+    sessionUpdate: text ? "agent_message_chunk" : "session_info_update", ...(text ? { content: { type: "text", text } } : {}), _meta: { [RunExt.key]: run },
+  } });
+  const unowned = { id: "run", turnId: null, state: "running" }, owned = { ...unowned, turnId: "turn" };
+  update(unowned); update(unowned, "earlier output");
+  update(owned); update(owned, "owned answer");
+  assert.equal(ws["activities"].get("a").kind, "writing");
+  const entries = ws["transcripts"].get("a").filter(e => e.kind === "output");
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map(e => e.run.turnId), [null, "turn"]);
+  assert.equal(entries[0].streaming, false);
+  update({ ...owned, state: "idle", stopReason: "end_turn" });
+  assert.ok(ws["transcripts"].get("a").filter(e => e.kind === "output").every(e => !e.streaming));
+  ws.close();
+});
+
+test("history replays autonomous run ownership and endings identically to live output", async () => {
+  const peer = new Peer(), a = { ...agent("a"), mainSessionId: "s" };
+  snapshot(peer, [a]);
+  const run = { id: "historic-run", turnId: null, state: "running" };
+  peer.requests.set(History.page, () => ({ updates: [
+    { sessionUpdate: "session_info_update", _meta: { [RunExt.key]: run } },
+    { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "background history" }, _meta: { [RunExt.key]: run } },
+    { sessionUpdate: "session_info_update", _meta: { [RunExt.key]: { ...run, state: "idle", stopReason: "end_turn" } } },
+  ], cursor: null, state: "idle", agent: a }));
+  const ws = workspace(peer), loaded = await ws.load();
+  assert.deepEqual(loaded.transcripts.a[0].run, { id: "historic-run", turnId: null });
+  assert.equal(loaded.transcripts.a[0].streaming, false);
+  assert.equal(loaded.transcripts.a[0].stopReason, "end_turn");
+  assert.deepEqual(loaded.activities, {});
   ws.close();
 });
 

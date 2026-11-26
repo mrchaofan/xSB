@@ -52,6 +52,20 @@ const handed = (task: Task): Task => {
 const results = (to: Addr, id: string) => [...state.mail.values()].filter((m) => m.to.sessionId === to.sessionId && m.results?.taskIds.includes(id));
 const settle = () => hooks.settled();
 
+// Unowned backend execution is a policy hook; its default does not touch business state.
+{
+  const p = { ...B, run: { id: "background", turnId: null }, action: "show" as const };
+  const before = state.tasks.size;
+  assert.deepEqual(hooks.decide("acp.pre_unowned_run", p), p);
+  const customHooks: KernelHooks = new Hooks(reports);
+  new Kernel(state, customHooks, () => ({ exists: true, busy: false, awaits: () => false }));
+  customHooks.decider("acp.pre_unowned_run", p => ({ ...p, action: "stop" }));
+  assert.equal((customHooks.decide("acp.pre_unowned_run", p) as typeof p).action, "stop");
+  customHooks.decider("acp.pre_unowned_run", () => { throw new Error("policy failed"); });
+  assert.ok(isVeto(customHooks.decide("acp.pre_unowned_run", p)));
+  assert.equal(state.tasks.size, before);
+}
+
 // Done and stopped share one pipeline: the end says why and who; every party but the one who ended it is notified.
 {
   const t = handed(give(A, B, "done"));
