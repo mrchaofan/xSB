@@ -227,8 +227,6 @@
     reloadPlugins: async () => pluginViews(),
     pluginApprovals: async () => [],
     revokePluginApproval: async () => pluginViews(),
-    exportSettings: async () => false,
-    importSettings: async () => null,
     revealPlugins: async () => true,
     setBackend: async (id, backend) => {
       const a = get(id);
@@ -298,7 +296,7 @@
       return {
         state: !BACKENDS.find((b) => b.name === name)?.installed
           ? "missing"
-          : ["unauthenticated", "unknown", "broken"].includes(previewState)
+          : ["broken"].includes(previewState)
             ? previewState
             : "ready",
         version: "1.0.0",
@@ -310,7 +308,7 @@
         BACKENDS.find((b) => b.name === name),
         { installed: true, missing: undefined },
       );
-      return { state: "unauthenticated", version: "1.0.0" };
+      return { state: "ready", version: "1.0.0" };
     },
     async locateProgram(command) {
       // Electron：系统的选择文件对话框

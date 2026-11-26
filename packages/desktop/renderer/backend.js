@@ -4,7 +4,6 @@ import { CLI_DETAILS, backendPresentation } from "./backend-state.js";
 import { arkModelLabel } from "./ark.js";
 import { backendIcon } from "./backend-icons.js";
 import { h } from "./dom.js";
-import { openDialog } from "./form.js";
 import { t } from "./i18n.js";
 
 const results = new Map();
@@ -78,47 +77,8 @@ export function backendControls(backend, onChange = () => {}, { card = false } =
     finally { config.removeAttribute("aria-disabled"); changed(); }
   };
 
-  const login = () => {
-    let copying = false;
-    const copy = button("backend.login.copy", async () => {
-      if (copying) return;
-      copying = true;
-      copy.setAttribute("aria-busy", "true");
-      try { await xsb.copyText(backend.loginCommand ?? provider.login); copy.textContent = t("backend.login.copied"); }
-      catch (error) { loginFailure.textContent = error.message; }
-      finally { copying = false; copy.removeAttribute("aria-busy"); }
-    });
-    const loginFailure = h("p", { class: "error", role: "alert" });
-    const dialog = openDialog(t("backend.login.title", { name }), [
-      h("p", { class: "backend-login-intro" }, t("backend.login.intro")),
-      h("ol", { class: "backend-login-steps" },
-        h("li", {}, t("backend.login.step1")),
-        h("li", {}, t("backend.login.step2"), h("div", { class: "backend-command" }, h("code", {}, backend.loginCommand ?? provider.login), copy)),
-        h("li", {}, t("backend.login.step3"))),
-      h("p", { class: "hint" }, t("backend.login.provider")), loginFailure,
-    ], [
-      { label: t("backend.config"), run: async () => { await reveal(); return false; } },
-      { label: t("common.close") },
-      { label: t("backend.login.verify"), primary: true, run: async () => {
-        if (busy.has(key)) return false;
-        const verify = dialog.querySelector(".actions .primary");
-        verify.setAttribute("aria-disabled", "true");
-        verify.textContent = t("backend.checking");
-        try {
-          const completed = await work("check");
-          if (completed && results.get(key)?.state === "ready") return true;
-          loginFailure.textContent = t("backend.login.notReady");
-          return false;
-        }
-        finally { verify.removeAttribute("aria-disabled"); verify.textContent = t("backend.login.verify"); }
-      } },
-    ]);
-    dialog.classList.add("backend-login");
-  };
-
   const primary = button("backend.check", () => {
-    if (presentation.primary === "login") login();
-    else if (presentation.primary) work(presentation.primary);
+    if (presentation.primary) work(presentation.primary);
   }, { "data-backend-primary": "" });
   const config = button("backend.config", reveal, { class: "btn backend-config", title: t("backend.config.title") });
   const locate = button("backend.locate", () => work("locate"), { class: "btn backend-quiet" });
@@ -156,20 +116,17 @@ export function backendControls(backend, onChange = () => {}, { card = false } =
     version.textContent = result?.version && backend.installed ? `v${result.version}` : "";
     description.textContent = error ? t(`backend.failure.${error.action}`) : t(`backend.detail.${presentation.state}`, { name });
     if (result?.issue && !pending && !error) description.textContent += t("sentence.gap") + t(`backend.issue.${result.issue}`);
-    // xSB 中的这个智能体用的是火山方舟套餐，不是它自己的登录（ark.js）。
-    // 检测结果的 ark 说明方舟此刻为什么用不了（ark.ts 的 agentCheck）。
-    const arkProblem = backend.ark && result?.via === "ark" ? result.ark : undefined;
-    if (backend.ark && !pending && !error && ["found", "ready", "unauthenticated", "unknown"].includes(presentation.state))
-      description.textContent = arkProblem ? t(`backend.detail.ark.${arkProblem}`, { name }) : t("backend.detail.viaArk", { name, model: arkModelLabel(backend.ark.model) });
+    if (backend.ark && !pending && !error && ["found", "ready"].includes(presentation.state))
+      description.textContent = t("backend.detail.viaArk", { name, model: arkModelLabel(backend.ark.model) });
     if (!cli && presentation.state === "found") description.textContent = t("backend.detail.custom");
     if (!cli && presentation.state === "missing") description.textContent = t("backend.detail.customMissing");
     if (card) description.hidden = !error && (["checking", "installing", "locating"].includes(presentation.state) ||
       (!backend.ark && ["found", "ready"].includes(presentation.state)));
     if (!card) {
-      const viaArk = backend.ark && ["found", "ready", "unauthenticated", "unknown"].includes(presentation.state);
+      const viaArk = backend.ark && ["found", "ready"].includes(presentation.state);
       description.hidden = ["found", "ready"].includes(presentation.state) && !viaArk;
       if (!description.hidden) description.textContent = viaArk
-        ? arkProblem ? t(`backend.compact.ark.${arkProblem}`) : t("backend.compact.viaArk", { model: arkModelLabel(backend.ark.model) })
+        ? t("backend.compact.viaArk", { model: arkModelLabel(backend.ark.model) })
         : t(`backend.compact.${presentation.state}`);
     }
     if (!cli && presentation.state === "found") badge.textContent = t("backend.status.custom");

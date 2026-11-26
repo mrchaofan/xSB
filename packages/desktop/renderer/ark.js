@@ -175,7 +175,7 @@ export function arkCard() {
     version.textContent = status?.version && !busy ? `v${status.version}` : "";
     description.textContent = error ? t(`ark.failure.${error.kind}`) : t(`ark.detail.${p.state}`);
     description.hidden = !error && ["unchecked", "checking", "binding", "ready"].includes(p.state);
-    // 程序无法运行时说明里已经讲了怎么办；内置程序的路径不能由用户指定，通用的“检查路径”提示不适用。
+    // 内置程序的路径不能由用户指定，通用的“检查路径”提示不适用。
     if (status?.issue && status.issue !== "execution" && !busy && !error) description.textContent += t("sentence.gap") + t(`backend.issue.${status.issue}`);
     plans.replaceChildren(...(s === "ready" || s === "noPlan" ? status.plans : []).map((plan) => h("li", { "data-expired": plan.expired ? "true" : "false" }, planText(plan))));
     plans.hidden = !plans.children.length || !!busy;

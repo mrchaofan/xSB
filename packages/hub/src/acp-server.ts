@@ -1,4 +1,3 @@
-import { Auth } from "./auth.ts";
 /**
  * The hub as an ACP v2 agent: what an editor, the CLI or the desktop app talks to.
  *
@@ -29,7 +28,6 @@ export class Client {
   controls = false;
   forms = false;
   urls = false;
-  terminalAuth = false;
   private hub: Hub;
   private attached = new Set<LiveSession>();
 
@@ -49,7 +47,6 @@ export class Client {
       this.controls = meta?.[SessionControls.capability] != null;
       this.forms = p.capabilities?.elicitation?.form != null;
       this.urls = p.capabilities?.elicitation?.url != null;
-      this.terminalAuth = p.capabilities?.auth?.terminal != null;
       // The project works in the language of the first user who says which one they read.
       const language = meta?.[LanguageExt.key];
       const config = loadProjectConfig(hub.paths);
@@ -77,8 +74,6 @@ export class Client {
       };
     });
     conn.onRequest("authenticate", () => ({}));
-    conn.onRequest(Auth.methods, (p, ctx) => hub.authentication.forward(p.agentId, this, ctx.id, ctx.signal, () => hub.authentication.methods(p.agentId)));
-    conn.onRequest(Auth.login, (p, ctx) => hub.authentication.forward(p.agentId, this, ctx.id, ctx.signal, () => hub.authentication.login(p.agentId, p.methodId, this, ctx.signal)));
 
     // ---- sessions (standard) ----------------------------------------------
 
@@ -169,7 +164,7 @@ export class Client {
       }
       const messageId = origin.messageId;
       // An interruption is the workflow's only once the model has it: one that never gets there blocks nothing.
-      return hub.authentication.forward(session.agentId, this, ctx.id, ctx.signal, () => hub.delivery.fromUser(session, p.prompt, origin, this)).catch((e) => {
+      return hub.urlElicitations.forward(session.agentId, this, ctx.id, ctx.signal, () => hub.delivery.fromUser(session, p.prompt, origin, this)).catch((e) => {
         hub.workflows.discarded(session, messageId);
         throw e;
       });
@@ -205,13 +200,13 @@ export class Client {
     conn.onRequest(SessionControls.get, async (p, ctx) => {
       const session = this.own(p.sessionId);
       // Its settings are the backend session's: a new conversation opens one here, given nothing yet (`backendFresh`).
-      if (p.discover === true) await hub.authentication.forward(session.agentId, this, ctx.id, ctx.signal, () => session.ensureBackend());
+      if (p.discover === true) await hub.urlElicitations.forward(session.agentId, this, ctx.id, ctx.signal, () => session.ensureBackend());
       return session.composerState();
     });
 
     conn.onRequest("session/set_config_option", (p, ctx) => {
       const session = this.own(p.sessionId);
-      return hub.authentication.forward(session.agentId, this, ctx.id, ctx.signal, () => session.setConfig(p));
+      return hub.urlElicitations.forward(session.agentId, this, ctx.id, ctx.signal, () => session.setConfig(p));
     });
 
     // ---- agents ------------------------------------------------------------

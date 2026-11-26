@@ -13,11 +13,25 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await click(lane + " .prompt-suggestions button");
   assert.equal(await js(q(lane) + '.editor.read()[0].text'), "Standard suggestion");
   assert.equal(await js(q(lane + " .entries") + ".children.length"), prior, "suggestion edits a draft only");
-  await js(q(lane + " .native-commands") + '.value="0"; ' + q(lane + " .native-commands") + '.dispatchEvent(new Event("change"))');
-  assert.deepEqual(await js(q(lane) + '.editor.read()[0]'), { type: "skill", name: "pdf" });
-  assert.equal(await js(q(lane + " .entries") + ".children.length"), prior, "skill selection edits a draft only");
-  await click(lane + " .send");
-  await untilJS(q(lane + " .entries") + '.innerText.includes(\'"type":"skill"\')', "native skill reached the agent");
+  assert.equal(await has(lane + " .native-commands"), false, "no command/skill dropdown");
+  await click(lane + " .model-settings");
+  await until(() => has(lane + " .cascade-parent"), "model menu");
+  assert.equal(await js(q(lane + " .composer-menu") + '.querySelectorAll(":scope > button").length'), 0, "no sign-in action");
+  assert.equal(await js('typeof xsb.authenticate'), "undefined", "sign-in IPC is absent");
+  await js(q(lane + " .composer-menu") + '.hidePopover()');
+  for (const failure of ["reject-prompt", "fail-run"]) {
+    const errors = await js(q(lane + " .entries") + '.querySelectorAll(".entry.error").length');
+    await send(lane, failure);
+    await untilJS(q(lane + " .entries") + '.querySelectorAll(".entry.error").length > ' + errors, "provider error");
+    assert.equal(await js(q(lane + " .entries") + '.querySelector(".entry.error:last-child").textContent'), "Provider rejected credentials");
+    assert.equal(await js(q(lane + " .entries") + '.innerText.includes("xsb hub stop")'), false);
+  }
+  assert.equal(await js('typeof xsb.exportSettings'), "undefined");
+  assert.equal(await js('typeof xsb.importSettings'), "undefined");
+  await click("#settings");
+  await until(() => has("dialog.settings-dialog .settings-body"), "settings");
+  const settings = await js(q("dialog.settings-dialog") + ".innerText");
+  assert.equal(/Settings backup|设置备份|Export settings|导出设置|Import settings|导入设置/.test(settings), false);
   require("node:fs").writeFileSync("/tmp/xsb-capabilities-window.png", (await win.capturePage()).toPNG());
-  console.log("Electron + real Hub/ACP: standard suggestion edits draft; skill stays first and reaches the backend after Send");
+  console.log("Electron + real Hub/ACP: removed composer/backup controls; provider errors render unchanged");
 });

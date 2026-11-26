@@ -1,4 +1,4 @@
-import { Authentication } from "./auth.ts";
+import { UrlElicitations } from "./url-elicitation.ts";
 import { Lifecycle } from "./lifecycle.ts";
 /**
  * The hub: the one long-running process of a project.
@@ -72,7 +72,7 @@ export class Hub {
   readonly questions: Questions;
   readonly elicitations: Elicitations;
   readonly lifecycle: Lifecycle;
-  readonly authentication: Authentication;
+  readonly urlElicitations: UrlElicitations;
   readonly assets: Assets;
   readonly workflows: Workflows;
   /** Set by `shutdown`: turns that die with it stay unacknowledged and run again on the next start. */
@@ -98,13 +98,13 @@ export class Hub {
       (rec.backendWorkspace ? rec.backendWorkspace !== this.state.agents.get(rec.agentId)?.workspace : this.paths.moved || this.paths.previousRoots.length > 0));
     if (movedBindings.length) this.state.commit(movedBindings.map(rec => ops.putSession({ ...rec, backendSessionId: undefined, backendFresh: undefined, renew: "project_moved", used: undefined })));
     this.backends = new BackendPool((line) => this.log(line), {
-      url: (backend, request, signal) => this.authentication.request(backend, request, signal),
-      urlComplete: (backend, id) => this.authentication.complete(backend, id),
+      url: (backend, request, signal) => this.urlElicitations.request(backend, request, signal),
+      urlComplete: (backend, id) => this.urlElicitations.complete(backend, id),
     });
     const hooks: KernelHooks = new Hooks(auditReports(this.state.store, (line) => this.log(line)));
     this.kernel = new Kernel(this.state, hooks, (to) => this.delivery.recipient(to));
     this.lifecycle = new Lifecycle(hooks);
-    this.authentication = new Authentication(this);
+    this.urlElicitations = new UrlElicitations(this);
     this.delivery = new Delivery(this);
     this.jobs = new Jobs(this);
     auditHook(hooks, this.state.store);
@@ -194,7 +194,7 @@ export class Hub {
     // From here no turn starts and no backend is started (LiveSession.pump, BackendPool.for): what waits, waits for
     // the next start.
     this.stopping = true;
-    this.authentication.close();
+    this.urlElicitations.close();
     this.jobs.close();
     for (const session of this.live.values()) { this.questions.cancel(session); this.elicitations.cancel(session); }
     this.contextTokens.clear();

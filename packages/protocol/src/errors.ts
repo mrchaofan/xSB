@@ -29,8 +29,7 @@ const list = (items: string[] | undefined, none: string): string => (items?.leng
 
 /** What each reason says, from the facts carried with it. */
 const en = {
-  auth_required: (d: Facts) =>
-    `${d.detail}: agent "${d.agent}" (${d.info}) is not signed in. xsb does not handle credentials; sign in with that agent's own CLI or settings, then run \`xsb hub stop\` so the next start picks it up.${d.authMethods?.length ? ` It offers: ${d.authMethods.map((m: any) => typeof m === "string" ? m : m.name ?? m.methodId).join(", ")}.` : ""}`,
+  auth_required: (d: Facts) => d.detail ?? "Authentication required",
   backend_not_installed: (d: Facts) =>
     `agent "${d.agent}": backend "${d.backend}" needs the command "${d.command}", which is not installed or not on PATH. xsb does not install backends${d.hint ? `; install it yourself, e.g. \`${d.hint}\`` : ""}.`,
   backend_start_failed: (d: Facts) =>
@@ -54,8 +53,7 @@ const en = {
 export type Reason = keyof typeof en;
 
 const zh: Record<Reason, (d: Facts) => string> = {
-  auth_required: (d) =>
-    `${d.detail}：智能体“${d.agent}”（${d.info}）尚未登录。xsb 不处理凭据；请用该后端自己的命令行或设置登录，然后执行 \`xsb hub stop\`，下次启动时生效。${d.authMethods?.length ? `它支持的登录方式：${d.authMethods.map((m: any) => typeof m === "string" ? m : m.name ?? m.methodId).join("、")}。` : ""}`,
+  auth_required: (d) => d.detail ?? "Authentication required",
   backend_not_installed: (d) =>
     `智能体“${d.agent}”：后端“${d.backend}”需要命令“${d.command}”，但它没有安装，或不在 PATH 中。xsb 不安装后端${d.hint ? `；请自行安装，例如 \`${d.hint}\`` : ""}。`,
   backend_start_failed: (d) =>
@@ -95,7 +93,7 @@ export function reasonOf(e: unknown): Reason | undefined {
 export function explain(e: unknown, language: Language): string {
   const reason = reasonOf(e);
   const facts = (e as RpcError).data as Facts | undefined;
-  return reason && facts?.reason ? TEXT[language][reason](facts) : e instanceof Error ? e.message : String(e);
+  return reason && reason !== "auth_required" && facts?.reason ? TEXT[language][reason](facts) : e instanceof Error ? e.message : String(e);
 }
 
 /** Process exit code of the CLI for an error. */
