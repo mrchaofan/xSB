@@ -11,8 +11,6 @@ export { approvePlugin, ensurePluginRoot, listPlugins, setPluginEnabled } from "
 export { WITHHELD_ENV, withhold } from "./util.ts";
 export type { PluginProblem, PluginScope, PluginView } from "./plugins.ts";
 export { pluginApprovals, revokePluginApproval } from "./trust.ts";
-export { settingsBundle, restoreSettingsBundle, validateSettingsBundle } from "./settings-backup.ts";
-export type { SettingsBundle } from "./settings-backup.ts";
 export { atomicWrite } from "@xsb/store";
 export { updateJsonFile } from "./config-files.ts";
 

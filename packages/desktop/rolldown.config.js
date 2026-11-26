@@ -65,7 +65,6 @@ const pages = {
 export default defineConfig([
   { ...node, input: "src/main.ts", output: { file: "dist/app/main.js", format: "esm", codeSplitting: false } },
   { ...node, input: "src/preload.cjs", output: { file: "dist/app/preload.cjs", format: "cjs" } },
-  program("xsb-auth-terminal", "src/auth-terminal-runner.ts"),
   program("xsb-hub", "../hub/bin/xsb-hub"),
   program("xsb-mcp-bridge", "../hub/bin/xsb-mcp-bridge"),
   program("claude-agent-acp", wrapper("claude-agent-acp")),

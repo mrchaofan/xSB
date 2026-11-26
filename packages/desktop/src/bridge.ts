@@ -69,7 +69,6 @@ export type Progress = { done: string[]; failed?: string; error?: string };
 
 export type BackendView = { name: string; command: string; installed: boolean; missing?: string; cli?: "codex" | "claude"; configPath?: string;
   /** What the user runs in a terminal to sign the agent's program in: by its path when the terminal would not find it. */
-  loginCommand?: string;
   /** The Volcengine Ark plan xSB's agent uses instead of its own configuration (ark.ts). */
   ark?: { profile: string; model: string } };
 

@@ -13,7 +13,7 @@ import { skillPrompt } from "./prompt-capabilities.ts";
 import spawn from "cross-spawn";
 import type { ChildProcess } from "node:child_process";
 import { Connection, OriginExt, PROTOCOL_VERSION, RpcError, TurnIsolation, failure, text } from "@xsb/protocol";
-import type { AuthMethod, ElicitationRequest, ElicitationResponse, UrlElicitationRequest, ContentBlock, InitializeResponse, OriginMeta, PermissionRequest, PromptResponse } from "@xsb/protocol";
+import type { ElicitationRequest, ElicitationResponse, UrlElicitationRequest, ContentBlock, InitializeResponse, OriginMeta, PermissionRequest, PromptResponse } from "@xsb/protocol";
 import { INSTALL_HINT, findCommand } from "./config.ts";
 import type { BackendSpec } from "./config.ts";
 import type { LiveSession } from "./session.ts";
@@ -45,8 +45,6 @@ export class Backend {
   readonly agentId: string;
   caps: BackendCaps = { systemPrompt: false, additionalDirectories: false, image: false };
   info = "";
-  /** Names of the ways this agent can be signed in, as it reported them. */
-  authMethods: AuthMethod[] = [];
   private proc: ChildProcess;
   /** Settles once the process is gone (or never started): only then is what it held, such as session locks, free. */
   private ended: Promise<void>;
@@ -172,7 +170,7 @@ export class Backend {
         protocolVersion: PROTOCOL_VERSION,
         info: { name: "xsb", title: "xsb hub", version: VERSION },
         // v2 compaction reports are standard session updates and need no client capability.
-        capabilities: { auth: { terminal: {} }, elicitation: { url: {}, ...(nativeForms ? { form: {} } : {}) }, session: { promptSuggestions: {}, commands: { skill: {} } }, ...((spec.airCompatibility ?? codex) ? { _meta: AIR_COMPATIBILITY } : {}) },
+        capabilities: { elicitation: { url: {}, ...(nativeForms ? { form: {} } : {}) }, session: { promptSuggestions: {}, commands: { skill: {} } }, ...((spec.airCompatibility ?? codex) ? { _meta: AIR_COMPATIBILITY } : {}) },
       })
       .catch(async (e) => {
         // A process that died during startup is the real story, not the closed pipe.
@@ -194,7 +192,6 @@ export class Backend {
       orderedCancellation: (init._meta?.[TurnIsolation.key] as { version?: number; afterIdle?: boolean } | undefined)?.version === TurnIsolation.version &&
         (init._meta?.[TurnIsolation.key] as { afterIdle?: boolean } | undefined)?.afterIdle === true,
     };
-    backend.authMethods = init.authMethods ?? [];
     backend.info = init.info ? `${init.info.name} ${init.info.version}` : name;
     return backend;
   }

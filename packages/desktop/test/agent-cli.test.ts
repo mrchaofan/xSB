@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
-import { AgentClis, agentCli, claudePlatform, codexTarget, configPath, configTemplate, loginCommand, run } from "../src/agent-cli.ts";
+import { AgentClis, agentCli, claudePlatform, codexTarget, configPath, configTemplate, run } from "../src/agent-cli.ts";
 import type { Runner } from "../src/agent-cli.ts";
 
 const ok = (stdout = "", code = 0) => ({ code, stdout, timedOut: false });
@@ -43,11 +43,6 @@ test("providers reject arbitrary IPC names and respect CLI home overrides", () =
   assert.equal(claudePlatform("darwin", "arm64"), "darwin-arm64");
   assert.equal(claudePlatform("win32", "x64"), "win32-x64");
   assert.throws(() => claudePlatform("freebsd", "x64"));
-  // Sign-in is run in the user's terminal: a program in the app's folder is named by its path, quoted for that terminal.
-  assert.equal(loginCommand("claude", "/usr/local/bin/claude", true, "darwin"), "claude auth login");
-  assert.equal(loginCommand("claude", "/Users/o'b/Library/xsb/installed/claude/claude", false, "darwin"), "'/Users/o'\\''b/Library/xsb/installed/claude/claude' auth login");
-  assert.equal(loginCommand("codex", "C:\\Users\\O'Brien\\codex.exe", false, "win32"), "& 'C:\\Users\\O''Brien\\codex.exe' login");
-  assert.equal(loginCommand("codex", null, false, "darwin"), "codex login");
 });
 
 test("inspection never creates files; concurrent creation never overwrites user settings", async () => {
@@ -69,7 +64,7 @@ test("inspection never creates files; concurrent creation never overwrites user 
     assert.equal(await fs.readFile(inspected.path, "utf8"), "# user configuration\n");
     const claude = await service.config("claude", true, "zh-CN");
     JSON.parse(await fs.readFile(claude.path, "utf8"));
-    assert.match(await fs.readFile(path.join(path.dirname(claude.path), "settings.README.md"), "utf8"), /claude auth login/);
+    assert.match(await fs.readFile(path.join(path.dirname(claude.path), "settings.README.md"), "utf8"), /后端与服务配置/);
   } finally {
     if (old.codex === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = old.codex;
     if (old.claude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = old.claude;
@@ -77,32 +72,22 @@ test("inspection never creates files; concurrent creation never overwrites user 
   }
 });
 
-test("checks use only version and local auth commands and distinguish every failure", async () => {
+test("checks only run the executable version, regardless of account/provider setup", async () => {
   const calls: string[][] = [];
-  let answer = ok('{"loggedIn":true,"email":"private@example.com","apiProvider":"firstParty"}');
-  const envs: (string | undefined)[] = [];
-  const runner: Runner = async (_file, args, options) => { calls.push(args); envs.push(options?.env?.MARK); return args[0] === "--version" ? ok("cli 2.1.0") : answer; };
+  const runner: Runner = async (_file, args, options) => {
+    calls.push(args);
+    assert.equal(options?.env?.MARK, "child");
+    assert.deepEqual(args, ["--version"], "no authentication or provider requests");
+    return ok("cli 2.1.0");
+  };
   const service = new AgentClis(registry(), runner);
-  assert.deepEqual(await service.check("claude"), { state: "ready", version: "2.1.0" });
-  answer = ok('{"loggedIn":false}', 1);
-  assert.equal((await service.check("claude")).state, "unauthenticated");
-  answer = ok('{"loggedIn":false,"apiKeySource":"env"}');
-  assert.equal((await service.check("claude")).state, "ready");
-  answer = ok('{"loggedIn":false,"apiProvider":"bedrock"}');
-  assert.equal((await service.check("claude")).state, "unknown");
-  answer = ok("unsupported command", 1);
-  assert.equal((await service.check("claude")).state, "unknown");
-  answer = { ...ok("", 1), stderr: "Not logged in" };
-  assert.equal((await service.check("codex")).state, "unauthenticated");
-  answer = ok("", 1);
-  assert.equal((await service.check("codex")).state, "unknown");
-  answer = { code: null, stdout: "", timedOut: true };
-  assert.deepEqual(await service.check("claude"), { state: "unknown", version: "2.1.0", issue: "timeout" });
-  assert.ok(calls.every((args) => ["--version", "auth status --json", "login status"].includes(args.join(" "))));
-  // Probes run in the environment of the app's child processes.
-  assert.ok(envs.every((mark) => mark === "child"));
+  for (const name of ["claude", "codex"] as const) {
+    assert.deepEqual(await service.check(name), { state: "ready", version: "2.1.0" });
+  }
+  assert.equal(calls.length, 2);
   assert.deepEqual(await new AgentClis(registry(null), runner).check("codex"), { state: "missing" });
   assert.deepEqual(await new AgentClis(registry(), async () => ok("wrong executable")).check("codex"), { state: "broken", issue: "execution" });
+  assert.deepEqual(await new AgentClis(registry(), async () => ({ code: null, stdout: "", timedOut: true })).check("claude"), { state: "broken", issue: "timeout" });
 });
 
 test("simultaneous checks share one bounded probe", async () => {
@@ -111,7 +96,7 @@ test("simultaneous checks share one bounded probe", async () => {
   const first = service.check("codex");
   assert.equal(first, service.check("codex"));
   await first;
-  assert.equal(count, 2);
+  assert.equal(count, 1);
 });
 
 test("runner terminates a hung process without prompting or exposing stderr", async () => {

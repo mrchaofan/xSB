@@ -28,9 +28,7 @@ export const ARTIFACT_SCHEME = "xsb-artifact";
 
 export type DesktopInteractions = {
   url?: (request: import("@xsb/protocol").UrlElicitationRequest, signal: AbortSignal) => Promise<ElicitationResponse>;
-  terminal?: (request: import("./terminal-auth.ts").TerminalAuthRequest, signal: AbortSignal) => Promise<{ exitCode: number | null }>;
 };
-const Auth = { methods: "_dev.xsb/auth/methods", login: "_dev.xsb/auth/login", terminal: "_dev.xsb/auth/terminal" };
 
 type Emit = (event: Event) => void;
 
@@ -120,7 +118,7 @@ export class Workspace {
       protocolVersion: PROTOCOL_VERSION,
       info: { name: "xsb-desktop", version: "0.1.0" },
       // An observer of all agents, and a transcript: sent its own input too, when it gets into the conversation.
-      capabilities: { ...(interactions.terminal ? { auth: { terminal: {} } } : {}), session: { promptSuggestions: {}, commands: { skill: {} } }, elicitation: { form: {}, ...(interactions.url ? { url: {} } : {}) }, _meta: { [Agents.capability]: {}, [History.capability]: {}, [SessionControls.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
+      capabilities: { session: { promptSuggestions: {}, commands: { skill: {} } }, elicitation: { form: {}, ...(interactions.url ? { url: {} } : {}) }, _meta: { [Agents.capability]: {}, [History.capability]: {}, [SessionControls.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
     }).catch(error => { workspace.close(); throw error; });
     return workspace;
   }
@@ -163,7 +161,6 @@ export class Workspace {
     conn.onRequest("elicitation/create", (p: ElicitationRequest, ctx) => p.mode === "url"
       ? interactions.url?.(p, ctx.signal) ?? { action: "decline" }
       : this.onElicitation(p, ctx.signal));
-    conn.onRequest(Auth.terminal, (p, ctx) => interactions.terminal?.(p, ctx.signal) ?? { exitCode: null });
   }
 
   get connected(): boolean {
@@ -817,8 +814,6 @@ export class Workspace {
     });
   }
 
-  authenticationMethods(agentId: string): Promise<import("@xsb/protocol").AuthMethod[]> { return this.conn.request(Auth.methods, { agentId }); }
-  authenticate(agentId: string, methodId: string): Promise<unknown> { return this.conn.request(Auth.login, { agentId, methodId }); }
 
   /** Answer the permission request an entry shows. */
   permit(entryId: string, allow: boolean): void {
