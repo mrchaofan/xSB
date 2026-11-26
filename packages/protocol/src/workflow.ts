@@ -32,6 +32,7 @@ export type WorkflowNodeView = {
   sessionId?: string;
   target?: string;
   summary?: string;
+  additionalResults?: { id: string; summary: string }[];
   controls?: { pause: boolean; resume: boolean };
 };
 

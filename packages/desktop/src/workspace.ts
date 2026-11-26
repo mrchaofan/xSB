@@ -16,7 +16,7 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { Answer, Question, RunExt, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent } from "@xsb/protocol";
+import { Answer, Question, RunExt, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent } from "@xsb/protocol";
 import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
 import type { ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
@@ -539,6 +539,13 @@ export class Workspace {
       if (prior && !prior.pending && !prior.unsent) return;
       return this.put(agentId, { id, kind: "input", origin: accepted.origin, content: accepted.content, pending: true });
     }
+    const delivery = info?.[MessageDelivery.key] as MessageDelivery | undefined;
+    if (delivery) {
+      const prior = this.inputEntry(agentId, `${sessionId}:${delivery.messageId}`);
+      if (prior && prior.pending) this.put(agentId, { ...prior, delivery: delivery.state,
+        canCancel: delivery.canCancel, canSendNow: delivery.canSendNow, isQueueHead: delivery.isHead, targetTurnId: delivery.targetTurnId, sendNowBlockedBy: delivery.sendNowBlockedBy });
+      return;
+    }
     const discarded = info?.[Discarded.key] as Discarded | undefined;
     if (discarded) {
       // The model did not see it: it stays where it was, said so and why; never taken out of the transcript.
@@ -585,7 +592,7 @@ export class Workspace {
       const prior = this.inputEntry(agentId, id);
       const deliveredAs = update._meta?.[DeliveredAs.key] as DeliveredAs | undefined;
       // Its first block settles the waiting entry (`Accepted`) into the one the model has; the rest follow it.
-      if (prior && !prior.pending && !prior.unsent) return this.put(agentId, { ...prior, content: append(prior.content, update.content) });
+      if (prior && !prior.pending && !prior.unsent && !prior.discarded) return this.put(agentId, { ...prior, content: append(prior.content, update.content) });
       if (prior) {
         this.settle(agentId);
         this.does(agentId, "waiting");
@@ -688,10 +695,25 @@ export class Workspace {
     if (!entry?.discarded || entry.origin.kind !== "user" || entry.redelivered || entry.resentAs) throw new Error("this message cannot be sent again");
     const messageId = entryId.slice(entryId.indexOf(":") + 1);
     if (entry.unsent) {
-      this.drop(agentId, entryId);
-      return this.send(agentId, entry.content, undefined, { messageId });
+      const replacement = randomUUID();
+      this.put(agentId, { ...entry, resentAs: replacement });
+      this.unsend(messageId);
+      return this.send(agentId, entry.content, undefined, { messageId: replacement });
     }
     return this.send(agentId, entry.content, undefined, { resendOf: messageId });
+  }
+
+  async cancelMessage(agentId: string, entryId: string): Promise<void> {
+    const entry = this.inputEntry(agentId, entryId);
+    if (!entry?.pending || !entry.canCancel) throw new Error("this message is no longer queued");
+    await this.conn.request(MessageDelivery.cancel, { sessionId: await this.session(this.agents.get(agentId)!), messageId: entryId.slice(entryId.indexOf(":") + 1) });
+  }
+
+  async sendMessageNow(agentId: string, entryId: string): Promise<void> {
+    const entry = this.inputEntry(agentId, entryId);
+    if (!entry?.pending || !entry.canSendNow || !entry.targetTurnId) throw new Error("only the queue head can be sent now");
+    await this.conn.request(MessageDelivery.sendNow, { sessionId: await this.session(this.agents.get(agentId)!),
+      messageId: entryId.slice(entryId.indexOf(":") + 1), targetTurnId: entry.targetTurnId });
   }
 
   private inputEntry(agentId: string, id: string): Extract<Entry, { kind: "input" }> | undefined {

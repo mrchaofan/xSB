@@ -1078,7 +1078,7 @@ dialog.settings-dialog::backdrop { background: var(--backdrop); backdrop-filter:
 .backend-limits[open] > summary { margin-bottom: var(--space-1); }
 .backend-limits > .hint { margin-bottom: var(--space-1); }
 /* 用户消息还没进入模型的对话：气泡变淡，直到插入回执到达 */
-.input[data-pending] .said { opacity: .6; }
+.input[data-pending] .said { opacity: .6; font-size: .9em; }
 .input .delivered-as { font-size: var(--text-xs); color: var(--ink-3); margin-top: 2px; }
 .input .resend { margin-left: var(--space-2); }
 

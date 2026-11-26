@@ -539,7 +539,7 @@ function answerOf(given: unknown): Answer | undefined {
   if (!Array.isArray(a.answers) || a.answers.length > 4 || !a.answers.every((v) => text(v) || (Array.isArray(v) && v.length <= 9 && v.every(text)))) return undefined;
   return { questionId: a.questionId, answers: a.answers };
 }
-const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","renameConversation","setAvatar","setBackend","workflowControl","history","send","resend","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
+const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","renameConversation","setAvatar","setBackend","workflowControl","history","send","resend","cancelMessage","sendMessageNow","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();
@@ -710,7 +710,7 @@ async function call(event: Electron.IpcMainInvokeEvent, method: string, args: an
     return workspace.composerState(args[0], true);
   }
   if (method === "send") return workspace.send(args[0], args[1], typeof args[2] === "string" ? args[2] : undefined, undefined, answerOf(args[4]));
-  if (method === "resend" && (typeof args[0] !== "string" || typeof args[1] !== "string")) throw new Error("resend takes an agent and an entry");
+  if (["resend", "cancelMessage", "sendMessageNow"].includes(method) && (typeof args[0] !== "string" || typeof args[1] !== "string")) throw new Error("resend takes an agent and an entry");
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);
   throw new Error(`unknown method ${method}`);
 }

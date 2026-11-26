@@ -34,6 +34,8 @@ type Instance = {
   /** Assignments the node's agent had in its conversation that were withdrawn since: it is told so with its next one. */
   revoked?: string[];
   last?: Delivery;
+  /** Additional deliveries are retained in the workflow ledger, never prompted back to the caller. */
+  additionalResults?: Delivery[];
   paused: boolean;
   /** The node waits for the main agent's decision: its agent escalated with pauseSelf, for this reason. */
   replan?: string;
@@ -351,7 +353,7 @@ export function normalize(f: Flow) {
       if (w.state !== "ended" || !w.staged || gate.blocked) continue;
       const delivery = { ...w.staged, id: newId("delivery"), valid: true, basis: w.basis! };
       if (w.kind === "graph") i.last = delivery;
-      else notice(f, JSON.stringify({ additionalResult: n.node, ...w.staged, id: delivery.id }));
+      else (i.additionalResults ??= []).push(delivery);
       delete i.work;
       changed = true;
       break;
@@ -489,6 +491,7 @@ export function view(f: Flow): WorkflowView {
           sessionId: i.sessionId,
           target: i.work?.kind === "graph" ? i.work.id : i.last?.valid ? i.last.id : undefined,
           summary: i.last?.valid ? i.last.summary : undefined,
+          additionalResults: i.additionalResults?.map(({ id, summary }) => ({ id, summary })),
           controls: {
             pause: n.kind === "task" && actionable && !i.paused && !f.paused,
             resume: n.kind === "task" && !f.paused && actionable &&

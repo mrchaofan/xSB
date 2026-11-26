@@ -48,7 +48,11 @@ export class Delivery {
     // The user's message that ended without the session recording it (dropped, refused, abandoned at quit, or settled on a
     // restart) is recorded as discarded: what the user sees of it is what became of it.
     hooks.on("message.discarded", (entry) => {
-      if (entry.from.kind === "user") this.hub.live.get(entry.sessionId)?.unaccepted(entry.messageId, entry.state === "insertion_uncertain" ? "uncertain" : this.hub.stopping ? "abandoned" : "refused");
+      if (entry.from.kind === "user") {
+        const session = this.hub.live.get(entry.sessionId);
+        session?.unaccepted(entry.messageId, entry.discardReason ?? (entry.state === "insertion_uncertain" ? "uncertain" : this.hub.stopping ? "abandoned" : "refused"));
+        if (session) this.hub.workflows?.discarded(session, entry.messageId);
+      }
     });
     hooks.on("message.withdrawn", (items) => {
       for (const item of items) this.hub.live.get(item.to.sessionId)?.withdraw((m) => m.id === item.id);
@@ -234,21 +238,27 @@ export class Delivery {
     const to = { agentId: session.agentId, sessionId: session.id };
     const waiting = deferred<void>();
     this.inserted.set(messageId, { done: waiting, client });
-    session.accept(messageId, { ...origin, messageId }, prompt, client);
     try {
-      const open = kernel.userTask(session.id);
-      if (open) {
-        kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", taskId: open.id, prompt, pref: "wake" });
-      } else if (session.busy && kernel.openTasks(session.id).some((t) => !t.stopping)) {
-        kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", prompt, pref: "wake" });
-      } else {
-        const task = kernel.dispatchUser(to, prompt, messageId, topicKey(session.rec.title ?? "conversation"));
-        if (isVeto(task)) throw new Error(task.veto);
-      }
+      this.hub.state.atomic(() => {
+        session.accept(messageId, { ...origin, messageId }, prompt, client);
+        const open = kernel.userTask(session.id);
+        if (open) {
+          kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", taskId: open.id, prompt, pref: "wake" });
+        } else if (session.busy && kernel.openTasks(session.id).some((t) => !t.stopping)) {
+          kernel.post({ id: messageId, to, from: { kind: "user" }, kind: "message", prompt, pref: "wake" });
+        } else {
+          const task = kernel.dispatchUser(to, prompt, messageId, topicKey(session.rec.title ?? "conversation"));
+          if (isVeto(task)) throw new Error(task.veto);
+        }
+      });
       await waiting.promise;
       return { messageId };
     } catch (e) {
-      session.unaccepted(messageId, reasonOf(e), errorMessage(e));
+      if (this.hub.state.store.healthy) this.hub.state.atomic(() => {
+        session.accept(messageId, { ...origin, messageId }, prompt, client);
+        if (!this.hub.state.ledger.has(messageId)) kernel.mark(messageId, "discarded_unseen", { agentId: session.agentId, sessionId: session.id, from: { kind: "user" } });
+        session.unaccepted(messageId, reasonOf(e), errorMessage(e));
+      });
       throw e;
     } finally {
       this.inserted.delete(messageId);
@@ -335,17 +345,11 @@ export class Delivery {
       for (const item of turn.items) {
         const input = turn.inputs.find(i => i.messageId === item.id);
         if (!input) continue;
-        const state = input.in || input.receipted ? (!end.failure && end.stopReason !== "cancelled" ? "seen" : "inserted_unprocessed") : "discarded_unseen";
+        const state = input.in || input.receipted ? (!end.failure && end.stopReason !== "cancelled" ? "inserted" : "inserted_unprocessed") : "discarded_unseen";
         kernel.mark(item.id, state, { agentId: session.agentId, sessionId: session.id, from: item.from, ...(item.taskId ? { taskId: item.taskId } : {}) });
       }
       for (const [taskId, waiter] of this.waiters) if (waiter.turn === turn) this.unwait(taskId, "");
       if (end.failure) {
-        for (const item of turn.items) {
-          if (item.kind !== "task" && item.from.kind === "agent") {
-            // The sender believes the message arrived; tell it otherwise.
-            kernel.tell({ agentId: item.from.agentId, sessionId: item.from.sessionId }, item.topic, `Your message ${item.id} to "${session.agentId}" was not processed: ${errorMessage(end.failure)}`);
-          }
-        }
         // The tasks the turn brought fail even when they had not reached the model: nothing else will run them.
         for (const item of turn.items) {
           const task = item.kind === "task" ? this.hub.state.tasks.get(item.taskId!) : undefined;

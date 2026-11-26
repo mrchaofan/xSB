@@ -255,8 +255,7 @@ export class Workflows {
       origin: { kind: "system", messageId: newId("continue") },
       interruptionId: pending.id,
       prompt: [
-        text("Continue handling the interrupted user message below. Verify any effects already observed."),
-        ...pending.prompt,
+        text(`Continue handling the user's previously received message ${pending.id} from this conversation. Verify any effects already observed. If that message is no longer in context, ask the user to send it again; do not reconstruct it.`),
       ],
     });
   }
@@ -314,11 +313,8 @@ export class Workflows {
       f.paused = !completed(f);
       // Notices acknowledged by ACP never become a second input after a crash.
       const held = [...this.hub.state.mail.values()].filter((m) => m.workflowNotice && m.to.sessionId === f.owner);
-      f.outbox = f.outbox.filter(
-        (n) =>
-          !n.posted ||
-          !["inserted", "seen", "inserted_unprocessed"].includes(this.hub.state.ledger.get(n.posted)?.state ?? ""),
-      );
+      // Pre-restart transport attempts never become fresh prompts on resume.
+      f.outbox = f.outbox.filter(n => !n.posted);
       for (const n of f.outbox) delete n.posted;
       for (const i of Object.values(f.instances)) if (i.work?.state === "running") suspend(i.work);
       // Held until the workflow resumes: what its nodes were sent, and the main conversation's interruptions of it. The
@@ -331,7 +327,7 @@ export class Workflows {
           (this.hub.state.agents.get(m.to.agentId)?.workflowOwner === f.owner || (m.to.sessionId === f.owner && interruptions.has(m.id))) &&
           !["inserted", "seen", "inserted_unprocessed", "discarded_unseen", "insertion_uncertain"].includes(this.hub.state.ledger.get(m.id)?.state ?? ""),
       );
-      this.save(f, [...held.map((item) => ops.ack(item.id)), ...heldInputs.map((item) => ops.enqueue({ ...item, workflowHeld: true }))]);
+      this.save(f, heldInputs.map((item) => ops.enqueue({ ...item, workflowHeld: true })));
     }
   }
   available(s: LiveSession) {

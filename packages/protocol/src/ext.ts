@@ -285,18 +285,16 @@ export const Tasks = {
  *   queued                waits in xsb behind the running turn; the model knows nothing of it
  *   submitted             routed/submitted; no insertion receipt yet
  *   inserted              accepted by the backend conversation, not proof of model execution
- *   seen                  the model went on after it
- *   inserted_unprocessed  in the conversation, but the turn was stopped before the model went on; it is seen
- *                         when the session goes on, and discarded if it never does
- *   discarded_unseen      delivery revoked/declined; not automatically retried
+ *   seen                  legacy confirmed/consumed state; not proof that a model read it
+ *   inserted_unprocessed  insertion confirmed; execution ended interrupted, without a model-read guarantee
+ *   discarded_unseen      delivery revoked/declined or old unsent input interrupted; not automatically retried
  *   insertion_uncertain   offered before a connection/power failure; insertion could not be confirmed
  *
  * The signals are ACP v2's: "inserted" is the answer to `session/prompt` (its insertion), "discarded_unseen" the
- * -32800 of a prompt cancelled before it; "seen" is anything the backend reports after an insertion, or its idle that
- * ended the work normally.
+ * -32800 of a prompt cancelled before it; legacy "seen" is retained for compatibility. Current output or idle never advances input confirmation.
  */
 export type LedgerState = "inboxed" | "queued" | "submitted" | "inserted" | "seen" | "inserted_unprocessed" | "discarded_unseen" | "insertion_uncertain";
-export type LedgerEntry = { messageId: string; agentId: string; sessionId: string; from: Origin; taskId?: string; state: LedgerState; ts: string; offered?: { backendSessionId: string; key: string } };
+export type LedgerEntry = { messageId: string; agentId: string; sessionId: string; from: Origin; taskId?: string; state: LedgerState; ts: string; discardReason?: DiscardReason; offered?: { backendSessionId: string; key: string } };
 export const Ledger = {
   update: `_${NS}/messages/update`,
   /**
@@ -366,7 +364,7 @@ export const Discarded = { key: `${NS}/discarded` } as const;
 export type Discarded = { messageId: string; origin: OriginMeta; content: ContentBlock[]; reason?: DiscardReason; detail?: string; owed?: boolean;
   /** The user sent it again, as this message: it is no longer owed. */
   resentAs?: string };
-export type DiscardReason = "stopped" | "failed" | "too_large" | "refused" | "expired" | "abandoned" | "uncertain";
+export type DiscardReason = "stopped" | "failed" | "too_large" | "refused" | "expired" | "abandoned" | "uncertain" | "interrupted";
 
 /**
  * The user's message as xsb accepted it, before it is in the model's conversation: recorded, so that a reader of the
@@ -376,6 +374,16 @@ export type DiscardReason = "stopped" | "failed" | "too_large" | "refused" | "ex
  */
 export const Accepted = { key: `${NS}/accepted` } as const;
 export type Accepted = { messageId: string; origin: OriginMeta; content: ContentBlock[] };
+
+/** Durable input delivery projection; queue controls are user actions, not model tools. */
+export const MessageDelivery = {
+  key: `${NS}/input_delivery`,
+  cancel: `_${NS}/messages/cancel`,
+  sendNow: `_${NS}/messages/send_now`,
+} as const;
+export type MessageDelivery = { messageId: string; state: "waiting" | "queued" | "sending";
+  canCancel: boolean; canSendNow: boolean; isHead: boolean; targetTurnId?: string; sendNowBlockedBy?: "sending" | "stopping" | "waiting" };
+
 
 /**
  * Messages the model had not seen (`Discarded` with `owed`) went into its conversation along with `with`, in front of it:

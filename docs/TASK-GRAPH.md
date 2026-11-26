@@ -168,3 +168,7 @@ state.ts      Task.parents 的持久化与反向索引
 - **不丢弃派发者排队中的消息。** 中枢判断不了一条消息是不是关于被撤的任务。
 
 停止已经完成的根任务仍遍历其后代，根的原结果和完成状态不变，记录 `cascadeStopped`。后续支撑者计算不再穿透这个已撤销的根。执行器的停止事件与确认绑定 turn ID；创建子任务在提交前检查已提交的停止状态。具体生命周期见 [TURN-LIFECYCLE.md](TURN-LIFECYCLE.md)。
+
+### 2026-11-26 调用结果与重启结算
+
+普通 Agent 调用结果保存在任务账本，不默认给发起 Agent 回传 prompt，也不因 legacy wake/sync 偏好隐式等待子任务。显式 DAG 控制与依赖释放仍遵循图规则；后台 job 和显式订阅保留各自的通知契约。workflow 的追加工作结果保存到节点 additionalResults，不形成回传 prompt。重启前未确认输入及没有邮件的 blocked 工作统一终结，结束事务不得再释放同一批正在终结的任务。

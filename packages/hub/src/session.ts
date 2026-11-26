@@ -11,17 +11,16 @@ import path from "node:path";
  * of authorized work. A backend execution (run) is bounded by ACP running/idle;
  * it may have no turn owner, or be claimed by a turn when its input is inserted.
  *
- * What goes into a running turn goes to the backend at once, each input on its
- * own, once the backend has the turn's first: the hub does not hold it back,
- * merge it, or reorder it. Input the work did not take before it ended is the
- * next turn's.
+ * A session has one prompt batch awaiting insertion. Later input joins and protects
+ * its logical turn immediately, but is sent only after that batch's real receipt.
+ * Binding, recovery and cancellation keep the same serial ownership.
  *
  * Every input has a receipt: it is inserted into the backend's conversation
  * (the response to `session/prompt`, or a correlated backend echo), or it never will be in this turn: -32800, dropped by a stop, or
  * stopped while the hub still held it. The user's is then kept for the next
  * turn; mail waits for a turn of its own.
  */
-import { SessionControls, InsertionTrace, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, Redelivered, RunExt, TurnExt, TurnFailure, RpcError, CONNECTION_CLOSED, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
+import { SessionControls, InsertionTrace, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, RunExt, TurnExt, TurnFailure, RpcError, CONNECTION_CLOSED, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
 import type { ExecutionSource, BackendRun, RunUpdate, Boundary, ContentBlock, DiscardReason, ElicitationResponse, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
@@ -34,7 +33,7 @@ import { Paths } from "./paths.ts";
 import { asPreface, conversationTitle, handoff, isXsbText } from "./prompts.ts";
 import type { Gives, Renewal } from "./prompts.ts";
 import { turnsSinceCleared } from "./transcript.ts";
-import { atomicWrite } from "@xsb/store";
+import { MessageDelivery } from "@xsb/protocol";
 import type { MailItem, SessionRec } from "./state.ts";
 import type { WorkflowTold } from "./workflow-state.ts";
 import { ops } from "./state.ts";
@@ -75,6 +74,7 @@ export type Input = Discarded &
   TurnRequest & {
     inserted: Deferred<void>;
     shown?: boolean;
+    cancelling?: boolean;
     /** Submitted through ACP session/prompt; execution and insertion settle separately. */
     sent?: "prompt";
     /** Execution associated with this request, even if its insertion receipt follows that execution's idle. */
@@ -91,8 +91,6 @@ export type Input = Discarded &
     receipted?: boolean;
     /** User input accepted after a replacement committed joins that replacement's new turn. */
     joinsTaskId?: string;
-    /** Earlier user messages the model never got (`SessionRec.owed`), given in front of this one. */
-    owedIds?: string[];
     /** How the model is given it, where that differs from what it is (`DeliveredAs`). */
     deliveredAs?: DeliveredAs;
   };
@@ -188,8 +186,87 @@ export class LiveSession {
   private carried: Input[] = [];
   /** Inputs whose end is recorded already, in the conversation (`user_message_chunk`) or discarded: recorded once. */
   private settled = new Set<string>();
-  /** The input whose prompt carries the owed messages, until it is in the conversation. */
-  private owedCarrier?: Input;
+  private accepted = new Set<string>();
+  private sendingHead?: Input;
+  private sendingBatch?: Input[];
+  private deliveryViews = new Map<string, string>();
+
+  private queueEligible(input: Input): boolean {
+    const item = input.item;
+    const task = item?.taskId ? this.hub.state.tasks.get(item.taskId) : undefined;
+    return !input.cancelling && !!item && this.hub.state.mail.has(item.id) && !item.targetTurnId && !item.workflowHeld &&
+      (!task || !task.stopping && !task.cascadeStopped && !["completed", "failed", "cancelled", "interrupted"].includes(task.status) &&
+        task.after.every(id => ["completed", "failed", "cancelled", "interrupted"].includes(this.hub.state.tasks.get(id)?.status ?? "")));
+  }
+
+  private canSendQueued(input: Input): boolean {
+    return !this.sendingHead && !this.sendingBatch && this.queue[0] === input && this.queueEligible(input) && !!this.current?.started &&
+      !this.current.cancelledBy && !this.current.recovering && !!this.backend && !this.userStopping && !this.hub.stopping &&
+      !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id }) && this.hub.workflows?.available(this) !== false;
+  }
+
+  private deliveryView(input: Input, state: MessageDelivery["state"]): void {
+    const view: MessageDelivery = { messageId: input.messageId, state,
+      isHead: state === "queued" && !this.sendingHead && this.queue[0] === input,
+      canCancel: (state === "queued" || state === "waiting" && !!this.current?.held.includes(input)) && this.queueEligible(input),
+      canSendNow: state === "queued" && this.canSendQueued(input),
+      ...(this.current ? { targetTurnId: this.current.id } : {}) };
+    if (view.isHead && !view.canSendNow) view.sendNowBlockedBy = this.sendingBatch ? "sending" :
+      this.userStopping || this.current?.cancelledBy || this.hub.stopping ? "stopping" : "waiting";
+    const key = JSON.stringify(view);
+    if (this.deliveryViews.get(input.messageId) === key) return;
+    this.deliveryViews.set(input.messageId, key);
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [MessageDelivery.key]: view } });
+  }
+
+  private publishQueue(): void {
+    this.hub.state.atomic(() => {
+      for (const input of this.queue) this.deliveryView(input, users(input) ? "waiting" : "queued");
+    });
+  }
+
+  /** User-authorized insertion. The unsettled head reserves the queue until its real receipt. */
+  sendQueued(messageId: string, targetTurnId: string): void {
+    const input = this.queue[0], turn = this.current;
+    if (!input || input.messageId !== messageId || !turn || turn.id !== targetTurnId || !this.canSendQueued(input)) {
+      throw RpcError.invalidParams("The queue head or current work changed. Refresh and try again.");
+    }
+    this.protect();
+    this.queue.shift();
+    this.sendingHead = input;
+    input.origin = { ...input.origin, steered: true };
+    turn.order ??= [...turn.inputs];
+    turn.order.push(input);
+    turn.inputs.push(input);
+    if (input.item) turn.items.push(input.item);
+    this.publishQueue();
+    this.send([input]);
+  }
+
+  /** A queue cancellation cannot withdraw input already owned by the backend. */
+  cancelQueued(messageId: string): void {
+    const input = this.queue.find(i => i.messageId === messageId) ?? this.current?.held.find(i => i.messageId === messageId && !i.sent);
+    if (!input || !this.queueEligible(input)) throw RpcError.invalidParams("This message is no longer queued.");
+    input.cancelling = true;
+    try {
+      const item = input.item!;
+      this.hub.state.atomic(() => {
+        if (item.kind === "task" && item.taskId) {
+          const result = this.hub.kernel.stop(this.hub.state.tasks.get(item.taskId)!, { kind: "user" },
+            { status: "cancelled", reason: "cancelled", result: "The user cancelled this queued input." });
+          if (isVeto(result)) throw RpcError.invalidParams(result.veto);
+        } else {
+          this.hub.kernel.mark(messageId, "discarded_unseen");
+          this.hub.kernel.ack([messageId]);
+        }
+        this.queue = this.queue.filter(i => i !== input);
+        this.drop(input);
+        this.discard(input, RpcError.cancelled(), "stopped");
+      });
+    } finally { input.cancelling = false; }
+    this.publishQueue();
+    this.pump();
+  }
   private priorityTaskId?: string;
   /** A user stop freezes dispatch until the old turn is confirmed idle. */
   private userStopping = false;
@@ -396,11 +473,12 @@ export class LiveSession {
     // A backend session that was given nothing held nothing, and a conversation with nothing in it has nothing to
     // tell: the new backend session then replaces the old one without a boundary or a handoff.
     const fresh = !!prior && !!this.rec.backendFresh;
-    const checkpoint = renewal && !fresh ? this.handoff(renewal) : undefined;
+    const lostContext = renewal === "not_restored" && !fresh;
+    const checkpoint = renewal && !fresh && !lostContext ? this.handoff(renewal) : undefined;
     const checkpointRef = checkpoint === undefined ? undefined : contextRef(this.hub.paths, this.agentId, checkpoint).ref;
     this.save({ backendSessionId: created.sessionId, backendWorkspace: agent.workspace, backendFresh: true, backend: agent.backend, renew: undefined, used: undefined, contextSize: undefined,
       contextEpoch: (this.rec.contextEpoch ?? 0) + 1,
-      ...(checkpointRef ? { contextCheckpoint: checkpointRef, contextHandoffPending: checkpointRef } : {}),
+      ...(lostContext ? { contextCheckpoint: undefined, contextHandoffPending: undefined } : checkpointRef ? { contextCheckpoint: checkpointRef, contextHandoffPending: checkpointRef } : {}),
       ...(renewal === "backend_changed" ? { contextRenewAt: undefined, contextRecovery: undefined, selectedConfig: undefined } : {}) });
     backend.open(created.sessionId, this);
     this.backend = backend;
@@ -414,7 +492,8 @@ export class LiveSession {
       this.boundary({ kind: renewal, backend: agent.backend, handoff: true });
       this.hub.log(`${this.id}: ${renewal === "backend_changed" ? `now on backend "${agent.backend}"` : renewal === "renewed" ? "renewed, its conversation having grown long" : renewal === "stopped" ? "continued after stopping" : "backend session renewed"}, with a handoff of the conversation`);
     } else {
-      if (renewal) this.hub.log(`${this.id}: backend session replaced; it held nothing to hand over`);
+      if (lostContext) { this.forget(); this.boundary({ kind: "not_restored", backend: agent.backend, handoff: false }); }
+      if (renewal) this.hub.log(`${this.id}: backend session replaced; no old input was replayed`);
       this.pendingHandoff();
     }
     this.notifyControls();
@@ -865,13 +944,28 @@ export class LiveSession {
   /** Record an update and show it to every attached client but `except`. */
   emit(update: SessionUpdate, except?: Client): void {
     const file = Paths.transcript(this.agentId, this.id);
-    const offset = this.hub.state.store.bytes(file);
-    this.hub.state.store.append(file, { ts: now(), update }, false);
-    for (const client of this.clients) {
-      if (client !== except) {
+    const durable = update.sessionUpdate === "user_message_chunk" || !!update._meta?.[Accepted.key] ||
+      !!update._meta?.[Discarded.key] || !!update._meta?.[MessageDelivery.key];
+    const eventId = newId("event");
+    const record = { ts: now(), eventId, update };
+    const initialOffset = this.hub.state.store.bytes(file);
+    if (durable) this.hub.state.commit([{ file, rec: record }]);
+    else this.hub.state.store.append(file, record, false);
+    this.hub.state.afterCommit(() => {
+      // WAL tags change physical line lengths. Resolve durable image cursors after the whole transaction landed.
+      const needsOffset = update.sessionUpdate === "user_message_chunk" && update.content?.type === "image" ||
+        (update._meta?.[Discarded.key] as import("@xsb/protocol").Discarded | undefined)?.content.some(block => block.type === "image");
+      const offset = durable && needsOffset ? [...this.recordOffset(file, eventId)][0] ?? initialOffset : initialOffset;
+      for (const client of this.clients) if (client !== except) {
         const view = client.history ? historyUpdate(update, this.id, offset) : update;
         if (view) client.conn.notify("session/update", { sessionId: this.id, update: view });
       }
+    });
+  }
+
+  private *recordOffset(file: string, eventId: string): Generator<number> {
+    for (const entry of this.hub.state.store.readBackwardEntries(file)) if (entry.record.eventId === eventId) {
+      yield entry.offset; return;
     }
   }
 
@@ -891,7 +985,7 @@ export class LiveSession {
   }
 
   private emitInput({ messageId, origin, content, from, deliveredAs, backendSessionId, backendMessageId }: Input): void {
-    const meta = { [OriginExt.key]: { ...origin, ...(this.current ? { turnId: this.current.id } : {}) },
+    const meta = { [OriginExt.key]: { ...origin, ...(origin.turnId || this.current ? { turnId: origin.turnId ?? this.current!.id } : {}) },
       ...(backendSessionId && backendMessageId ? { [InsertionTrace.key]: { phase: "linked", backendSessionId, nativeMessageId: backendMessageId } } : {}), ...(deliveredAs ? { [DeliveredAs.key]: deliveredAs } : {}) };
     const except = from?.echo ? undefined : from;
     for (const block of content) {
@@ -904,7 +998,8 @@ export class LiveSession {
    * what became of it: waiting, in the conversation, or discarded (docs/TURN-LIFECYCLE.md 4).
    */
   accept(messageId: string, origin: OriginMeta, content: ContentBlock[], from?: Client): void {
-    if (this.settled.has(messageId)) return;
+    if (this.settled.has(messageId) || this.accepted.has(messageId)) return;
+    this.hub.state.afterCommit(() => this.accepted.add(messageId));
     // A client that did not opt in to its own input (`OriginExt`) is not sent it, as in plain ACP.
     this.emit({ sessionUpdate: "session_info_update", _meta: { [Accepted.key]: { messageId, origin, content } } } as SessionUpdate, from?.echo ? undefined : from);
   }
@@ -915,6 +1010,10 @@ export class LiveSession {
    */
   unaccepted(messageId: string, reason: DiscardReason, detail?: string): void {
     if (this.settled.has(messageId)) return;
+    // Restart already committed the discard projection with its ledger entry.
+    if (this.hub.state.ledger.get(messageId)?.discardReason === "interrupted") {
+      this.settled.add(messageId); return;
+    }
     this.settled.add(messageId);
     this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: { messageId, origin: { kind: "user", messageId }, content: [], reason, ...(detail ? { detail } : {}) } } } as SessionUpdate);
   }
@@ -930,24 +1029,11 @@ export class LiveSession {
     return path.join(this.hub.paths.dir, "agents", this.agentId, "context", `owed-${messageId.replace(/[^\w.-]/g, "_")}.json`);
   }
 
-  /** The user's message failed to get into the conversation: the model is given it in front of the user's next one. */
-  private owe(input: Input): void {
-    const owed = this.rec.owed ?? [];
-    if (owed.includes(input.messageId)) return;
-    const file = this.owedFile(input.messageId);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    atomicWrite(file, JSON.stringify(input.content));
-    this.save({ owed: [...owed, input.messageId] });
-  }
-
   /**
    * The user sends an owed message again, as a message of its own: it is no longer owed. One that already went to the
    * model with a later message, or is on its way there, is not sent twice.
    */
   resend(messageId: string, as: string): void {
-    if (this.owedCarrier?.owedIds?.includes(messageId) && this.owedCarrier.sent && !this.owedCarrier.in) {
-      throw new RpcError(-32602, "This message is on its way to the model with the user's latest message; it is not sent again.", { errorKind: "already_redelivered" });
-    }
     if ((this.rec.redelivered ?? []).includes(messageId)) {
       throw new RpcError(-32602, "This message already reached the model with a later message; it is not sent again.", { errorKind: "already_redelivered" });
     }
@@ -957,30 +1043,6 @@ export class LiveSession {
     }
     // Recorded, so that the transcript (also after a restart) no longer says it will be given with the next message.
     this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: { messageId, origin: { kind: "user", messageId }, content: [], owed: false, resentAs: as } } } as SessionUpdate);
-  }
-
-  /** The owed messages, for the prompt of a user's input, and the text that introduces them. */
-  private owedContent(policy: ReturnType<Hub["policy"]>): { ids: string[]; content: ContentBlock[] } | undefined {
-    const ids: string[] = [], content: ContentBlock[] = [];
-    for (const id of this.rec.owed ?? []) {
-      let blocks: ContentBlock[];
-      try { blocks = JSON.parse(fs.readFileSync(this.owedFile(id), "utf8")); } catch { continue; }
-      ids.push(id);
-      content.push(text(`[xsb] Earlier message ${ids.length} from the user (it failed to reach you then):`), ...this.spill(blocks, policy));
-    }
-    if (!ids.length) return undefined;
-    return { ids, content: [text(`[xsb] ${ids.length === 1 ? "A message" : `${ids.length} messages`} the user sent earlier did not reach you: giving ${ids.length === 1 ? "it" : "them"} to you failed, and you have not seen ${ids.length === 1 ? "it" : "them"} until now. ${ids.length === 1 ? "It comes" : "They come"} first, in order; the user's new message follows. Take ${ids.length === 1 ? "it" : "them"} into account; the user may refer to ${ids.length === 1 ? "it" : "them"}.`), ...content, text("[xsb] The user's new message:")] };
-  }
-
-  /** The owed messages went into the conversation with `carrier`: settled, once, and said so. */
-  private redelivered(carrier: Input): void {
-    const ids = carrier.owedIds ?? [];
-    if (this.owedCarrier === carrier) this.owedCarrier = undefined;
-    if (!ids.length) return;
-    const left = (this.rec.owed ?? []).filter((id) => !ids.includes(id));
-    this.save({ owed: left, redelivered: [...(this.rec.redelivered ?? []), ...ids].slice(-200) });
-    for (const id of ids) fs.rmSync(this.owedFile(id), { force: true });
-    this.emit({ sessionUpdate: "session_info_update", _meta: { [Redelivered.key]: { messageIds: ids, with: carrier.messageId } } } as SessionUpdate);
   }
 
   /**
@@ -993,13 +1055,14 @@ export class LiveSession {
     const kind = (why as RpcError | undefined)?.data && typeof (why as RpcError).data === "object" ? ((why as RpcError).data as { errorKind?: string }).errorKind : undefined;
     reason ??= this.userStopping || !why || (why instanceof RpcError && why.code === RpcError.CANCELLED) ? "stopped"
       : kind === "execution_uncertain" ? "uncertain" : kind === "input_too_large" ? "too_large" : /Target turn has ended or changed/.test(errorMessage(why)) ? "expired" : "failed";
-    const owed = users(input) && reason === "failed";
-    if (owed) this.owe(input);
+    const owed = false;
     if (this.settled.has(messageId) && !input.shown) return void this.receipt(input, false, why);
     this.settled.add(messageId);
     const detail = why && reason !== "stopped" ? errorMessage(why) : undefined;
+    this.hub.state.atomic(() => {
     this.emit({ sessionUpdate: "session_info_update", _meta: { [Discarded.key]: { messageId, origin, content, reason, ...(detail ? { detail } : {}), ...(owed ? { owed } : {}) } } } as SessionUpdate);
     this.receipt(input, false, why);
+    });
   }
 
   /** The receipt of an input: it is in the conversation, or it never will be. Its sender learns which. */
@@ -1007,17 +1070,22 @@ export class LiveSession {
     if (inserted && input.receipted) return;
     const about = { agentId: this.agentId, sessionId: this.id, from: fromOf(input.origin), ...(input.origin.taskId ? { taskId: input.origin.taskId } : {}) };
     const unknown = !inserted && (why as RpcError)?.data && ((why as RpcError).data as any).errorKind === "execution_uncertain";
-    this.hub.kernel.mark(input.messageId, inserted ? "inserted" : unknown ? "insertion_uncertain" : "discarded_unseen", about);
-    this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: input.messageId, about, inserted, outcome: inserted ? "inserted" : unknown ? "unknown" : "not_inserted" });
-    if (inserted) {
-      input.receipted = true;
-      this.hub.workflows?.inserted(this,input.messageId);
-      this.show(input);
-      input.inserted.resolve();
-    } else {
-      if (users(input)) this.hub.workflows?.discarded(this, input.messageId);
-      input.inserted.reject(why);
-    }
+    this.hub.state.atomic(() => {
+      this.hub.kernel.mark(input.messageId, inserted ? "inserted" : unknown ? "insertion_uncertain" : "discarded_unseen", about);
+      if (inserted) this.show(input);
+      this.hub.state.afterCommit(() => {
+        this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: input.messageId, about, inserted, outcome: inserted ? "inserted" : unknown ? "unknown" : "not_inserted" });
+        if (inserted) {
+          input.receipted = true;
+          if (this.current?.inputs.includes(input)) this.hub.workflows?.inserted(this, input.messageId);
+          input.inserted.resolve();
+        } else {
+          if (users(input)) this.hub.workflows?.discarded(this, input.messageId);
+          input.inserted.reject(why);
+        }
+        if (this.sendingHead === input) { this.sendingHead = undefined; this.publishQueue(); }
+      });
+    });
   }
 
   // ---- turns --------------------------------------------------------------
@@ -1028,6 +1096,8 @@ export class LiveSession {
     if (users(input) && this.priorityTaskId) input.joinsTaskId = this.priorityTaskId;
     if (first) this.queue.unshift(input);
     else this.queue.push(input);
+    this.accept(input.messageId, input.origin, input.content, input.from);
+    this.publishQueue();
     this.pump();
     return input;
   }
@@ -1042,6 +1112,7 @@ export class LiveSession {
       this.discard(q, RpcError.cancelled(), "stopped");
       return false;
     });
+    this.publishQueue();
     return taken;
   }
 
@@ -1052,7 +1123,7 @@ export class LiveSession {
   pump(): void {
     if (this.hub.authentication?.busy(this.agentId)) return;
     // While the hub stops, nothing starts: what waits is in the inbox, and runs on the next start.
-    if (this.userStopping || this.current || this.hub.stopping) return;
+    if (this.userStopping || this.current || this.hub.stopping || this.sendingHead || this.queue[0]?.cancelling) return;
     if (this.hub.workflows?.available(this) === false) {
       for (const input of [...this.queue.splice(0), ...this.carried.splice(0)]) this.discard(input);
       return;
@@ -1097,6 +1168,7 @@ export class LiveSession {
     this.current = turn;
     this.lifecycle.emit("turn.started", this.source(), { protected: turn.protected, taskIds: turn.taskIds });
     this.turnChanged();
+    this.publishQueue();
     this.hub.agentChanged(this.agentId);
     this.state("running");
     if (this.rec.contextExecution?.messageId === first.messageId) {
@@ -1179,10 +1251,18 @@ export class LiveSession {
   private send(batch: Input[]): void {
     const turn = this.current!;
     if (turn.cancelledBy) return;
+    if (this.sendingBatch) {
+      for (const input of batch) {
+        if (!turn.held.includes(input)) turn.held.push(input);
+        this.deliveryView(input, "waiting");
+      }
+      return;
+    }
     const backend = this.backend;
     if (!backend) return this.end({ stopReason: "error", failure: new Error("the agent program is gone") });
     const sessionId = this.rec.backendSessionId!;
     const policy = this.hub.policy(this.agentId);
+    for (const input of batch) this.deliveryView(input, "sending");
     if (this.handoffPreface && this.prefaces.includes(this.handoffPreface)) {
       const left = policy.promptTokens - policy.reserveTokens - this.standingTokens - contentTokens(batch.flatMap((i) => i.content)) -
         contentTokens(this.prefaces.filter((p) => p !== this.handoffPreface).map(text));
@@ -1195,13 +1275,7 @@ export class LiveSession {
         this.handoffPreface = shorter;
       }
     }
-    // The user's earlier messages that never got to the model go in front of the user's next one, until one is in.
-    const carrierBusy = !!this.owedCarrier && !!this.owedCarrier.sent && !this.owedCarrier.in && !!turn.inputs.includes(this.owedCarrier);
-    const userInput = batch.find(users);
-    const owed = userInput && !carrierBusy ? this.owedContent(policy) : undefined;
-    if (userInput) userInput.owedIds = owed?.ids;
-    if (owed && userInput) this.owedCarrier = userInput;
-    const content = [...this.prefaces.map((p) => text(p)), ...(owed?.content ?? []), ...batch.flatMap(i => {
+    const content = [...this.prefaces.map((p) => text(p)), ...batch.flatMap(i => {
       // A node's first input has its purpose in the turn's workflow context; the main conversation's does not.
       const scope = users(i) && (i !== turn.first || !this.hub.agent(this.agentId).workflowOwner) ? this.hub.workflows?.interruptionContext(this,i.messageId) : undefined;
       if (scope) void i.inserted.promise.then(()=>this.recordWorkflow(turn.id,{messageId:i.messageId,scope}),()=>{});
@@ -1234,6 +1308,7 @@ export class LiveSession {
     if (this.rec.backendFresh || !this.rec.conversed) this.save({ backendFresh: undefined, conversed: true });
     for (const input of batch) {
       input.batch = batch; input.sent = "prompt"; input.backendSessionId = sessionId;
+      input.origin = { ...input.origin, turnId: turn.id };
       if (input.item?.targetTurnId && this.currentRun?.turnId === turn.id) input.runId = this.currentRun.id;
     }
     // The tasks are the executor's before tools or output can arrive.
@@ -1242,21 +1317,30 @@ export class LiveSession {
       this.hub.kernel.offered(batch.map(input => ({ messageId: input.messageId, about: { agentId: this.agentId, sessionId: this.id, from: fromOf(input.origin), ...(input.origin.taskId ? { taskId: input.origin.taskId } : {}) } })), sessionId, batch[0].messageId);
     });
     this.hub.state.afterCommit(() => {
-    const given = this.current === turn && !turn.cancelledBy && !this.hub.stopping && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })
-      ? backend.prompt(sessionId, content, { ...batch[0].origin, turnId: turn.id })
-      : Promise.reject(RpcError.cancelled());
-    given.then(
-      (messageId) => {
-        if (this.backend === backend && this.rec.backendSessionId === sessionId) {
-          const run = this.insertionRuns.get(messageId);
-          this.insertionRuns.delete(messageId);
-          this.landed(batch, run, messageId);
-        }
-      },
-      (e) => {
-        if (this.backend === backend && this.rec.backendSessionId === sessionId) this.refused(batch, e, backend);
-      },
-    );
+      this.sendingBatch = batch;
+      this.publishQueue();
+      const given = this.current === turn && !turn.cancelledBy && !this.hub.stopping && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })
+        ? backend.prompt(sessionId, content, { ...batch[0].origin, turnId: turn.id })
+        : Promise.reject(RpcError.cancelled());
+      given.then(
+        (messageId) => {
+          if (this.backend === backend && this.rec.backendSessionId === sessionId) {
+            const run = this.insertionRuns.get(messageId);
+            this.insertionRuns.delete(messageId);
+            this.landed(batch, run, messageId);
+          }
+        },
+        (e) => {
+          if (this.backend === backend && this.rec.backendSessionId === sessionId) {
+            if (this.sendingBatch === batch) this.sendingBatch = undefined;
+            this.refused(batch, e, backend);
+            if (this.current === turn && !turn.cancelledBy && !turn.recovering) {
+              for (const input of turn.held.splice(0)) this.send([input]);
+              this.publishQueue();
+            }
+          }
+        },
+      );
     });
   }
 
@@ -1267,7 +1351,15 @@ export class LiveSession {
   private landed(batch: Input[], insertionRun?: BackendRun | null, backendMessageId?: string): void {
     const turn = this.current;
     // In already, or its turn is over: what became of it was settled then.
-    if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) return;
+    if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) {
+      for (const input of batch) if (!input.receipted && input.backendSessionId === this.rec.backendSessionId &&
+        this.hub.state.ledger.get(input.messageId)?.state === "insertion_uncertain") {
+        input.backendMessageId = backendMessageId;
+        input.in = true;
+        this.receipt(input, true);
+      }
+      return;
+    }
     if (insertionRun) for (const input of batch) input.runId = insertionRun.id;
     if (backendMessageId) for (const input of batch) input.backendMessageId = backendMessageId;
     // A later prompt held by the backend belongs to the next execution of this same logical turn. The first
@@ -1285,13 +1377,14 @@ export class LiveSession {
     if (this.currentRun?.turnId === turn.id) for (const input of batch) input.runId = this.currentRun.id;
     if (this.rec.contextHandoffPending) this.save({ contextHandoffPending: undefined });
     if (this.rec.migratedFrom?.pending) this.save({ migratedFrom: { ...this.rec.migratedFrom, pending: undefined } });
-    for (const input of batch) if (input.owedIds) this.redelivered(input);
     for (const input of batch) {
       input.in = true;
       this.take(input.gives);
       this.receipt(input, true);
     }
+    if (this.sendingBatch === batch) this.sendingBatch = undefined;
     for (const input of turn.held.splice(0)) this.send([input]);
+    this.publishQueue();
     if (this.runEndedFor(turn)) this.idle();
   }
 
@@ -1463,8 +1556,9 @@ export class LiveSession {
     } else {
       // Stopped or failed: the backend drops what it did not take. Ended: it runs it next, a turn of its own (3.1, 5).
       if (turn.cancelledBy || end.failure || !turn.started || expiredAppend) for (const input of out) {
-        if (!turn.cancelledBy && input.sent && (end.failure as RpcError)?.data && ((end.failure as RpcError).data as any).errorKind === "execution_uncertain") {
-          this.drop(input); this.discard(input, end.failure, "uncertain");
+        if (input.sent && ((end.failure as RpcError)?.data && ((end.failure as RpcError).data as any).errorKind === "execution_uncertain" ||
+          turn.cancelledBy === "user" && this.hub.state.ledger.get(input.messageId)?.offered)) {
+          this.drop(input); this.discard(input, new RpcError(-32603, "Sending was interrupted before confirmation.", { errorKind: "execution_uncertain" }), "uncertain");
         } else this.leave(input);
       }
       else next = out;
@@ -1476,6 +1570,8 @@ export class LiveSession {
       turn.items = itemsOf(turn.inputs);
     }
     this.current = undefined;
+    this.sendingBatch = undefined;
+    this.publishQueue();
     this.turnChanged();
     if (unanswered && this.backend) this.backend.cancel(this.rec.backendSessionId!);
     // Turn isolation holds once cancelled work reports idle; a failure's unanswered input is not awaited, so it is
@@ -1535,6 +1631,7 @@ export class LiveSession {
   private async recover(turn: Turn, error: unknown, failed = true): Promise<void> {
     if (this.current !== turn || turn.recovering) return;
     turn.recovering = true;
+    this.sendingBatch = undefined;
     this.finishRun({ stopReason: "error", failure: error });
     turn.refusalChunks = [];
     turn.started = false;
@@ -1643,8 +1740,9 @@ export class LiveSession {
     turn.order.push(input);
     turn.inputs.push(input);
     if (req.item) turn.items.push(req.item);
+    this.accept(input.messageId, input.origin, input.content, input.from);
     if (turn.started && turn.inserted) this.send([input]);
-    else turn.held.push(input);
+    else { turn.held.push(input); this.deliveryView(input, "waiting"); }
     return input;
   }
 

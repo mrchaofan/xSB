@@ -402,7 +402,7 @@ test("the user is told when the work is done, failed, or waits for them", async 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Accepted, Discarded, Ledger, OriginExt, Redelivered } from "@xsb/protocol";
+import { Accepted, Discarded, Ledger, MessageDelivery, OriginExt, Redelivered } from "@xsb/protocol";
 
 function sending(t: any) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-outbox-"));
@@ -434,7 +434,7 @@ test("a message xsb did not take stays in the transcript, marked, and after a re
   peer.requests.set("session/prompt", (p: any) => { sent.push(p._meta[OriginExt.key]); return { messageId: p._meta[OriginExt.key].messageId }; });
   await again.resend("a", entry.id);
   assert.equal(sent.length, 2);
-  assert.equal(sent[1].messageId, sent[0].messageId, "the same id: xsb keeps one copy if it did get the first");
+  assert.notEqual(sent[1].messageId, sent[0].messageId, "explicit resend is a new input");
   again.close();
 });
 
@@ -487,5 +487,29 @@ test("idle does not fail background tool cards, including opaque terminal IDs di
   const tool = ws["transcripts"].get("a").find(e => e.kind === "tool");
   assert.equal(tool.status, "running");
   assert.equal(ws["activities"].get("a"), undefined);
+  ws.close();
+});
+
+test("queued input projects user controls and in-flight input cannot be cancelled as queued", async t => {
+  const { peer, open } = sending(t);
+  const ws = open(); await ws.load();
+  const info = (key: string, value: any) => peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "session_info_update", _meta: { [key]: value } } });
+  for (const id of ["q1", "q2"]) info(Accepted.key, { messageId: id, origin: { kind: "agent", agentId: "b", sessionId: "sb" }, content: [{ type: "text", text: id }] });
+  info(MessageDelivery.key, { messageId: "q1", state: "queued", isHead: true, canCancel: true, canSendNow: true, targetTurnId: "turn" });
+  info(MessageDelivery.key, { messageId: "q2", state: "queued", isHead: false, canCancel: true, canSendNow: false, targetTurnId: "turn" });
+  const calls: any[] = [];
+  peer.requests.set(MessageDelivery.sendNow, p => { calls.push(p); return {}; });
+  peer.requests.set(MessageDelivery.cancel, p => { calls.push(p); return {}; });
+  await assert.rejects(ws.sendMessageNow("a", "s:q2"), /queue head/);
+  await ws.sendMessageNow("a", "s:q1");
+  assert.deepEqual(calls[0], { sessionId: "s", messageId: "q1", targetTurnId: "turn" });
+  info(MessageDelivery.key, { messageId: "q1", state: "sending", isHead: false, canCancel: false, canSendNow: false });
+  await assert.rejects(ws.cancelMessage("a", "s:q1"), /no longer queued/);
+  await ws.cancelMessage("a", "s:q2");
+  assert.equal(calls[1].messageId, "q2");
+  info(Discarded.key, { messageId: "q2", origin: { kind: "agent", agentId: "b", sessionId: "sb" }, content: [], reason: "interrupted" });
+  const interrupted = inputs(await ws.load()).find((e: any) => e.id === "s:q2");
+  assert.equal(interrupted.discarded, true);
+  assert.equal(interrupted.content[0].text, "q2");
   ws.close();
 });
