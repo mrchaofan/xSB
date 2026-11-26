@@ -31,15 +31,20 @@ function fixture(t: { after: (fn: () => void) => void }) {
     fs.writeFileSync(`${filename}.attestation.jsonl`, "fixture bundle");
   }
   const assets = verifyBuilds(directory, context, () => "");
-  const release = { draft: true, immutable: false, author: { login: "github-actions[bot]" }, assets: assets.map((asset) => ({ ...asset, state: "uploaded" })) };
+  const release = { tag_name: context.tag, draft: true, immutable: false, author: { login: "github-actions[bot]" }, assets: assets.map((asset) => ({ ...asset, state: "uploaded" })) };
   const calls: string[][] = [];
   let exists = false;
   const command = (args: string[]) => {
     calls.push(args);
     if (args[0] === "attestation") return "";
     if (args[0] === "api") {
-      if (!exists) throw Object.assign(new Error("missing"), { stderr: "gh: Not Found (HTTP 404)" });
-      return JSON.stringify(release);
+      if (args[1].includes("/releases/tags/")) {
+        if (!exists || release.draft) throw Object.assign(new Error("missing"), { stderr: "gh: Not Found (HTTP 404)" });
+        return JSON.stringify(release);
+      }
+      assert.equal(args[1], `repos/${context.repository}/releases?per_page=100`);
+      assert.ok(args.includes("--paginate") && args.includes("--slurp"));
+      return JSON.stringify([[{ tag_name: "v0.0.1" }], exists ? [release] : []]);
     }
     if (args[1] === "create") exists = true;
     if (args[1] === "upload") release.assets = assets.map((asset) => ({ ...asset, state: "uploaded" }));
@@ -100,6 +105,38 @@ test("publishing uploads a draft before locking and verifies the resulting asset
   assert.ok(!f.calls.some((args) => args[0] === "release"), "Published rerun must not upload or edit");
 });
 
+test("draft lookup uses all release pages because the tag endpoint hides drafts", (t) => {
+  const f = fixture(t);
+  f.setExists();
+  assert.throws(() => f.command(["api", `repos/${f.context.repository}/releases/tags/${f.context.tag}`]), /missing/);
+  f.calls.length = 0;
+  publishRelease(f.directory, f.context, f.command);
+  const lookups = f.calls.filter((args) => args[0] === "api");
+  assert.equal(lookups.length, 3, "find draft, verify uploaded draft, verify published release");
+  assert.ok(lookups.every((args) => args.includes("--paginate") && args.includes("--slurp")));
+  assert.deepEqual(f.calls.filter((args) => args[0] === "release").map((args) => args[1]), ["upload", "edit"]);
+});
+
+test("failed listings, ambiguous tags and vanished drafts never trigger publication", (t) => {
+  const f = fixture(t);
+  for (const status of [403, 404, 429, 500]) {
+    assert.throws(() => publishRelease(f.directory, f.context, (args: string[]) => {
+      if (args[0] === "api") throw Object.assign(new Error(`HTTP ${status}`), { stderr: `HTTP ${status}` });
+      return f.command(args);
+    }), new RegExp(`HTTP ${status}`));
+  }
+  assert.throws(() => publishRelease(f.directory, f.context, (args: string[]) => {
+    if (args[0] === "api") return JSON.stringify([[f.release], [f.release]]);
+    return f.command(args);
+  }), /Multiple releases/);
+  assert.ok(!f.calls.some((args) => args[0] === "release"));
+  assert.throws(() => publishRelease(f.directory, f.context, (args: string[]) => {
+    if (args[0] === "api") return "[[]]";
+    return f.command(args);
+  }), /Release not found after upload/);
+  assert.ok(!f.calls.some((args) => args[0] === "release" && args[1] === "edit"));
+});
+
 test("draft reruns resume expected assets and refuse manual drafts or extra uploads", (t) => {
   const f = fixture(t);
   f.setExists();
@@ -128,7 +165,7 @@ test("an altered upload is caught before publication", (t) => {
 test("API errors, mutable releases and uploaded digest changes fail closed", (t) => {
   const f = fixture(t);
   assert.throws(() => publishRelease(f.directory, f.context, (args: string[]) => {
-    if (args[0] === "api" && args[1].includes("/releases/tags/")) throw Object.assign(new Error("forbidden"), { stderr: "HTTP 403" });
+    if (args[0] === "api") throw Object.assign(new Error("forbidden"), { stderr: "HTTP 403" });
     return f.command(args);
   }), /forbidden/);
   f.setExists();

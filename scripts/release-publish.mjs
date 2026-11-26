@@ -72,15 +72,16 @@ export function assertReleaseAssets(release, assets) {
 
 export function publishRelease(directory, context, command = gh) {
   const assets = verifyBuilds(directory, context, command);
-  const endpoint = `repos/${context.repository}/releases/tags/${context.tag}`;
-  const getRelease = () => JSON.parse(command(["api", endpoint]));
-  let release;
-  try {
-    release = getRelease();
-  } catch (error) {
-    // Authentication, rate limiting and outages must never be mistaken for a missing release.
-    if (!String(error.stderr ?? "").includes("(HTTP 404)")) throw error;
-  }
+  // The tag endpoint only returns published releases; listing also includes authenticated drafts.
+  const endpoint = `repos/${context.repository}/releases?per_page=100`;
+  const getRelease = () => {
+    const pages = JSON.parse(command(["api", endpoint, "--paginate", "--slurp"]));
+    const matches = pages.flat().filter((release) => release.tag_name === context.tag);
+    assert.ok(matches.length <= 1, "Multiple releases match the version tag");
+    return matches[0];
+  };
+  // API failures propagate; only a successful listing without the tag means the release is missing.
+  let release = getRelease();
   if (release && !release.draft) {
     assert.equal(release.immutable, true, "Refusing to modify a published mutable release");
     assertReleaseAssets(release, assets);
@@ -95,11 +96,13 @@ export function publishRelease(directory, context, command = gh) {
     command(["release", "create", context.tag, ...files, "--repo", context.repository, "--draft", "--verify-tag", "--generate-notes"]);
   }
   release = getRelease();
+  assert.ok(release, "Release not found after upload");
   assert.equal(release.draft, true, "Release must remain a draft until all assets are verified");
   assert.equal(release.author.login, "github-actions[bot]");
   assertReleaseAssets(release, assets);
   command(["release", "edit", context.tag, "--repo", context.repository, "--draft=false"]);
   release = getRelease();
+  assert.ok(release, "Release not found after publication");
   assert.equal(release.draft, false);
   assert.equal(release.immutable, true, "Published release was not locked");
   assertReleaseAssets(release, assets);
