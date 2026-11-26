@@ -403,9 +403,8 @@ export const DeliveredAs = { key: `${NS}/delivered` } as const;
 export type DeliveredAs = { imagesHidden?: number; spilled?: { chars: number; file: string }[]; scope?: string };
 
 /**
- * A question the agent asks the user with the `ask` tool, and what became of it. The tool returns at once; the user's
- * reply is their next message to the agent: answers or a skip (with `Answer` in the prompt's `_meta`), or a message of
- * their own instead. Recorded and shown in the transcript:
+ * A question the agent asks with `ask`. The tool waits for an explicit answer or skip, then resumes the same turn.
+ * Targeted replies use Answer.submit; a new ordinary user message supersedes the question. Recorded in the transcript:
  *   session/update { sessionUpdate: "session_info_update", _meta: { "dev.xsb/question": Question } }
  * first with `state: "open"` and the questions, then with the id and how it closed.
  */
@@ -426,8 +425,8 @@ export type QuestionState = "open" | "answered" | "skipped" | "superseded" | "ca
 export type Question = { id: string; state: QuestionState; questions?: QuestionItem[]; answers?: QuestionAnswer[]; reply?: string; source?: "acp"; delivery?: "async" };
 /** One answer per question, in order: an option or text for single and text, a list for multi. */
 export type QuestionAnswer = string | string[] | null;
-/** `_meta` of the `session/prompt` that answers or skips a question. */
-export const Answer = { key: `${NS}/answer` } as const;
+/** A targeted user response: `{ sessionId, answer: Answer }` -> `{}`. Stale targets fail without a new prompt. */
+export const Answer = { key: `${NS}/answer`, submit: `_${NS}/questions/answer` } as const;
 export type Answer = { questionId: string; answers?: QuestionAnswer[]; skipped?: boolean };
 
 /** Desktop history pages use byte cursors and image references, leaving ACP replay unchanged. */

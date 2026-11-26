@@ -146,6 +146,7 @@ export class Hub {
     fs.mkdirSync(this.paths.run, { recursive: true });
     fs.mkdirSync(this.paths.shared, { recursive: true });
     fs.mkdirSync(this.paths.assets, { recursive: true });
+    this.questions.restart();
     this.elicitations.restart();
     this.workflows.restart();
     await this.listen(this.paths.socket("acp"), (socket) => {
@@ -195,7 +196,7 @@ export class Hub {
     this.stopping = true;
     this.authentication.close();
     this.jobs.close();
-    for (const session of this.live.values()) this.elicitations.cancel(session);
+    for (const session of this.live.values()) { this.questions.cancel(session); this.elicitations.cancel(session); }
     this.contextTokens.clear();
     for (const conn of this.mcpClients) conn.close();
     for (const server of this.servers) server.close();
@@ -230,7 +231,7 @@ export class Hub {
   agentInfo(agent: AgentSpec): AgentInfo {
     const rec = this.state.mainSession(agent.id);
     const session = rec && this.live.get(rec.id);
-    const state = this.permissions.waitingOn(agent.id) || this.elicitations.waitingOn(agent.id) ? "requires_action" : session?.busy ? "running" : "idle";
+    const state = this.permissions.waitingOn(agent.id) || this.questions.waitingOn(agent.id) || this.elicitations.waitingOn(agent.id) ? "requires_action" : session?.busy ? "running" : "idle";
     const turn = session?.current;
     return {
       ...agent,
@@ -512,6 +513,7 @@ export class Hub {
 
   /** Revoke an unresponsive backend's existing tool bridges before accepting a new run. */
   rotateBridge(session: LiveSession): void {
+    this.questions.cancel(session);
     for (const [token, owner] of this.contextTokens)
       if (owner.session === session) this.contextTokens.delete(token);
     this.bridgeTokens.delete(session.bridgeToken);

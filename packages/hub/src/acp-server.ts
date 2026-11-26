@@ -142,10 +142,16 @@ export class Client {
       return {};
     });
 
+    conn.onRequest(Answer.submit, (p) => {
+      hub.questions.answer(this.own(p.sessionId), p.answer);
+      return {};
+    });
+
     conn.onRequest("session/prompt", (p, ctx) => {
       const session = this.own(p.sessionId);
       if (!Array.isArray(p.prompt)) throw RpcError.invalidParams("prompt must be an array of content blocks");
       if (!p.prompt.length) throw RpcError.invalidParams("prompt must not be empty");
+      if (p._meta?.[Answer.key]) throw RpcError.invalidParams(`Question replies must use ${Answer.submit}`);
       // Answered once it is in the conversation; the user's word never waits behind work (kernel.ts, `deliveryPolicy`).
       const origin = userOrigin(p);
       origin.messageId ??= newId("m");
@@ -153,7 +159,7 @@ export class Client {
       if (hub.delivery.known(origin.messageId)) return hub.delivery.fromUser(session, p.prompt, origin, this);
       // A message to an agent that asked the user something replies to it: answers, a skip, or other words instead.
       session.clearSuggestions();
-      hub.questions.reply(session, origin.messageId, p._meta?.[Answer.key]);
+      hub.questions.reply(session, origin.messageId);
       hub.elicitations.cancel(session);
       hub.workflows.input(session,origin.messageId,p.prompt,p._meta?.[Workflow.target]);
       if (!session.rec.title && !hub.agent(session.agentId).workflowOwner) {

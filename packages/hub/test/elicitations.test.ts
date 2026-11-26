@@ -5,9 +5,10 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Agents, Connection, Question, Workflow } from "@xsb/protocol";
+import { Agents, Answer, Connection, Question, Workflow } from "@xsb/protocol";
 import type { ElicitationResponse } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
+import { BRIDGE_ATTACH, XSB_SERVER } from "../src/mcp.ts";
 
 const form = { message: "Choose storage", requestedSchema: {
   type: "object", properties: { question_0: { type: "string", oneOf: [{ const: "sqlite", title: "SQLite" }, { const: "pg", title: "Postgres" }] } }, required: ["question_0"],
@@ -51,8 +52,10 @@ test("native form traverses real ACP transports and resumes the same protected t
   assert.deepEqual(answered.answers, ["Postgres"]);
   assert.equal(session.toolContext().turns.at(-1)?.id, turn);
   await send('!call ask {"questions":[{"question":"Own ask?","kind":"text"}]}');
-  await until(() => !session.busy && session.rec.question);
-  assert.ok(session.rec.question);
+  await until(() => session.rec.question);
+  assert.ok(session.busy);
+  await client.request(Answer.submit, { sessionId: session.id, answer: { questionId: session.rec.question, answers: ["Yes"] } });
+  await until(() => !session.busy);
 });
 
 test("stop cancels the native form and fences a late answer from the next turn", async t => {
@@ -80,9 +83,85 @@ test("invalid native answers cannot reach the backend as accepted choices", asyn
 });
 
 test("Codex does not receive form capability and continues to use xSB ask", async t => {
-  const { session, updates, send } = await setup(t, "codex");
+  const { client, session, updates, send } = await setup(t, "codex");
   await send("!elicit " + JSON.stringify(form)); await until(() => !session.busy && updates.some(u => u.content?.text?.includes("native forms disabled")));
   assert.ok(updates.some(u => u.content?.text?.includes("native forms disabled")));
   await send('!call ask {"questions":[{"question":"Codex choice","kind":"single","options":["A","B"]}]}');
-  await until(() => !session.busy && session.rec.question); assert.ok(session.rec.question);
+  await until(() => session.rec.question); assert.ok(session.busy);
+  await client.request(Answer.submit, { sessionId: session.id, answer: { questionId: session.rec.question, answers: ["B"] } });
+  await until(() => !session.busy);
+});
+
+test("ask blocks the real MCP call until submission, then continues its original ACP turn without a new prompt", async t => {
+  const { hub, client, session, updates, send } = await setup(t, "codex");
+  await send('!call ask {"questions":[{"question":"Storage?","kind":"single","options":["A","B"]}]}\n!say AFTER ANSWER');
+  await until(() => session.rec.question);
+  const questionId = session.rec.question;
+  const turn = session.current!;
+  const inputs = turn.inputs.length, tasks = hub.state.tasks.size;
+  await new Promise(r => setTimeout(r, 100));
+  assert.equal(hub.agentInfo(hub.agent(session.agentId)).state, "requires_action");
+  assert.ok(!updates.some(u => u.content?.text?.includes("result(ask)") || u.content?.text?.includes("AFTER ANSWER")));
+  await assert.rejects(client.request(Answer.submit, { sessionId: session.id, answer: { questionId, answers: ["C"] } }), /Invalid answer/);
+  assert.equal(session.rec.question, questionId);
+  await client.request(Answer.submit, { sessionId: session.id, answer: { questionId, answers: ["B"] } });
+  await until(() => !session.busy && updates.some(u => u.content?.text?.includes("AFTER ANSWER")));
+  assert.ok(updates.some(u => u.content?.text?.includes('"answers":["B"]')));
+  assert.equal(turn.inputs.length, inputs, "answer returned through MCP, never inserted as another prompt");
+  assert.equal(hub.state.tasks.size, tasks);
+  assert.equal(session.toolContext().turns.at(-1)?.id, turn.id);
+  await assert.rejects(client.request(Answer.submit, { sessionId: session.id, answer: { questionId, answers: ["A"] } }), /expired/);
+  assert.equal(session.current, undefined);
+});
+
+test("stop cancels a waiting ask; a late answer cannot supersede the next question", async t => {
+  const { client, session, updates, send } = await setup(t);
+  const ask = '!call ask {"questions":[{"question":"Choice?","kind":"single","options":["A","B"]}]}';
+  await send(ask);
+  await until(() => session.rec.question);
+  const old = session.rec.question;
+  client.notify("session/cancel", { sessionId: session.id });
+  await until(() => !session.busy && !session.rec.question);
+  assert.ok(updates.some(u => u._meta?.[Question.key]?.id === old && u._meta[Question.key].state === "cancelled"));
+  await send(ask);
+  await until(() => session.rec.question);
+  const next = session.rec.question;
+  await assert.rejects(client.request(Answer.submit, { sessionId: session.id, answer: { questionId: old, answers: ["A"] } }), /expired/);
+  assert.equal(session.rec.question, next);
+  await client.request(Answer.submit, { sessionId: session.id, answer: { questionId: next, skipped: true } });
+  await until(() => !session.busy);
+  assert.ok(updates.some(u => u.content?.text?.includes('"status":"skipped"')));
+});
+
+test("MCP transport cancellation and disconnect clear waiting ask calls", async t => {
+  const { hub, session, send } = await setup(t);
+  await send("!sleep 10000");
+  const socket = net.connect(hub.paths.socket("mcp")); await new Promise(r => socket.once("connect", r));
+  const mcp = new Connection(socket, socket);
+  t.after(() => { mcp.close(); socket.destroy(); });
+  await mcp.request(BRIDGE_ATTACH, { token: session.bridgeToken, server: XSB_SERVER });
+  const args = { name: "ask", arguments: { questions: [{ question: "Text?", kind: "text" }] } };
+  const abort = new AbortController();
+  const first = mcp.request("tools/call", args, { signal: abort.signal, notify: "notifications/cancelled" });
+  await until(() => session.rec.question);
+  abort.abort();
+  assert.equal((await first).isError, true);
+  assert.equal(session.rec.question, undefined);
+  const second = mcp.request("tools/call", args);
+  const gone = assert.rejects(second, /closed/);
+  await until(() => session.rec.question);
+  mcp.close(); socket.destroy();
+  await gone;
+  await until(() => !session.rec.question);
+  assert.equal(hub.questions.waitingOn(session.agentId), false);
+});
+
+test("new ordinary user input supersedes ask and is delivered as ordinary input", async t => {
+  const { session, updates, send } = await setup(t);
+  await send('!call ask {"questions":[{"question":"Text?","kind":"text"}]}');
+  await until(() => session.rec.question);
+  const questionId = session.rec.question;
+  await send("Do this instead");
+  await until(() => !session.busy && updates.some(u => u.content?.text?.includes("Do this instead")));
+  assert.ok(updates.some(u => u._meta?.[Question.key]?.id === questionId && u._meta[Question.key].state === "superseded"));
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { Paths } from "@xsb/hub";
-import { Workflow, Agents, Assets, Connection, History, Question, RunExt, Tasks } from "@xsb/protocol";
+import { Answer, Workflow, Agents, Assets, Connection, History, Question, RunExt, Tasks } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
@@ -79,6 +79,22 @@ test("a native form arriving before the first snapshot waits for session mapping
   peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "session_info_update", _meta: { [Question.key]: { id: "native", source: "acp", state: "open", questions: [{ question: "Choose", kind: "single", options: ["A", "B"] }] } } } });
   await ws.send("a", [], undefined, undefined, { questionId: "native", answers: ["B"] });
   assert.deepEqual(await response, { action: "accept", content: { choice: "B" } });
+  ws.close();
+});
+
+test("ask answers use the targeted callback without a prompt or replayable outbox input", async () => {
+  const peer = new Peer(); snapshot(peer, [{ ...agent("a"), mainSessionId: "s" }]);
+  peer.requests.set(History.page, () => ({ updates: [], more: false, agent: { ...agent("a"), mainSessionId: "s" } }));
+  const ws = workspace(peer), replies = [];
+  await ws.load();
+  peer.requests.set("session/prompt", () => assert.fail("an ask answer cannot start another prompt"));
+  peer.requests.set(Answer.submit, p => { replies.push(p); return {}; });
+  await ws.send("a", [{ type: "text", text: "B" }], undefined, undefined, { questionId: "q", answers: ["B"] });
+  assert.deepEqual(replies, [{ sessionId: "s", answer: { questionId: "q", answers: ["B"] } }]);
+  assert.equal(ws["pending"].size, 0);
+  peer.requests.set(Answer.submit, () => { throw Error("This question has expired"); });
+  await assert.rejects(ws.send("a", [], undefined, undefined, { questionId: "q", skipped: true }), /expired/);
+  assert.equal(ws["pending"].size, 0);
   ws.close();
 });
 

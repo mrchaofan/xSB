@@ -644,7 +644,7 @@ export class Workspace {
    * at once; the hub sends it back under the same id when it has become part
    * of a turn, and that entry takes the place of this one.
    */
-  /** `answer`: the message answers or skips the question the agent asked (`Answer`). */
+  /** `answer`: return a targeted answer/skip through the pending tool, without another user prompt. */
   async send(agentId: string, content: Content, target?: string, again?: { messageId?: string; resendOf?: string }, answer?: Answer): Promise<void> {
     if (answer) {
       const entry = this.transcripts.get(agentId)?.find((e) => e.kind === "question" && e.questionId === answer.questionId);
@@ -656,6 +656,9 @@ export class Workspace {
         pending.answer(response);
         return;
       }
+      const sessionId = await this.session(this.agents.get(agentId)!);
+      await this.conn.request(Answer.submit, { sessionId, answer });
+      return;
     }
     for (const pending of this.nativeQuestions.values()) if (pending.agentId === agentId) pending.answer({ action: "cancel" });
     const agent = this.agents.get(agentId)!;
@@ -674,11 +677,10 @@ export class Workspace {
     this.drop(agentId, `unsent:${messageId}`);
     this.pending.add(messageId);
     this.outbox(agentId, messageId, content, again?.resendOf);
-    if (answer) this.replies.add(messageId);
-    this.put(agentId, { id, kind: "input", origin: { kind: "user" }, content, pending: true, ...(answer ? { reply: true } : {}) });
+    this.put(agentId, { id, kind: "input", origin: { kind: "user" }, content, pending: true });
     // Answered once it is in the conversation. Once xsb has it (`Accepted`), the transcript says what becomes of it:
     // in the conversation, or discarded and why (and whether it is owed to the model with the next message).
-    await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId, ...(again?.resendOf ? { resendOf: again.resendOf } : {}) }, [Workflow.target]: target, ...(answer ? { [Answer.key]: answer } : {}) } }).catch((e) => {
+    await this.conn.request("session/prompt", { sessionId, prompt: content, _meta: { [OriginExt.key]: { messageId, ...(again?.resendOf ? { resendOf: again.resendOf } : {}) }, [Workflow.target]: target } }).catch((e) => {
       if (!this.pending.delete(messageId)) return;
       // xsb did not take it, or its answer was lost: shown as not delivered, to be sent again under the same id.
       const prior = this.inputEntry(agentId, id);

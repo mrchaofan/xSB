@@ -118,7 +118,10 @@ export function serveMcp(
       let result: unknown;
       if (server === XSB_SERVER) {
         if (p.name !== ASK_TOOL.name) throw Error(`Unknown tool ${p.name}`);
-        result = owner.withStep(step.source, () => hub.questions.ask(owner, args));
+        result = await owner.withStep(step.source, () => hub.questions.ask(owner, args, ctx?.signal));
+        // Waiting for a person must not let an old bridge/turn credit output to new work.
+        if (attached() !== owner || owner.current?.id !== turnId || !owner.acceptsTools)
+          throw RpcError.cancelled();
       } else result = owner.withStep(step.source, () => hub.workflows.call(owner, p.name, args, receipt));
       const answer = boundedText(
         hub.paths,
