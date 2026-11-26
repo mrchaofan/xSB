@@ -97,6 +97,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .icon-btn[hidden] { display: none; }
 .icon-btn.pin[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); height: var(--control-md); padding: 0 var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); font-size: var(--text-md); line-height: 1; white-space: nowrap; background: var(--paper); }
+.btn[hidden] { display: none; }
 /* 紧凑按钮：卡片、横幅、菜单、行内的操作统一用这一档，同一处不混用两种高度 */
 .btn.sm, :is(.tool-actions, .tool-approve, .backend-actions, .backend-command, .permission .actions, .ask-foot, .choice, .card-foot, .web-note .actions, .catalog-empty, .history-more-row) .btn,
 .history-more { height: var(--control-sm); padding: 0 var(--space-2); border-radius: var(--radius-sm); font-size: var(--text-sm); }
