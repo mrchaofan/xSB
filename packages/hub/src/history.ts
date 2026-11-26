@@ -16,11 +16,11 @@ export function historyUpdate(update: SessionUpdate, sessionId: string, offset: 
     return discarded ? { ...update, _meta: { ...update._meta, [Discarded.key]: { ...discarded, content: discarded.content.map(block) } } } : update;
   }
   if (update.sessionUpdate === "tool_call_update") {
-    const { sessionUpdate, toolCallId, title, status, locations } = update;
-    return { sessionUpdate, toolCallId, title, status, locations };
+    const { sessionUpdate, toolCallId, title, status, locations, _meta } = update;
+    return { sessionUpdate, toolCallId, title, status, locations, _meta };
   }
   if (update.sessionUpdate === "state_update" || update.sessionUpdate === "agent_thought_chunk") {
-    return update.sessionUpdate === "agent_thought_chunk" ? { sessionUpdate: update.sessionUpdate } : update;
+    return update.sessionUpdate === "agent_thought_chunk" ? { sessionUpdate: update.sessionUpdate, _meta: update._meta } : update;
   }
 }
 

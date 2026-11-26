@@ -32,7 +32,7 @@ const WORKING_RULES = `
 
 /** Enforced lifecycle contract; keep aligned with docs/TURN-LIFECYCLE.md and the runtime regression tests. */
 export const TASK_LIFECYCLE_RULES = `
-Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks and messages from agents join a running turn that is unprotected; behind a protected turn they queue. Task results never join a running turn. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. Only ACP insertion or echo acknowledges input. A user message that failed to reach you (not one the user stopped) is given to you once, marked "[xsb] … did not reach you", in front of the user's next message: treat it as said before that message, and do not act on it twice. Old callbacks, tool permissions and backend receipts expire with their binding. Never launch hidden agents or detached jobs.
+Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks and messages from agents join a running turn that is unprotected; behind a protected turn they queue. Task results never join a running turn. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. Only ACP insertion or echo acknowledges input. A user message that failed to reach you (not one the user stopped) is given to you once, marked "[xsb] … did not reach you", in front of the user's next message: treat it as said before that message, and do not act on it twice. Old callbacks, tool permissions and backend receipts expire with their binding. Do not bypass the Hub to create hidden delegation. You may use backend-native background commands. Backend-native notifications may trigger runs outside a turn: xSB records and displays their execution boundaries without creating tasks or granting turn tool permissions. A submitted turn owns its new run; input inserted into an already-unowned run claims it from that receipt onward. User stop still targets the turn and its accepted work.
 A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery. The host accepts it after normal turn completion and revalidation. Pause and an escalation with pauseSelf stop affected attempts. After restart the workflow is paused until explicit resume. If an assignment needs the user's choice, ask and end the turn: the work waits, and the user's reply continues it in a turn of its own, where you finish. A workflow context may list work a user stop cancelled; it will not come back. An assignment may say earlier assignments were withdrawn; do not continue those. Answer status and unrelated questions directly.`;
 
 /**
@@ -256,8 +256,9 @@ export function conversationRecord(title: string, backend: string, turns: PastTu
   const body = turns.map((turn) => {
     const inputs = turn.inputs.map((input) => `${whoSaid(input.origin)}:\n${quote(input.text)}`).join("\n");
     const tools = turn.tools.length ? `\ntools used: ${[...new Set(turn.tools.map(firstLine))].join(", ")}` : "";
-    const reply = turn.reply.trim() ? `\nthe assistant answered:\n${quote(turn.reply)}` : "";
-    return `<xsb-past-turn at="${turn.at}">\n${inputs}${tools}${reply}\n</xsb-past-turn>`;
+    const reply = turn.reply.trim() ? `\n${turn.run ? "the backend produced output outside a turn" : "the assistant answered"}:\n${quote(turn.reply)}` : "";
+    const tag = turn.run ? "xsb-past-run" : "xsb-past-turn";
+    return `<${tag} at="${turn.at}">\n${inputs}${tools}${reply}\n</${tag}>`;
   });
   return `${earlier ? `${earlier.trim()}\n\n` : ""}Conversation "${title}" on the agent program "${backend}", oldest first:\n${body.join("\n") || "(nothing was said)"}\n`;
 }
@@ -293,9 +294,10 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
       const inputs = turn.inputs.map((input) => `${whoSaid(input.origin)}:\n${quote(input.text)}`).join("\n");
       // Tool titles can contain whole shell scripts; the transcript retains the details.
       const tools = turn.tools.length ? `\ntools used: ${[...new Set(turn.tools.map(firstLine))].join(", ")}` : "";
-      const reply = turn.reply.trim() ? `\nyou answered:\n${quote(turn.reply)}` : "";
+      const reply = turn.reply.trim() ? `\n${turn.run ? "the backend produced output outside a turn" : "you answered"}:\n${quote(turn.reply)}` : "";
       const note = excerpt ? "Excerpt of this turn; consult the transcript and current assets for details.\n" : "";
-      return `<xsb-past-turn at="${turn.at}">\n${note}${inputs}${tools}${reply}\n</xsb-past-turn>`;
+      const tag = turn.run ? "xsb-past-run" : "xsb-past-turn";
+      return `<${tag} at="${turn.at}">\n${note}${inputs}${tools}${reply}\n</${tag}>`;
     };
     let text = render(verbatim);
     // A large asset injection must not erase the latest turn or everything before it.

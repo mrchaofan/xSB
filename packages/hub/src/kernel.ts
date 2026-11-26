@@ -22,7 +22,7 @@
  * settles, the tasks it releases. Done and stopped differ only in what the end says.
  */
 import { isTerminal, textOf } from "@xsb/protocol";
-import type { Addr, Asset, ContentBlock, DeliveryPref, EndReason, LedgerEntry, LedgerState, Origin, Principal, SessionUpdate, StopReason, Task, TaskStatus } from "@xsb/protocol";
+import type { Addr, Asset, BackendRun, ContentBlock, DeliveryPref, EndReason, LedgerEntry, LedgerState, Origin, Principal, SessionUpdate, StopReason, Task, TaskStatus } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import type { Hooks, Veto } from "./hooks.ts";
 import { isVeto } from "./hooks.ts";
@@ -66,6 +66,8 @@ export type KernelDecide = {
   "cascade.pre_propagate": { root: Task; stopper: Principal; cascade: "spare" | "force" };
   "message.pre_deliver": Delivery;
   "message.pre_submit": Submission;
+  /** Policy for backend execution with no turn owner; observing it never creates a turn or task. */
+  "acp.pre_unowned_run": { agentId: string; sessionId: string; run: BackendRun; action: "show" | "stop" };
 };
 
 export type Receipt = { messageId: string; about: Omit<LedgerEntry, "messageId" | "state" | "ts">; inserted: boolean };
@@ -91,6 +93,9 @@ export type KernelObserve = {
   /** Every change of the ledger. */
   "message.ledger": LedgerEntry;
   "acp.session_update": { agentId: string; sessionId: string; update: SessionUpdate };
+  /** Also emitted when an insertion receipt claims an already-running, unowned execution. */
+  "acp.run_started": { agentId: string; sessionId: string; run: BackendRun };
+  "acp.run_ended": { agentId: string; sessionId: string; run: BackendRun; stopReason: StopReason; origin?: unknown };
   "acp.turn_changed": { agentId: string; sessionId: string };
   "acp.turn_ended": { agentId: string; sessionId: string; turnId?: string; stopReason: StopReason; failed: boolean };
   /** The backend session was replaced: what it held is gone. */
@@ -185,6 +190,7 @@ export class Kernel {
       return { ...p, verdict: tries > QUALITY_RETRIES ? "fail" : "retry", why };
     });
     hooks.decider("message.pre_deliver", (p) => ({ ...p, route: p.route ?? this.deliveryPolicy(p) }));
+    hooks.decider("acp.pre_unowned_run", (p) => ({ ...p, action: p.action ?? "show" }));
   }
 
   /**

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { Store } from "@xsb/store";
-import { Boundaries, OriginExt } from "@xsb/protocol";
+import { Boundaries, OriginExt, RunExt } from "@xsb/protocol";
 import { Paths } from "../src/paths.ts";
 import { turnsSinceCleared } from "../src/transcript.ts";
 import { handoff } from "../src/prompts.ts";
@@ -24,6 +24,20 @@ const input = (id: string, text: string, steered = false) => ({
   _meta: { [OriginExt.key]: { kind: "user", steered } },
 });
 const reply = (text: string) => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+
+test("handoffs preserve autonomous output separately from the preceding turn's reply", () => {
+  const turns = readTurns([
+    input("user", "work"), reply("foreground result"),
+    { ...reply("background notification"), _meta: { [RunExt.key]: { id: "background", turnId: null, state: "running" } } },
+    input("correction", "new instructions", true), reply("new result"),
+  ]);
+  assert.deepEqual(turns.map(turn => turn.reply), ["foreground result", "background notification", "new result"]);
+  assert.deepEqual(turns[1].run, { id: "background", turnId: null });
+  assert.equal(turns[1].inputs.length, 0);
+  assert.equal(turns[2].inputs[0].text, "new instructions");
+  const told = handoff("renewed", turns, { tasks: [], waiting: [], assets: [] });
+  assert.match(told, /<xsb-past-run[^]*output outside a turn/);
+});
 
 test("handoff retains tools reported only as updates and the final answer after tool activity", () => {
   const turns = readTurns([

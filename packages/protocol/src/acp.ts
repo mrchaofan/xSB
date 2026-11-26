@@ -25,7 +25,7 @@ export type SessionUpdate = { sessionUpdate: string; _meta?: Meta; [k: string]: 
 export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled" | "error";
 export type SessionState = "idle" | "running" | "requires_action";
 /** `state_update`; `error` comes with the stop reason `error`, as a JSON-RPC error object. */
-export type StateUpdate = { sessionUpdate: "state_update"; state: SessionState; stopReason?: StopReason | null; error?: { code: number; message: string; data?: unknown } | null };
+export type StateUpdate = { sessionUpdate: "state_update"; state: SessionState; stopReason?: StopReason | null; error?: { code: number; message: string; data?: unknown } | null; _meta?: Meta };
 export const isStateUpdate = (u: SessionUpdate): u is StateUpdate => u.sessionUpdate === "state_update";
 
 export type PermissionOption = { optionId: string; name: string; kind: string };

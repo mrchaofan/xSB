@@ -12,7 +12,7 @@ import type { ComposerState, WorkflowView } from "@xsb/protocol";
  * for each (../renderer/text.js). Main hands it facts, and errors already
  * worded in that language, since only main can tell what an error is about.
  */
-import type { AgentInfo, Boundary, DeliveredAs, DiscardReason, OriginMeta, QuestionAnswer, QuestionItem, QuestionState, Task } from "@xsb/protocol";
+import type { AgentInfo, BackendRun, Boundary, DeliveredAs, DiscardReason, OriginMeta, QuestionAnswer, QuestionItem, QuestionState, Task } from "@xsb/protocol";
 import type { Content } from "./content.ts";
 import type { WebAnnotation } from "./page-annotations.ts";
 
@@ -31,7 +31,7 @@ export type Entry = { id: string } & (
       deliveredAs?: DeliveredAs;
       /** It answers or skips a question: the question's card shows it. */
       reply?: boolean }
-  | { kind: "output"; content: Content; streaming?: boolean }
+  | { kind: "output"; content: Content; streaming?: boolean; run?: BackendRun; stopReason?: string; runOrigin?: unknown }
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
   /** What the agent asked the user (the `ask` tool) and what became of it. Its reply's own message is not shown apart. */

@@ -11,6 +11,7 @@
 应用证明时必须明确定义：
 
 - **turn 与 task 不同。** turn 是一次串行模型执行及其输入；task 是持久化的业务任务。task 可以等待多个 turn，也可以在 turn 尚未退出时通过 `report_result` 结束。一个 turn 可以承接多个仍开放的任务。
+- **turn 与 run 不同。** run 是后端一次执行，以 ACP `running`（或首次 `requires_action`）开始、`idle` 结束；turn 是中枢授权的输入和任务归属。已提交 prompt 的 turn 认领随后开始的 run；已有无主 run 只有在当前 turn 的输入获得插入回执后才被认领，认领前的输出保持回合外。running 本身不证明输入已被接收。
 - **投递表针对已获授权、依赖已满足且需要执行的 prompt。** `lazy` 邮件留在 inbox；`after` 未满足的 task 留在 blocked；它们属于待办，不因接收请求就立刻开 turn。
 - **抢占权限是前提。** `dispatch` 权限不等于任意停止其他发起方的工作。混合所有者的 turn 若无法整体合法停止，抢占请求整体排队，不先取消一部分。请求也不能通过停止祖先把自身工作撤掉。
 - **传播可达不等于所有后代都要取消。** 内置 `spare` 策略下每个实际调用后代都参与判定；只为停止范围而存在的后代取消，仍被无关活任务支撑的共享后代保留。`after` 是次序边，不能当成调用/取消边。可信扩展若显式采用 `force`，属于另一个传播策略，须单独说明授权与证明，不能声称满足这里的共享保留规则。
@@ -182,3 +183,15 @@ turn 因非取消原因失败时，已发出但没有插入回执的输入可能
 | 任务/turn 区分与有限恢复 | `Kernel.turnEnded`、`LiveSession.recover` | ACP 端到端：同 taskId 恢复；次数耗尽；模型保持；交接重启；执行证据阻止重放 |
 
 模型摘要由 `prompts.ts` 的 `TASK_LIFECYCLE_RULES` 注入主 Agent 与任务 Agent 的系统说明；没有 systemPrompt 能力的后端通过第一条 standing-instructions preface 获得同样规则。修改本契约时须同步该摘要与对应场景测试。
+
+## 7. 后端运行与回合外输出
+
+会话维护当前 run 及其 `turnId`（无主时为 `null`），不再用 `backendIdle/ranSince` 代替执行归属。只有属于当前 turn 的 run 结束才结束该 turn；无主 run 的 idle 不能结束仍在等 prompt 回执的 turn，也不能确认任务停止。回合已有 run 结束时仍等在途 prompt 的真实回执；后端把后续 prompt 插入自己的下一段执行时，仍由同一逻辑 turn 认领。已结束 run 的迟到输出保持结束状态。
+
+内核提供三个 hook：`acp.run_started`、`acp.run_ended` 是观察点；`acp.pre_unowned_run` 是决策点，默认 `action: show`，扩展可改为 `stop`。决策否决或抛错按 fail-closed 请求后端取消；提交前复核 run 仍是原来的无主运行。插入认领时用同一 run ID 再发 `run_started`，表示归属变化，历史输出不改写。
+
+每条后端输出附 `_meta["dev.xsb/run"] = { id, turnId, state }`；开始、认领与结束另写 `session_info_update`，结束带 `stopReason` 和后端的 `_claude/origin`（如果有）。边界与归属进入 transcript，历史查询和实时转发采用同样的数据。无主输出不推进输入消费、不成为任务交付、不授予 MCP 或工具权限。
+
+桌面按 run ID 和当时的 owner 分段；回合外段带“回合外”标题与结束说明，收到该 run 的 idle 后关闭所有分段的流式光标。文字、思考与工具更新只显示，不改变智能体状态、输入栏或停止目标。用户停止仍只针对 turn 及已接受的工作，不因展示回合外输出而扩大取消范围。后端自带的后台完成通知可以显示；允许使用后端原生后台命令；不得绕过中枢建立隐藏委派。
+
+验证：`turns.test.ts` 覆盖无回合运行、pending prompt、插入认领、idle 先于回执、停止/veto 策略和权限隔离；`stop.test.ts` 验证回合外结束不能确认 turn 停止；`kernel.test.ts` 验证默认策略和 hook 的 fail-closed；ACP 端到端与桌面测试验证后台完成通知、实时与历史边界，以及分段收尾。

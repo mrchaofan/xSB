@@ -433,7 +433,14 @@ function entryNode(agentId, entry) {
   const base = { class: `entry ${entry.kind}`, "data-id": entry.id };
 
   const openLink = (href, container) => followContentLink(href, container, agentId);
-  if (entry.kind === "output") return h("div", { ...base, "data-streaming": entry.streaming }, contentView(entry.content, openLink, { streaming: entry.streaming }));
+  if (entry.kind === "output") {
+    const offTurn = entry.run?.turnId === null;
+    const notification = entry.runOrigin === "task-notification" || entry.runOrigin?.kind === "task-notification";
+    return h("div", { ...base, "data-streaming": entry.streaming, "data-off-turn": offTurn },
+      offTurn && h("div", { class: "run-label" }, t("entry.run.offTurn")),
+      contentView(entry.content, openLink, { streaming: entry.streaming }),
+      offTurn && entry.stopReason && h("div", { class: "run-end" }, t(notification ? "entry.run.notification" : "entry.run.ended")));
+  }
   if (entry.kind === "error") return h("div", base, entry.text);
   // 上下文的边界：对话记录都还在，分隔线告诉用户模型从哪里起看不到上面的内容。
   if (entry.kind === "boundary") {
