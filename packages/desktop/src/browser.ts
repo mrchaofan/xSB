@@ -73,7 +73,7 @@ const TOOLS = [
   },
   {
     name: "browser_select",
-    description: "Select one of your pages by pageId, bringing it into view and returning its snapshot. Optionally set presentation to window or panel to move that same page without reloading. Website popups open in tabs by default. All subsequent actions use this page and its latest element numbers.",
+    description: "Select one of your pages by pageId as the target of your next actions, returning its snapshot. The user's view does not change: you work in the background. Optionally set presentation to window or panel to move that same page without reloading. Website popups open in tabs by default. All subsequent actions use this page and its latest element numbers.",
     inputSchema: { type: "object", required: ["pageId"], properties: { pageId: str("An id returned by browser_open, browser_tabs or a snapshot."), presentation: { type: "string", enum: ["panel", "window"] } } },
   },
   {
@@ -123,7 +123,7 @@ const TOOLS = [
   },
   {
     name: "browser_screenshot",
-    description: "A picture of the part of the page that is visible now. Use it for what a snapshot cannot say: layout, images, a chart. It brings your tab to the front of the side panel.",
+    description: "A picture of the page's current viewport. Use it for what a snapshot cannot say: layout, images, a chart. An unattached page is drawn in a temporary 800×600 window that never takes the user's focus or selects their tab.",
     inputSchema: { type: "object", properties: {} },
   },
 ];
@@ -277,7 +277,19 @@ export class Driven {
   }
 
   async screenshot(): Promise<string> {
-    return (await this.send("Page.captureScreenshot", { format: "png" })).data;
+    await this.engage();
+    // A page attached a moment ago (Pages.drawn) can hold its first capture until something else asks for
+    // a frame; a second request releases both. Ask again a few times, unless one has answered.
+    let answered = false;
+    const shot = async (delay: number): Promise<string> => {
+      await sleep(delay);
+      if (answered) throw new Error("answered");
+      const { data } = await this.raw("Page.captureScreenshot", { format: "png" });
+      answered = true;
+      return data;
+    };
+    try { return await Promise.any([0, 250, 1000, 3000].map(shot)); }
+    catch (e) { throw (e as AggregateError).errors?.[0] ?? e; }
   }
 }
 
@@ -361,7 +373,7 @@ export class BrowserSession {
   private open(): Tab {
     this.prepare();
     const sessionId = this.contextState && (this.sessionOf?.(this.contextState.agentId) ?? this.contextState.sessionId);
-    const { id } = this.pages!.open("about:blank", { agent: true, sessionId, downloads: this.downloads, onPopup: (id) => {
+    const { id } = this.pages!.open("about:blank", { agent: true, background: true, sessionId, downloads: this.downloads, onPopup: (id) => {
       try { if (!this.released) this.adopt(id); }
       catch (e) { this.popupErrors.push(`Could not control popup ${id}: ${errorMessage(e)}`); this.pages!.releaseAgent(id); }
     } });
@@ -381,7 +393,7 @@ export class BrowserSession {
   private presentation(id: string, value: unknown): void {
     if (value === undefined) return;
     if (value !== "panel" && value !== "window") throw new Error("presentation must be panel or window");
-    this.pages!.call(id, value === "window" ? "detach" : "restore");
+    this.pages!.call(id, value === "window" ? "detach" : "restore", "background");
   }
 
   private records(from = 0): object {
@@ -449,7 +461,6 @@ export class BrowserSession {
       const tab = this.tab(String(args.pageId ?? ""));
       this.current = tab.id;
       this.presentation(tab.id, args.presentation);
-      await this.pages!.reveal(tab.id);
     } else if (name === "browser_navigate" || name === "browser_open") {
       if (args.presentation !== undefined && args.presentation !== "panel" && args.presentation !== "window") throw new Error("presentation must be panel or window");
       const url = address(String(args.url ?? ""));
@@ -469,8 +480,9 @@ export class BrowserSession {
       }
     } else if (name === "browser_screenshot") {
       const tab = this.tab();
-      await this.pages!.reveal(tab.id);
-      return { content: [{ type: "image", data: await tab.driven.screenshot(), mimeType: "image/png" }, { type: "text", text: `pageId: ${tab.id}` }] };
+      await tab.driven.engage();
+      const data = await this.pages!.drawn(tab.id, () => tab.driven.screenshot());
+      return { content: [{ type: "image", data, mimeType: "image/png" }, { type: "text", text: `pageId: ${tab.id}` }] };
     } else if (name === "browser_click") await this.tab().driven.click(args.ref);
     else if (name === "browser_type") {
       const tab = this.tab();

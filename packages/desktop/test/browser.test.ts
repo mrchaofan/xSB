@@ -158,7 +158,7 @@ class FakePages {
     if (op === "close") { this.contents(id).destroy(); this.entries.delete(id); }
     else this.entries.get(id).window = op === "detach";
   }
-  async reveal(id: string) { this.operations.push(`${id}:reveal`); }
+  async drawn<T>(id: string, draw: () => Promise<T>) { this.operations.push(`${id}:drawn`); return draw(); }
   list() { return [...this.entries.values()].map(({ id, contents, url, window }) => ({ id, contentsId: id, url, title: contents.getTitle(), window })); }
   releaseAgent(id: string) { this.entries.get(id).options = {}; }
   popup(parent: string) {

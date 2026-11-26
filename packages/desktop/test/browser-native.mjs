@@ -16,6 +16,20 @@ try {
   for (const name of ["page.html", "styles.css"]) fs.copyFileSync(renderer(name), path.join(directory, name));
   await build({ input: renderer("page-window.js"), platform: "browser", output: { file: path.join(directory, "page-window.js"), format: "iife" } });
   await build({ input: renderer("webview.js"), platform: "browser", output: { file: path.join(directory, "webview.js"), format: "esm" } });
+  // Exercise the real tab/focus routing with only unrelated app state and panels stubbed.
+  const panelStubs = {
+    "./app.js": `export const state = window.auditState; export const rootSession = () => 'sa'; export const rememberPosition = () => {}; export const renderArtifact = () => {}; export const revealArtifacts = () => {};`,
+    "./workflow.js": `export const currentFlow = () => null; export const renderWorkflow = () => {};`,
+    "./artifacts.js": `export const artifactLabel = () => '';`,
+    "./file-icons.js": `export const fileIcon = () => null;`,
+    "./form.js": `export const openDialog = () => document.createElement('div');`,
+    "./menu.js": `export const openContextMenu = () => {};`,
+  };
+  await build({ input: renderer("pages.js"), platform: "browser", plugins: [{
+    name: "tab-panel-fixture",
+    resolveId(source, importer) { if (importer === renderer("pages.js") && panelStubs[source]) return `\0${source}`; },
+    load(id) { if (id.startsWith("\0")) return panelStubs[id.slice(1)]; },
+  }], output: { file: path.join(directory, "pages-audit.js"), format: "esm" } });
   await build({ input: fileURLToPath(new URL("browser-native.electron.ts", import.meta.url)), platform: "node", external: ["electron"], output: { file, format: "cjs" } });
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;

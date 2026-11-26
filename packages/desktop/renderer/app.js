@@ -855,12 +855,6 @@ xsb.on((event) => {
   else if (event.removedPage) onPageRemoved(event.removedPage);
   else if (event.hub === "down") showHub(false);
   else if (event.arkLoginUrl) onArkLoginUrl(event.arkLoginUrl);
-  else if (event.revealPage) {
-    const page = state.pages?.find(p => p.id === event.revealPage);
-    const owner = page && state.agents.find(a => a.mainSessionId === page.sessionId);
-    if (owner && !sessionPages().includes(page)) focusLane(owner.id);
-    if (page && sessionPages().includes(page)) { revealArtifacts(); selectTab(page.id); }
-  }
   else if (event.showAgent) { if (agentOf(event.showAgent)) focusLane(event.showAgent); }
   // 应用菜单：设置；文件 › 打开文件夹… 换了这个窗口的工作区。
   else if (event.openSettings) showSettings();
