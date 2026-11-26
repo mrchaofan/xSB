@@ -71,6 +71,17 @@ test("the downloader patch applies and verifies inside Git repositories, linked 
   }
 });
 
+test("Windows CRLF patch checkouts apply to the LF files extracted by npm", (t) => {
+  const root = temp(t);
+  execFileSync("git", ["init"], { cwd: root, stdio: "pipe" });
+  execFileSync("git", ["config", "core.autocrlf", "true"], { cwd: root, stdio: "pipe" });
+  const { dir, patch } = fixture(root);
+  fs.writeFileSync(patch, patchText.replace(/\n/g, "\r\n"));
+  assert.equal(patchElectron(dir, patch), true);
+  assert.equal(fs.readFileSync(path.join(dir, "index.js"), "utf8"), patched);
+  assert.equal(patchElectron(dir, patch), false);
+});
+
 test("npm install and npm ci run the root and desktop postinstall hooks and leave the downloader patched", (t) => {
   const root = temp(t);
   const app = path.join(root, "packages/desktop");
