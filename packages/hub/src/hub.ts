@@ -244,7 +244,7 @@ export class Hub {
   toolServers(
     agent: AgentSpec,
     clientMcp: McpServer[] = [],
-  ): { server: McpServer; from: ToolOrigin; about?: string }[] {
+  ): { server: McpServer; from: ToolOrigin }[] {
     const all = [
       ...activePlugins(this.paths).map((t) => ({ ...t, from: "plugin" as const })),
       ...clientMcp.map((server) => ({ server, from: "client" as const })),
@@ -293,9 +293,7 @@ export class Hub {
   }
 
   systemPromptFor(agent: AgentSpec, clientMcp: McpServer[] = []): string {
-    const tools = this.toolServers(agent, clientMcp)
-      .map((t) => [t.server.name, t.about].filter(Boolean).join(" — "))
-      .join("\n");
+    const tools = this.toolServers(agent, clientMcp).map((t) => t.server.name).join("\n");
     return conversationPrompt(
       agent,
       projectLanguage(this.paths),
