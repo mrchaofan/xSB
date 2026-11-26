@@ -26,7 +26,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { McpServer } from "@xsb/protocol";
-import { globalDir, machineConfig, projectConfig, updateGlobalConfig, updateProjectConfig } from "./config.ts";
+import { globalDir, globalConfiguration, machineConfig, projectConfig, updateGlobalConfig, updateProjectConfig } from "./config.ts";
+import { approvedFingerprints, recordPluginApproval } from "./trust.ts";
 import type { Paths } from "./paths.ts";
 
 export const PLUGINS_ENV = "XSB_PLUGINS";
@@ -47,6 +48,7 @@ export type PluginView = {
   enabled: boolean;
   /** Project plugins only. */
   approved?: boolean;
+  approvalFingerprint?: string;
   /** A later place has a plugin of the same name. */
   replaced?: boolean;
   /** Conversations of the project get it. */
@@ -131,19 +133,19 @@ const fingerprint = (p: Found, paths: Paths) => {
 
 /** Every plugin of every place, each with how it stands. */
 function survey(paths?: Paths): { found: Found; view: PluginView }[] {
-  const global = machineConfig();
+  const configuration = globalConfiguration(), global = configuration.config;
   const offGlobal = offIn(global), offProject = paths ? offIn(projectConfig(paths)) : new Set<string>();
-  const approved = approvedIn(global);
+  const approved = approvedFingerprints(approvedIn(global));
   const found = (["builtin", "global", "project"] as const).flatMap((scope) => scan(scope, paths));
   const last = new Map(found.filter((p) => !p.problem).map((p) => [p.name, p]));
   return found.map((p) => {
-    const enabled = !(p.scope === "project" ? offProject : offGlobal).has(p.name) && !offProject.has(p.name);
+    const enabled = configuration.available && !(p.scope === "project" ? offProject : offGlobal).has(p.name) && !offProject.has(p.name);
     const ok = p.scope !== "project" || (!!paths && approved.has(fingerprint(p, paths)));
     const m = p.manifest;
     const view: PluginView = {
       name: p.name, scope: p.scope, dir: p.dir, problem: p.problem, description: m?.description,
       runs: m && p.entry && [...Object.entries(m.xsb?.env ?? {}).map(([k, v]) => `${k}=${v}`), "node", path.relative(p.dir, p.entry)].join(" "),
-      enabled, ...(p.scope === "project" ? { approved: ok } : {}),
+      enabled, ...(p.scope === "project" ? { approved: ok, ...(ok && paths ? { approvalFingerprint: fingerprint(p, paths) } : {}) } : {}),
       replaced: !p.problem && last.get(p.name) !== p,
       active: !p.problem && last.get(p.name) === p && enabled && ok,
     };
@@ -182,7 +184,7 @@ export function setPluginEnabled(scope: "global" | "project", name: string, enab
 export function approvePlugin(paths: Paths, name: string): void {
   const p = scan("project", paths).find((x) => x.name === name && !x.problem);
   if (!p) throw new Error(`no usable plugin ${name} in this project`);
-  updateGlobalConfig((config) => ({ ...config, approvedPlugins: [...approvedIn(config), fingerprint(p, paths)] }));
+  recordPluginApproval(paths.project, name, fingerprint(p, paths));
 }
 
 /** The folder of a place, made if it is not there, for the user to put plugins in. */

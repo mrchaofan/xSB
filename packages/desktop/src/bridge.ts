@@ -78,7 +78,7 @@ export type { ArkModel, ArkPlan, ArkStatus } from "./ark.ts";
 /** Everything a window shows at first. A window without a workspace gets `{ workspace: null, recent }` instead. */
 export type Snapshot = {
   workflows: Record<string,WorkflowView>;
-  workspace: { name: string; path: string };
+  workspace: { name: string; path: string; id?: string; previousPaths?: string[] };
   backends: BackendView[];
   agents: AgentInfo[];
   tasks: Task[];
@@ -101,6 +101,7 @@ export type Event =
   | { removedAgent: string }
   | { task: Task }
   | { artifact: Artifact }
+  | { artifactsRemoved: string[] }
   | { page: PageView }
   | { removedPage: string }
   /** The connection to the workspace's hub is gone. Opening the workspace again makes a new one. */

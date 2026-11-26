@@ -41,7 +41,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { PLUGINS_ENV, findCommand, withhold } from "@xsb/hub";
+import { PLUGINS_ENV, findCommand, withhold, updateJsonFile } from "@xsb/hub";
 import { SOCKET_ENV } from "./browser.ts";
 
 /** The hub's built-in backends: each is named after the program of the user's machine it is, or is built around. */
@@ -228,9 +228,7 @@ export class Clis {
   /** The user says where a program is. Whether it is one: a file that can be run. */
   setPath(command: string, file: string): boolean {
     if (!findCommand(file)) return false;
-    this.paths[command] = file;
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(this.file, JSON.stringify(this.paths, null, 2));
+    this.changePaths(paths => ({ ...paths, [command]: file }));
     this.sync();
     return true;
   }
@@ -241,8 +239,13 @@ export class Clis {
    */
   forget(command: string): void {
     if (!(command in this.paths)) return;
-    delete this.paths[command];
-    fs.writeFileSync(this.file, JSON.stringify(this.paths, null, 2));
+    this.changePaths(paths => { const { [command]: _old, ...rest } = paths; return rest; });
+  }
+
+  private changePaths(change: (paths: Record<string, string>) => Record<string, string>): void {
+    this.paths = updateJsonFile(this.file, () => fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, "utf8")) : {}, change, paths => {
+      if (!paths || typeof paths !== "object" || Array.isArray(paths) || Object.values(paths).some(value => typeof value !== "string")) throw new Error("Invalid program paths configuration");
+    });
   }
 
   /** The program the app installed for `command`, if it did. */

@@ -95,33 +95,36 @@ export class Workflows {
         next.revoked = [...(next.revoked ?? []), old.work.id];
     }
     const operations = [...extra, ops.workflow(f)];
-    this.hub.state.commit(operations);
-    // All old completions and tool writes are already fenced by the committed snapshot.
-    for (const [name, old] of Object.entries(prior.instances)) {
-      const session = old.sessionId && this.hub.live.get(old.sessionId);
-      if (!session) continue;
-      const current = session.current,
-        next = f.instances[name];
-      if (old.id !== next?.id) {
-        this.hub.broadcast(Agents.removed, { id: session.agentId });
-        // A removed instance cannot receive its old mailbox through a queued route.
-        for (const item of [...this.hub.state.mail.values()])
-          if (item.to.sessionId === session.id) this.hub.kernel.route(item);
-        const retire = () => this.hub.backends.stop(session.agentId);
-        if (current) void current.done.promise.then(retire);
-        else retire();
+    if (userStops) {
+      if (!this.hub.delivery.userStopMany([...userStops], operations)) return;
+    } else this.hub.state.commit(operations);
+    this.hub.state.afterCommit(() => {
+      // All old completions and tool writes are already fenced by the committed snapshot.
+      for (const [name, old] of Object.entries(prior.instances)) {
+        const session = old.sessionId && this.hub.live.get(old.sessionId);
+        if (!session) continue;
+        const current = session.current,
+          next = f.instances[name];
+        if (old.id !== next?.id) {
+          this.hub.broadcast(Agents.removed, { id: session.agentId });
+          // A removed instance cannot receive its old mailbox through a queued route.
+          for (const item of [...this.hub.state.mail.values()])
+            if (item.to.sessionId === session.id) this.hub.kernel.route(item);
+          const retire = () => this.hub.backends.stop(session.agentId);
+          if (current) void current.done.promise.then(retire);
+          else retire();
+        }
+        if (
+          current &&
+          !userStops?.has(session) &&
+          (next?.id !== old.id ||
+            (old.work?.attempt === current.first.messageId && next?.work?.attempt !== old.work.attempt))
+        )
+          session.halt(current.id);
       }
-      if (
-        current &&
-        !userStops?.has(session) &&
-        (next?.id !== old.id ||
-          (old.work?.attempt === current.first.messageId && next?.work?.attempt !== old.work.attempt))
-      )
-        session.halt(current.id);
-    }
-    for (const session of userStops ?? []) this.hub.delivery.userStop(session);
-    this.publish(f.owner);
-    this.schedule(f.owner);
+      this.publish(f.owner);
+      this.schedule(f.owner);
+    });
   }
   private schedule(owner: string) {
     if (this.scheduled.has(owner) || this.hub.stopping) return;

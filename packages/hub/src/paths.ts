@@ -16,11 +16,16 @@
  *     assets/                          the asset library's files
  *     run/                             lock, pid, sockets, log of the running hub
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { updateJsonFile } from "./config-files.ts";
+import { globalDir } from "./config.ts";
+
+export type PathRef = { base: "project" | "data" | "external"; path: string };
+type ProjectIdentity = { version: 1; id: string; root: string; previousRoots: string[] };
 
 /** The project's own directory. Machine settings stay in `~/.xsb2_global` (config.ts, `globalDir`). */
 export const DIR = ".xsb2";
@@ -41,10 +46,62 @@ export function findProject(start = process.cwd()): string | null {
 export class Paths {
   readonly project: string;
   readonly dir: string;
+  moved = false;
+  private identity?: ProjectIdentity;
 
   constructor(project: string) {
     this.project = path.resolve(project);
     this.dir = path.join(this.project, DIR);
+  }
+
+  prepare(legacyRoot?: string): void {
+    if (this.dir === globalDir()) throw new Error("The global configuration directory must differ from the project data directory");
+    const file = path.join(this.dir, "project.json");
+    const read = (): ProjectIdentity => fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { version: 1, id: randomUUID(), root: legacyRoot ?? this.project, previousRoots: [] };
+    const validate = (value: ProjectIdentity) => {
+      if (value.version !== 1 || typeof value.id !== "string" || typeof value.root !== "string" || !path.isAbsolute(value.root) || !Array.isArray(value.previousRoots) || value.previousRoots.some(p => typeof p !== "string" || !path.isAbsolute(p))) throw new Error("Invalid project identity");
+    };
+    this.identity = updateJsonFile(file, read, value => {
+      validate(value);
+      this.moved = value.root !== this.project;
+      return { ...value, root: this.project, previousRoots: [...new Set([...value.previousRoots, ...(this.moved ? [value.root] : [])])] };
+    }, validate);
+  }
+
+  get projectId(): string {
+    try { return this.identity?.id ?? JSON.parse(fs.readFileSync(path.join(this.dir, "project.json"), "utf8")).id ?? this.project; }
+    catch { return this.project; }
+  }
+  get previousRoots(): string[] {
+    try { return this.identity?.previousRoots ?? JSON.parse(fs.readFileSync(path.join(this.dir, "project.json"), "utf8")).previousRoots ?? []; }
+    catch { return []; }
+  }
+
+  reference(file: string): PathRef {
+    for (const [base, root] of [["data", this.dir], ["project", this.project]] as const) {
+      const relative = path.relative(root, file);
+      if (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative)) return { base, path: relative || "." };
+    }
+    return { base: "external", path: file };
+  }
+
+  resolveStored(value: string | PathRef): string {
+    if (typeof value === "string") {
+      const here = path.relative(this.project, value);
+      if (here !== ".." && !here.startsWith(".." + path.sep) && !path.isAbsolute(here)) return path.resolve(value);
+      for (const root of this.previousRoots) {
+        const relative = path.relative(root, value);
+        if (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative)) return path.resolve(this.project, relative);
+      }
+      return path.resolve(this.project, value);
+    }
+    if (!value || typeof value.path !== "string" || !["project", "data", "external"].includes(value.base)) throw new Error("Invalid stored path");
+    if (value.base === "external") {
+      if (!path.isAbsolute(value.path)) throw new Error("External paths must be absolute");
+      return value.path;
+    }
+    if (path.isAbsolute(value.path) || value.path.split(/[\\/]/).includes("..")) throw new Error("Stored path escapes its root");
+    return path.resolve(value.base === "data" ? this.dir : this.project, value.path);
   }
 
   get config(): string {

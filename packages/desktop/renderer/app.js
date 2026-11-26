@@ -15,7 +15,7 @@ import { backendPicker } from "./backend-picker.js";
 import { clock, t } from "./i18n.js";
 import { sessionPages, onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
 import { closeSettings, showSettings } from "./settings.js";
-import { onPreferencesChanged, syncWindowColors } from "./preferences.js";
+import { migrateWorkspaceState, onPreferencesChanged, syncWindowColors } from "./preferences.js";
 import { confirmDialog, field, openDialog } from "./form.js";
 import { openContextMenu } from "./menu.js";
 import { questionRecord, syncAskPanel } from "./ask.js";
@@ -218,7 +218,7 @@ export function focusLane(agentId) {
     for (const id of [...state.open]) closeLane(id, true);
     openLane(agentId);
     restoreSide();
-    remember("xsb.active:" + state.workspace.path, agentId);
+    remember("xsb.active:" + (state.workspace.id ?? state.workspace.path), agentId);
   }
   const lane = laneOf(agentId);
   lane.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -258,7 +258,7 @@ function openLane(agentId, panel, readonly) {
   };
   // 一个按钮管两件事：输入框里有内容就是发送；没有内容而智能体在工作，就是停止。
   const press = () => (readonly ? undefined : lane.dataset.action === "stop" ? xsb.cancel(agentId) : send());
-  let key = draftKey(state.workspace.path, agentOf(agentId));
+  let key = draftKey(state.workspace.id ?? state.workspace.path, agentOf(agentId));
   let editor = pendingEditors.get(key);
   if (!editor) {
     editor = createEditor(() => editor.el.closest(".lane")?.send(), () => {
@@ -295,7 +295,7 @@ function openLane(agentId, panel, readonly) {
   lane.send = send;
   lane.saveDraft = () => saveDraft(key, editor.snapshot());
   lane.updateSession = (previous) => {
-    const next = draftKey(state.workspace.path, agentOf(agentId));
+    const next = draftKey(state.workspace.id ?? state.workspace.path, agentOf(agentId));
     if (next === key) return;
     saveDraft(key, editor.snapshot());
     if (!previous?.mainSessionId) moveDraft(key, next);
@@ -655,6 +655,7 @@ export async function renderArtifact(force = false) {
       if (width && height) node.style.setProperty("--media-ratio", String(width / height));
     };
     node.onload = node.onloadedmetadata = fit;
+    node.onerror = () => { if (request === artifactRender) fill(body, h("div", { class: "catalog-empty", role: "status" }, t("artifact.unavailable"))); };
     return fill(body, h("figure", {}, node));
   }
   if (preview && artifact.kind === "html") {
@@ -741,7 +742,7 @@ function referenceArtifact(artifact) {
 }
 $("#asset-reference").onclick = () => referenceArtifact(artifactOf(state.artifactId));
 
-function sideKey() { return "xsb.side:" + JSON.stringify([state.workspace?.path, rootSession()]); }
+function sideKey() { return "xsb.side:" + JSON.stringify([state.workspace?.id ?? state.workspace?.path, rootSession()]); }
 function rememberSide() {
   if (!rootSession()) return;
   rememberPosition();
@@ -832,7 +833,7 @@ export function onAgent(agent) {
   const lane = laneOf(agent.id);
   if (lane) lane.updateSession(previous);
   else if (previous && !previous.mainSessionId && agent.mainSessionId) {
-    moveDraft(draftKey(state.workspace.path, previous), draftKey(state.workspace.path, agent));
+    moveDraft(draftKey(state.workspace.id ?? state.workspace.path, previous), draftKey(state.workspace.id ?? state.workspace.path, agent));
   }
   state.transcripts[agent.id] ??= [];
   renderRail();
@@ -847,7 +848,7 @@ function addAnnotation({ sessionId, annotation }) {
   if (!agent || annotation?.type !== "web_annotation") return;
   const lane = laneOf(agent.id);
   if (lane) return lane.editor.insert([annotation], true);
-  const key = draftKey(state.workspace.path, agent);
+  const key = draftKey(state.workspace.id ?? state.workspace.path, agent);
   saveDraft(key, [...loadDraft(key), annotation]);
 }
 function onAnnotationsRemoved({ sessionId, ids }) {
@@ -855,7 +856,7 @@ function onAnnotationsRemoved({ sessionId, ids }) {
   if (!agent || !Array.isArray(ids)) return;
   const lane = laneOf(agent.id);
   if (lane) return lane.editor.removeAnnotations(ids);
-  const key = draftKey(state.workspace.path, agent);
+  const key = draftKey(state.workspace.id ?? state.workspace.path, agent);
   saveDraft(key, loadDraft(key).filter((b) => b.type !== "web_annotation" || !ids.includes(b.id)));
 }
 function dropPageAnnotations(notes) {
@@ -880,6 +881,14 @@ xsb.on((event) => {
     closeLane(event.removedAgent);
   }
   else if (event.task) { upsert(state.tasks, event.task); renderRail(); }
+  else if (event.artifactsRemoved) {
+    state.artifacts = state.artifacts.filter(a => !event.artifactsRemoved.includes(a.id));
+    for (const lane of document.querySelectorAll(".lane")) {
+      const id = lane.dataset.agent;
+      fill(lane.querySelector(".entries"), ...(state.transcripts[id] ?? []).map(entry => entryNode(id, entry)));
+    }
+    renderArtifact(true);
+  }
   else if (event.artifact) {
     upsert(state.artifacts, event.artifact);
     if (belongsHere(event.artifact) && (state.tab === "catalog" || state.artifactId === event.artifact.id)) renderArtifact();
@@ -917,10 +926,11 @@ export async function start() {
   $("#ws-path").textContent = state.workspace?.path ?? "";
   $("#ws").title = state.workspace?.path ?? t("settings.workspace");
   if (!state.workspace) return renderWelcome();
+  migrateWorkspaceState(state.workspace);
 
   showHub(true);
   $("#lanes").replaceChildren();
-  const activeId = recall("xsb.active:" + state.workspace.path);
+  const activeId = recall("xsb.active:" + (state.workspace.id ?? state.workspace.path));
   const first = state.agents.find(a => !a.workflowOwner && a.id === activeId) ?? state.agents.find(a => !a.workflowOwner);
   $("#task-conversation").replaceChildren();
   if (first) openLane(first.id);

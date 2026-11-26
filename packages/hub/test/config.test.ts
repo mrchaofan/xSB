@@ -4,7 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { BACKEND_LIMITS, GLOBAL_DIR, backendLimit, globalConfigPath, limitSettings, setLimit } from "../src/config.ts";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { BACKEND_LIMITS, GLOBAL_DIR, backendLimit, globalConfigPath, globalDir, globalConfiguration, backends, limitSettings, setLimit, updateGlobalConfig } from "../src/config.ts";
 import { Paths } from "../src/paths.ts";
 
 function machine(t: test.TestContext) {
@@ -73,4 +75,36 @@ test("a setting is not saved over a config file that cannot be read: what the us
   assert.throws(() => setLimit("claude", "promptTokens", 8000), /invalid_json|JSON/);
   assert.equal(fs.readFileSync(globalConfigPath(), "utf8"), before, "untouched");
   assert.equal(backendLimit("claude", "promptTokens"), BACKEND_LIMITS.promptTokens.default, "and reading it still works, with defaults");
+});
+
+test("concurrent global writers preserve independent edits", async t => {
+  machine(t); updateGlobalConfig(c => c);
+  const module = new URL("../src/config.ts", import.meta.url).href;
+  const children = ["first", "second"].map(name => spawn(process.execPath, ["--input-type=module", "-e",
+    `import {updateGlobalConfig} from ${JSON.stringify(module)}; updateGlobalConfig(c => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,100); return {...c,plugins:{...c.plugins,${name}:{enabled:false}}}; });`], { env: { ...process.env }, stdio: "ignore" }));
+  const results = await Promise.all(children.map(child => once(child, "exit")));
+  assert.ok(results.every(([code]) => code === 0));
+  assert.deepEqual(JSON.parse(fs.readFileSync(globalConfigPath(), "utf8")).plugins, { first: { enabled: false }, second: { enabled: false } });
+});
+
+test("a broken config preserves the last valid disabled plugins and reports diagnostics", t => {
+  machine(t);
+  updateGlobalConfig(c => ({ ...c, plugins: { off: { enabled: false } } }));
+  fs.writeFileSync(globalConfigPath(), "{ broken");
+  assert.equal(globalConfiguration().config.plugins?.off.enabled, false);
+  assert.equal(globalConfiguration().available, true);
+  assert.ok(globalConfiguration().issues.length);
+  assert.deepEqual(Object.keys(backends()).sort(), ["claude", "codex"]);
+});
+
+test("configuration validates versions, backend entries, home paths and combined budgets", t => {
+  machine(t);
+  assert.throws(() => setLimit("claude", "promptTokens", 4000), /contextReserveTokens/);
+  fs.writeFileSync(globalConfigPath(), JSON.stringify({ version: 999 }));
+  assert.throws(() => updateGlobalConfig(c => c), /Unsupported/);
+  fs.writeFileSync(globalConfigPath(), JSON.stringify({ version: 1, backends: { broken: { command: 42 }, good: { command: "good" } } }));
+  assert.equal(backends().broken, undefined); assert.equal(backends().good.command, "good");
+  assert.ok(globalConfiguration().issues.some(issue => issue.includes("broken")));
+  process.env.XSB_HOME = "relative";
+  assert.throws(() => globalDir(), /absolute/);
 });

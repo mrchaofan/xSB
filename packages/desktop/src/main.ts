@@ -20,7 +20,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, net, protocol, session, shell, webContents } from "electron";
 import type { WebPreferences } from "electron";
-import { Paths, approvePlugin, describeBackends, ensurePluginRoot, findCommand, limitSettings, listPlugins, projectLanguageSetting, setLimit, setPluginEnabled, setProjectLanguage, stopHub } from "@xsb/hub";
+import { Paths, approvePlugin, describeBackends, ensurePluginRoot, findCommand, limitSettings, listPlugins, projectLanguageSetting, setLimit, setPluginEnabled, setProjectLanguage, stopHub, settingsBundle, restoreSettingsBundle, validateSettingsBundle, pluginApprovals, revokePluginApproval, atomicWrite } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Answer, Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
@@ -639,6 +639,36 @@ function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): 
       return toolsChanged("global", workspace);
     case "revealPlugins":
       return shell.openPath(ensurePluginRoot(args[0], workspace?.paths));
+    case "pluginApprovals":
+      return pluginApprovals();
+    case "revokePluginApproval":
+      revokePluginApproval(args[0]);
+      return toolsChanged("global", workspace);
+    case "exportSettings":
+      return (async () => {
+        const bundle = { ...settingsBundle(), ui: args[0], channels: ark.bindings() };
+        validateSettingsBundle(bundle);
+        const saved = await dialog.showSaveDialog(win, { defaultPath: "xsb-settings.json", filters: [{ name: "xSB settings", extensions: ["json"] }] });
+        if (saved.canceled || !saved.filePath) return false;
+        atomicWrite(saved.filePath, JSON.stringify(bundle, null, 2) + "\n");
+        return true;
+      })();
+    case "importSettings":
+      return (async () => {
+        if ([...projects.values()].some(w => w.working().length)) throw new Error("Finish or stop running work before importing settings");
+        const opened = await dialog.showOpenDialog(win, { properties: ["openFile"], filters: [{ name: "xSB settings", extensions: ["json"] }] });
+        if (opened.canceled || !opened.filePaths[0]) return null;
+        if (fs.statSync(opened.filePaths[0]).size > 192 * 1024 * 1024) throw new Error("Settings backup is too large");
+        const bundle: unknown = JSON.parse(fs.readFileSync(opened.filePaths[0], "utf8"));
+        validateSettingsBundle(bundle);
+        const confirmed = await dialog.showMessageBox(win, { type: "question", message: language() === "zh-CN" ? "导入设置并恢复全局插件？" : "Import settings and restore global plugins?", detail: path.basename(opened.filePaths[0]), buttons: language() === "zh-CN" ? ["取消", "导入"] : ["Cancel", "Import"], defaultId: 0, cancelId: 0 });
+        if (confirmed.response !== 1) return null;
+        if ([...projects.values()].some(w => w.working().length)) throw new Error("Finish or stop running work before importing settings");
+        restoreSettingsBundle(bundle);
+        if (bundle.channels) for (const name of ["claude", "codex"] as const) await ark.bind(name, (bundle.channels as ReturnType<Ark["bindings"]>)[name] ?? null);
+        await toolsChanged("global", workspace);
+        return bundle.ui ?? {};
+      })();
   }
   if (!workspace) throw new Error("this window has no workspace open");
   // A message's id is the workspace's to choose: the renderer sends content, or names an entry to send again.

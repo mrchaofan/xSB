@@ -9,6 +9,8 @@ let storageListener: (event: { key: string | null }) => void;
 let failWrites = false;
 Object.assign(globalThis, {
   localStorage: {
+    get length() { return values.size; },
+    key: (index: number) => [...values.keys()][index] ?? null,
     getItem: (key: string) => values.get(key) ?? null,
     setItem: (key: string, value: string) => { if (failWrites) throw new Error("storage unavailable"); values.set(key, value); },
   },
@@ -71,4 +73,17 @@ test("a failed preference save remains visible to the caller and leaves appearan
 
 test("both interface languages have the same keys", () => {
   assert.deepEqual(Object.keys(TEXT.en).sort(), Object.keys(TEXT["zh-CN"]).sort());
+});
+
+test("a relocated project's identity preserves drafts and side state without overwriting newer choices", () => {
+  values.set('xsb.draft:["/old","s"]', '[{"type":"text","text":"draft"}]');
+  values.set('xsb.side:["/old","s"]', '{"tab":"catalog"}');
+  values.set("xsb.active:/old", "old-agent");
+  values.set("xsb.active:identity", "new-agent");
+  values.set("xsb.ui.workspace:/old", '{"showCompleted":true}');
+  prefs.migrateWorkspaceState({ id: "identity", path: "/new", previousPaths: ["/old"] });
+  assert.equal(values.get('xsb.draft:["identity","s"]'), values.get('xsb.draft:["/old","s"]'));
+  assert.equal(values.get('xsb.side:["identity","s"]'), '{"tab":"catalog"}');
+  assert.equal(values.get("xsb.active:identity"), "new-agent");
+  assert.equal(prefs.workspacePreferences("identity").showCompleted, true);
 });

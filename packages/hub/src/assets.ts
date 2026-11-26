@@ -8,6 +8,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { ensureDirectory, syncDirectory } from "@xsb/store";
 import { Assets as AssetsExt } from "@xsb/protocol";
 import type { Asset } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
@@ -39,7 +40,7 @@ export class Assets {
     const id = `${type}/${name}`;
     const version = (this.hub.state.assets.get(id)?.length ?? 0) + 1;
     const dir = path.join(this.hub.paths.assets, type, name);
-    fs.mkdirSync(dir, { recursive: true });
+    ensureDirectory(dir);
     let file: string;
     if (input.path) {
       const source = path.resolve(this.hub.agent(by.agentId).workspace, input.path);
@@ -52,6 +53,9 @@ export class Assets {
     } else {
       throw new Error(`give "path" (a file) or "content" (text)`);
     }
+    const fd = fs.openSync(file, "r+");
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    syncDirectory(dir);
     const asset: Asset = {
       id,
       type,

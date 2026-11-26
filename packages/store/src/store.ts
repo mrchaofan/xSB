@@ -20,12 +20,15 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { atomicWrite, ensureDirectory, syncDirectory } from "./files.ts";
+export { atomicWrite, ensureDirectory, syncDirectory } from "./files.ts";
 
 export type Record_ = Record<string, any>;
 export type Op = { file: string; rec: Record_ };
 
 const WAL = "wal.jsonl";
 const WAL_CHECKPOINT_BYTES = 1 << 20;
+const MANIFEST = "conversations/current.json";
 
 /** Drop a trailing partial line left by a crash mid-append. */
 function repairTail(file: string): void {
@@ -55,15 +58,47 @@ export class Store {
   private repaired = new Set<string>();
   /** A transaction began and did not reach its commit: an append failed. Until `recover` finishes it, only the WAL knows of it. */
   private unfinished = false;
+  private recovering = false;
+  private aliases: Record<string, string> = {};
+  private baselines: Record<string, number> = {};
+  onFailure?: (error: unknown) => void;
+
+  get healthy(): boolean { return !this.unfinished; }
+  private writable(): void {
+    if (this.unfinished && !this.recovering) throw new Error("Storage write failed; restart and recover before writing again.");
+  }
+  private failed(error: unknown): never {
+    const first = !this.unfinished;
+    this.unfinished = true;
+    if (first) this.onFailure?.(error);
+    throw error;
+  }
 
   constructor(root: string) {
     this.root = root;
-    fs.mkdirSync(root, { recursive: true });
+    ensureDirectory(root);
+    const manifest = path.join(root, MANIFEST);
+    if (fs.existsSync(manifest)) {
+      const saved = JSON.parse(fs.readFileSync(manifest, "utf8"));
+      if (saved.version !== 1 || !saved.files || typeof saved.files !== "object" || Array.isArray(saved.files)) throw new Error("Invalid storage manifest");
+      for (const [logical, physical] of Object.entries(saved.files)) {
+        if (typeof physical !== "string" || !physical.startsWith("conversations/generations/") || path.isAbsolute(physical) || physical.split(/[\\/]/).includes("..")) throw new Error("Invalid storage generation path");
+        if (!fs.existsSync(path.join(root, physical))) throw new Error(`Missing storage generation: ${physical}`);
+        this.aliases[logical] = physical;
+        const baseline = saved.baselines?.[logical] ?? 0;
+        if (!Number.isSafeInteger(baseline) || baseline < 0 || baseline > fs.statSync(path.join(root, physical)).size) throw new Error("Invalid storage snapshot baseline");
+        this.baselines[logical] = baseline;
+      }
+    }
   }
 
   private abs(file: string): string {
-    return path.join(this.root, file);
+    return path.join(this.root, this.aliases[file] ?? file);
   }
+
+  filePath(file: string): string { return this.abs(file); }
+  bytes(file: string): number { return fs.statSync(this.abs(file), { throwIfNoEntry: false })?.size ?? 0; }
+  deltaBytes(file: string): number { return Math.max(0, this.bytes(file) - (this.baselines[file] ?? 0)); }
 
   read(file: string): Record_[] {
     return readLines(this.abs(file));
@@ -132,23 +167,40 @@ export class Store {
 
   /** Append one record. `sync` forces it to disk before returning. */
   append(file: string, rec: Record_, sync = true): void {
+    this.writable();
+    try {
+      this.appendRecord(file, rec, sync);
+      if (file === "audit.jsonl" && this.bytes(file) > 16 * 1024 * 1024) {
+        const abs = this.abs(file), fd = fs.openSync(abs, "r");
+        try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+        fs.renameSync(abs, `${abs}.${Date.now()}-${randomBytes(3).toString("hex")}`);
+        syncDirectory(path.dirname(abs));
+        this.repaired.delete(abs);
+      }
+    } catch (error) { this.failed(error); }
+  }
+
+  private appendRecord(file: string, rec: Record_, sync: boolean): void {
     const abs = this.abs(file);
+    const exists = fs.existsSync(abs);
     if (!this.repaired.has(abs)) {
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      ensureDirectory(path.dirname(abs));
       repairTail(abs);
       this.repaired.add(abs);
     }
     const fd = fs.openSync(abs, "a");
     try {
-      fs.writeSync(fd, JSON.stringify(rec) + "\n");
+      fs.writeFileSync(fd, JSON.stringify(rec) + "\n");
       if (sync) fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);
     }
+    if (sync && !exists) syncDirectory(path.dirname(abs));
   }
 
   /** Apply all ops or none. A single op needs no WAL. */
   tx(ops: Op[]): void {
+    this.writable();
     if (ops.length === 0) return;
     if (ops.length === 1) return this.append(ops[0].file, ops[0].rec);
     const tx = `tx_${randomBytes(6).toString("hex")}`;
@@ -160,11 +212,10 @@ export class Store {
         this.failpoint?.(`after-op-${i}`);
       });
       this.append(WAL, { t: "commit", tx });
+      this.checkpoint();
     } catch (e) {
-      this.unfinished = true;
-      throw e;
+      this.failed(e);
     }
-    this.checkpoint();
   }
 
   /** Test hook: throw here to simulate a crash between two steps of `tx`. */
@@ -172,46 +223,89 @@ export class Store {
 
   /** Finish transactions a crash left half applied. Call once, before reading state. */
   recover(): number {
-    repairTail(this.abs(WAL));
-    const begun = new Map<string, { f: string; r: Record_ }[]>();
-    for (const rec of this.read(WAL)) {
-      if (rec.t === "begin") begun.set(rec.tx, rec.ops);
-      else if (rec.t === "commit") begun.delete(rec.tx);
-    }
-    for (const [tx, ops] of begun) {
-      const applied = new Map<string, Set<string>>();
-      ops.forEach((op, i) => {
-        let tags = applied.get(op.f);
-        if (!tags) {
-          repairTail(this.abs(op.f));
-          tags = new Set(this.read(op.f).map((r) => r._tx).filter(Boolean));
-          applied.set(op.f, tags);
-        }
-        const tag = `${tx}:${i}`;
-        if (!tags.has(tag)) this.append(op.f, { ...op.r, _tx: tag });
-      });
-      this.append(WAL, { t: "commit", tx });
-    }
-    this.unfinished = false;
-    this.checkpoint(true);
-    return begun.size;
+    if (this.unfinished) throw new Error("Recover storage using a new Store and rebuild state.");
+    this.recovering = true;
+    try {
+      repairTail(this.abs(WAL));
+      const begun = new Map<string, { f: string; r: Record_ }[]>();
+      for (const rec of this.read(WAL)) {
+        if (rec.t === "begin") begun.set(rec.tx, rec.ops);
+        else if (rec.t === "commit") begun.delete(rec.tx);
+      }
+      for (const [tx, ops] of begun) {
+        const applied = new Map<string, Set<string>>();
+        ops.forEach((op, i) => {
+          let tags = applied.get(op.f);
+          if (!tags) {
+            repairTail(this.abs(op.f));
+            tags = new Set(this.read(op.f).map((r) => r._tx).filter(Boolean));
+            applied.set(op.f, tags);
+          }
+          const tag = `${tx}:${i}`;
+          if (!tags.has(tag)) this.append(op.f, { ...op.r, _tx: tag });
+        });
+        this.append(WAL, { t: "commit", tx });
+      }
+      this.unfinished = false;
+      this.checkpoint(true);
+      return begun.size;
+    } finally { this.recovering = false; }
   }
 
   /** The WAL only matters for open transactions; with none open it can be emptied. */
   private checkpoint(force = false): void {
     const abs = this.abs(WAL);
     if (!fs.existsSync(abs) || (this.unfinished && !force)) return;
-    if (force || fs.statSync(abs).size > WAL_CHECKPOINT_BYTES) fs.truncateSync(abs, 0);
+    if (force || fs.statSync(abs).size > WAL_CHECKPOINT_BYTES) {
+      const fd = fs.openSync(abs, "r+");
+      try { fs.ftruncateSync(fd, 0); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    }
   }
 
   /** Replace a log by its compacted form, atomically. */
   rewrite(file: string, recs: Record_[]): void {
-    const abs = this.abs(file);
-    const tmp = `${abs}.tmp`;
-    fs.writeFileSync(tmp, recs.map((r) => JSON.stringify(r) + "\n").join(""));
-    const fd = fs.openSync(tmp, "r");
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fs.renameSync(tmp, abs);
+    this.writable();
+    try { atomicWrite(this.abs(file), recs.map((r) => JSON.stringify(r) + "\n").join("")); }
+    catch (error) { this.failed(error); }
+  }
+
+  /** Switch a group of compacted logs with one durable manifest publication. Transcripts keep their offsets. */
+  compact(logs: Record<string, Record_[]>): void {
+    this.writable();
+    const prior = { ...this.aliases };
+    const generation = `conversations/generations/g_${randomBytes(8).toString("hex")}`;
+    const next = { ...prior };
+    const baselines = { ...this.baselines };
+    try {
+      this.checkpoint(true);
+      for (const [i, [file, recs]] of Object.entries(logs).entries()) {
+        next[file] = `${generation}/${i}-${path.basename(file)}`;
+        atomicWrite(path.join(this.root, next[file]), recs.map(r => JSON.stringify(r) + "\n").join(""));
+        baselines[file] = fs.statSync(path.join(this.root, next[file])).size;
+        this.failpoint?.(`after-snapshot-file-${i}`);
+      }
+      this.failpoint?.("before-snapshot-publish");
+      atomicWrite(path.join(this.root, MANIFEST), JSON.stringify({ version: 1, files: next, baselines }) + "\n");
+      this.aliases = next;
+      this.baselines = baselines;
+      this.failpoint?.("after-snapshot-publish");
+    } catch (error) { this.failed(error); }
+    // Cleanup follows publication; failures only leave unused files, never a partial state.
+    for (const file of Object.keys(logs)) {
+      for (const old of new Set([prior[file] ?? file, file])) {
+        try { fs.rmSync(path.join(this.root, old), { force: true }); } catch { /* retry on a later maintenance pass */ }
+      }
+    }
+    for (const dir of new Set(Object.values(prior).map(file => path.dirname(path.join(this.root, file))))) {
+      try { fs.rmdirSync(dir); } catch { /* a live or nonempty generation stays */ }
+    }
+    const active = new Set(Object.values(next).map(file => path.dirname(path.join(this.root, file))));
+    try {
+      const generations = path.join(this.root, "conversations/generations");
+      for (const entry of fs.readdirSync(generations, { withFileTypes: true })) {
+        const dir = path.join(generations, entry.name);
+        if (entry.isDirectory() && /^g_[a-f0-9]{16}$/.test(entry.name) && !active.has(dir)) fs.rmSync(dir, { recursive: true, force: true });
+      }
+    } catch { /* unused generations can be collected on the next successful maintenance */ }
   }
 }

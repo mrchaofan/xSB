@@ -77,6 +77,8 @@ Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src
 
 ### 2.1 配置：两个文件
 
+全局目录是当前用户在本机的 `~/.xsb2_global/`；`XSB_HOME` 只能设为非空绝对目录，并与项目数据目录分离。`config.json` 保存后端、限额和插件开关；新项目插件批准写入独立的 `trust.json`（项目路径、名称、内容指纹、批准/撤销时间），旧 `approvedPlugins` 继续兼容读取。所有配置写入者用同一个跨进程文件锁完成读改写，临时文件 fsync 后原子替换，并保留最近有效配置。损坏配置采用有效快照并提供诊断，不能重新启用原先禁用的插件；后端条目分别校验，限额联合检查预留预算小于输入预算。桌面设置页可导出/导入全局配置、插件文件、界面偏好和渠道选择，凭证、批准记录及机器生成的启动器不随备份转移。
+
 | 文件 | 字段 | 含义 |
 | - | - | - |
 | `~/.xsb2_global/config.json`（这台机器） | `backends.<名称>.command` | 启动该后端的可执行文件，按 PATH 查找 |
@@ -452,16 +454,16 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
 
 ## 7. 存储
 
-全部在 `.xsb2/` 下，都是只追加的 JSONL 事件日志，内存状态是对日志的折叠（[state.ts](../packages/hub/src/state.ts)）：
+项目数据在 `.xsb2/` 下，业务状态由 JSONL 事件日志重放得到；运行时先恢复 WAL，再读取当前存储代（[state.ts](../packages/hub/src/state.ts)）：
 
 ```
 .xsb2/
   config.json                       项目设置（机器设置在 ~/.xsb2_global/config.json）
-  agents.jsonl                      Agent 及其 workspace
-  sessions.jsonl                    会话 ↔ 后端会话
-  tasks.jsonl  gates.jsonl          任务、汇合门
-  mailbox.jsonl                     收件箱：Agent 间的消息与通知，enqueue / ack
-  ledger.jsonl                      台账：每条输入的去向（模型看没看到）
+  project.json                      稳定项目 ID、当前位置和先前位置
+  conversations/agents.jsonl …      初始日志的逻辑名称：agents、sessions、tasks、gates、mailbox、ledger、assets、workflows
+  conversations/current.json       原子发布的逻辑日志 → 存储代文件映射
+  conversations/generations/<代>/   完整有效状态快照，后续事件追加在本代日志中
+  conversations/cleanup.json        可重试的永久清理计划
   audit.jsonl                       审计：Kernel 的事件、否决、死信；只写不读
   wal.jsonl                         预写日志
   agents/<id>/instructions.md       这个 Agent 是谁、怎么工作（可手改）
@@ -469,14 +471,19 @@ skill 不依赖任何后端的原生 skills 机制，所以对每个后端行为
   agents/<id>/sessions/<sid>.jsonl  会话记录（`session/resume` 带 `replayFrom` 时回放）
   agents/<id>/scratch/              它的草稿和中间文件
   shared/                           Agent 之间交接的零散文件
-  assets.jsonl  assets/             资产库：索引与文件
-  roles/<角色>/                      项目自己的角色：role.json、instructions.md、skills/（用户编写）。所用预设团队的角色不在这里
+  assets/                           资产文件（索引在 conversations）
+  agents/<id>/context/              按内容引用的交接、大内容与欠交输入
+  desktop/outbox.json               桌面客户端按 messageId 保存的发件箱
   run/                              锁、pid、socket、日志
 ```
 
 - 单文件的修改就是追加一行；崩溃留下的半行在下次打开时丢弃。
+- 任一写入失败后 Store 拒绝继续修改，Hub 撤销执行入口并退出；恢复必须使用新实例并重建内存状态。
+- 累计新增记录超过 64 MiB 时，Hub 在提交间隙将有效状态写入新存储代，所有文件落盘后用一个清单原子发布，再清理旧日志。去重账本、真实起因边和主题统计保留。工作流的版本、回执与节点变化增量追加，快照提供完整基线；audit 超过 16 MiB 轮转并保留旧文件。正文不重写，图片和分页的偏移引用保持稳定。
+- Agent workspace 和资产路径按项目相对、数据目录相对、外部绝对三类保存；旧格式路径兼容读取。项目移动保持会话和项目身份、解析旧文件链接，并以交接建立新 cwd 的后端会话。桌面草稿与侧栏状态按项目 ID 索引并迁移原来的路径键。
+- 资产仍按创建者回收；清理提交后广播失效资产，界面移除旧卡片、保留历史引用并标为不可用，工具调用返回可处理的错误。永久清理先保存计划、原子发布移除记录的快照，最后删除文件；中断后启动继续完成。
 - 跨文件的修改走 WAL（[store.ts](../packages/store/src/store.ts)）：先把整组记录写进 `wal.jsonl` 并落盘，再逐个追加（每条带事务标记），最后写 commit。重启时对没有 commit 的事务补写缺失的记录。例如"任务完成"是一个事务：任务状态、确认原邮件、关门、投递合并结果、释放被它挡住的任务，要么全有要么全无。
-- 邮件是**至少一次**投递：一轮结束才 ack。Hub 停止或崩溃时没跑完的任务，重启后会重新执行。插话投递失败时退回为排队的下一轮，不会丢。
+- 邮件只在持久化结算中消费。任务结束、邮件 ack、结果通知和依赖释放一起提交；工作流用户停止将整个作用域的图状态、任务冻结、停止代次和旧待办撤销一起提交，然后取消后端。重启只路由未插入的输入；已插入输入按执行结果未知结算，不重放。
 - **也可以让它不接着做。** 停止 Hub 的一方可以留下一个标记（`run/abandon`，`stopHub(paths, true)`）：下一次启动的 Hub 看到它，就把没做完的一切放弃再开始（[kernel.ts](../packages/hub/src/kernel.ts) 的 `abandon`），标记随即删除。放弃是一个事务：未确认的邮件全部确认掉，没结束的任务记为 `interrupted`（停止方是用户），还开着的汇合门关掉。不唤醒任何人，因为那本身就是一轮，会把用户不想继续的事又做起来；派发者、承接者和没送达的邮件的发件人各收到一条通知，留在收件箱，随它们下一轮附上。标记是留给下一个 Hub 的，不是对当前这个的请求，所以不管当前这个怎么结束（包括被直接杀掉）都算数。桌面应用在用户确认"仍然退出"时用它（GUI.md）；`xsb hub stop` 不用，仍是下次接着做。
 - 一个项目只有一个 Hub，因为 Hub 是这个项目日志的唯一写入者、Agent 进程的持有者、两个 socket 的监听者：两个 Hub 会各写各的日志、把同一封邮件跑两遍、互相抢走 socket。单例由内核保证，不靠文件内容：Hub 在运行期间持有 `run/hub.lock` 上的文件锁（[lock.ts](../packages/hub/src/lock.ts)），进程不管怎么结束（包括被强杀、断电）锁都随之释放，所以没有"残留的锁"要判断，也没有接管的竞争。同时启动的第二个 Hub 拿不到锁，在碰到 socket 和日志之前就退出。`run/hub.json` 只说明持锁的是谁（pid、启动时间），只在锁被持有时才作数：Hub 被强杀后它会留下，里面的 pid 可能已经是别的程序，`xsb hub status` / `stop` 不会把它当成 Hub。Node 没有自己的 `flock`，标准库里够得着的文件锁只有 SQLite 的：对一个空数据库开独占事务（`node:sqlite`），POSIX 上是 fcntl 锁，Windows 上是 LockFileEx。
 

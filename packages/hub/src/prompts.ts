@@ -32,6 +32,7 @@ const WORKING_RULES = `
 
 /** Enforced lifecycle contract; keep aligned with docs/TURN-LIFECYCLE.md and the runtime regression tests. */
 export const TASK_LIFECYCLE_RULES = `
+Storage failure invalidates execution: do not initiate more effects or blindly repeat inputs with uncertain outcomes; xSB must restart and recover its durable state. Task settlement and mail consumption commit together. User stops durably revoke the whole accepted scope before backend cancellation; queued work from that scope does not return after restart. Clearing context preserves the user's transcript but atomically changes the model's context boundary. Project relocation preserves conversation identity and supplies a historical handoff in the new working directory, never a replay of executed inputs. Assets are reclaimed with their creator's cleaned-up conversation; handle unavailable versions by obtaining another valid reference, not by assuming their contents.
 Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks and messages from agents join a running turn that is unprotected; behind a protected turn they queue. Task results never join a running turn. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. Background tool calls have no Hub concurrency cap; graph validation has no step cap. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. Only ACP insertion or echo acknowledges input. A user message that failed to reach you (not one the user stopped) is given to you once, marked "[xsb] … did not reach you", in front of the user's next message: treat it as said before that message, and do not act on it twice. Old callbacks, tool permissions and backend receipts expire with their binding. Do not bypass the Hub to create hidden delegation. You may use backend-native background commands. Backend-native notifications may trigger runs outside a turn: xSB records and displays their execution boundaries without creating tasks or granting turn tool permissions. A submitted turn owns its new run; input inserted into an already-unowned run claims it from that receipt onward. User stop still targets the turn and its accepted work.
 A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery. The host accepts it after normal turn completion and revalidation. Pause and an escalation with pauseSelf stop affected attempts. After restart unfinished workflows are paused until explicit resume; completed graphs remain completed and cannot be resumed into duplicate work. Workflow state queries report the current state and allowed controls. xSB ask returns immediately: end the turn and wait for the user's next message, which continues the assignment. Claude's native AskUserQuestion instead waits through ACP form elicitation and continues the same turn. Native requests and answers expire with their turn/backend binding and are cancelled by stop or disconnect; they never become later prompts. Codex uses xSB ask, not native elicitation. A workflow context may list work a user stop cancelled; it will not come back. An assignment may say earlier assignments were withdrawn; do not continue those. Answer status and unrelated questions directly.`;
 
@@ -280,7 +281,7 @@ export function conversationRecord(title: string, backend: string, turns: PastTu
 }
 
 /** Why a session goes on in a backend session that has none of its conversation. */
-export type Renewal = "backend_changed" | "not_restored" | "renewed" | "stopped" | "isolated";
+export type Renewal = "backend_changed" | "not_restored" | "renewed" | "stopped" | "isolated" | "project_moved";
 
 /**
  * The first thing a backend session is told when it takes over a conversation it has none of: the earlier turns
@@ -289,7 +290,7 @@ export type Renewal = "backend_changed" | "not_restored" | "renewed" | "stopped"
  */
 export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; waiting: Results[]; assets: Asset[] }): string {
   const reason =
-    why === "backend_changed"
+    why === "project_moved" ? "The project directory moved. Continue from this historical handoff in the new working directory; do not repeat earlier executed work." : why === "backend_changed"
       ? "This session now runs on another agent program, which has none of the earlier conversation."
       : why === "renewed"
         ? "This conversation had grown long, and goes on in a new session of the agent program. You have none of the earlier conversation but this handoff."

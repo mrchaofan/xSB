@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { ensureDirectory, syncDirectory } from "@xsb/store";
 import type { Asset, AssetRef } from "@xsb/protocol";
 import type { LiveSession, Turn } from "./session.ts";
 import type { Hub } from "./hub.ts";
@@ -100,11 +101,14 @@ export function accessAsset(
         }
       }
       const dir = path.join(hub.paths.assets, "workflow", fingerprint(asset));
-      fs.mkdirSync(dir, { recursive: true });
+      ensureDirectory(dir);
       const version = versions.length + 1,
         file = path.join(dir, newId("file") + path.extname(source));
       fs.copyFileSync(source, file, fs.constants.COPYFILE_EXCL);
+      const fd = fs.openSync(file, "r+");
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
       fs.chmodSync(file, 0o444);
+      syncDirectory(dir);
       registered = {
         id: assetKey(asset),
         type: "workflow",

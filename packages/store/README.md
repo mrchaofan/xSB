@@ -7,7 +7,7 @@
 ```ts
 import { Store } from "@xsb/store";
 
-const store = new Store("/path/to/.xsb"); // 所有文件名都相对这个目录
+const store = new Store("/path/to/project/.xsb2"); // 所有逻辑文件名都相对这个目录
 store.recover();                          // 启动时调用一次，在读任何状态之前
 
 store.append("agents.jsonl", { op: "put", agent });   // 单文件：追加一行并落盘
@@ -37,6 +37,10 @@ store.rewrite("memory.jsonl", compacted);             // 用压缩后的内容�
 读到的记录可能带 `_tx` 字段，使用方忽略它即可。
 
 ## 前提
+
+- 任一写入失败后，本实例拒绝 `append`、`tx`、`rewrite` 和压缩。必须创建新的 Store，先恢复 WAL，再重建 Hub 状态；不能在旧内存状态上继续写入。
+- `compact(logs)` 把整组日志写到 `conversations/generations/` 下的新一代，可靠落盘后原子发布 `conversations/current.json`。调用方须提供完整的有效状态，并保持单写者。提交之后才清理旧文件；读者必须通过 Store 解析逻辑日志名。
+- 压缩保留 messageId 去重记录、任务起因边和主题统计。对话正文不参与压缩，字节偏移保持稳定。
 
 - **单写者**：同一个目录只能有一个进程在写。xsb 里由 Hub 独占项目来保证（见 `@xsb/hub` 的 `daemon.ts`）。
 - `tx` 是同步的，进程内事务不会交错。

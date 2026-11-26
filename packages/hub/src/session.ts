@@ -33,6 +33,7 @@ import { Paths } from "./paths.ts";
 import { asPreface, conversationTitle, handoff, isXsbText } from "./prompts.ts";
 import type { Gives, Renewal } from "./prompts.ts";
 import { turnsSinceCleared } from "./transcript.ts";
+import { atomicWrite } from "@xsb/store";
 import type { MailItem, SessionRec } from "./state.ts";
 import type { WorkflowTold } from "./workflow-state.ts";
 import { ops } from "./state.ts";
@@ -331,7 +332,7 @@ export class LiveSession {
         // A resumed adapter without systemPrompt must also receive updated lifecycle/role instructions.
         if (!backend.caps.systemPrompt) this.prefaces.push(asPreface(instructions));
         this.pendingHandoff();
-        if (!this.rec.backend) this.save({ backend: agent.backend });
+        if (!this.rec.backend || !this.rec.backendWorkspace) this.save({ backend: agent.backend, backendWorkspace: agent.workspace });
         return;
       } catch (e) {
         this.hub.log(`${this.id}: backend session ${prior} not restored (${errorMessage(e)}), starting a new one`);
@@ -349,7 +350,7 @@ export class LiveSession {
     const fresh = !!prior && !!this.rec.backendFresh;
     const checkpoint = renewal && !fresh ? this.handoff(renewal) : undefined;
     const checkpointRef = checkpoint === undefined ? undefined : contextRef(this.hub.paths, this.agentId, checkpoint).ref;
-    this.save({ backendSessionId: created.sessionId, backendFresh: true, backend: agent.backend, renew: undefined, used: undefined, contextSize: undefined,
+    this.save({ backendSessionId: created.sessionId, backendWorkspace: agent.workspace, backendFresh: true, backend: agent.backend, renew: undefined, used: undefined, contextSize: undefined,
       contextEpoch: (this.rec.contextEpoch ?? 0) + 1,
       ...(checkpointRef ? { contextCheckpoint: checkpointRef, contextHandoffPending: checkpointRef } : {}),
       ...(renewal === "backend_changed" ? { contextRenewAt: undefined, contextRecovery: undefined, selectedConfig: undefined } : {}) });
@@ -552,14 +553,28 @@ export class LiveSession {
    */
   clear(): void {
     if (this.busy) throw failure("session_busy", { agent: this.agentId });
-    this.finishRun({ stopReason: "cancelled" });
-    this.lastRun = undefined;
-    this.prefaces = [];
-    this.backend = undefined;
-    this.forget();
-    this.estimated = 0;
-    this.save({ backendSessionId: undefined, renew: undefined, used: undefined, contextSize: undefined, contextRecovery: undefined, contextCheckpoint: undefined, contextHandoffPending: undefined });
-    this.boundary({ kind: "cleared", handoff: false });
+    const oldBackend = this.backend, oldSessionId = this.rec.backendSessionId;
+    const boundary: Boundary = { kind: "cleared", handoff: false };
+    const next: SessionRec = {
+      ...this.rec, backendSessionId: undefined, renew: undefined, used: undefined, contextSize: undefined,
+      contextRecovery: undefined, contextExecution: undefined, contextCheckpoint: undefined, contextHandoffPending: undefined, updatedAt: now()
+    };
+    const update: SessionUpdate = { sessionUpdate: "session_info_update", _meta: { [Boundaries.key]: boundary } } as SessionUpdate;
+    this.hub.state.commit([ops.putSession(next), { file: Paths.transcript(this.agentId, this.id), rec: { ts: now(), update } }]);
+    this.hub.state.afterCommit(() => {
+      this.rec = next;
+      this.finishRun({ stopReason: "cancelled" });
+      this.lastRun = undefined;
+      this.prefaces = [];
+      if (oldSessionId) oldBackend?.close?.(oldSessionId);
+      this.hub.rotateBridge(this);
+      this.hub.backends.stop(this.agentId);
+      this.backend = undefined;
+      this.forget();
+      this.estimated = 0;
+      for (const client of this.clients) client.conn.notify("session/update", { sessionId: this.id, update });
+      this.hub.kernel.hooks.emit("acp.session_renewed", { agentId: this.agentId, sessionId: this.id });
+    });
   }
 
   /** ACP's `auth_required` says nothing about which of several agents needs what. */
@@ -600,8 +615,9 @@ export class LiveSession {
   }
 
   save(patch: Partial<SessionRec>): void {
-    this.rec = { ...this.rec, ...patch, updatedAt: now() };
-    this.hub.state.commit([ops.putSession(this.rec)]);
+    const next = { ...this.rec, ...patch, updatedAt: now() };
+    this.hub.state.commit([ops.putSession(next)]);
+    this.hub.state.afterCommit(() => { this.rec = next; });
   }
 
   // ---- updates ------------------------------------------------------------
@@ -735,7 +751,7 @@ export class LiveSession {
   /** Record an update and show it to every attached client but `except`. */
   emit(update: SessionUpdate, except?: Client): void {
     const file = Paths.transcript(this.agentId, this.id);
-    const offset = fs.statSync(path.join(this.hub.paths.dir, file), { throwIfNoEntry: false })?.size ?? 0;
+    const offset = this.hub.state.store.bytes(file);
     this.hub.state.store.append(file, { ts: now(), update }, false);
     for (const client of this.clients) {
       if (client !== except) {
@@ -805,9 +821,7 @@ export class LiveSession {
     if (owed.includes(input.messageId)) return;
     const file = this.owedFile(input.messageId);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(input.content));
-    fs.renameSync(temporary, file);
+    atomicWrite(file, JSON.stringify(input.content));
     this.save({ owed: [...owed, input.messageId] });
   }
 
@@ -877,6 +891,7 @@ export class LiveSession {
   private receipt(input: Input, inserted: boolean, why: unknown = RpcError.cancelled()): void {
     if (inserted && input.receipted) return;
     const about = { agentId: this.agentId, sessionId: this.id, from: fromOf(input.origin), ...(input.origin.taskId ? { taskId: input.origin.taskId } : {}) };
+    this.hub.kernel.mark(input.messageId, inserted ? "inserted" : "discarded_unseen", about);
     this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: input.messageId, about, inserted });
     if (inserted) {
       input.receipted = true;
@@ -1344,10 +1359,12 @@ export class LiveSession {
       if (end.failure) this.hub.log(`${this.agentId}/${this.id}: turn failed: ${errorMessage(end.failure)}`);
       // Its failure goes into the transcript, where the user sees it: the prompt that started it may have been answered long ago.
       if (end.failure) this.emit({ sessionUpdate: "session_info_update", _meta: { [TurnFailure.key]: { message: errorMessage(end.failure), data: (end.failure as RpcError).data } } } as SessionUpdate);
-      this.hub.kernel.hooks.emit("acp.turn_ended", { agentId: this.agentId, sessionId: this.id, turnId: turn.id, stopReason: end.stopReason, failed: !!end.failure });
-      this.hub.workflows?.ended(this,turn,end);
-      this.hub.delivery.turnEnded(this, turn, end);
-      this.hub.agentChanged(this.agentId);
+      this.hub.state.atomic(() => {
+        this.hub.state.afterCommit(() => this.hub.kernel.hooks.emit("acp.turn_ended", { agentId: this.agentId, sessionId: this.id, turnId: turn.id, stopReason: end.stopReason, failed: !!end.failure }));
+        this.hub.workflows?.ended(this,turn,end);
+        this.hub.delivery.turnEnded(this, turn, end);
+        this.hub.state.afterCommit(() => this.hub.agentChanged(this.agentId));
+      });
     }
     this.state("idle", end);
     turn.done.resolve(end);

@@ -46,6 +46,7 @@ export function pluginsSection(page) {
       view.description && h("p", { class: "tool-about" }, view.description),
       view.runs && h("code", { class: "tool-command" }, view.runs),
       view.problem && h("p", { class: "tool-problem" }, t(`plugins.problem.${view.problem}`)),
+      view.scope === "project" && view.approved && view.approvalFingerprint && h("button", { class: "btn", onclick: () => act(xsb.revokePluginApproval(view.approvalFingerprint), t("plugins.applied")) }, t("plugins.revoke")),
       view.scope === "project" && !view.problem && !view.approved && h("div", { class: "tool-approve" },
         h("p", {}, t("plugins.unapproved")),
         h("button", { class: "btn primary", onclick: () => act(xsb.approvePlugin(view.name), t("plugins.applied")) }, t("plugins.approve"))));

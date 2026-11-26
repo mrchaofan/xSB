@@ -21,7 +21,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "node --test test/config.test.ts test/plugins.test.ts test/context.test.ts test/tool-context.test.ts test/workflow.test.ts test/history.test.ts test/stop.test.ts test/turns.test.ts test/transcript.test.ts test/delete.test.ts && node test/kernel.test.ts && node test/e2e.test.ts",
+    "test": "node --test test/config.test.ts test/plugins.test.ts test/storage.test.ts test/context.test.ts test/tool-context.test.ts test/workflow.test.ts test/history.test.ts test/stop.test.ts test/turns.test.ts test/transcript.test.ts test/delete.test.ts && node test/kernel.test.ts && node test/e2e.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -63,7 +63,7 @@ test("a deleted conversation leaves the list at once; cleaning up removes its fi
   assert.deepEqual([...again.state.agents.values()].map((a) => a.name), ["kept"]);
   assert.ok(!again.state.sessions.has(gone.session.id));
   assert.deepEqual([...again.state.assets.keys()], ["image/kept"]);
-  const log = fs.readFileSync(path.join(paths.dir, "conversations/agents.jsonl"), "utf8");
+  const log = fs.readFileSync(again.state.store.filePath("conversations/agents.jsonl"), "utf8");
   assert.ok(!log.includes(gone.session.agentId), "the log is compacted, not just appended to");
 });
 

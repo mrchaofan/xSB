@@ -87,6 +87,7 @@ async function runHub(project: string): Promise<void> {
   let hub: Hub;
   try {
     hub = new Hub(project);
+    hub.state.store.onFailure = error => { void hub.storageFailed(error).finally(() => { release(); process.exit(1); }); };
     await hub.start();
   } catch (e) {
     release();

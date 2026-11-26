@@ -108,8 +108,7 @@ export class Delivery {
     if (route === "return") return this.returned(item, delivered);
     const steered = route === "interject" && session.steer(delivered, item.targetTurnId);
     if (item.targetTurnId && !steered) {
-      this.hub.kernel.mark(item.id, "discarded_unseen");
-      this.hub.kernel.ack([item.id]);
+      this.hub.kernel.reject(item, "Target turn has ended or changed.");
       waiting?.reject(new Error("Target turn has ended or changed."));
       return;
     }
@@ -129,8 +128,7 @@ export class Delivery {
     })();
     const decided = kernel.hooks.decide("message.pre_submit", { to: item.to, from: item.from, item, prompt: rendered.prompt });
     if (isVeto(decided)) {
-      kernel.mark(item.id, "discarded_unseen");
-      kernel.ack([item.id]);
+      kernel.reject(item, decided.veto);
       return undefined;
     }
     const origin: OriginMeta = {
@@ -154,9 +152,12 @@ export class Delivery {
     if (!waiter) return;
     this.waiters.delete(taskId);
     clearTimeout(waiter.timer);
-    waiter.resolve(delivered.prompt.map((b) => (b.type === "text" ? b.text : "")).join("\n"));
-    this.hub.kernel.ack([item.id]);
     const about = { agentId: item.to.agentId, sessionId: item.to.sessionId, from: item.from, taskId };
+    this.hub.state.atomic(() => {
+      this.hub.kernel.mark(item.id, "seen", about);
+      this.hub.kernel.ack([item.id]);
+    });
+    waiter.resolve(delivered.prompt.map((b) => (b.type === "text" ? b.text : "")).join("\n"));
     this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: item.id, about, inserted: true });
   }
 
@@ -282,16 +283,26 @@ export class Delivery {
    * what they took along goes too. What the user says next is a task of its own: the user taking over.
    */
   userStop(session: LiveSession): void {
-    const inputs = session.beginUserStop();
-    if (!inputs) return;
-    const stopped = this.hub.kernel.stopSession({ agentId: session.agentId, sessionId: session.id }, inputs.pending, inputs.sent, inputs.inserted);
+    this.userStopMany([session]);
+  }
+
+  userStopMany(sessions: LiveSession[], extra: import("@xsb/store").Op[] = []): boolean {
+    const scopes = sessions.flatMap(session => {
+      const inputs = session.beginUserStop();
+      return inputs ? [{ session, ...inputs, to: { agentId: session.agentId, sessionId: session.id } }] : [];
+    });
+    if (!scopes.length) return false;
+    const stopped = this.hub.kernel.stopSessions(scopes, extra);
     if (isVeto(stopped)) {
-      session.releaseUserStop();
+      for (const { session } of scopes) session.releaseUserStop();
       this.hub.log(`user stop refused: ${stopped.veto}`);
-      return;
+      return false;
     }
-    session.rec = this.hub.state.sessions.get(session.id) ?? session.rec;
-    session.cancelUserWork();
+    for (const { session } of scopes) {
+      session.rec = this.hub.state.sessions.get(session.id) ?? session.rec;
+      session.cancelUserWork();
+    }
+    return true;
   }
 
   // ---- turns ----------------------------------------------------------------------
@@ -317,24 +328,31 @@ export class Delivery {
    * of a message that could not be read is told.
    */
   turnEnded(session: LiveSession, turn: Turn, end: TurnEnd): void {
-    const { kernel } = this.hub;
-    for (const [taskId, waiter] of this.waiters) if (waiter.turn === turn) this.unwait(taskId, "");
-    kernel.ack(turn.items.map((m) => m.id));
-    if (end.failure) {
+    this.hub.state.atomic(() => {
+      const { kernel } = this.hub;
       for (const item of turn.items) {
-        if (item.kind !== "task" && item.from.kind === "agent") {
-          // The sender believes the message arrived; tell it otherwise.
-          kernel.tell({ agentId: item.from.agentId, sessionId: item.from.sessionId }, item.topic, `Your message ${item.id} to "${session.agentId}" was not processed: ${errorMessage(end.failure)}`);
+        const input = turn.inputs.find(i => i.messageId === item.id);
+        if (!input) continue;
+        const state = input.in || input.receipted ? (!end.failure && end.stopReason !== "cancelled" ? "seen" : "inserted_unprocessed") : "discarded_unseen";
+        kernel.mark(item.id, state, { agentId: session.agentId, sessionId: session.id, from: item.from, ...(item.taskId ? { taskId: item.taskId } : {}) });
+      }
+      for (const [taskId, waiter] of this.waiters) if (waiter.turn === turn) this.unwait(taskId, "");
+      if (end.failure) {
+        for (const item of turn.items) {
+          if (item.kind !== "task" && item.from.kind === "agent") {
+            // The sender believes the message arrived; tell it otherwise.
+            kernel.tell({ agentId: item.from.agentId, sessionId: item.from.sessionId }, item.topic, `Your message ${item.id} to "${session.agentId}" was not processed: ${errorMessage(end.failure)}`);
+          }
+        }
+        // The tasks the turn brought fail even when they had not reached the model: nothing else will run them.
+        for (const item of turn.items) {
+          const task = item.kind === "task" ? this.hub.state.tasks.get(item.taskId!) : undefined;
+          if (task?.status === "queued") kernel.started(task.id);
         }
       }
-      // The tasks the turn brought fail even when they had not reached the model: nothing else will run them.
-      for (const item of turn.items) {
-        const task = item.kind === "task" ? this.hub.state.tasks.get(item.taskId!) : undefined;
-        if (task?.status === "queued") kernel.started(task.id);
-      }
-    }
-    const record = (task: { id: string }): string => taskRecord(this.hub.state.store, session.agentId, session.id, task.id);
-    kernel.turnEnded(session.id, end.stopReason, record, end.failure ? errorMessage(end.failure) : undefined);
+      const record = (task: { id: string }): string => taskRecord(this.hub.state.store, session.agentId, session.id, task.id);
+      kernel.turnEnded(session.id, end.stopReason, record, end.failure ? errorMessage(end.failure) : undefined, turn.items.map(m => m.id));
+    });
   }
 
   /**

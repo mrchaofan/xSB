@@ -12,6 +12,7 @@ const METHODS = [
   "openPage", "page", "pageWindow",
   "limitSettings", "setLimit", "projectLanguage", "setProjectLanguage",
   "plugins", "setPluginEnabled", "approvePlugin", "reloadPlugins", "revealPlugins",
+  "pluginApprovals", "revokePluginApproval", "exportSettings", "importSettings",
   "readClipboardImages", "copyText", "openArtifact", "revealArtifact",
 ];
 
