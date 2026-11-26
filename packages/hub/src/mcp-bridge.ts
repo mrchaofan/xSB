@@ -4,7 +4,7 @@
  * mcp.ts) and from then on is a pipe between the backend and the hub.
  */
 import net from "node:net";
-import { BRIDGE_ATTACH, BRIDGE_SOCKET_ENV, BRIDGE_TOKEN_ENV } from "./mcp.ts";
+import { BRIDGE_ATTACH, BRIDGE_SERVER_ENV, BRIDGE_SOCKET_ENV, BRIDGE_TOKEN_ENV } from "./mcp.ts";
 
 export function main(): void {
   const fail = (message: string): never => {
@@ -18,7 +18,7 @@ export function main(): void {
   const socket = net.connect(socketPath);
   socket.on("error", (e) => fail(e.message));
   socket.on("close", () => process.exit(0));
-  socket.write(JSON.stringify({ jsonrpc: "2.0", id: "attach", method: BRIDGE_ATTACH, params: { token } }) + "\n");
+  socket.write(JSON.stringify({ jsonrpc: "2.0", id: "attach", method: BRIDGE_ATTACH, params: { token, server: process.env[BRIDGE_SERVER_ENV] } }) + "\n");
   let head = "";
   const onData = (chunk: Buffer): void => {
     head += chunk.toString("utf8");

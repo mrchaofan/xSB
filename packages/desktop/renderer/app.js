@@ -3,6 +3,7 @@
 // xsb 是全局对象：Electron 里由 preload 注入，浏览器里直接打开时由 mock.js 提供。
 import { onArkLoginUrl } from "./ark.js";
 import { avatarImage, avatarPicker } from "./avatars.js";
+import { AVATARS } from "./avatar-catalog.js";
 import { backendIcon, backendKind, backendMark } from "./backend-icons.js";
 import { createArtifactBrowser, artifactDetails, artifactLabel, artifactNavigation } from "./artifacts.js";
 import { currentFlow, renderWorkflow, showTask, workflowPanelState, restoreWorkflowPanel } from "./workflow.js";
@@ -15,7 +16,7 @@ import { clock, t } from "./i18n.js";
 import { sessionPages, onPage, onPageRemoved, renderSide, selectTab } from "./pages.js";
 import { closeSettings, showSettings } from "./settings.js";
 import { onPreferencesChanged, syncWindowColors } from "./preferences.js";
-import { confirmDialog, openDialog } from "./form.js";
+import { confirmDialog, field, openDialog } from "./form.js";
 import { openContextMenu } from "./menu.js";
 import { questionRecord, syncAskPanel } from "./ask.js";
 import { bindArtifactResize } from "./resize.js";
@@ -125,20 +126,41 @@ function applyProviderTheme() {
 }
 
 /**
- * 删除对话（会话行的右键菜单）：说过话、有了后端会话的，先确认；空的新会话直接删。
+ * 删除对话（会话行的右键菜单）：有对话记录的先确认；没有记录的（哪怕已有后端会话）直接删。
  * 工作中的对话由中枢拒绝删除（停下后才能删），菜单里这一项不可用。
  */
 async function deleteConversation(agent) {
-  const used = agent.backendStarted || (state.transcripts[agent.id] ?? []).length > 0;
-  if (used && !(await confirmDialog(t("rail.delete.title", { name: agent.name }), [h("p", {}, t("rail.delete.body"))], t("rail.delete.confirm")))) return;
+  if (agent.conversed && !(await confirmDialog(t("rail.delete.title", { name: agent.name }), [h("p", {}, t("rail.delete.body"))], t("rail.delete.confirm")))) return;
   try { await xsb.deleteConversation(agent.id); }
   catch (e) { openDialog(t("rail.delete.failed"), [h("p", {}, e.message)], [{ label: t("common.close"), primary: true }]); }
+}
+
+function renameConversation(agent) {
+  const name = h("input", { type: "text", maxlength: 64, required: true, autocomplete: "off" });
+  name.value = agent.name;
+  let saving = false;
+  const dialog = openDialog(t("rail.rename"), [field(t("rail.rename.name"), name)], [
+    { label: t("common.cancel") },
+    { label: t("rail.rename.save"), primary: true, run: async () => {
+      if (saving) return false;
+      if (!name.value.trim()) throw Error(t("rail.rename.empty"));
+      saving = true;
+      try { onAgent(await xsb.renameConversation(agent.id, name.value.trim())); }
+      finally { saving = false; }
+    } },
+  ]);
+  name.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); dialog.querySelector(".primary").click(); }
+  });
+  name.focus();
+  name.select();
 }
 
 function renderRail() {
   applyProviderTheme();
   const roots = state.agents.filter(a => !a.workflowOwner);
   const menu = (e, a) => openContextMenu(e, [
+    { label: t("rail.rename"), icon: "edit", run: () => renameConversation(a) },
     { label: t("rail.delete"), icon: "trash", danger: true, disabled: a.state !== "idle", hint: t("rail.delete.busy"), run: () => deleteConversation(a) },
   ], a.name);
   fill($("#agents"), ...roots.map(a =>
@@ -573,6 +595,7 @@ export async function renderArtifact(force = false) {
   const tasks = (currentFlow()?.nodes ?? []).filter(n => n.sessionId && agentOf(n.agentId));
   const destination = $("#reference-destination");
   destination.hidden = !items.length || !tasks.length;
+  $("#artifact-references").hidden = $("#asset-reference").hidden && destination.hidden;
   if (!destination.hidden) {
     const select = destination.querySelector("select");
     fill(select, h("option", { value: state.open[0] }, t("artifact.mainComposer")),
@@ -675,7 +698,7 @@ async function newSession() {
   const unused = state.agents.find((a) => !a.workflowOwner && !(state.transcripts[a.id] ?? []).length);
   if (unused) return focusLane(unused.id);
   const agent = await xsb.newSession(defaultBackend());
-  onAgent(agent);
+  onAgent(await xsb.setAvatar(agent.id, AVATARS[Math.floor(Math.random() * AVATARS.length)].id));
   focusLane(agent.id);
 }
 $("#new-agent").onclick = () => newSession().catch((e) => fill($("#blank"), h("p", { class: "error" }, e.message)));

@@ -53,11 +53,13 @@
     <header class="bar artifact-toolbar">
       <button class="icon-btn" id="artifact-list" data-t-title="artifact.list.all" data-t-aria-label="artifact.list.all"><svg viewBox="0 0 16 16"><path d="M10 3L5 8l5 5"/></svg></button>
       <div class="artifact-title"><strong id="artifact-name"></strong><small id="artifact-meta"></small></div>
-      <button class="btn" id="asset-reference" hidden data-t="flow.reference"></button>
       <div id="artifact-navigation" hidden></div>
       <button class="icon-btn" id="artifact-info" hidden aria-expanded="false" aria-controls="artifact-details" data-t-title="artifact.details" data-t-aria-label="artifact.details"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 7v4M8 4.5v.5"/></svg></button>
     </header>
-    <label id="reference-destination" hidden><span data-t="artifact.destination"></span><select></select></label>
+    <div id="artifact-references" hidden>
+      <label id="reference-destination" hidden><span data-t="artifact.destination"></span><select></select></label>
+      <button class="btn" id="asset-reference" hidden data-t="flow.reference"></button>
+    </div>
     <div class="artifact-stage">
       <div class="artifact-body" id="artifact-body"></div>
       <aside class="artifact-details" id="artifact-details" hidden data-t-aria-label="artifact.details">

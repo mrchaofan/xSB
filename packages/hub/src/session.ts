@@ -26,7 +26,7 @@ import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
 import type { Hub } from "./hub.ts";
-import { bridgeServer } from "./mcp.ts";
+import { bridgeServer, XSB_SERVER } from "./mcp.ts";
 import { boundedText, contentTokens, contextOverflow, contextRef, textTokens } from "./context.ts";
 import { historyUpdate } from "./history.ts";
 import { Paths } from "./paths.ts";
@@ -301,7 +301,7 @@ export class LiveSession {
     const params = {
       cwd: agent.workspace,
       // The hub's own tools, then the others the agent has (Hub.toolServers): the system prompt says where each comes from.
-      mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), ...this.hub.toolServers(agent, this.clientMcp).map((t) => this.hub.withToolContext(t.server, this))],
+      mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), bridgeServer(paths.socket("mcp"), this.bridgeToken, XSB_SERVER), ...this.hub.toolServers(agent, this.clientMcp).map((t) => this.hub.withToolContext(t.server, this))],
       ...(backend.caps.systemPrompt ? { systemPrompt: { mode: "append", content: [text(instructions)] } } : {}),
       ...(backend.caps.additionalDirectories
         ? { additionalDirectories: [paths.shared, paths.assets, ] }
@@ -481,14 +481,6 @@ export class LiveSession {
 
   async setConfig(params: { configId: string; type?: string; value: unknown }) {
     const { configId, value } = params;
-    // The agent program is not called before the first message: a choice made before it is kept, and applied when the
-    // first message opens the backend session (`restoreConfig`), as one the backend no longer offers would be dropped.
-    if (!this.rec.backendSessionId) {
-      if (typeof value !== "string") throw RpcError.invalidParams("value must be an option id");
-      this.save({ selectedConfig: { ...this.rec.selectedConfig, [configId]: value } });
-      this.notifyControls();
-      return this.composerState();
-    }
     const backend = await this.ensureBackend();
     const binding = this.rec.backendSessionId;
     const revision = this.usageRevision;
@@ -514,7 +506,7 @@ export class LiveSession {
   }
 
   composerState() {
-    return { connected: !!this.backend, ...(!this.rec.backendSessionId ? { lazy: true } : {}), configOptions: this.backend ? this.setup.configOptions ?? [] : [],
+    return { connected: !!this.backend, configOptions: this.backend ? this.setup.configOptions ?? [] : [],
       selected: this.rec.selectedConfig ?? {}, used: this.used, size: this.contextSize };
   }
 
@@ -646,7 +638,7 @@ export class LiveSession {
         }
         break;
       case "session_info_update":
-        if (typeof update.title === "string" && update.title !== this.rec.title && !isXsbText(update.title)) this.save({ title: update.title });
+        if (!this.rec.titleEdited && typeof update.title === "string" && update.title !== this.rec.title && !isXsbText(update.title)) this.save({ title: update.title });
         break;
       case "config_option_update":
         if (Array.isArray(update.configOptions)) {
@@ -1090,7 +1082,7 @@ export class LiveSession {
     this.prefaces = [];
     for (const input of batch) input.prefaces = carried;
     this.estimated += tokens;
-    if (this.rec.backendFresh) this.save({ backendFresh: undefined });
+    if (this.rec.backendFresh || !this.rec.conversed) this.save({ backendFresh: undefined, conversed: true });
     const prompt = (): Promise<boolean> => {
       if (this.current !== turn || turn.cancelledBy) return Promise.reject(RpcError.cancelled());
       for (const input of batch) input.sent = "prompt";

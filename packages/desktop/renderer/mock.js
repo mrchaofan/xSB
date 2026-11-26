@@ -129,7 +129,7 @@
     if (!a) throw Error("Unknown conversation");
     return a;
   };
-  // 后端在第一次打开设置菜单（discover）时才连上，拉取要一会儿。
+  // 打开设置菜单（discover）时中枢为对话连上后端（新对话也建立后端会话），拉取要一会儿。
   const connected = new Set();
   function composerState(id) {
     const selected = get(id).selected ?? {};
@@ -159,7 +159,7 @@
   const row = (rows) => rows.map(([name, d, min, max]) => ({ name, default: d, min, max, value: undefined }));
   const backendRows = () => row([["sessionTokens", 150000, 10000, 2000000], ["promptTokens", 32000, 4000, 2000000], ["contextReserveTokens", 8192, 1024, 200000],
     ["toolOutputTokens", 4000, 500, 200000], ["contextRecoveryAttempts", 1, 0, 3]]);
-  const limits = { hub: row([["jobsAtOnce", 2, 1, 16], ["workflowValidationSteps", 100000, 1000, 10000000]]), backends: { claude: backendRows(), codex: backendRows() } };
+  const limits = { backends: { claude: backendRows(), codex: backendRows() } };
   let projectLanguage = language;
   window.xsb = {
     language,
@@ -206,10 +206,10 @@
       emit({ agent: a });
       return structuredClone(a);
     },
-    // 限制：与中枢 config.ts 的表相同；上下文限制按后端，执行限制全局。
+    // 上下文限制：与中枢 config.ts 的表相同，按后端设置。
     limitSettings: async () => structuredClone(limits),
     setLimit: async (backend, name, value) => {
-      (backend ? limits.backends[backend] : limits.hub).find((l) => l.name === name).value = value ?? undefined;
+      limits.backends[backend].find((l) => l.name === name).value = value ?? undefined;
       return structuredClone(limits);
     },
     projectLanguage: async () => projectLanguage,
@@ -223,6 +223,12 @@
       const a = get(id);
       if (data.transcripts[id].some((e) => e.kind === "input")) put(id, { id: "m" + ++sequence, kind: "boundary", boundary: { kind: "backend_changed", backend, handoff: true } });
       a.backend = backend;
+      emit({ agent: a });
+      return structuredClone(a);
+    },
+    renameConversation: async (id, title) => {
+      const a = get(id);
+      a.name = title.trim();
       emit({ agent: a });
       return structuredClone(a);
     },

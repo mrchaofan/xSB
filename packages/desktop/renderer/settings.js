@@ -84,7 +84,7 @@ function languageSection() {
 
 /**
  * 限制都在这台设备上（~/.xsb2_global/config.json），没有工作区或会话单独的设置。表单按中枢给出的表生成（默认值、范围），
- * 留空即用默认值；改动立即保存，下次用到时生效。backend：某个后端的上下文限制；null：中枢的限制。
+ * 留空即用默认值；改动立即保存，下次用到时生效。backend：某个后端的上下文限制。
  */
 function limitRows(items, backend, failure) {
   return items.map((item) => {
@@ -137,8 +137,6 @@ export function showSettings(key = "general", refresh = true) {
     card.append(h("details", { class: "backend-limits" }, h("summary", {}, t("limits.backend")), h("p", { class: "hint" }, t("limits.intro")), body));
     return card;
   });
-  const hubLimits = h("div", { class: "settings-card-body" });
-  limits?.then((all) => fill(hubLimits, ...limitRows(all.hub, null, limitsFailure)), () => {});
   if (key === "general") content = [
     section(t("settings.appearance"),
       settingRow(t("settings.theme"), t("settings.themeHint"), choose("theme", ["light", "dark", "system"])),
@@ -147,14 +145,9 @@ export function showSettings(key = "general", refresh = true) {
       toggle(t("settings.showTools"), global.showTools, (value) => save(() => saveGlobalPreferences({ showTools: value }))))),
   ];
   if (key === "backends") content = [
-    h("p", { class: "hint" }, t("settings.backendsHint")),
     limitsFailure,
     backendList = h("div", { class: "backend-list" }, ...backendCards()),
-    h("div", { class: "backend-list" }, arkCard()),
-    h("div", { class: "backend-check" },
-      h("div", { class: "backend-assurance" }, h("span", { "aria-hidden": "true", html: ICON.check }), h("span", {}, t("backend.check.free"))),
-      h("details", { class: "backend-explanation" }, h("summary", {}, t("backend.check.scope")), h("p", { class: "hint" }, t("backend.check.hint")))),
-    section(t("limits.hub"), h("p", { class: "hint" }, t("limits.hubIntro")), hubLimits)];
+    h("div", { class: "backend-list" }, arkCard())];
   if (key === "tools") content = pluginsSection("global");
   if (key === "workspaceTools") content = pluginsSection("project");
   if (key === "workspace") {

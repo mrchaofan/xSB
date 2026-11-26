@@ -8,13 +8,13 @@ function tool(name: string, description: string, properties: Record<string, unkn
 const main = [
   tool(
     "plan",
-    "xSB workflow: save one candidate workflow (a DAG of task nodes) for review, in place of any earlier candidate. One JSON object per line: {node,prompt,input?,model?,schema?,multi?}, {node,kind:'end'}, or {from,to,case?}. xSB names the version; the workflow context shows it with the graph.",
+    "xSB workflow: save one candidate workflow (a DAG of task nodes) for review, in place of any earlier candidate. One JSON object per line: {node,prompt,input?,model?,schema?,multi?}, {node,kind:'end'}, or {from,to,case?}. Task and end node names are shown to the user: write them in the conversation language declared in the system prompt. xSB names the version; the workflow context shows it with the graph.",
     { graphJsonl: string },
     ["graphJsonl"],
   ),
   tool(
     "execute",
-    "xSB workflow: adopt and run a workflow. With no arguments, adopt the candidate the workflow context shows; or supply a complete graphJsonl, or one complete replaceNode definition.",
+    "xSB workflow: adopt and run a workflow. With no arguments, adopt the candidate the workflow context shows; or supply a complete graphJsonl, or one complete replaceNode definition. Name new task and end nodes in the conversation language declared in the system prompt; preserve existing names when updating the same responsibility.",
     { graphJsonl: string, replaceNode: obj },
   ),
   tool(
@@ -66,29 +66,6 @@ const task = [
   ),
 ];
 const common = [
-  tool(
-    "ask",
-    "Ask the user 1 to 4 questions about preferences or choices that change the work and that you cannot reasonably settle yourself; ask them together. kind single: pick one option; multi: pick any; text: a free answer. Options are 2 to 8 short, distinct choices; other:true lets the user also write their own. Returns at once: then end your turn without assuming the answers. The user's reply is their next message: the answers, a skip (go on with sensible choices and say which), or other words instead.",
-    {
-      questions: {
-        type: "array",
-        minItems: 1,
-        maxItems: 4,
-        items: {
-          type: "object",
-          properties: {
-            question: string,
-            kind: { enum: ["single", "multi", "text"] },
-            options: { type: "array", items: string, maxItems: 8 },
-            other: { type: "boolean" },
-          },
-          required: ["question", "kind"],
-          additionalProperties: false,
-        },
-      },
-    },
-    ["questions"],
-  ),
   tool("asset_list", "List accessible registered versions in creation order.", { name: string }, ["name"]),
   tool(
     "asset_version_get",

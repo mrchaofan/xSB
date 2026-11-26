@@ -52,10 +52,9 @@ export function composerSettings(agentId) {
       ring.setAttribute("aria-valuetext", ring.title);
     }
     // 后端还没连上、正在拉取时，值和列表都显示"获取中"，不拿"后端默认"冒充已知的值。
-    // 还没发过消息的对话不调后端：设置要等第一条消息发出、后端会话建好之后才有。
-    const lazy = !!latest.lazy;
-    const loading = fetching && !latest.connected && !lazy;
-    const signature = JSON.stringify([model, effort, latest.connected, loading, lazy]);
+    // 新对话也一样：打开菜单时中枢为它建立后端会话，设置随即可选。
+    const loading = fetching && !latest.connected;
+    const signature = JSON.stringify([model, effort, latest.connected, loading]);
     if (signature !== lastFields) {
       lastFields = signature;
       fill(fields, ...[[model, "model"], [effort, "effort"]].map(([option, name]) => {
@@ -65,7 +64,7 @@ export function composerSettings(agentId) {
           ...items.map(o => h("button", { type: "button", role: "menuitemradio", class: "cascade-item", "aria-checked": String(o.value === option.currentValue),
             onclick: () => { menu.hidePopover(); request(() => xsb.setComposerOption(agentId, option.configId ?? option.id, o.value)); } },
             h("span", { class: "cascade-check", "aria-hidden": "true", html: ICON.check }), h("span", {}, o.name ?? o.value))),
-          !items.length && (lazy || loading || latest.connected) && h("small", { class: "cascade-empty" }, t(lazy ? "composer.afterFirst" : loading ? "composer.loading" : "composer.unsupported")));
+          !items.length && (loading || latest.connected) && h("small", { class: "cascade-empty" }, t(loading ? "composer.loading" : "composer.unsupported")));
         const row = h("div", { class: "cascade-row", "data-name": name },
           h("button", { type: "button", role: "menuitem", class: "cascade-item cascade-parent", "aria-haspopup": "menu", "aria-expanded": "false",
             onclick: () => expand(name, true), onmouseenter: () => expand(name), onfocus: () => expand(name) },

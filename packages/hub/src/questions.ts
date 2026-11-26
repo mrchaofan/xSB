@@ -7,8 +7,10 @@
  *
  * One question is open per conversation (`SessionRec.question`): a new one replaces it. What became of it is
  * recorded in the transcript (`Question` in @xsb/protocol), and the model is told how the message it gets replies.
- * A task agent's work waits for the reply instead of ending unfinished (workflows.ts, `asking`).
+ * It is not a workflow tool, only usable in one too: a task agent's work waits for the reply instead of ending
+ * unfinished (workflows.ts, `asking`).
  */
+import { Ajv } from "ajv";
 import { Question } from "@xsb/protocol";
 import type { Answer, QuestionAnswer, QuestionItem, QuestionState, SessionUpdate } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
@@ -16,6 +18,37 @@ import type { LiveSession } from "./session.ts";
 import { newId } from "./util.ts";
 
 export const ASK_LIMITS = { questions: 4, options: 8, chars: 500 };
+
+/** The `ask` tool: xSB's own, served apart from the workflow tools (mcp.ts, `XSB_SERVER`). Any agent may use it. */
+export const ASK_TOOL = {
+  name: "ask",
+  description: "Ask the user 1 to 4 questions about preferences or choices that change the work and that you cannot reasonably settle yourself; ask them together. kind single: pick one option; multi: pick any; text: a free answer. Options are 2 to 8 short, distinct choices; other:true lets the user also write their own. Returns at once: then end your turn without assuming the answers. The user's reply is their next message: the answers, a skip (go on with sensible choices and say which), or other words instead.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      questions: {
+        type: "array",
+        minItems: 1,
+        maxItems: ASK_LIMITS.questions,
+        items: {
+          type: "object",
+          properties: {
+            question: { type: "string" },
+            kind: { enum: ["single", "multi", "text"] },
+            options: { type: "array", items: { type: "string" }, maxItems: ASK_LIMITS.options },
+            other: { type: "boolean" },
+          },
+          required: ["question", "kind"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["questions"],
+    additionalProperties: false,
+  },
+};
+const validator = new Ajv();
+const checkAsk = validator.compile(ASK_TOOL.inputSchema);
 
 /** How the model is told what the user's message is, in front of it. */
 const SCOPES: Record<Exclude<QuestionState, "open">, string> = {
@@ -54,8 +87,9 @@ export class Questions {
   }
 
   /** The `ask` tool. */
-  ask(s: LiveSession, questions: QuestionItem[]): string {
-    const checked = checkQuestions(questions);
+  ask(s: LiveSession, args: unknown): string {
+    if (!checkAsk(args)) throw Error(validator.errorsText(checkAsk.errors));
+    const checked = checkQuestions((args as { questions: QuestionItem[] }).questions);
     if (s.rec.question) this.close(s, "superseded");
     const id = newId("question");
     s.save({ question: id });

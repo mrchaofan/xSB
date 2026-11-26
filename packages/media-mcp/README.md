@@ -35,7 +35,7 @@ agent ──start_job──▶ Hub ──▶ xsb-media-mcp ──VideoProvider�
 
 ## 并发
 
-同一个进程里，同时出图最多 3 张，其余排队。视频的并发由 Hub 控制（`start_job` 排队，见 hub 的 `limits.jobsAtOnce`，默认 2）。
+同一个进程里，同时出图最多 3 张，其余排队。Hub 不再限制后台工具调用的并发数。
 
 ## 换一个模型
 

@@ -53,10 +53,16 @@ test("status: broken, signed out, no plan and ready; the platform profile and ex
     const noPlan = await new Ark(launchers(), dir, PROGRAM, answer({ logged_in: true, profiles_summary: [PLATFORM, expired] })).status();
     assert.equal(noPlan.state, "noPlan");
     assert.deepEqual(noPlan.plans.map((p) => [p.profile, p.expired]), [[PLAN.name, true]]);
-    const ready = await new Ark(launchers(), dir, PROGRAM, answer({ logged_in: true, profiles_summary: [PLATFORM, PLAN] })).status();
+    const calls: string[][] = [];
+    const readyAnswer = answer({ logged_in: true, profiles_summary: [PLATFORM, PLAN] });
+    const ready = await new Ark(launchers(), dir, PROGRAM, async (file, args, options) => {
+      calls.push(args);
+      return readyAnswer(file, args, options);
+    }).status();
     assert.equal(ready.state, "ready");
     assert.deepEqual(ready.plans, [{ profile: PLAN.name, name: "Agent Plan Medium", type: "agent-plan", tier: "medium", expiresAt: PLAN.expires_at, expired: false }]);
     assert.equal(ready.version, "1.0.65");
+    assert.deepEqual(calls, [["--version"], ["auth", "status", "--format", "json"]], "checks version, sign-in and returned plans without key, quota or model calls");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

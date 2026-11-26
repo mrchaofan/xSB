@@ -5,7 +5,6 @@ import type { Op } from "@xsb/store";
 import type { Hub } from "./hub.ts";
 import type { LiveSession, Turn, TurnEnd } from "./session.ts";
 import { ops } from "./state.ts";
-import { hubLimit } from "./config.ts";
 import { newId, now } from "./util.ts";
 import { boundedText, contextRef, readContext } from "./context.ts";
 import { canonical, fingerprint, graphJsonl, validateResult, word } from "./workflow-graph.ts";
@@ -606,8 +605,7 @@ export class Workflows {
         // Adopting the candidate adopts the one this turn was shown: its name is xSB's to check, not the model's to quote.
         if (name === "execute" && a.graphJsonl === undefined && a.replaceNode === undefined && f.candidate && observed?.candidate !== f.candidate.version)
           throw Error("The candidate changed since this turn saw it");
-        const steps = hubLimit("workflowValidationSteps");
-        const version = adopt(f, a, steps, name === "plan");
+        const version = adopt(f, a, name === "plan");
         for (const ref of f.versions[version].nodes.flatMap((n) => refs([n.input, n.prompt])))
           findAsset(this.hub, ref);
         result = { version };

@@ -16,13 +16,21 @@ import type { Graph } from "./task-graph.ts";
 export type SessionRec = {
   id: string;
   agentId: string;
+  /** The user renamed this conversation; backend-generated titles no longer replace it. */
+  titleEdited?: boolean;
   /** The backend's own session id, once one exists. */
   backendSessionId?: string;
   /**
-   * The backend session has been given nothing yet: it was opened only to read or change its settings. A backend may
-   * keep no such session (codex writes one at its first prompt), so failing to resume it loses nothing to hand over.
+   * The backend session has been given nothing yet (a new conversation's, opened for its settings, or one just
+   * renewed). A backend may keep no such session (codex writes one at its first prompt), so failing to resume it loses
+   * nothing to hand over.
    */
   backendFresh?: boolean;
+  /**
+   * The conversation has records: something was given to its model. Until then its backend changes in place; from
+   * then on switching moves it to a new conversation (`Agents.migrate`). Never unset: clearing the context keeps them.
+   */
+  conversed?: boolean;
   /**
    * The agent's conversation: the one session the user, its peers and xsb all talk to it in, and the one it does all
    * its work in, one turn at a time. One per agent. Other sessions are a client's own (`session/new`).
@@ -74,6 +82,9 @@ export type SessionRec = {
   createdAt: string;
   updatedAt: string;
 };
+
+/** Whether the conversation has records. Records written before `conversed` existed: a backend session given input. */
+export const conversed = (rec: SessionRec): boolean => rec.conversed ?? (!!rec.contextEpoch && !rec.backendFresh);
 
 /** The results of some tasks, handed over together. */
 export type Results = {

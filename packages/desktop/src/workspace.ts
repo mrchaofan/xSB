@@ -733,6 +733,13 @@ export class Workspace {
     return this.conn.request(ToolServers.apply, {});
   }
 
+  /** The user's title for a conversation, overriding automatic backend titles. */
+  async renameConversation(agentId: string, title: string): Promise<AgentInfo> {
+    const { agent } = await this.conn.request<{ agent: AgentInfo }>(Agents.set, { agentId, title });
+    this.onAgent(agent);
+    return agent;
+  }
+
   /** The icon the user chose for a conversation; "" is the default. */
   async setAvatar(agentId: string, avatar: string): Promise<AgentInfo> {
     const { agent } = await this.conn.request<{ agent: AgentInfo }>(Agents.set, { agentId, avatar });

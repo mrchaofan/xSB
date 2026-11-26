@@ -59,8 +59,8 @@ type Manifest = { description?: string; main?: string; xsb?: { env?: Record<stri
 type Found = { name: string; scope: PluginScope; dir: string; manifest?: Manifest; entry?: string; text?: string; problem?: PluginProblem };
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-/** The hub's own tools go by this name (mcp.ts); a plugin cannot take it. */
-const RESERVED = "workflow";
+/** The hub's own tools go by these names (mcp.ts); a plugin cannot take them. */
+const RESERVED = new Set(["workflow", "xsb"]);
 
 /** The folder of each place. */
 export function pluginRoot(scope: PluginScope, paths?: Paths): string | undefined {
@@ -98,7 +98,7 @@ function scan(scope: PluginScope, paths?: Paths): Found[] {
   catch { return []; }
   return names.map((name) => {
     const dir = path.join(root!, name);
-    if (!NAME.test(name) || name === RESERVED) return { name, scope, dir, problem: "bad_name" as const };
+    if (!NAME.test(name) || RESERVED.has(name)) return { name, scope, dir, problem: "bad_name" as const };
     let text: string;
     try { text = fs.readFileSync(path.join(dir, "package.json"), "utf8"); } catch { return { name, scope, dir, problem: "no_manifest" as const }; }
     let manifest: unknown;

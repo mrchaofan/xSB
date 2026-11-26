@@ -102,7 +102,7 @@ const definition = ({ kind, prompt, input, schema, model }: NodeDef) => ({ kind,
  * Plan saves `graphJsonl` as the candidate; execute adopts `graphJsonl`, `replaceNode`, or with neither the candidate.
  * Versions are named here, in order, and a graph already named keeps its name: a model never names or quotes one.
  */
-export function adopt(f: Flow, args: Record<string, any>, limit: number, plan: boolean) {
+export function adopt(f: Flow, args: Record<string, any>, plan: boolean) {
   const given = ["graphJsonl", "replaceNode"].filter((k) => args[k] !== undefined);
   if (plan ? given.length !== 1 || given[0] !== "graphJsonl" : given.length > 1)
     throw Error("Specify a single adoption method");
@@ -116,9 +116,8 @@ export function adopt(f: Flow, args: Record<string, any>, limit: number, plan: b
       [...old.nodes.map((n) => (n.node === args.replaceNode.node ? args.replaceNode : n)), ...old.edges]
         .map((v) => JSON.stringify(v))
         .join("\n"),
-      limit,
     );
-  } else if (args.graphJsonl !== undefined) graph = parseGraph(args.graphJsonl, limit);
+  } else if (args.graphJsonl !== undefined) graph = parseGraph(args.graphJsonl);
   else {
     if (!f.candidate) throw Error("No candidate to adopt");
     if (f.candidate.base !== f.active) throw Error("Candidate is stale: plan it again on the active workflow");

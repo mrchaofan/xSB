@@ -831,10 +831,8 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 /* 后端状态用全局的语义色 */
 :root { --cli-success: var(--ok); --cli-attention: var(--warn); --cli-error: var(--danger); }
 .backend-list { display: flex; flex-direction: column; gap: var(--space-3); }
-.backend-check { display: flex; flex-direction: column; gap: var(--space-1); }
 .backend-card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); min-width: 0; }
 .backend-card-head { display: flex; align-items: center; gap: var(--space-3); }
-.backend-assurance svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .backend-identity { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
 .backend-identity h2 { margin: 0; font-size: var(--text-md); color: var(--ink); font-weight: 600; }
 .backend-identity small { font-size: var(--text-xs); }
@@ -866,11 +864,6 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 .backend-options .backend-quiet { width: 100%; justify-content: flex-start; height: var(--control-md); border-color: transparent; padding: 0 var(--space-2); }
 .backend-guide { display: flex; align-items: center; height: var(--control-md); padding: 0 var(--space-2); color: var(--ink-2); text-decoration: none; font-size: var(--text-sm); border-radius: var(--radius-sm); }
 .backend-guide:hover { background: var(--hover); color: var(--accent); }
-.backend-assurance { display: flex; align-items: center; gap: var(--space-1h); color: var(--ink-3); font-size: var(--text-sm); }
-.backend-assurance svg { width: 14px; height: 14px; }
-.backend-explanation { font-size: var(--text-xs); color: var(--ink-3); }
-.backend-explanation p { margin: var(--space-2) 0 0; line-height: var(--leading); }
-.backend-explanation[open] > summary { margin-bottom: 0; }
 .backend-controls { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .backend-choice { align-items: flex-start; flex-wrap: wrap; padding: var(--space-2) var(--space-3); gap: var(--space-3); }
 .backend-name { display: flex; align-items: center; gap: var(--space-2); min-width: 104px; padding-top: var(--space-1); }
@@ -959,8 +952,11 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 .catalog-empty small { font-size: var(--text-sm); }
 .catalog-empty strong { color: var(--ink-2); font-weight: 500; }
 
-#reference-destination:not([hidden]) { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1h) var(--space-3); color: var(--ink-3); border-bottom: 1px solid var(--line); font-size: var(--text-sm); }
-#reference-destination select { min-width: 0; max-width: 75%; height: var(--control-sm); padding: 0 var(--space-1h); color: var(--ink); background: var(--wash); border: none; border-radius: var(--radius-sm); }
+#artifact-references:not([hidden]) { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-1h) var(--space-3); border-bottom: 1px solid var(--line); }
+#artifact-references .btn { flex: none; height: var(--control-sm); white-space: nowrap; }
+#reference-destination:not([hidden]) { display: flex; flex: 1; min-width: 0; align-items: center; gap: var(--space-2); color: var(--ink-3); font-size: var(--text-sm); }
+#reference-destination > span { flex: none; }
+#reference-destination select { flex: 1; min-width: 0; height: var(--control-sm); padding: 0 var(--space-1h); color: var(--ink); background: var(--wash); border: none; border-radius: var(--radius-sm); }
 
 
 /* 侧栏启动页：没有当前标签时，竖排列出可以在新标签中打开的东西 */

@@ -18,7 +18,7 @@ let error = null;
 let notice = null;
 let loginUrl = null;
 const views = new Set();
-// 一张卡片在插入页面之前就开始检测；只忘掉插入过、后来被移走的卡片。
+// 只忘掉插入过、后来被移走的卡片；打开设置只显示已有结果，检测由用户发起。
 const paint = () => { for (const view of views) if (view.isConnected) view.paint(); else if (view.shown) views.delete(view); else view.paint(); };
 
 /** arkcli 打印的登录地址：浏览器没自动打开时，用户可以点它。 */
@@ -56,7 +56,7 @@ async function act(kind, run, done) {
 
 function presentation() {
   if (busy) return { state: busy, tone: "progress" };
-  if (!status) return { state: "checking", tone: "progress" };
+  if (!status) return { state: error ? "broken" : "unchecked", tone: error ? "error" : "attention" };
   const s = status.state;
   return { state: s, tone: s === "ready" ? "success" : s === "broken" ? "error" : "attention" };
 }
@@ -169,11 +169,12 @@ export function arkCard() {
     const p = presentation();
     const s = status?.state;
     root.dataset.tone = p.tone;
-    root.setAttribute("aria-busy", busy || !status ? "true" : "false");
+    root.setAttribute("aria-busy", busy ? "true" : "false");
     badge.textContent = t(`ark.status.${p.state}`);
     badge.dataset.tone = p.tone;
     version.textContent = status?.version && !busy ? `v${status.version}` : "";
     description.textContent = error ? t(`ark.failure.${error.kind}`) : t(`ark.detail.${p.state}`);
+    description.hidden = !error && ["unchecked", "checking", "binding", "ready"].includes(p.state);
     // 程序无法运行时说明里已经讲了怎么办；内置程序的路径不能由用户指定，通用的“检查路径”提示不适用。
     if (status?.issue && status.issue !== "execution" && !busy && !error) description.textContent += t("sentence.gap") + t(`backend.issue.${status.issue}`);
     plans.replaceChildren(...(s === "ready" || s === "noPlan" ? status.plans : []).map((plan) => h("li", { "data-expired": plan.expired ? "true" : "false" }, planText(plan))));
@@ -182,11 +183,11 @@ export function arkCard() {
     loginLink.hidden = !loginUrl;
     if (loginUrl) loginLink.href = loginUrl;
     const next = busy ? null : error ? { unauthenticated: "login" }[s] ?? "check"
-      : { broken: "check", unauthenticated: "login" }[s];
+      : { unchecked: "check", broken: "check", unauthenticated: "login" }[p.state];
     primary.hidden = !next && !(busy && busy !== "login");
     primary.className = `btn primary${busy ? " backend-working" : ""}`;
     primary.setAttribute("aria-disabled", busy ? "true" : "false");
-    primary.textContent = busy ? t(`ark.action.${busy}`) : next ? t(`ark.action.${next}`) : "";
+    primary.textContent = busy ? t(`ark.action.${busy}`) : next ? t(p.state === "unchecked" ? "backend.check" : `ark.action.${next}`) : "";
     primary.onclick = () => {
       if (busy || !next) return;
       if (next === "login") act("login", () => xsb.arkLogin(), "ark.login.done");
@@ -206,6 +207,5 @@ export function arkCard() {
   };
   views.add(root);
   root.paint();
-  if (!busy) void act("checking", () => xsb.arkStatus());
   return root;
 }

@@ -519,7 +519,7 @@ function answerOf(given: unknown): Answer | undefined {
   if (!Array.isArray(a.answers) || a.answers.length > 4 || !a.answers.every((v) => text(v) || (Array.isArray(v) && v.length <= 9 && v.every(text)))) return undefined;
   return { questionId: a.questionId, answers: a.answers };
 }
-const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","setAvatar","setBackend","workflowControl","history","send","resend","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
+const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","renameConversation","setAvatar","setBackend","workflowControl","history","send","resend","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();

@@ -3,12 +3,20 @@ const fs = require("node:fs");
 const path = require("node:path");
 const assert = require("node:assert/strict");
 const { pathToFileURL } = require("node:url");
-require("./window-harness.cjs").windowTest(__filename, async ({ js, q, click, draft, send, has, until, untilJS, workspace }) => {
+require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, click, draft, send, has, until, untilJS, workspace }) => {
   // A new conversation takes the backend of the last one (app.js `defaultBackend`); the first is asked for by name,
   // so that it is the scripted one, not an agent of the machine.
+  let created = false;
   const create = async () => {
-    await js('xsb.newSession("mock")');
-    await untilJS('!!document.querySelector("#lanes .lane")', "created session");
+    await untilJS('!!document.querySelector("#lanes .lane")', "initial session");
+    if (!created) {
+      await js('xsb.setBackend(document.querySelector("#lanes .lane").dataset.agent,"mock")');
+      created = true;
+    } else {
+      const prior = await js(q("#lanes .lane") + ".dataset.agent");
+      await click("#new-agent");
+      await untilJS(q("#lanes .lane") + ".dataset.agent!==" + JSON.stringify(prior), "created session");
+    }
   };
   await create();
   const main = "#lanes .lane",
@@ -17,14 +25,15 @@ require("./window-harness.cjs").windowTest(__filename, async ({ js, q, click, dr
   assert.equal(await js(q(main + " .context-ring") + ".dataset.known"), "false");
   await click(main + " .model-settings");
   const pick = async (name, value) => {
-    const control = q(main + " select[data-setting=" + name + "]");
-    await untilJS("!" + control + ".disabled", "available " + name);
-    await js(control + ".value=" + JSON.stringify(value) + ";" + control + ".dispatchEvent(new Event('change'))");
+    if (!(await has(main + " .composer-menu:popover-open"))) await click(main + " .model-settings");
+    const row = main + " .cascade-row[data-name=" + name + "]";
+    await until(() => has(row + " .cascade-sub button:not(:disabled)"), "available " + name);
+    await click(row + " .cascade-parent");
+    await js('[...document.querySelectorAll(' + JSON.stringify(row + " .cascade-sub button") + ')].find(b=>b.textContent.trim()===' + JSON.stringify(value) + ').click()');
     await untilJS(q(main + " .model-settings") + ".textContent.includes(" + JSON.stringify(value) + ")", "applied " + value);
   };
   await pick("model", "studio");
   await pick("effort", "high");
-  await click(main + " .model-settings");
   await send(main, "!model\n!usage 50000\n!say DIRECT");
   await untilJS(q(main + " .context-ring") + ".getAttribute('aria-valuenow')==='5'", "reported context");
   await untilJS(q(main + " .entries") + ".textContent.includes('model: studio')", "backend model selection");
@@ -35,6 +44,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ js, q, click, dr
   );
   fs.writeFileSync(path.join(workspace, "brief.md"), "Red coat");
   await send(main, '!call asset_put {"name":"costume","path":"brief.md"}');
+  await click("#side-launcher .launcher-item:nth-of-type(2)");
   await until(() => has(".artifact-card"), "registered artifact");
   await click(".reference-action");
   assert.equal(await js(q(main + " .asset-ref") + ".textContent"), "costume · v1");
@@ -56,16 +66,17 @@ require("./window-harness.cjs").windowTest(__filename, async ({ js, q, click, dr
   assert.equal(await has(".artifact-card"), false);
   assert.equal(await js(q(".catalog-controls") + ".hidden"), true);
   assert.equal(await js(q(main + " .editor") + ".textContent"), "");
-  await send(main, "!say [Brief](brief.md)");
+  fs.writeFileSync(path.join(workspace, "notes.md"), "Unregistered working notes");
+  await send(main, "!say [Notes](notes.md)");
   await until(() => has(main + " .output a"), "ordinary file link");
   await click(main + " .output a");
-  await untilJS(q("#artifact-name") + ".textContent==='brief.md'", "file preview");
+  await untilJS(q("#artifact-name") + ".textContent==='notes.md'", "file preview");
   await click("#asset-reference");
-  assert.equal(await js(q(main + " .editor .chip") + ".textContent"), "brief.md");
+  assert.equal(await js(q(main + " .editor .chip") + ".textContent"), "notes.md");
   await click(main + " .send");
   await until(() => has(main + " .said .chip"), "ordinary file sent");
   const ordinary = await js("xsb.load()");
-  assert.ok(Object.values(ordinary.transcripts).flat().some(e => e.kind === "input" && e.content.some(b => b.type === "resource_link" && b.uri === pathToFileURL(path.join(workspace, "brief.md")).href)));
+  assert.ok(Object.values(ordinary.transcripts).flat().some(e => e.kind === "input" && e.content.some(b => b.type === "resource_link" && b.uri === pathToFileURL(fs.realpathSync(path.join(workspace, "notes.md"))).href)));
   await draft(main, "second session draft");
   await click(first);
   assert.equal(await js(q("#artifact-name") + ".textContent"), "costume.md");
@@ -96,18 +107,18 @@ require("./window-harness.cjs").windowTest(__filename, async ({ js, q, click, dr
   assert.equal(await js(q(main + " .editor") + ".textContent"), "typed while reading");
   const finish = (s) => "!call finish " + JSON.stringify({ summary: s, assets: [] });
   const rows = [
-    { node: "A", prompt: "!sleep 9000\n" + finish("A done") },
-    { node: "B", prompt: finish("B done") },
-    { node: "end", kind: "end" },
-    { from: "A", to: "B" },
-    { from: "B", to: "end" },
+    { node: "起草", prompt: "!sleep 9000\n" + finish("起草完成") },
+    { node: "审阅", prompt: finish("审阅完成") },
+    { node: "完成", kind: "end" },
+    { from: "起草", to: "审阅" },
+    { from: "审阅", to: "完成" },
   ];
   await send(
     main,
     "!call execute " + JSON.stringify({ graphJsonl: rows.map((v) => JSON.stringify(v)).join("\n") }),
   );
   await untilJS(
-    'document.querySelectorAll(".dag-node").length===3 && !document.querySelector(".dag-node").disabled',
+    'document.querySelectorAll(".dag-node").length===3 && !!document.querySelector(".dag-node:not(:disabled)")',
     "DAG",
   );
   // The global icon size must not clip the DAG's curved edges to a 16 × 16 viewport.
@@ -143,8 +154,17 @@ require("./window-harness.cjs").windowTest(__filename, async ({ js, q, click, dr
   await untilJS(q(panel + " .task-control") + ".innerText.match(/Stop|停止/)!=null", "task resume");
   await draft(main, "main-only");
   await draft(panel, "task-only");
-  await click(".catalog-tab button");
-  await click(".reference-action");
+  await click('#tabs .tab[data-id="catalog"] .tab-main');
+  await click(".artifact-card");
+  await untilJS("!" + q("#asset-reference") + ".hidden && !" + q("#reference-destination") + ".hidden", "reference controls together");
+  const referenceLayout = await js(`(() => {
+    const row = document.querySelector("#artifact-references"), button = document.querySelector("#asset-reference"), target = document.querySelector("#reference-destination");
+    const r = row.getBoundingClientRect(), b = button.getBoundingClientRect(), t = target.getBoundingClientRect();
+    return { grouped: button.parentElement === row && target.parentElement === row, aligned: Math.abs(b.top + b.height / 2 - t.top - t.height / 2) < 1, fits: b.right <= r.right && t.left >= r.left, capture: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) } };
+  })()`);
+  assert.ok(referenceLayout.grouped && referenceLayout.aligned && referenceLayout.fits, "reference target and action share one row without overflow");
+  if (process.env.XSB_SCREENSHOTS) fs.writeFileSync(path.join(process.env.XSB_SCREENSHOTS, "references.png"), (await win.capturePage(referenceLayout.capture)).toPNG());
+  await click("#asset-reference");
   await untilJS("!" + q("#side-workflow") + ".hidden", "reference opens task composer");
   assert.equal(await has(panel + " .asset-ref"), true);
   assert.equal(await has(main + " .asset-ref"), false);

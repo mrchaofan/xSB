@@ -3,7 +3,7 @@
  *
  *   ~/.xsb2_global/config.json        about this machine: which backends exist and how to start them, plugins turned
  *                             off and project plugins approved (plugins.ts)
- *   <project>/.xsb2/config.json about this project: workflow limits, which language its agents work in, and
+ *   <project>/.xsb2/config.json about this project: which language its agents work in, and
  *                             plugins turned off here
  *
  * xsb starts backends; it does not install them, sign them in, or decide what
@@ -46,9 +46,8 @@ export const INSTALL_HINT: Record<string, string> = {
 export type GlobalConfig = {
   version: 1;
   backends?: Record<string, BackendSpec>;
-  /** Limits of each backend (`BACKEND_LIMITS`) and of the hub (`HUB_LIMITS`). */
+  /** Context limits of each backend (`BACKEND_LIMITS`). */
   backendLimits?: Record<string, Partial<Record<BackendLimit, number>>>;
-  limits?: Partial<Record<HubLimit, number>>;
   /** Plugins turned off on this machine (plugins.ts). */
   plugins?: Record<string, { enabled?: boolean }>;
   /** Fingerprints of the project plugins this machine approved (plugins.ts). */
@@ -68,9 +67,6 @@ export type GlobalConfig = {
  *   contextReserveTokens     headroom kept within it for output, backend additions and estimation error
  *   toolOutputTokens         the estimated budget of one tool response or result the hub controls
  *   contextRecoveryAttempts  safe retries of a context refusal with no observed execution, per input; 0 disables
- * Of the hub (`limits`):
- *   jobsAtOnce               calls of one tool that run as jobs at a time; the others wait in the hub
- *   workflowValidationSteps  how far a workflow graph is explored when it is checked
  */
 export const BACKEND_LIMITS = {
   sessionTokens: { default: 150_000, min: 10_000, max: 2_000_000 },
@@ -79,12 +75,7 @@ export const BACKEND_LIMITS = {
   toolOutputTokens: { default: 4_000, min: 500, max: 200_000 },
   contextRecoveryAttempts: { default: 1, min: 0, max: 3 },
 } as const;
-export const HUB_LIMITS = {
-  jobsAtOnce: { default: 2, min: 1, max: 16 },
-  workflowValidationSteps: { default: 100_000, min: 1_000, max: 10_000_000 },
-} as const;
 export type BackendLimit = keyof typeof BACKEND_LIMITS;
-export type HubLimit = keyof typeof HUB_LIMITS;
 type Range = { default: number; min: number; max: number };
 
 export type ProjectConfig = {
@@ -112,36 +103,27 @@ export function backendLimits(backend: string): Record<BackendLimit, number> {
     .map((name) => [name, inRange(BACKEND_LIMITS[name], set?.[name]) ? set![name]! : BACKEND_LIMITS[name].default])) as Record<BackendLimit, number>;
 }
 
-/** A limit of the hub: what this machine sets, or the default. */
-export function hubLimit(name: HubLimit): number {
-  const value = machineConfig().limits?.[name];
-  return inRange(HUB_LIMITS[name], value) ? value : HUB_LIMITS[name].default;
-}
-
 /** The limits as a client shows them: each with its range, default and what this machine sets. */
 export function limitSettings() {
   const config = machineConfig();
   const row = (table: Record<string, Range>, set: Record<string, unknown> | undefined) => Object.entries(table)
     .map(([name, range]) => ({ name, ...range, value: inRange(range, set?.[name]) ? set![name] as number : undefined }));
   return {
-    hub: row(HUB_LIMITS, config.limits),
     backends: Object.fromEntries(Object.keys(backends()).map((name) => [name, row(BACKEND_LIMITS, config.backendLimits?.[name])])),
   };
 }
 
-/** Set a limit: of a backend when `backend` is given, else of the hub. `null` goes back to the default. */
+/** Set a backend's context limit. A null value goes back to the default. */
 export function setLimit(backend: string | null, name: string, value: unknown): ReturnType<typeof limitSettings> {
-  const table: Record<string, Range> = backend ? BACKEND_LIMITS : HUB_LIMITS;
-  if (!Object.hasOwn(table, name)) throw new Error(`unknown limit ${name}`);
+  const table: Record<string, Range> = BACKEND_LIMITS;
+  if (!backend || !Object.hasOwn(table, name)) throw new Error(`unknown limit ${name}`);
   if (value !== null && !inRange(table[name], value)) throw new Error(`${name} must be a whole number from ${table[name].min} to ${table[name].max}`);
   if (backend && !Object.hasOwn(backends(), backend)) throw new Error(`unknown backend ${backend}`);
   const put = (set: Record<string, number> | undefined) => {
     const { [name]: _old, ...rest } = set ?? {};
     return value === null ? rest : { ...rest, [name]: value as number };
   };
-  updateGlobalConfig((config) => backend
-    ? { ...config, backendLimits: { ...config.backendLimits, [backend]: put(config.backendLimits?.[backend]) } }
-    : { ...config, limits: put(config.limits) });
+  updateGlobalConfig((config) => ({ ...config, backendLimits: { ...config.backendLimits, [backend]: put(config.backendLimits?.[backend]) } }));
   return limitSettings();
 }
 
