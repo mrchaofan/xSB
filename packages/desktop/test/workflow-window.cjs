@@ -156,6 +156,8 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.equal(await js(q(main + " .entries") + '.innerText.includes("SIDE-ONLY")'), false);
   await click(panel + " .task-control");
   await untilJS(q(panel + " .task-control") + ".innerText.match(/Stop|停止/)!=null", "task resume");
+  // 空闲又无可继续时 syncLane 把按钮设成 hidden；.btn 的 display 不能盖过 [hidden]，否则“空闲”旁边还挂着“停止任务”。
+  assert.equal(await js(`(b => { const was = b.hidden; b.hidden = true; const shown = getComputedStyle(b).display; b.hidden = was; return shown; })(${q(panel + " .task-control")})`), "none", "hidden task control is not displayed");
   await draft(main, "main-only");
   await draft(panel, "task-only");
   await click('#tabs .tab[data-id="catalog"] .tab-main');
