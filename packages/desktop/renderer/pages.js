@@ -181,7 +181,7 @@ function syncTabs(list, next) {
 }
 
 /** 按 state.tab 和 state.pages 画出标签栏和当前的网页。 */
-export function renderSide() {
+export function renderSide(focusPage = false) {
   const flow = currentFlow();
   const hasWorkflow = flow?.version || flow?.candidate;
   // 标签都属于打开的会话；没有会话时只剩启动页。
@@ -267,7 +267,7 @@ export function renderSide() {
       h("div", { class: "actions" },
         h("button", { class: "btn primary", onclick: () => xsb.page(page.id, "restore") }, t("web.restore")),
         h("button", { class: "btn", onclick: () => xsb.page(page.id, "show") }, t("web.show")))));
-  } else showWeb($("#web-body"), page);
+  } else showWeb($("#web-body"), page, focusPage === true);
 }
 
 /** 已打开的标签：完整列出标题和位置，点一个就切过去。 */
@@ -291,19 +291,23 @@ async function newTab() {
   if (rootSession() === owner) $("#web-url").focus();
 }
 
-/** 一个网页新开或者变了。新开的成为当前标签，右栏收起时把它打开。 */
+/** 一个网页新开或者变了。用户新开的成为当前标签，右栏收起时把它打开；智能体开的只在标签栏出现，不抢当前标签。 */
 export function onPage(page) {
   const known = state.pages.find(p => p.id === page.id);
   if (!page.sessionId) page.sessionId = known?.sessionId ?? rootSession();
+  const here = ownerOf(page) === rootSession();
+  let focusPage = false;
   if (known) Object.assign(known, page);
   else {
     state.pages.push(page);
-    if (ownerOf(page) !== rootSession()) return;
-    rememberPosition();
-    state.tab = page.id;
-    revealArtifacts();
+    if (here && !page.background) {
+      rememberPosition();
+      state.tab = page.id;
+      revealArtifacts();
+      focusPage = true;
+    }
   }
-  if (ownerOf(page) === rootSession()) renderSide();
+  if (here) renderSide(focusPage);
 }
 
 /** 网页关了：关的是当前标签时，回到它旁边的那个。 */

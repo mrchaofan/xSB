@@ -35,9 +35,12 @@ const create = (webContents as unknown as { create?: (options: WebPreferences & 
 const WEB_PARTITION = "persist:xsb-web";
 /** Previews of the HTML files agents wrote: the only pages that can read `xsb-artifact://`, and no website is among them. */
 export const PREVIEW_PARTITION = "xsb-preview";
+/** A background page is drawn in a small, non-activating window for its screenshot. */
+const SCREENSHOT_SIZE = { width: 800, height: 600 };
 
-export type PageOptions = { sessionId?: string; embedded?: boolean; agent?: boolean; downloads?: BrowserDownloads; onPopup?: (id: string, openerId: string) => void };
-type Page = { id: string; contents: Webview2; embedded: boolean; agent: boolean; controlling?: boolean; window?: BrowserWindow; error?: string; favicon?: string; releaseDownloads?: () => void; annotator?: Annotator; options: PageOptions };
+/** `background`: an agent opened it, or its page did while the agent was driving it; it does not take the user's current tab or focus. */
+export type PageOptions = { sessionId?: string; embedded?: boolean; agent?: boolean; background?: boolean; downloads?: BrowserDownloads; onPopup?: (id: string, openerId: string) => void };
+type Page = { id: string; contents: Webview2; embedded: boolean; agent: boolean; background: boolean; controlling?: boolean; window?: BrowserWindow; error?: string; favicon?: string; releaseDownloads?: () => void; annotator?: Annotator; options: PageOptions };
 /** Where the app's own files are, for a page's window. */
 /** `toneOf`: the style of annotations on a page of this session (page-annotations.ts), after its agent's backend. */
 type Shell = { preload: string; pageWindowUrl: string; controlText?: string; toneOf?: (sessionId?: string) => Tone };
@@ -47,6 +50,7 @@ export class Pages {
   static readonly supported = typeof create === "function";
 
   private pages = new Map<string, Page>();
+  private drawing = new Map<string, BrowserWindow>();
   private seq = 0;
   private host: WebContents;
   private shell: Shell;
@@ -91,8 +95,8 @@ export class Pages {
   }
 
   private register(contents: Webview2, options: PageOptions): Page {
-    const { embedded = false, agent = false, downloads } = options;
-    const page: Page = { id: `p${++this.seq}`, contents, embedded, agent, options };
+    const { embedded = false, agent = false, background = false, downloads } = options;
+    const page: Page = { id: `p${++this.seq}`, contents, embedded, agent, background, options };
     this.pages.set(page.id, page);
     installInputGuard(contents);
     if (downloads) page.releaseDownloads = ownDownloads(contents, page.id, downloads, () => { page.error = undefined; this.changed(page); });
@@ -121,7 +125,8 @@ export class Pages {
       if (page.embedded) {
         if (/^https?:/i.test(url)) this.open(url, { sessionId: page.options.sessionId });
       } else if (/^(https?|blob):/i.test(url)) {
-        const child = this.start(url, page.options, {
+        // Who caused the popup decides whether it is shown: the agent's action, or the user's.
+        const child = this.start(url, { ...page.options, background: !!page.controlling }, {
           httpReferrer: referrer,
           ...(postBody && {
             postData: postBody.data as LoadURLOptions["postData"],
@@ -147,7 +152,7 @@ export class Pages {
     else if (op === "reload") contents.reload();
     else if (op === "external") void shell.openExternal(contents.getURL());
     else if (op === "close") this.close(page);
-    else if (op === "detach") this.detach(page);
+    else if (op === "detach") this.detach(page, arg === "background");
     else if (op === "restore") this.restore(page);
     else if (op === "show") window?.show();
     else if (op === "pin") window?.setAlwaysOnTop(arg === true);
@@ -243,15 +248,50 @@ export class Pages {
     this.changed(page);
   }
 
-  /** Put the page on screen, for what needs it drawn (a screenshot): its tab becomes the side panel's current one. */
-  async reveal(id: string): Promise<void> {
+  /**
+   * Run `draw` (a screenshot) while the page is drawn. A page already attached stays where it is.
+   * Any other gets a temporary, non-interactive window: never attach it to the user's host document,
+   * select their tab, or activate a window to obtain a Chromium frame.
+   */
+  async drawn<T>(id: string, draw: () => Promise<T>): Promise<T> {
     const page = this.pages.get(id);
     if (!page) throw new Error("this page was closed");
-    if (page.window) page.window.show();
-    const shown = (): boolean => page.contents.isAttached();
-    if (!page.window && !shown()) this.send({ revealPage: id });
-    for (let i = 0; i < 30 && !shown(); i++) await new Promise((resolve) => setTimeout(resolve, 100));
-    if (!shown()) throw new Error("the page is not on screen and could not be brought there");
+    if (page.contents.isAttached()) return draw();
+    if (this.drawing.has(id)) throw new Error("this page is already being drawn");
+    const window = new BrowserWindow({
+      show: false,
+      focusable: false,
+      skipTaskbar: true,
+      useContentSize: true,
+      ...SCREENSHOT_SIZE,
+      title: this.shell.controlText ?? "Agent browser",
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, webview2Tag: true } as WebPreferences,
+    });
+    this.drawing.set(id, window);
+    window.setIgnoreMouseEvents(true);
+    window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    window.webContents.on("will-navigate", (event) => event.preventDefault());
+    try {
+      const html = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>html,body,webview2{display:block;margin:0;width:100%;height:100%;overflow:hidden}</style><webview2></webview2>`;
+      await window.loadURL(`data:text/html,${encodeURIComponent(html)}`);
+      const attached = await window.webContents.executeJavaScript(`new Promise((done) => {
+        const el = document.querySelector("webview2");
+        el.addEventListener("attached", () => done(true), { once: true });
+        el.addEventListener("error", () => done(false), { once: true });
+        el.setAttribute("web-contents-id", "${page.contents.id}");
+      })`);
+      if (!attached) throw new Error("the page could not be drawn: it is being shown somewhere right now, try again");
+      window.showInactive();
+      return await draw();
+    } finally {
+      // Detach before returning, rather than waiting for asynchronous window destruction to release the page.
+      // Removing this element leaves a page the user moved elsewhere alone.
+      if (!window.isDestroyed()) {
+        await window.webContents.executeJavaScript('document.querySelector("webview2")?.remove()').catch(() => {});
+        if (!window.isDestroyed()) window.destroy();
+      }
+      this.drawing.delete(id);
+    }
   }
 
   /** The page that a window of its own shows, if `contents` is such a window. */
@@ -268,9 +308,10 @@ export class Pages {
   // ---- a page in a window of its own -------------------------------------------
 
   /** Move the page out of the side panel into a window. The page itself is not touched: it does not load again. */
-  private detach(page: Page): void {
-    if (page.window) return page.window.show();
+  private detach(page: Page, background = false): void {
+    if (page.window) return background ? page.window.showInactive() : page.window.show();
     const window = new BrowserWindow({
+      show: false,
       width: 1000,
       height: 760,
       minWidth: 400,
@@ -292,6 +333,7 @@ export class Pages {
     page.annotator?.discard();
     page.contents.detach();
     this.changed(page);
+    if (background) window.showInactive(); else window.show();
     void window.loadURL(this.shell.pageWindowUrl);
   }
 
@@ -310,6 +352,9 @@ export class Pages {
 
   private close(page: Page): void {
     if (!this.pages.delete(page.id)) return;
+    const drawing = this.drawing.get(page.id);
+    this.drawing.delete(page.id);
+    if (drawing && !drawing.isDestroyed()) drawing.destroy();
     page.annotator?.dispose();
     const window = page.window;
     page.window = undefined;
@@ -327,11 +372,11 @@ export class Pages {
     if (page.window && !page.window.isDestroyed()) page.window.webContents.send("xsb:event", event);
   }
 
-  private send(event: { page: PageView } | { removedPage: string } | { revealPage: string }): void {
+  private send(event: { page: PageView } | { removedPage: string }): void {
     if (!this.host.isDestroyed()) this.host.send("xsb:event", event);
   }
 
-  private view({ id, options, contents, window, agent, controlling, error, favicon, annotator }: Page): PageView {
+  private view({ id, options, contents, window, agent, background, controlling, error, favicon, annotator }: Page): PageView {
     return {
       id,
       contentsId: contents.id,
@@ -344,6 +389,7 @@ export class Pages {
       window: !!window,
       pinned: !!window && window.isAlwaysOnTop(),
       agent,
+      background,
       controlling: !!controlling,
       annotating: !!annotator?.active,
       annotations: annotator?.count ?? 0,

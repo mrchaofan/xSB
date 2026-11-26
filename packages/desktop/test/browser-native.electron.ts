@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, nativeImage } from "electron";
 import { Pages } from "../src/pages.ts";
 import { BrowserSession } from "../src/browser.ts";
 
@@ -21,6 +21,7 @@ const body = `<title>Opener</title><h1>Original</h1><input aria-label="Agent inp
 <script>addEventListener('keydown',()=>window.keys=(window.keys||0)+1)</script>
 <div id="region" style="height:120px;overflow:auto"><div style="height:800px;padding-top:300px"><p id="deep">Deep text</p></div></div>
 <form id="post" action="/post" method="POST" target="_blank"><input name="value" value="preserved é"></form>
+<a href="/popup" target="_blank">Agent popup</a>
 <form id="download" action="/download" method="POST"><input name="value" value="file"></form>
 <script>addEventListener('message', e => window.received = e.data)</script>`;
 let postBody = "";
@@ -59,6 +60,7 @@ try {
   const preload = path.join(cwd, "empty-preload.cjs");
   fs.writeFileSync(preload, `const {contextBridge, ipcRenderer} = require('electron');
 contextBridge.exposeInMainWorld('xsb', {
+  openPage: (url, embedded, sessionId) => ipcRenderer.invoke('test-open-page', url, embedded, sessionId),
   page: (id, op, arg) => ipcRenderer.invoke('test-page', id, op, arg),
   pageWindow: () => ipcRenderer.invoke('test-page-window'),
   language: 'zh-CN',
@@ -66,6 +68,22 @@ contextBridge.exposeInMainWorld('xsb', {
 });`);
   const html = path.join(cwd, 'host.html');
   const hostUrl = new URL(`file://${html}`).href;
+  const tabHtml = path.join(cwd, 'tabs.html');
+  fs.writeFileSync(tabHtml, `<html><link rel="stylesheet" href="styles.css"><body style="margin:0;height:100vh;display:flex;flex-direction:column"><input id="hostEditor" style="position:absolute;left:-9999px">
+<div id="tabs"></div><div id="side-workflow"></div><div id="side-launcher"></div><div id="side-artifacts"></div>
+<section id="side-web" style="display:flex;flex:1;flex-direction:column"><header><button id="web-back"></button><button id="web-forward"></button><button id="web-reload"></button><button id="web-external"></button><button id="web-detach"></button><button id="web-annotate"></button><input id="web-url"></header><main id="web-body" class="web-body"></main></section>
+<script>window.auditState = { pages: [], agents: [], artifacts: [], artifactTabs: [], tab: null, workflowTab: false, catalogTab: false };</script>
+<script type="module">
+import {onPage, onPageRemoved, selectTab} from './pages-audit.js';
+window.selectPage = selectTab;
+xsb.on(event => {
+  if (event.annotationTarget) window.target = event.annotationTarget;
+  if (event.webAnnotation) window.notes = [...(window.notes ?? []), event.webAnnotation];
+  if (event.webAnnotationsRemoved) window.removed = [...(window.removed ?? []), event.webAnnotationsRemoved];
+  if (event.page) onPage(event.page);
+  if (event.removedPage) onPageRemoved(event.removedPage);
+});
+</script></body></html>`);
   fs.writeFileSync(html, `<html><link rel="stylesheet" href="styles.css"><body style="margin:0;height:100vh;display:flex"><input id="hostEditor" style="position:absolute;left:-9999px"><main class="web-body"></main>
 <script type="module">
 import {showWeb} from './webview.js';
@@ -81,13 +99,13 @@ xsb.on(event => {
     pages.set(event.page.id, event.page);
     if (selected === event.page.id) show(event.page);
   }
-  if (event.revealPage) { selected = event.revealPage; show(pages.get(selected)); }
 });
 </script></body></html>`);
   ipcMain.handle('test-page-window', event => pages?.shownIn(event.sender));
   host = new BrowserWindow({ show: false, webPreferences: { preload, webview2Tag: true } as any });
   await host.loadURL(hostUrl);
   pages = new Pages(host.webContents, { preload, pageWindowUrl: new URL(`file://${path.join(cwd, 'page.html')}`).href, controlText: "智能体正在控制网页", toneOf: (sessionId) => sessionId === 'sa' ? 'claude' : 'default' });
+  ipcMain.handle('test-open-page', (_event, url, embedded, sessionId) => pages!.open(url, { embedded, sessionId }));
   ipcMain.handle('test-page', (_event, id, op, arg) => pages!.call(id, op, arg));
   let context = { agentId: 'a', sessionId: 'sa', turnId: 'native-turn', active: true, turns: [{ id: 'native-turn', startedAt: Date.now() - 1 }] };
   const listeners = new Set<(state: any) => void>();
@@ -121,6 +139,7 @@ xsb.on(event => {
   await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
   await invoke("browser_navigate", { url });
   const original = pages.contents("p1")!;
+  await until(() => original.isAttached());
   // Control lasts the tool call only: the page is the user's again afterwards.
   assert.equal(pages.list()[0].controlling, false);
   await userTypes('A');
@@ -143,6 +162,7 @@ xsb.on(event => {
   await until(async () => !(await shieldIn(host!)));
   await invoke("browser_navigate", { url });
   const snap = (await invoke('browser_snapshot')).content[0].text;
+  await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
   const fieldRef = Number(/\[(\d+)\] textbox "Agent input"/.exec(snap)![1]);
   await invoke('browser_type', { ref: fieldRef, text: 'agent works' });
   await invoke('browser_press_key', { key: 'Enter' });
@@ -163,8 +183,9 @@ xsb.on(event => {
   pages.setAgentControl('p1', true);
   await until(async () => !!(await shieldIn(host!)));
   const button = await original.executeJavaScript("(()=>{const r=document.querySelector('button').getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()");
+  const viewOffset = await host.webContents.executeJavaScript("(()=>{const r=document.querySelector('main webview2').getBoundingClientRect();return {x:r.x,y:r.y}})()");
   await host.webContents.executeJavaScript("addEventListener('mousedown', e => { window.shielded = e.target.className; }, true); true");
-  for (const type of ['mouseDown', 'mouseUp'] as const) host.webContents.sendInputEvent({ type, ...button, button: 'left', clickCount: 1 });
+  for (const type of ['mouseDown', 'mouseUp'] as const) host.webContents.sendInputEvent({ type, x: button.x + viewOffset.x, y: button.y + viewOffset.y, button: 'left', clickCount: 1 });
   await until(async () => (await host!.webContents.executeJavaScript("window.shielded")) === 'control-shield');
   assert.equal(await original.executeJavaScript("window.clicks"), 2);
   pages.setAgentControl('p1', false);
@@ -279,13 +300,71 @@ xsb.on(event => {
   assert.equal(await child.executeJavaScript("typeof window.xsb"), "undefined");
   assert.equal(child.session, original.session);
   assert.equal(pages.list().find((p) => p.id === "p2")!.window, false);
+  // Only what the user caused takes the current tab: the agent's own page does not, the user's popup does.
+  assert.equal(pages.list().find((p) => p.id === "p1")!.background, true);
+  assert.equal(pages.list().find((p) => p.id === "p2")!.background, false);
   assert.equal(BrowserWindow.getAllWindows().length, 1, 'window.open must not create a BrowserWindow');
   const snapshot = await invoke("browser_snapshot");
   assert.match(snapshot.content[0].text, /Popup page/);
   await invoke("browser_screenshot");
   assert.equal(host.contentView.children.length, 0);
+  // An agent works in the background: selecting and drawing a page that is not on screen leaves the user's view alone.
   await invoke("browser_select", { pageId: "p1" });
-  await invoke("browser_screenshot");
+  const shownBefore = await host.webContents.executeJavaScript("document.querySelector('main webview2')?.getAttribute('web-contents-id')");
+  assert.equal(shownBefore, String(child.id));
+  assert.equal(original.isAttached(), false);
+  host.show();
+  host.focus();
+  await until(() => host!.isFocused());
+  await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
+  const drawn = pages.drawn.bind(pages);
+  let screenshotScale = 1;
+  const checkDrawing = (focused: BrowserWindow) => {
+    pages!.drawn = (id, draw) => drawn(id, async () => {
+      const drawing = BrowserWindow.getAllWindows().find((w) => w !== host && w !== focused)!;
+      assert.ok(drawing && drawing.isVisible(), 'an unattached page is drawn in a separate visible window');
+      assert.equal(drawing.isFocusable(), false);
+      assert.equal(drawing.isFocused(), false);
+      assert.equal(focused.isFocused(), true, 'creating and showing the screenshot window keeps the active window');
+      assert.equal(await host!.webContents.executeJavaScript("document.activeElement.id"), 'hostEditor');
+      assert.equal(await host!.webContents.executeJavaScript("document.querySelectorAll('webview2').length"), 1, 'the screenshot never attaches a second page to the host');
+      screenshotScale = await original.executeJavaScript('devicePixelRatio');
+      return draw();
+    });
+  };
+  checkDrawing(host);
+  const offscreen = await invoke("browser_screenshot");
+  pages.drawn = drawn;
+  assert.ok(offscreen.content[0].data.length > 1000, 'a page off screen is drawn for its screenshot');
+  assert.deepEqual(nativeImage.createFromBuffer(Buffer.from(offscreen.content[0].data, 'base64')).getSize(), { width: 800 * screenshotScale, height: 600 * screenshotScale });
+  assert.equal(host.isFocused(), true, 'closing the screenshot window keeps the active window');
+  assert.equal(await host.webContents.executeJavaScript("document.activeElement.id"), 'hostEditor');
+  assert.equal(await host.webContents.executeJavaScript("document.querySelector('main webview2')?.getAttribute('web-contents-id')"), shownBefore);
+  assert.equal(BrowserWindow.getAllWindows().length, 1, 'the temporary screenshot window is cleaned up');
+  await until(() => !original.isAttached());
+  // The screenshot must also leave a different foreground window and its editor alone.
+  const other = new BrowserWindow({ show: false });
+  await other.loadURL('data:text/html,<input id="otherEditor">');
+  host.hide();
+  other.show();
+  other.focus();
+  await until(() => other.isFocused());
+  await other.webContents.executeJavaScript("document.querySelector('#otherEditor').focus(); true");
+  checkDrawing(other);
+  await invoke('browser_screenshot');
+  pages.drawn = drawn;
+  assert.equal(other.isFocused(), true);
+  assert.equal(host.isVisible(), false, 'a screenshot does not show the hidden main window');
+  assert.equal(await other.webContents.executeJavaScript("document.activeElement.id"), 'otherEditor');
+  await assert.rejects(pages.drawn('p1', async () => { throw new Error('capture failed'); }), /capture failed/);
+  assert.equal(other.isFocused(), true, 'a failed screenshot also keeps the active window');
+  assert.equal(original.isAttached(), false, 'the page is detached after a failed screenshot');
+  assert.equal(original.isDestroyed(), false);
+  assert.equal(BrowserWindow.getAllWindows().length, 2, 'a failed capture leaves no screenshot window');
+  other.destroy();
+  host.show();
+  host.focus();
+  await until(() => host!.isFocused());
   // In a window of its own a page is shown by the app's page.html, shield and all.
   await invoke("browser_select", { pageId: "p2", presentation: "window" });
   assert.equal(pages.contents("p2"), child);
@@ -307,7 +386,7 @@ xsb.on(event => {
   await until(() => postBody === "value=preserved+%C3%A9");
   await until(() => pages!.list().length === 3 && pages!.contents("p3")!.getTitle() === "POST child");
   await original.executeJavaScript("document.querySelector('#download').submit(); true", true);
-  await pause(300);
+  await until(async () => JSON.parse((await invoke("browser_downloads_list")).content[0].text).downloads.length === 1);
   const downloaded = await invoke("browser_downloads_list");
   const records = JSON.parse(downloaded.content[0].text).downloads;
   assert.equal(records.length, 1);
@@ -331,6 +410,7 @@ xsb.on(event => {
   assert.equal(direct[2].filename, "same (2).csv");
   await invoke("browser_open", { url, presentation: "window" });
   assert.equal(pages.list().find((p) => p.id === "p4")!.window, true);
+  assert.equal(BrowserWindow.getAllWindows().find((w) => w !== host)!.isFocused(), false, "the agent's window does not take the focus");
   await invoke("browser_screenshot");
   await invoke("browser_select", { pageId: "p4", presentation: "panel" });
   assert.equal(pages.list().find((p) => p.id === "p4")!.window, false);
@@ -365,13 +445,44 @@ xsb.on(event => {
   original.sendInputEvent({ type: 'keyUp', keyCode: 'B' });
   await pause(100);
   assert.ok((await original.executeJavaScript("document.querySelector('#field').value")).includes('B'));
+  // A popup the agent's click opened is the agent's doing: it does not take the current tab either.
+  const linkRef = Number(/\[(\d+)\] link "Agent popup"/.exec((await invoke('browser_snapshot', { from: 0 })).content[0].text)![1]);
+  await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
+  await invoke('browser_click', { ref: linkRef });
+  await until(() => pages!.list().some((p) => p.id === 'p5'));
+  assert.equal(pages.list().find((p) => p.id === 'p5')!.background, true);
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor', 'an agent-created popup preserves the user focus');
   browser.release();
   await original.executeJavaScript("window.open('/popup'); true", true);
-  await until(() => pages!.list().some((p) => p.id === 'p5'));
-  assert.equal(pages.list().find((p) => p.id === 'p5')!.agent, false);
-  assert.equal(pages.list().find((p) => p.id === 'p5')!.window, false);
+  await until(() => pages!.list().some((p) => p.id === 'p6'));
+  assert.equal(pages.list().find((p) => p.id === 'p6')!.agent, false);
+  assert.equal(pages.list().find((p) => p.id === 'p6')!.background, false);
+  assert.equal(pages.list().find((p) => p.id === 'p6')!.window, false);
   assert.equal(BrowserWindow.getAllWindows().length, 1, 'user popups must also stay in tabs');
-  console.log("PASS annotations (debugger selection, embedded notes, region scrolling), DOM shield in the panel and in the page window, blocked user input for one tool call only, host focus kept by focus emulation, controlled popup tabs, POST/blob/direct downloads with preserved suffixes, per-turn list reset, explicit windows and restore");
+  // Check the production tab renderer independently of the shield/input fixture above.
+  await host.loadFile(tabHtml);
+  await until(async () => await host!.webContents.executeJavaScript('typeof window.selectPage === "function"'));
+  await host.webContents.executeJavaScript(`window.auditState.pages = ${JSON.stringify(pages.list())}; window.selectPage(null); document.querySelector('#hostEditor').focus(); true`);
+  browser = new BrowserSession(cwd, () => ({ pages: pages!, project: cwd }), runtime);
+  await invoke('browser_navigate', { url });
+  assert.equal(await host.webContents.executeJavaScript('window.auditState.tab'), null);
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor');
+  const userPage = pages.open(url, { sessionId: 'sa' });
+  await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === userPage.id);
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.tagName'), 'WEBVIEW2', 'a user-created tab selects and focuses its page');
+  await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
+  await pages.navigate(userPage.id, url);
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor', 'page updates do not focus an existing tab again');
+  const agentLink = Number(/\[(\d+)\] link "Agent popup"/.exec((await invoke('browser_snapshot')).content[0].text)![1]);
+  await invoke('browser_click', { ref: agentLink });
+  await pause(100);
+  assert.equal(await host.webContents.executeJavaScript('window.auditState.tab'), userPage.id);
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor');
+  await host.webContents.executeJavaScript("window.selectPage(null); document.querySelector('.launcher-item').click(); true");
+  await until(async () => (await host!.webContents.executeJavaScript('document.activeElement.id')) === 'web-url');
+  const blankId = await host.webContents.executeJavaScript('window.auditState.tab');
+  assert.equal(pages.list().find((p) => p.id === blankId)!.background, false);
+  console.log("PASS user tabs focus, agent tabs preserve selection and focus, temporary screenshot windows preserve foreground editors and clean up on failure, annotations, DOM shields, controlled input, popups, downloads, explicit windows and restore");
 } catch (e) {
   console.error(e);
   process.exitCode = 1;

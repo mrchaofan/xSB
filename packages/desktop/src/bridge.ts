@@ -57,7 +57,7 @@ export type Artifact = { sessionIds?: string[]; fileUri?: string; id: string; na
  * `favicon`: the site's icon (http(s) or data: image), once the page named one.
  * `annotating`: the user is annotating it; `annotations`: the notes embedded in its current document.
  */
-export type PageView = { sessionId?: string; id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; pinned: boolean; agent: boolean; controlling?: boolean; annotating?: boolean; annotations?: number; tone?: "claude" | "default"; error?: string; favicon?: string };
+export type PageView = { sessionId?: string; id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; pinned: boolean; agent: boolean; background?: boolean; controlling?: boolean; annotating?: boolean; annotations?: number; tone?: "claude" | "default"; error?: string; favicon?: string };
 
 /**
  * `missing` is set when the backend is one of the known agents and its
@@ -114,8 +114,6 @@ export type Event =
   | { webAnnotation: { pageId: string; sessionId?: string; annotation: WebAnnotation } }
   /** The user cleared these notes on the page: the composer drops them too. */
   | { webAnnotationsRemoved: { pageId: string; sessionId?: string; ids: string[] } }
-  /** Make this page's tab the current one of the side panel. */
-  | { revealPage: string }
   /** Show this agent's conversation: the user clicked a notification of it. */
   | { showAgent: string }
   /** The application menu asked for the settings. */
