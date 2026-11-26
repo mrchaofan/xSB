@@ -68,6 +68,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   ]));
   const panel = lane + " .ask-panel";
   await until(() => has(panel), "question panel above the composer");
+  assert.equal(await js("getComputedStyle(" + q(lane + " .tool > summary") + ", '::before').content"), "none", "tool rows do not get a second generic disclosure arrow");
   await untilJS(q(row + " .state") + ".dataset.state==='asking'", "the row says it waits for the answer");
   assert.equal(await js(q(lane + " .lane-state span") + ".textContent"), text["state.asking"]);
   assert.equal(await js(q(panel + " .ask-head small") + ".textContent"), "1/3");
