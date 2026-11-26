@@ -10,7 +10,7 @@ session 是持久对话；turn 是 Hub 授权的一段串行执行；run 是后�
 
 `Lifecycle` 统一构造不可变事件，提供 session opened/bound/unbound/closed/background_changed、turn started/ended、step started/ended。事件包含独立 eventId、时间、source（agentId、sessionId、backendSessionId、contextEpoch、turnId、可选 stepId）和 data。null turnId 明确表示无 turn 来源。生命周期观察事件不作为持久消息自动重放；需可靠执行的后台工作必须先登记 Task。旧 `acp.*` 钩子保留为传输及既有消费者入口，不另建调度器。
 
-`source()` 在调用当下捕获来源；观察者收到的是当时的快照。创建任务时将来源写入 Task，与任务原子提交；Jobs 以持久 taskId 重查可执行状态，并使用 Task.source，不读取处理时的 current turn 来认领它。step 结束、后台结果、登录完成均不能重新激活来源 turn。
+`source()` 在调用当下捕获来源；观察者收到的是当时的快照。创建任务时将来源写入 Task，与任务原子提交；Jobs 以持久 taskId 重查可执行状态，并使用 Task.source，不读取处理时的 current turn 来认领它。step 结束、后台结果、URL 交互完成均不能重新激活来源 turn。
 
 后台工作可以在 turn 中登记、在 turn 结束后启动或完成。只有登记提交点需要有效授权；已登记工作独立于创建 turn 的时长，仍受 task parents、workGeneration、停止代次约束。事件关联是因果信息，不是权限或取消边。结果通过既有内核通知和输入队列投递，不能插入无关受保护 turn。
 
@@ -18,10 +18,10 @@ ACP tool_call 按 backend binding + toolCallId 关联 step；Hub MCP 按请求 r
 
 ## ACP 能力接入
 
-1. URL elicitation 与 form 分开路由：Codex 仍使用 xSB ask，Claude 可使用原生 form；两者可请求 URL 授权。URL 请求支持 session 或 request 作用域，保留 opaque elicitationId，跨连接转换 requestId，覆盖登录、首次 prompt 建立后端以及设置发现期间的请求作用域；同意打开 URL不代表 OAuth 已完成。取消与连接关闭由原请求管理，不能套用 form 的 turn 结束取消规则。凭据不进入对话。
-2. 保留完整 authMethods。terminal 类型交给桌面端交互终端，使用配置好的 Agent 命令并追加协议 args/env，退出后重新握手；不调用 auth/login，不创建模型 turn。禁止在活动执行期间重启后端。
+1. URL elicitation 与 form 分开路由：Codex 仍使用 xSB ask，Claude 可使用原生 form；两者可请求 URL 授权。URL 请求支持 session 或 request 作用域，保留 opaque elicitationId，跨连接转换 requestId，覆盖首次 prompt 建立后端以及设置发现期间的请求作用域；同意打开 URL不代表 OAuth 已完成。取消与连接关闭由原请求管理，不能套用 form 的 turn 结束取消规则。凭据不进入对话。
+2. xSB 不发起后端登录，不消费 authMethods、不声明 terminal auth、不提供登录扩展或终端。用户自行完成后端与服务配置；ACP 返回的错误码、消息与数据保留原样，界面展示错误。
 3. promptSuggestions 缓存为会话 UI 状态，点击只填入草稿。新输入/绑定变化清理旧建议；历史重放不复活建议。
-4. commands.skill 维护标准命令目录；只有后端声明 session.prompt.skill 才发送 skill block。无 inline 能力时只能一个 skill 且位于首位，Hub 动态上下文置于其后；技能发现与加载仍由 Agent 负责。命令目录、登录状态和事件 ID 不进入常驻 systemPrompt。
+4. commands.skill 保留协议输入兼容；桌面端不提供“命令与技能”下拉。只有后端声明 session.prompt.skill 才发送 skill block。无 inline 能力时只能一个 skill 且位于首位，Hub 动态上下文置于其后；技能发现与加载仍由 Agent 负责。命令目录、登录状态和事件 ID 不进入常驻 systemPrompt。
 
 仅声明已实现的 client capability；Agent 的实际能力以握手和当前会话目录为准。新能力沿 Desktop → Hub → Backend 全链路传递。标准能力优先；不能等价替换的 AIR 能力保留在独立兼容边界，见下文。
 

@@ -3,18 +3,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { Connection, SessionControls } from "@xsb/protocol";
+import { Connection, SessionControls, TurnFailure } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
-import { Auth } from "../src/auth.ts";
 
 const agent = fileURLToPath(new URL("./capability-agent.ts", import.meta.url));
 const project = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-capabilities-"));
 const priorHome = process.env.XSB_HOME;
 process.env.XSB_HOME = path.join(project, "home"); fs.mkdirSync(process.env.XSB_HOME);
 fs.writeFileSync(path.join(process.env.XSB_HOME, "config.json"), JSON.stringify({ version: 1, backends: {
+  rejected: { command: process.execPath, args: [agent, "--setup-error"] },
   startup: { command: process.execPath, args: [agent, "--startup-url"] },
   codex: { command: process.execPath, args: [agent] }, capabilities: { command: process.execPath, args: [agent] },
 } }));
@@ -35,20 +34,38 @@ async function client(backend = "capabilities") {
 }
 async function until(predicate: () => boolean) { for (let i = 0; i < 200; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 10)); } assert.fail("condition did not arrive"); }
 
-test("OAuth URL maps request IDs across both connections and completion retains the opaque UI ID", async () => {
-  const { conn, session, completions } = await client();
-  let outer: number | undefined, shown: any;
-  conn.onRequest("elicitation/create", p => { shown = p; return { action: "accept" }; });
-  const methods = await conn.request(Auth.methods, { agentId: session.agentId });
-  assert.deepEqual(methods.find((m: any) => m.type === "terminal").env, [{ name: "ACP_TEST", value: "ok" }]);
-  const response = await conn.request(Auth.login, { agentId: session.agentId, methodId: "oauth" }, undefined, id => outer = id);
-  assert.equal(shown.requestId, outer);
-  assert.notEqual(shown.elicitationId, "oauth");
-  assert.equal(response.authenticated, true);
-  await until(() => completions.length > 0);
-  assert.equal(completions[0].elicitationId, shown.elicitationId);
+test("agent sign-in extensions are unavailable even when an agent offers auth methods", async () => {
+  const { conn, session } = await client();
+  await conn.request(SessionControls.get, { sessionId: session.id, discover: true });
+  for (const method of ["_dev.xsb/auth/methods", "_dev.xsb/auth/login"]) {
+    await assert.rejects(conn.request(method, { agentId: session.agentId, methodId: "terminal" }), { code: -32601 });
+  }
   assert.equal(session.current, undefined);
   conn.close();
+});
+
+test("ACP setup rejection preserves the provider's code, message and data", async () => {
+  const { conn, session } = await client("rejected");
+  await assert.rejects(conn.request(SessionControls.get, { sessionId: session.id, discover: true }), {
+    code: -32000, message: "Provider rejected credentials", data: { reason: "auth_required", provider: "custom" },
+  });
+  assert.equal(session.current, undefined);
+  conn.close();
+});
+
+test("ACP prompt and run failures keep the provider error without sign-in advice", async () => {
+  for (const text of ["reject-prompt", "fail-run"]) {
+    const { conn, session, updates } = await client();
+    await conn.request("session/prompt", { sessionId: session.id, prompt: [{ type: "text", text }] }).catch(error => {
+      assert.equal(error.code, -32000);
+      assert.equal(error.message, "Provider rejected credentials");
+    });
+    await until(() => !session.current && updates.some(u => u._meta?.[TurnFailure.key]));
+    const failed = updates.find(u => u._meta?.[TurnFailure.key])._meta[TurnFailure.key];
+    assert.equal(failed.message, "Provider rejected credentials");
+    assert.deepEqual(failed.data, { reason: "auth_required", provider: "custom" });
+    conn.close();
+  }
 });
 
 test("session URL survives foreground idle and standard suggestions override AIR without changing prefix order", async () => {
@@ -71,28 +88,6 @@ test("session URL survives foreground idle and standard suggestions override AIR
   assert.equal(session.current, undefined, "URL completion never revives the turn");
   conn.close();
 });
-
-test("terminal auth uses configured invocation and reconnects without creating a turn or losing session ID", async () => {
-  const { conn, session } = await client();
-  await conn.request(SessionControls.get, { sessionId: session.id, discover: true });
-
-  const saved = session.rec.backendSessionId;
-  let terminal: any;
-  conn.onRequest(Auth.terminal, async p => {
-    terminal = p;
-    const child = spawn(p.command, [...p.args, ...p.method.args], { cwd: p.cwd, env: { ...process.env, ...Object.fromEntries(p.method.env.map((e: any) => [e.name, e.value])) }, stdio: "ignore" });
-    return { exitCode: await new Promise(r => child.once("exit", r)) };
-  });
-  await conn.request(Auth.login, { agentId: session.agentId, methodId: "terminal" });
-  assert.equal(terminal.command, process.execPath);
-  assert.equal(terminal.cwd, project);
-  assert.equal(session.current, undefined);
-  assert.equal(session.rec.backendSessionId, saved);
-  await session.ensureBackend();
-  assert.equal(session.rec.backendSessionId, saved, "new process resumes the saved native ID");
-  conn.close();
-});
-
 
 test("request-scoped authorization during session setup maps to the discovering client request", async () => {
   const { conn, session } = await client("startup");

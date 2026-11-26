@@ -20,7 +20,7 @@
 - 不依赖包装包 `@volcengine/ark-cli`：它的 postinstall 会从 CDN 下载二进制，并调用 `+connect --refresh` 把 arkcli 的技能装进本机所有智能体。平台包只含程序本身和技能文档，没有安装脚本。
 - 各平台的应用在各自的平台上打包（`.github/workflows/desktop.yml`）。`electron-builder.config.mjs` 的 `afterPack` 会检查应用里有目标平台的 arkcli；跨平台打包时缺少这个程序，打包直接失败。
 - xSB 只使用内置的 arkcli，不在 PATH 中查找，也不使用用户自己装的 arkcli。方舟卡片和启动器按绝对路径调用它；它还以 `arkcli` 为名链接到 `backends/builtin/bin`（见 CLI_SETUP.md 的“可执行文件的布局”），这个目录排在子进程 PATH 中用户 PATH 的前面，所以媒体插件按命令名找到的也是它（除非用户显式设置了 `ARKCLI`）。登录凭据由 arkcli 保存在 `~/.arkcli`，和用户自己的 arkcli 共用。
-- 内置程序缺失或无法运行时，卡片显示“程序异常”，只提供重新检测；需要重新安装 xSB。
+- 内置程序缺失或无法运行时，卡片显示“程序异常”，只提供重新检测，不附加重装建议。
 - 升级 arkcli：改 `optionalDependencies` 中的六个版本号，重新运行 `npm install`，再按下文核对输出格式。
 
 ## 登录
@@ -45,7 +45,7 @@
 
 **Claude 的用户设置优先于环境变量。** 真实应用中实测发现：用户 `~/.claude/settings.json` 的 `env` 里设置的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` 会盖过进程环境，请求仍然发往用户自己的服务。所以在 macOS/Linux 上，xSB 写入 `<userData>/backends/ark/claude`（一个转发脚本）和 `ark/claude-settings.json`（地址、模型，并把 `ANTHROPIC_API_KEY`、`CLAUDE_CODE_USE_*` 置空；不含 Key）。启动器把 `CLAUDE_CODE_EXECUTABLE` 指向这个转发脚本，由它运行 `claude --settings <文件> …`。命令行设置的优先级高于用户设置；Key 仍只通过 `ANTHROPIC_AUTH_TOKEN` 环境变量传递。Windows 上 Node 不能不经 shell 启动 `.cmd`，所以只设环境变量，确认框会列出会胜出的用户设置项。另一种做法——用 `apiKeyHelper` 取 Key——实测返回 401，没有采用。
 
-Claude、Codex 的配置文件都不改；终端里的 claude/codex 不受影响。接入后，`AgentClis.check` 不再检查智能体自己的登录，而是调用 `Ark.agentCheck`：只在本地询问 arkcli，不发送模型请求。arkcli 已登录且所接入的套餐有效时为 `ready`；退出登录（`signedOut`）或套餐到期、已不在账号下（`planGone`）时为 `unauthenticated`；arkcli 无法运行或没有回应（`unavailable`）时为 `unknown`。
+Claude、Codex 的配置文件都不改；终端里的 claude/codex 不受影响。`AgentClis.check` 只检查智能体程序版本，不检查账号或套餐；LM 调用失败时展示 ACP 返回的错误。方舟设置页的显式检测仍由 `Ark.status` 提供。
 
 **生效时机。** 每个对话的智能体程序是一个进程，由启动器启动一次，之后跨 turn 复用（hub 的 `backends.ts`）。接入或解除只改写启动器和 `ark.json`，不会重启已在运行的进程。所以新建的对话立即生效，已打开的对话在重启应用后生效。确认框和完成提示都按这个说法（`main.ts` 的 `effect`）。已打开的对话如果在此之前因停止超时、续上下文或工具变更而重启了后端，也会提前生效。如果 Claude 自己的 `settings.json` 里设置了 `ANTHROPIC_*` 或 `apiKeyHelper`，它们会优先于进程环境，确认框会提示这一点。
 

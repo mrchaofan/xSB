@@ -518,9 +518,9 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
   console.log("ok 37 user stop withdraws backlog, preserves facts, and accepts new work");
 }
 
-// 12. Backend failures carry a code and a reason, and name the agent.
+// 12. Hub failures identify the backend; ACP provider errors preserve their original response.
 {
-  const fails = async (backend: string, code: number, reason: string, message: RegExp): Promise<void> => {
+  const fails = async (backend: string, code: number, reason: string | undefined, message: RegExp): Promise<void> => {
     let error: any;
     try {
       const session=await create(backend);
@@ -538,7 +538,7 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
   await fails("from-the-future", -33104, "backend_incompatible", /speaks ACP v9/);
   // An agent that speaks only ACP v1 (as Gemini CLI and Grok do) is not one the hub can run.
   await fails("old", -33104, "backend_incompatible", /speaks ACP v1/);
-  await fails("signed-out", -32000, "auth_required", /not signed in.*Log in with the mock CLI/);
+  await fails("signed-out", -32000, undefined, /^Authentication required$/);
   console.log("ok 12 error codes");
 }
 

@@ -4,7 +4,7 @@ import { backendControls, refreshBackendControls } from "./backend.js";
 import { ICON, fill, h } from "./dom.js";
 import { confirmDialog, field, select } from "./form.js";
 import { t } from "./i18n.js";
-import { applyPreferences, globalPreferences, saveGlobalPreferences } from "./preferences.js";
+import { globalPreferences, saveGlobalPreferences } from "./preferences.js";
 import { pluginsSection } from "./tools.js";
 
 const GLOBAL_KEYS = ["general", "backends", "tools"];
@@ -177,15 +177,6 @@ export function showSettings(key = "general", refresh = true) {
     section(t("settings.conversation"), settingRow(t("settings.showTools"), t("settings.showToolsHint"),
       toggle(t("settings.showTools"), global.showTools, (value) => save(() => saveGlobalPreferences({ showTools: value }))))),
     consultationSection("global"),
-    section(t("settings.backup"), h("p", {}, t("settings.backupHint")), h("div", { class: "actions" },
-      h("button", { class: "btn", onclick: async () => {
-        try { const ui = Object.fromEntries(Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(key => key?.startsWith("xsb.ui.")).map(key => [key, localStorage.getItem(key)])); await xsb.exportSettings(ui); }
-        catch (error) { failure.textContent = error.message; }
-      } }, t("settings.export")),
-      h("button", { class: "btn", onclick: async () => {
-        try { const ui = await xsb.importSettings(); if (ui === null) return; for (const [key, value] of Object.entries(ui)) localStorage.setItem(key, value); applyPreferences(); showSettings("general"); }
-        catch (error) { failure.textContent = error.message; }
-      } }, t("settings.import")))),
   ];
   if (key === "backends") content = [
     limitsFailure,

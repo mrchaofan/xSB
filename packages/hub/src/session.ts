@@ -358,7 +358,6 @@ export class LiveSession {
     return this.rec.agentId;
   }
   get configurationIdle(): boolean { return !this.busy && !this.currentRun && !this.background.length && !this.binding && !this.userStopping; }
-  resumeAfterAuth(): void { this.pump(); }
 
   get busy(): boolean {
     return !!this.current || this.queue.length > 0;
@@ -400,9 +399,7 @@ export class LiveSession {
     const backend = await this.hub.backends.for(this.hub.agent(this.agentId));
     if (this.backend !== backend) {
       this.binding ??= this.bind(backend).finally(() => (this.binding = undefined));
-      await this.binding.catch((e) => {
-        throw this.explain(e, backend);
-      });
+      await this.binding;
     }
     return backend;
   }
@@ -710,18 +707,6 @@ export class LiveSession {
       this.estimated = 0;
       for (const client of this.clients) client.conn.notify("session/update", { sessionId: this.id, update });
       this.hub.kernel.hooks.emit("acp.session_renewed", { agentId: this.agentId, sessionId: this.id });
-    });
-  }
-
-  /** ACP's `auth_required` says nothing about which of several agents needs what. */
-  private explain(e: unknown, backend?: Backend): unknown {
-    if (!(e instanceof RpcError) || e.code !== -32000 || !backend || backend.conn.isClosed) return e;
-    return failure("auth_required", {
-      detail: e.message,
-      agent: this.agentId,
-      backend: this.hub.agent(this.agentId).backend,
-      info: backend.info,
-      authMethods: backend.authMethods,
     });
   }
 
@@ -1123,7 +1108,6 @@ export class LiveSession {
    * model goes first, as a turn of its own, once something else is to run (docs/DESIGN.md 3.1, 8).
    */
   pump(): void {
-    if (this.hub.authentication?.busy(this.agentId)) return;
     // While the hub stops, nothing starts: what waits is in the inbox, and runs on the next start.
     if (this.userStopping || this.current || this.hub.stopping || this.sendingHead || this.queue[0]?.cancelling) return;
     if (this.hub.workflows?.available(this) === false) {
@@ -1335,7 +1319,7 @@ export class LiveSession {
         (e) => {
           if (this.backend === backend && this.rec.backendSessionId === sessionId) {
             if (this.sendingBatch === batch) this.sendingBatch = undefined;
-            this.refused(batch, e, backend);
+            this.refused(batch, e);
             if (this.current === turn && !turn.cancelledBy && !turn.recovering) {
               for (const input of turn.held.splice(0)) this.send([input]);
               this.publishQueue();
@@ -1394,7 +1378,7 @@ export class LiveSession {
    * The backend did not take input. Not taken for a stop (-32800), it is left out of the turn (`leave`); refused for
    * another reason, its sender is told why, and a turn that has nothing in the conversation yet fails with it.
    */
-  private refused(batch: Input[], e: unknown, backend: Backend): void {
+  private refused(batch: Input[], e: unknown): void {
     const turn = this.current;
     if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) return;
     if (e instanceof RpcError && e.code === RpcError.CANCELLED) {
@@ -1406,7 +1390,7 @@ export class LiveSession {
     if (e instanceof RpcError && e.code === CONNECTION_CLOSED) return this.end({ stopReason: "error", failure: new RpcError(CONNECTION_CLOSED,
       "The connection ended before insertion could be confirmed. The original input was preserved; verify the outcome before continuing.", { errorKind: "execution_uncertain" }) });
     if (contextOverflow(e) && this.canRecover(turn)) return void this.recover(turn, e);
-    const failure = this.explain(e, backend);
+    const failure = e;
     // What came in front of it (instructions, a handoff) was not given: it goes in front of the next prompt.
     this.restorePrefaces(batch, turn);
     if (!turn.inserted) {

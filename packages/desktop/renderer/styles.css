@@ -891,12 +891,8 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 .backend-choice .backend-description { margin: 0; font-size: var(--text-xs); }
 .backend-choice:has(input:checked) { background: color-mix(in srgb, var(--accent-wash) 40%, var(--paper)); }
 .backend-choice:has(input:disabled) .backend-name strong { color: var(--ink-3); }
-.backend-login-intro { margin: 0; color: var(--ink-2); font-size: var(--text-sm); }
-.backend-login-steps { margin: 0; padding-left: var(--space-5); display: flex; flex-direction: column; gap: var(--space-3); }
 .backend-command { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2) var(--space-3); margin-top: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--wash); }
 .backend-command code { flex: 1; user-select: text; font: var(--text-sm) / var(--leading) var(--mono); }
-.backend-login .hint { line-height: var(--leading); }
-.backend-login .error { color: var(--cli-error); font-weight: 400; font-size: var(--text-sm); }
 .backend-card [hidden], .backend-controls [hidden] { display: none !important; }
 /* 火山方舟：套餐列表、等待登录，以及每个智能体的接入状态 */
 .ark-plans { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-1h); }
@@ -926,7 +922,7 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 }
 
 .backend-choice .backend-name strong { color: var(--ink); font-weight: 500; }
-.backend-actions .btn[aria-disabled="true"], .backend-login .btn[aria-disabled="true"] { cursor: progress; color: var(--ink-3); background: var(--wash); border-color: var(--line); }
+.backend-actions .btn[aria-disabled="true"] { cursor: progress; color: var(--ink-3); background: var(--wash); border-color: var(--line); }
 
 .backend-choice .backend-error-details, .backend-choice .backend-notice { margin-top: 0; }
 /* The form scrolls independently so setup actions never push Save out of view. */
@@ -1119,6 +1115,5 @@ dialog.settings-dialog::backdrop { background: var(--backdrop); backdrop-filter:
 
 .composer-capabilities { display: flex; align-items: center; gap: 8px; padding: 4px 0; min-width: 0; }
 .composer-capabilities[hidden] { display: none; }
-.native-commands { max-width: 180px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
 .prompt-suggestions { display: flex; gap: 6px; overflow-x: auto; min-width: 0; }
 .prompt-suggestions button { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }

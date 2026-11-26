@@ -10,7 +10,6 @@ import { BACKEND_LIMITS, GLOBAL_DIR, backendLimit, consultationSettings, setCons
 import { Paths } from "../src/paths.ts";
 import { Hub } from "../src/hub.ts";
 import { consultationGuidance, TASK_LIFECYCLE_RULES } from "../src/prompts.ts";
-import { settingsBundle, restoreSettingsBundle } from "../src/settings-backup.ts";
 
 function machine(t: test.TestContext) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-config-"));
@@ -63,15 +62,6 @@ test("invalid consultation values and damaged settings cannot overwrite user con
   fs.writeFileSync(paths.config, broken);
   assert.throws(() => setConsultation("project", true, paths), /invalid_json|JSON/);
   assert.equal(fs.readFileSync(paths.config, "utf8"), broken);
-});
-
-test("consultation is included in global settings backup and restore", t => {
-  machine(t);
-  setConsultation("global", true);
-  const bundle = settingsBundle();
-  setConsultation("global", false);
-  restoreSettingsBundle(bundle);
-  assert.equal(consultationSettings().global, true);
 });
 
 test("main and task agents get localized effective consultation guidance without interrupting active work", t => {

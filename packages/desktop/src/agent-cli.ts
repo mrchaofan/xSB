@@ -1,5 +1,5 @@
 /** User-facing CLI lifecycle. Providers are data; filesystem, probes and installs share one service.
- * Probes never create a session or send a prompt. Authentication is local status, not proof of credit/network access.
+ * Probes only run the version command; account and provider configuration belong to the user.
  * An install downloads the publisher's own release into the app's folder for it (clis.ts `installDir`); it changes
  * nothing of the user's: no shell startup file, no PATH, nothing in their home folder.
  */
@@ -13,13 +13,10 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import type { Language } from "@xsb/protocol";
-import type { ArkAgentCheck, ArkProblem } from "./ark.ts";
 import type { Clis } from "./clis.ts";
 
 export type AgentCli = "codex" | "claude";
-export type CliCheck = { state: "missing" | "broken" | "unauthenticated" | "unknown" | "ready"; version?: string; issue?: "timeout" | "execution" | "auth";
-  /** The credentials are a Volcengine Ark plan's (ark.ts), not the agent's own sign-in; `ark` says why they cannot be used now. */
-  via?: "ark"; ark?: ArkProblem };
+export type CliCheck = { state: "missing" | "broken" | "ready"; version?: string; issue?: "timeout" | "execution" };
 export type CliConfig = { path: string; exists: boolean };
 type Result = { code: number | null; stdout: string; stderr?: string; timedOut: boolean };
 export type Runner = (file: string, args: string[], options?: { timeout?: number; cwd?: string; env?: Record<string, string | undefined> }) => Promise<Result>;
@@ -55,20 +52,10 @@ export const run: Runner = (file, args, options = {}) => new Promise((resolve) =
 });
 
 const PROVIDERS = {
-  codex: { env: "CODEX_HOME", directory: ".codex", file: "config.toml", auth: ["login", "status"], login: ["login"] },
-  claude: { env: "CLAUDE_CONFIG_DIR", directory: ".claude", file: "settings.json", auth: ["auth", "status", "--json"], login: ["auth", "login"] },
+  codex: { env: "CODEX_HOME", directory: ".codex", file: "config.toml" },
+  claude: { env: "CLAUDE_CONFIG_DIR", directory: ".claude", file: "settings.json" },
 } as const;
 
-/**
- * The command the user runs in their terminal to sign `name` in, for the program the app uses (`program`). That is
- * found by its name only when it is what the user's PATH finds (`onUserPath`); one the app installed in its own folder
- * is named by its path, quoted for the terminal of the platform (PowerShell on Windows).
- */
-export function loginCommand(name: AgentCli, program: string | null, onUserPath: boolean, platform: NodeJS.Platform = process.platform): string {
-  const args = PROVIDERS[name].login.join(" ");
-  if (!program || onUserPath) return `${name} ${args}`;
-  return platform === "win32" ? `& '${program.replaceAll("'", "''")}' ${args}` : `'${program.replaceAll("'", `'\\''`)}' ${args}`;
-}
 export function agentCli(name: unknown): AgentCli {
   if (name !== "codex" && name !== "claude") throw new Error("Unknown CLI");
   return name;
@@ -85,15 +72,15 @@ export function configTemplate(name: AgentCli, language: Language): string {
     permissions: { defaultMode: "default", allow: [], ask: ["Bash", "Edit", "Write"], disableBypassPermissionsMode: "disable" },
   }, null, 2) + "\n";
   return language === "zh-CN"
-    ? '# 使用前运行 codex login 登录；模板不包含凭据。\n# approval_policy：执行命令需用户确认；如需调整，参阅官方权限说明。\napproval_policy = "on-request"\n# sandbox_mode：默认只读；需要写入项目时可改为 "workspace-write"。\nsandbox_mode = "read-only"\n# 使用第三方服务时按官方说明添加 model_provider / model_providers，密钥放在环境变量中。\n'
-    : '# Run codex login before use; this template contains no credentials.\n# approval_policy: request approval for commands; consult the official permissions guide before changing.\napproval_policy = "on-request"\n# sandbox_mode: read-only; change to "workspace-write" if project writes are needed.\nsandbox_mode = "read-only"\n# For third-party services, configure model_provider / model_providers per the official guide; keep keys in environment variables.\n';
+    ? '# 使用前请自行完成后端与服务配置；模板不包含凭据。\n# approval_policy：执行命令需用户确认；如需调整，参阅官方权限说明。\napproval_policy = "on-request"\n# sandbox_mode：默认只读；需要写入项目时可改为 "workspace-write"。\nsandbox_mode = "read-only"\n# 使用第三方服务时按官方说明添加 model_provider / model_providers，密钥放在环境变量中。\n'
+    : '# Configure the backend and provider before use; this template contains no credentials.\n# approval_policy: request approval for commands; consult the official permissions guide before changing.\napproval_policy = "on-request"\n# sandbox_mode: read-only; change to "workspace-write" if project writes are needed.\nsandbox_mode = "read-only"\n# For third-party services, configure model_provider / model_providers per the official guide; keep keys in environment variables.\n';
 }
 
-/** JSON has no comments: Claude has no required editable fields; put login and optional field notes alongside it. */
+/** JSON has no comments: Claude has no required editable fields; put configuration notes alongside it. */
 function claudeNotes(language: Language): string {
   return language === "zh-CN"
-    ? '# Claude 配置说明\n\n使用前运行 `claude auth login` 登录。无需填写占位密钥。\n\n- `permissions.defaultMode`：默认逐项确认权限。\n- `permissions.allow`：默认空列表；只添加你明确允许自动执行的操作。\n- `permissions.ask`：执行命令、编辑和写入需确认。\n- `permissions.disableBypassPermissionsMode`：关闭跳过权限确认。\n- 第三方服务可按 https://code.claude.com/docs/en/settings 配置 `env`；API 密钥建议放在系统环境变量中。\n\nsettings.json 使用标准 JSON，不支持注释，因此说明保存在本文件。\n'
-    : '# Claude settings notes\n\nRun `claude auth login` before use. No placeholder API key is required.\n\n- `permissions.defaultMode`: confirm permissions by default.\n- `permissions.allow`: empty by default; add only operations you explicitly trust.\n- `permissions.ask`: confirm commands, edits and writes.\n- `permissions.disableBypassPermissionsMode`: disable skipping permission checks.\n- For third-party services configure `env` per https://code.claude.com/docs/en/settings; prefer system environment variables for API keys.\n\nsettings.json uses standard JSON; comments are kept in this file.\n';
+    ? '# Claude 配置说明\n\n使用前请自行完成后端与服务配置。无需填写占位密钥。\n\n- `permissions.defaultMode`：默认逐项确认权限。\n- `permissions.allow`：默认空列表；只添加你明确允许自动执行的操作。\n- `permissions.ask`：执行命令、编辑和写入需确认。\n- `permissions.disableBypassPermissionsMode`：关闭跳过权限确认。\n- 第三方服务可按 https://code.claude.com/docs/en/settings 配置 `env`；API 密钥建议放在系统环境变量中。\n\nsettings.json 使用标准 JSON，不支持注释，因此说明保存在本文件。\n'
+    : '# Claude settings notes\n\nConfigure the backend and provider before use. No placeholder API key is required.\n\n- `permissions.defaultMode`: confirm permissions by default.\n- `permissions.allow`: empty by default; add only operations you explicitly trust.\n- `permissions.ask`: confirm commands, edits and writes.\n- `permissions.disableBypassPermissionsMode`: disable skipping permission checks.\n- For third-party services configure `env` per https://code.claude.com/docs/en/settings; prefer system environment variables for API keys.\n\nsettings.json uses standard JSON; comments are kept in this file.\n';
 }
 
 export class AgentClis {
@@ -102,11 +89,6 @@ export class AgentClis {
   private clis: Pick<Clis, "executable" | "refresh" | "resync" | "installDir" | "env" | "forget">;
   private runner: Runner;
   private home: string;
-  /**
-   * The check of credentials that are not the agent's own (`Ark.agentCheck`), done instead of its sign-in's; null when
-   * they are its own. Given the PATH this check has just read again.
-   */
-  credentials: (name: AgentCli) => Promise<ArkAgentCheck | null> = async () => null;
   constructor(clis: Pick<Clis, "executable" | "refresh" | "resync" | "installDir" | "env" | "forget">, runner: Runner = run, home = os.homedir()) {
     this.clis = clis;
     this.runner = runner;
@@ -144,22 +126,7 @@ export class AgentClis {
     const result = await this.runner(executable, ["--version"], { env });
     const version = /\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/.exec(result.stdout)?.[0];
     if (result.code !== 0 || !version) return { state: "broken", issue: result.timedOut ? "timeout" : "execution" };
-    const delegated = await this.credentials(name);
-    if (delegated) return { ...delegated, version };
-    const auth = await this.runner(executable, [...PROVIDERS[name].auth], { env });
-    if (auth.timedOut || auth.code === null) return { state: "unknown", version, issue: auth.timedOut ? "timeout" : "auth" };
-    if (name === "codex") {
-      if (auth.code === 0) return { state: "ready", version };
-      if (/not logged in/i.test(auth.stdout + auth.stderr)) return { state: "unauthenticated", version };
-      return { state: "unknown", version, issue: "auth" };
-    }
-    try {
-      const status = JSON.parse(auth.stdout);
-      const external = !!status.apiProvider && status.apiProvider !== "firstParty";
-      if (external) return { state: "unknown", version, issue: "auth" };
-      if (typeof status.loggedIn === "boolean") return { state: status.loggedIn || status.apiKeySource ? "ready" : "unauthenticated", version };
-    } catch { /* Old CLIs or invalid settings: do not claim the credentials work. */ }
-    return { state: "unknown", version, issue: "auth" };
+    return { state: "ready", version };
   }
 
   install(name: AgentCli): Promise<CliCheck> {

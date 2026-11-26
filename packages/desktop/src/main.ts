@@ -1,4 +1,3 @@
-import { terminalAuth } from "./terminal-auth.ts";
 /**
  * The desktop app's main process: windows, and what only the operating system
  * can do for them (folder dialog, file protocol, reveal in Finder).
@@ -21,11 +20,11 @@ import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, net, protocol, session, shell, webContents } from "electron";
 import type { WebPreferences } from "electron";
-import { Paths, approvePlugin, consultationSettings, setConsultation, describeBackends, ensurePluginRoot, findCommand, limitSettings, listPlugins, projectLanguageSetting, setLimit, setPluginEnabled, setProjectLanguage, stopHub, settingsBundle, restoreSettingsBundle, validateSettingsBundle, pluginApprovals, revokePluginApproval, atomicWrite } from "@xsb/hub";
+import { Paths, approvePlugin, consultationSettings, setConsultation, describeBackends, ensurePluginRoot, findCommand, limitSettings, listPlugins, projectLanguageSetting, setLimit, setPluginEnabled, setProjectLanguage, stopHub, pluginApprovals, revokePluginApproval } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Answer, Language } from "@xsb/protocol";
 import { BadAddress } from "./address.ts";
-import { AgentClis, agentCli, configPath, loginCommand } from "./agent-cli.ts";
+import { AgentClis, agentCli, configPath } from "./agent-cli.ts";
 import { Ark, ROUTED_MODEL, arkLaunch, readArkBindings } from "./ark.ts";
 import type { BackendView, Event } from "./bridge.ts";
 import { serveBrowser } from "./browser.ts";
@@ -53,10 +52,8 @@ async function backends(workspace?: Workspace): Promise<BackendView[]> {
   return list.map((b) => {
     const cli = wrapped(b.command.split(" ")[0]);
     const via = cli ? ark.bindings()[agentCli(cli)] : undefined;
-    const program = cli ? clis.executable(cli) : null;
     return { ...b, installed: cli ? !clis.missing(cli) : b.installed, missing: cli && clis.missing(cli) ? cli : undefined,
       cli: cli ? agentCli(cli) : undefined, configPath: cli ? configPath(agentCli(cli)) : undefined,
-      loginCommand: cli ? loginCommand(agentCli(cli), program, !!program && findCommand(cli) === program) : undefined,
       ark: via && { profile: via.profile, model: via.model } };
   });
 }
@@ -486,7 +483,6 @@ function connect(paths: Paths): Promise<Workspace> {
         await shell.openExternal(url.href);
         return { action: "accept" };
       },
-      terminal: (request, signal) => terminalAuth(request, clis.env(), signal),
     })
       .then((created) => {
         current?.close();
@@ -671,44 +667,9 @@ async function call(event: Electron.IpcMainInvokeEvent, method: string, args: an
     case "revokePluginApproval":
       revokePluginApproval(args[0]);
       return toolsChanged("global", workspace);
-    case "exportSettings":
-      return (async () => {
-        const bundle = { ...settingsBundle(), ui: args[0], channels: ark.bindings() };
-        validateSettingsBundle(bundle);
-        const saved = await dialog.showSaveDialog(win, { defaultPath: "xsb-settings.json", filters: [{ name: "xSB settings", extensions: ["json"] }] });
-        if (saved.canceled || !saved.filePath) return false;
-        atomicWrite(saved.filePath, JSON.stringify(bundle, null, 2) + "\n");
-        return true;
-      })();
-    case "importSettings":
-      return (async () => {
-        if ([...projects.values()].some(w => w.working().length)) throw new Error("Finish or stop running work before importing settings");
-        const opened = await dialog.showOpenDialog(win, { properties: ["openFile"], filters: [{ name: "xSB settings", extensions: ["json"] }] });
-        if (opened.canceled || !opened.filePaths[0]) return null;
-        if (fs.statSync(opened.filePaths[0]).size > 192 * 1024 * 1024) throw new Error("Settings backup is too large");
-        const bundle: unknown = JSON.parse(fs.readFileSync(opened.filePaths[0], "utf8"));
-        validateSettingsBundle(bundle);
-        const confirmed = await dialog.showMessageBox(win, { type: "question", message: language() === "zh-CN" ? "导入设置并恢复全局插件？" : "Import settings and restore global plugins?", detail: path.basename(opened.filePaths[0]), buttons: language() === "zh-CN" ? ["取消", "导入"] : ["Cancel", "Import"], defaultId: 0, cancelId: 0 });
-        if (confirmed.response !== 1) return null;
-        if ([...projects.values()].some(w => w.working().length)) throw new Error("Finish or stop running work before importing settings");
-        restoreSettingsBundle(bundle);
-        if (bundle.channels) for (const name of ["claude", "codex"] as const) await ark.bind(name, (bundle.channels as ReturnType<Ark["bindings"]>)[name] ?? null);
-        await toolsChanged("global", workspace);
-        return bundle.ui ?? {};
-      })();
   }
   if (!workspace) throw new Error("this window has no workspace open");
   // A message's id is the workspace's to choose: the renderer sends content, or names an entry to send again.
-  if (method === "authenticate") {
-    const methods = await workspace.authenticationMethods(args[0]);
-    const zh = language() === "zh-CN";
-    if (!methods.length) throw new Error(zh ? "后端未提供 ACP 登录方式，请使用其命令行登录。" : "The agent offers no ACP login method. Use its CLI to sign in.");
-    const choice = await dialog.showMessageBox(win, { type: "question", message: zh ? "选择登录方式" : "Choose a sign-in method",
-      buttons: [zh ? "取消" : "Cancel", ...methods.map(m => m.name)], defaultId: 1, cancelId: 0 });
-    if (!choice.response) return;
-    await workspace.authenticate(args[0], methods[choice.response - 1].methodId);
-    return workspace.composerState(args[0], true);
-  }
   if (method === "send") return workspace.send(args[0], args[1], typeof args[2] === "string" ? args[2] : undefined, undefined, answerOf(args[4]));
   if (["resend", "cancelMessage", "sendMessageNow"].includes(method) && (typeof args[0] !== "string" || typeof args[1] !== "string")) throw new Error("resend takes an agent and an entry");
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);
@@ -789,7 +750,6 @@ void app.whenReady().then(() => {
       arkLaunch(readArkBindings(path.join(backendsDir, "ark.json"))[program as "claude" | "codex"], program, windows, ark.program, backendsDir, locate(program)),
   });
   agentClis = new AgentClis(clis);
-  agentClis.credentials = (name) => ark.agentCheck(name);
   protocol.handle(APP_SCHEME, (request) => {
     const file = path.join(RENDERER, decodeURIComponent(new URL(request.url).pathname));
     const inside = !path.relative(RENDERER, file).startsWith("..");

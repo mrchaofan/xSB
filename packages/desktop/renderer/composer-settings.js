@@ -18,8 +18,7 @@ export function composerSettings(agentId, onUpdate = () => {}) {
   // 级联菜单：一级是"模型 ›""推理强度 ›"及当前值，悬停、点击或按 → 展开二级的选项列表，点一项即生效。
   const fields = h("div", { class: "cascade", role: "menu", "aria-label": t("composer.settings") });
   const status = h("small", { role: "status" });
-  const login = h("button", { class: "btn sm", type: "button", onclick: () => { menu.hidePopover(); xsb.authenticate(agentId).then(value => { if (value) { latest = value; draw(); } }).catch(e => { message = e.message; menu.showPopover(); draw(); }); } }, t("composer.signIn"));
-  const menu = h("div", { class: "composer-menu", popover: "auto" }, fields, login, status);
+  const menu = h("div", { class: "composer-menu", popover: "auto" }, fields, status);
   let openName = null;
   const el = h("div", { class: "composer-settings" }, trigger, menu);
   let lastFields;
