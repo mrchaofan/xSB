@@ -408,12 +408,8 @@ export class Workflows {
       const i = instance(f, spec.workflowNode!);
       const current = (i.work?.kind === "graph" ? i.work.id : undefined) ?? (i.last?.valid ? i.last.id : undefined);
       if (target && target !== "history" && target !== current) throw Error("This workflow target has expired");
-      // The user's reply to what the work asked (questions.ts) continues the work, in a turn of its own: that turn is
-      // the work's attempt. A reply that joins the asking turn still running is part of it already.
-      if (i.work?.asking && i.work.state === "running" && !s.busy) {
-        i.work.attempt = id;
-        delete i.work.asking;
-      } else if (target !== "history" && current && !i.interruptions.some((p) => p.id === id))
+      // Targeted ask answers return through the pending tool; only ordinary user input reaches here.
+      if (target !== "history" && current && !i.interruptions.some((p) => p.id === id))
         i.interruptions.push({ id, target: current, prompt: blocks });
       if (i.work && target !== "history") i.work.grants.push(...named);
     }
@@ -423,7 +419,7 @@ export class Workflows {
     s.protect();
     if (named.length || spec.workflowOwner || target === "workflow") this.save(f);
   }
-  /** A task agent asked the user something (questions.ts) in its work: the work waits for the reply, not ending unfinished. */
+  /** Track the open question within this executing attempt; the tool waits for its reply. */
   asking(s: LiveSession, question: string) {
     const spec = this.hub.agent(s.agentId);
     if (!spec.workflowOwner) return;
@@ -572,8 +568,6 @@ export class Workflows {
         i.work.state = "ended";
         delete i.work.attempt;
         delete i.work.asking;
-      } else if (normal && i.work.asking && i.work.asking === s.rec.question) {
-        // It asked the user and waits for the reply, which continues it (`input`).
       } else {
         suspend(i.work, "failure");
         notice(

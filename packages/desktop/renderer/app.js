@@ -45,8 +45,8 @@ export const state = {
 };
 
 export const STATE_TEXT = { idle: t("state.idle"), running: t("state.running"), requires_action: t("state.requires_action"), asking: t("state.asking") };
-/** 显示的状态：空闲着、但有提问在等你回答（ask）的，显示"等你回答"。 */
-export const shownState = (agent) => agent.state === "idle" && agent.asking ? "asking" : agent.state;
+/** 提问工具等待用户回答时显示"等你回答"。 */
+export const shownState = (agent) => agent.asking && ["idle", "requires_action"].includes(agent.state) ? "asking" : agent.state;
 export const TASK_TEXT = {
   blocked: t("task.status.blocked"), queued: t("task.status.queued"), running: t("task.status.running"),
   completed: t("task.status.completed"), failed: t("task.status.failed"), cancelled: t("task.status.cancelled"), interrupted: t("task.status.interrupted"),
@@ -452,7 +452,7 @@ function syncActivity(agentId) {
   if (!hint) return;
   const agent = agentOf(agentId), s = agent.state;
   const activity = state.activities[agentId];
-  const kind = s === "idle" ? (agent.asking ? "asking" : null) : s === "requires_action" ? "permission" : (activity?.kind ?? "waiting");
+  const kind = shownState(agent) === "asking" ? "asking" : s === "idle" ? null : s === "requires_action" ? "permission" : (activity?.kind ?? "waiting");
   hint.hidden = !kind;
   if (!kind) return;
   const seconds = activity && !["permission", "asking"].includes(kind) ? Math.max(0, Math.floor((Date.now() - Date.parse(activity.since)) / 1000)) : null;

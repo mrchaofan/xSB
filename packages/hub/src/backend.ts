@@ -115,7 +115,7 @@ export class Backend {
     const conn = new Connection(proc.stdout!, proc.stdin!, `backend:${name}`);
     const backend = new Backend(proc, conn, name);
     const codex = backendName === "codex" || /(^|[/\\])codex-acp(?:\.cmd|\.exe)?$/.test(spec.command);
-    // Codex's turn-bound native forms cannot retain xSB ask's reply-after-turn interaction.
+    // Codex's async native forms may auto-resolve; use xSB's blocking ask instead.
     const nativeForms = !codex;
 
     let exited = false;

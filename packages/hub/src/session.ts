@@ -20,7 +20,7 @@ import path from "node:path";
  * stopped while the hub still held it. The user's is then kept for the next
  * turn; mail waits for a turn of its own.
  */
-import { SessionControls, InsertionTrace, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, RunExt, TurnExt, TurnFailure, RpcError, CONNECTION_CLOSED, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
+import { Question, SessionControls, InsertionTrace, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, RunExt, TurnExt, TurnFailure, RpcError, CONNECTION_CLOSED, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
 import type { ExecutionSource, BackendRun, RunUpdate, Boundary, ContentBlock, DiscardReason, ElicitationResponse, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
@@ -932,7 +932,7 @@ export class LiveSession {
   emit(update: SessionUpdate, except?: Client): void {
     const file = Paths.transcript(this.agentId, this.id);
     const durable = update.sessionUpdate === "user_message_chunk" || !!update._meta?.[Accepted.key] ||
-      !!update._meta?.[Discarded.key] || !!update._meta?.[MessageDelivery.key];
+      !!update._meta?.[Discarded.key] || !!update._meta?.[MessageDelivery.key] || !!update._meta?.[Question.key];
     const eventId = newId("event");
     const record = { ts: now(), eventId, update };
     const initialOffset = this.hub.state.store.bytes(file);
@@ -1509,6 +1509,7 @@ export class LiveSession {
     if (!turn) return;
     const source = this.source(turn.id);
     if (end.failure && contextOverflow(end.failure) && this.canRecover(turn)) return void this.recover(turn, end.failure);
+    this.hub.questions?.cancel(this);
     this.hub.elicitations?.cancel(this);
     if (this.currentRun?.turnId === turn.id) this.finishRun(end);
     if (!turn.cancelledBy) for (const update of turn.refusalChunks ?? []) this.emit(update);
@@ -1764,6 +1765,7 @@ export class LiveSession {
       this.discard(input);
     }
     this.hub.permissions.cancel(this);
+    this.hub.questions?.cancel(this);
     this.hub.elicitations?.cancel(this);
     if (!turn.started) return this.end({ stopReason: "cancelled" });
     this.stopTimer = setTimeout(() => {
@@ -1790,6 +1792,7 @@ export class LiveSession {
     const turn = this.current;
     if (!turn) return;
     this.hub.permissions.cancel(this);
+    this.hub.questions?.cancel(this);
     this.hub.elicitations?.cancel(this);
     if (!turn.started && !users(turn.first)) {
       for (const input of turn.held.filter(users)) this.leave(input, true);
@@ -1806,6 +1809,7 @@ export class LiveSession {
     if (!turn || turn.id !== targetTurnId) return;
     turn.cancelledBy ??= "hub";
     this.hub.permissions.cancel(this);
+    this.hub.questions?.cancel(this);
     this.hub.elicitations?.cancel(this);
     if (turn.started && !this.stopTimer) this.stopTimer = setTimeout(() => {
       if (this.current !== turn) return;

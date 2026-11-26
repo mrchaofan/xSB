@@ -647,9 +647,9 @@ body:has(.divider.dragging) webview2 { pointer-events: none; }
 details > summary { cursor: pointer; list-style: none; }
 details > summary::-webkit-details-marker { display: none; }
 /* 折叠项一律用细线箭头，收起朝右、展开朝下 */
-details:not(.card, .catalog-advanced) > summary { display: flex; align-items: center; gap: var(--space-1h); }
-details:not(.card, .catalog-advanced) > summary::before { content: ""; flex: none; width: 5px; height: 5px; margin: 0 var(--space-0); border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; opacity: .7; }
-details:not(.card, .catalog-advanced)[open] > summary::before { transform: rotate(45deg); }
+details:not(.card, .catalog-advanced, .tool) > summary { display: flex; align-items: center; gap: var(--space-1h); }
+details:not(.card, .catalog-advanced, .tool) > summary::before { content: ""; flex: none; width: 5px; height: 5px; margin: 0 var(--space-0); border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; opacity: .7; }
+details:not(.card, .catalog-advanced, .tool)[open] > summary::before { transform: rotate(45deg); }
 details[open] > summary { margin-bottom: var(--space-3); }
 
 .choices { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius-md); }
