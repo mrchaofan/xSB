@@ -100,6 +100,7 @@ function partNode(block) {
   }
   if (block.type === "image") return h("img", { class: "part", src: block.url || `data:${block.mimeType};base64,${block.data}`, loading: "lazy", decoding: "async", alt: t("content.image.alt") });
   if (block.type === "asset_reference") return h("span", { class: "part chip asset-ref", title: block.name + " · " + block.version, html: ICON.file }, block.name + " · " + block.version);
+  if (block.type === "skill") return h("span", { class: "part chip", title: block.name, html: ICON.file }, t("composer.skillName", { name: block.name }));
   return h("span", { class: "part chip", title: block.uri, html: ICON.file }, block.type === "resource_link" ? block.name : block.type);
 }
 
@@ -178,7 +179,7 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
     const node = partNode(block);
     node.contentEditable = "false";
     blocks.set(node, block);
-    if (block.type === "asset_reference" || block.type === "resource_link") node.append(h("button", { class: "remove-ref", tabindex: "-1", type: "button", "aria-label": t("composer.remove"), title: t("composer.remove"), html: ICON.close, onclick: () => { node.remove(); el.focus(); onChange(); } }));
+    if (block.type === "asset_reference" || block.type === "resource_link" || block.type === "skill") node.append(h("button", { class: "remove-ref", tabindex: "-1", type: "button", "aria-label": t("composer.remove"), title: t("composer.remove"), html: ICON.close, onclick: () => { node.remove(); el.focus(); onChange(); } }));
     return node;
   }
 

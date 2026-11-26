@@ -1,3 +1,4 @@
+import { Auth } from "./auth.ts";
 /**
  * The hub as an ACP v2 agent: what an editor, the CLI or the desktop app talks to.
  *
@@ -27,6 +28,8 @@ export class Client {
   history = false;
   controls = false;
   forms = false;
+  urls = false;
+  terminalAuth = false;
   private hub: Hub;
   private attached = new Set<LiveSession>();
 
@@ -45,6 +48,8 @@ export class Client {
       this.history = meta?.[History.capability] != null;
       this.controls = meta?.[SessionControls.capability] != null;
       this.forms = p.capabilities?.elicitation?.form != null;
+      this.urls = p.capabilities?.elicitation?.url != null;
+      this.terminalAuth = p.capabilities?.auth?.terminal != null;
       // The project works in the language of the first user who says which one they read.
       const language = meta?.[LanguageExt.key];
       const config = loadProjectConfig(hub.paths);
@@ -56,7 +61,7 @@ export class Client {
         info: { name: "xsb", title: "xsb hub", version: VERSION },
         capabilities: {
           // Images are taken for every agent; a backend that cannot read them is told one was there (backend.ts).
-          session: { prompt: { image: {} }, mcp: { stdio: {} } },
+          session: { prompt: { image: {}, skill: { inline: {} } }, mcp: { stdio: {} } },
           _meta: {
             [Agents.capability]: { version: 1 },
             [History.capability]: { version: 1 },
@@ -72,6 +77,8 @@ export class Client {
       };
     });
     conn.onRequest("authenticate", () => ({}));
+    conn.onRequest(Auth.methods, (p, ctx) => hub.authentication.forward(p.agentId, this, ctx.id, ctx.signal, () => hub.authentication.methods(p.agentId)));
+    conn.onRequest(Auth.login, (p, ctx) => hub.authentication.forward(p.agentId, this, ctx.id, ctx.signal, () => hub.authentication.login(p.agentId, p.methodId, this, ctx.signal)));
 
     // ---- sessions (standard) ----------------------------------------------
 
@@ -92,7 +99,7 @@ export class Client {
           conn.notify("session/update", { sessionId: session.id, update });
         }
       }
-      conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "state_update", state: session.current ? "running" : "idle" } });
+      conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "state_update", state: session.current ? "running" : "idle", background: session.composerState().background } });
       this.attach(session);
       return { ...setup(session), _meta: sessionMeta(session) };
     });
@@ -135,7 +142,7 @@ export class Client {
       return {};
     });
 
-    conn.onRequest("session/prompt", (p) => {
+    conn.onRequest("session/prompt", (p, ctx) => {
       const session = this.own(p.sessionId);
       if (!Array.isArray(p.prompt)) throw RpcError.invalidParams("prompt must be an array of content blocks");
       if (!p.prompt.length) throw RpcError.invalidParams("prompt must not be empty");
@@ -145,6 +152,7 @@ export class Client {
       // The same message sent again (its answer was lost): no second copy, and no second workflow interruption.
       if (hub.delivery.known(origin.messageId)) return hub.delivery.fromUser(session, p.prompt, origin, this);
       // A message to an agent that asked the user something replies to it: answers, a skip, or other words instead.
+      session.clearSuggestions();
       hub.questions.reply(session, origin.messageId, p._meta?.[Answer.key]);
       hub.elicitations.cancel(session);
       hub.workflows.input(session,origin.messageId,p.prompt,p._meta?.[Workflow.target]);
@@ -155,7 +163,7 @@ export class Client {
       }
       const messageId = origin.messageId;
       // An interruption is the workflow's only once the model has it: one that never gets there blocks nothing.
-      return hub.delivery.fromUser(session, p.prompt, origin, this).catch((e) => {
+      return hub.authentication.forward(session.agentId, this, ctx.id, ctx.signal, () => hub.delivery.fromUser(session, p.prompt, origin, this)).catch((e) => {
         hub.workflows.discarded(session, messageId);
         throw e;
       });
@@ -177,14 +185,17 @@ export class Client {
       return {};
     });
 
-    conn.onRequest(SessionControls.get, async (p) => {
+    conn.onRequest(SessionControls.get, async (p, ctx) => {
       const session = this.own(p.sessionId);
       // Its settings are the backend session's: a new conversation opens one here, given nothing yet (`backendFresh`).
-      if (p.discover === true) await session.ensureBackend();
+      if (p.discover === true) await hub.authentication.forward(session.agentId, this, ctx.id, ctx.signal, () => session.ensureBackend());
       return session.composerState();
     });
 
-    conn.onRequest("session/set_config_option", p => this.own(p.sessionId).setConfig(p));
+    conn.onRequest("session/set_config_option", (p, ctx) => {
+      const session = this.own(p.sessionId);
+      return hub.authentication.forward(session.agentId, this, ctx.id, ctx.signal, () => session.setConfig(p));
+    });
 
     // ---- agents ------------------------------------------------------------
 

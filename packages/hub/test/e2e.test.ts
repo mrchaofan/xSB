@@ -45,8 +45,7 @@ fs.writeFileSync(
     backends: {
       mock: { command: node, args: [MOCK] },
       wrapped: { command: node, args: [THIRD_PARTY] },
-      steerable: { command: node, args: [MOCK, "--steering"] },
-      codexlike: { command: node, args: [MOCK, "--steer-ext"] },
+      steerable: { command: node, args: [MOCK, "--steering", "--legacy-steering-advertisement"] },
       old: { command: node, args: [MOCK, "--protocol", "1"] },
       bare: { command: node, args: [MOCK, "--no-system-prompt"] },
       "signed-out": { command: node, args: [MOCK, "--auth-required"] },
@@ -202,7 +201,7 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   await prompt(joined.id, "!say FRONT\n!background 100 500");
   await until("autonomous output before input", () => joinedUpdates.find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("BACKGROUND START")));
   const unowned = joinedUpdates.find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("BACKGROUND START"))._meta[RunExt.key];
-  await prompt(joined.id, "!say JOINED");
+  await prompt(joined.id, "!sleep 25\n!say JOINED");
   const claimed = joinedUpdates.find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("JOINED"))._meta[RunExt.key];
   assert.equal(unowned.turnId, null);
   assert.equal(claimed.id, unowned.id);
@@ -307,7 +306,7 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   observer.close();
   console.log("ok conversation rename: persistence, broadcasts, backend titles and running turn");
 }
-// 5. The user's word never waits. To a backend that holds what comes while it works (as codex does), it goes in when
+// 5. The user's word never waits. To a generic backend that holds what comes while it works, it goes in when
 // the work it does is done, and the turn goes on with it: one turn, answered when the message is inserted.
 {
   const turn = prompt(a, "!sleep 600\n!say FIRST");
@@ -321,12 +320,14 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   console.log("ok 5 the user's word into held work");
 }
 
-// 6. To a backend that steers (as claude does), it goes in at once, and the work goes on with it.
+// 6. To a priority-prompt backend (as the pinned Claude/Codex adapters do), it goes in at once, and the work goes on with it.
 {
   const c = (await create("steerable")).id;
   const turn = prompt(c, "!sleep 400\n!say END");
   await until("c running", () => hub.session(c).current?.started);
+  const originalTurn = hub.session(c).current;
   await conn.request("session/prompt", { sessionId: c, prompt: [{ type: "text", text: "!say MID" }] });
+  assert.ok(originalTurn?.inputs.some(i => i.in && i.content.some(b => b.type === "text" && b.text === "!say MID")), "the standard prompt was inserted under its original Hub turn");
   assert.equal((await turn).stopReason, "end_turn");
   assert.match(said.get(c)!, /MID\nEND/);
   console.log("ok 6 the user's word steered in");
@@ -459,7 +460,7 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
 // 37. User stop withdraws the accepted backlog on every backend; new work is a separate turn.
 {
   const b=await create();
-  for (const backend of ["mock", "steerable", "codexlike"]) {
+  for (const backend of ["mock", "steerable"]) {
     const session=await create(backend), agentId=session.agentId, sessionId=session.id;
     const work = dispatch(hub.session(a), agentId, { title: `stop running ${backend}`, topic: "stop queue", instructions: "!sleep 3000\n!say OLD-RUN", after: [] });
     await until("old work inserted", () => session.current?.inserted);
@@ -515,7 +516,7 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
 
 // 40. Confirmed stops keep the backend conversation, image context and attached MCP bridge.
 {
-  for (const backend of ["mock", "steerable", "codexlike"]) {
+  for (const backend of ["mock", "steerable"]) {
     const session = await create(backend), agentId=session.agentId, sessionId=session.id;
     const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" };
     const boundaries = () => hub.state.store.read(Paths.transcript(agentId, sessionId))

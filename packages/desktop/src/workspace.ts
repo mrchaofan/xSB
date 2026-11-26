@@ -1,3 +1,4 @@
+import { TerminalViews } from "./terminal-views.ts";
 /**
  * One project's workspace: an ACP connection to the project's hub, turned into
  * what the renderer shows (bridge.ts).
@@ -24,6 +25,12 @@ import type { Content } from "./content.ts";
 import { artifactPath } from "./artifact-link.ts";
 
 export const ARTIFACT_SCHEME = "xsb-artifact";
+
+export type DesktopInteractions = {
+  url?: (request: import("@xsb/protocol").UrlElicitationRequest, signal: AbortSignal) => Promise<ElicitationResponse>;
+  terminal?: (request: import("./terminal-auth.ts").TerminalAuthRequest, signal: AbortSignal) => Promise<{ exitCode: number | null }>;
+};
+const Auth = { methods: "_dev.xsb/auth/methods", login: "_dev.xsb/auth/login", terminal: "_dev.xsb/auth/terminal" };
 
 type Emit = (event: Event) => void;
 
@@ -77,6 +84,8 @@ export class Workspace {
   /** Agent id -> what it is doing, while it has a turn running, and the tool calls of it that have not ended. */
   private activities = new Map<string, Activity>();
   private tools = new Map<string, Set<string>>();
+  private terminalViews = new TerminalViews();
+  private backgroundTools = new Map<string, Set<string>>();
   /** Entry id -> how to answer the permission request it shows. */
   private asking = new Map<string, { agentId: string; entry: Extract<Entry, { kind: "permission" }>; request: PermissionRequest; answer: (r: PermissionResponse) => void }>();
   private seq = 0;
@@ -99,24 +108,24 @@ export class Workspace {
    * Open the project's workspace, making the folder a project first if it is none.
    * `language` is the one the user reads, and `say` words an error in it.
    */
-  static async open(paths: Paths, env: NodeJS.ProcessEnv, language: Language, say: (e: unknown) => string, emit: Emit, notify: Notify): Promise<Workspace> {
+  static async open(paths: Paths, env: NodeJS.ProcessEnv, language: Language, say: (e: unknown) => string, emit: Emit, notify: Notify, interactions: DesktopInteractions = {}): Promise<Workspace> {
     if (!fs.existsSync(paths.dir)) initProject(paths);
     // The app's own hub: started for this process and stopped with it (a hub an earlier app left is replaced), with
     // the environment of the app's child processes (`env`, clis.ts): it finds the agents' programs on its PATH.
     const socket = await hubSocket(paths, true, env);
     const conn = new Connection(socket, socket, "hub");
     // Requests may arrive in the same stream chunk as initialize's response.
-    const workspace = new Workspace(paths, conn, say, emit, notify);
+    const workspace = new Workspace(paths, conn, say, emit, notify, interactions);
     await conn.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       info: { name: "xsb-desktop", version: "0.1.0" },
       // An observer of all agents, and a transcript: sent its own input too, when it gets into the conversation.
-      capabilities: { elicitation: { form: {} }, _meta: { [Agents.capability]: {}, [History.capability]: {}, [SessionControls.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
+      capabilities: { ...(interactions.terminal ? { auth: { terminal: {} } } : {}), session: { promptSuggestions: {}, commands: { skill: {} } }, elicitation: { form: {}, ...(interactions.url ? { url: {} } : {}) }, _meta: { [Agents.capability]: {}, [History.capability]: {}, [SessionControls.capability]: {}, [OriginExt.capability]: {}, [LanguageExt.key]: language } },
     }).catch(error => { workspace.close(); throw error; });
     return workspace;
   }
 
-  private constructor(paths: Paths, conn: Connection, say: (e: unknown) => string, emit: Emit, notify: Notify) {
+  private constructor(paths: Paths, conn: Connection, say: (e: unknown) => string, emit: Emit, notify: Notify, interactions: DesktopInteractions = {}) {
     this.paths = paths;
     this.conn = conn;
     this.say = say;
@@ -129,7 +138,10 @@ export class Workspace {
     // The hub stopped, or died: the window says so, whatever it is in the middle of. Not when it was this side that left.
     void conn.closed.then(() => this.left || this.onHubGone(emit));
     conn.onNotification("session/update", (p) => this.onUpdate(p.sessionId, p.update));
-    conn.onNotification(SessionControls.update, ({agentId, controls}) => this.emit({agentId, controls}));
+    conn.onNotification(SessionControls.update, ({agentId, controls}) => {
+      if (Array.isArray(controls.background)) this.backgroundTools.set(agentId, new Set(controls.background.map((b: any) => b.toolCallId ?? b.terminalId).filter(Boolean)));
+      this.emit({agentId, controls});
+    });
     conn.onNotification(Agents.update, (p) => this.onAgent(p.agent));
     conn.onNotification(Agents.removed, (p) => this.onAgentRemoved(p.id));
     conn.onNotification(Assets.update, (p) => this.asset(p.asset));
@@ -148,7 +160,10 @@ export class Workspace {
       this.notify({ agentId: p.agentId, kind: "confirm", detail: p.question });
     });
     conn.onRequest("session/request_permission", (p) => this.onPermission(p));
-    conn.onRequest("elicitation/create", (p, ctx) => this.onElicitation(p, ctx.signal));
+    conn.onRequest("elicitation/create", (p: ElicitationRequest, ctx) => p.mode === "url"
+      ? interactions.url?.(p, ctx.signal) ?? { action: "decline" }
+      : this.onElicitation(p, ctx.signal));
+    conn.onRequest(Auth.terminal, (p, ctx) => interactions.terminal?.(p, ctx.signal) ?? { exitCode: null });
   }
 
   get connected(): boolean {
@@ -180,6 +195,7 @@ export class Workspace {
   /** With the hub gone nothing runs: no agent is at work any more, and no question of theirs waits for an answer. */
   private onHubGone(emit: Emit): void {
     this.stopped = true;
+    this.backgroundTools.clear();
     this.markReady();
     for (const pending of this.nativeQuestions.values()) pending.answer({ action: "cancel" });
     for (const [agentId, entries] of this.transcripts) for (const entry of entries)
@@ -432,8 +448,11 @@ export class Workspace {
   }
 
   private finishTools(agentId: string): void {
+    const sessionId = this.agents.get(agentId)?.mainSessionId;
+    const background = [...(this.backgroundTools.get(agentId) ?? [])];
     for (const entry of this.transcripts.get(agentId) ?? []) {
-      if (entry.kind === "tool" && entry.status === "running") this.put(agentId, { ...entry, status: "failed" });
+      const independent = !!sessionId && background.some(id => entry.id === `${sessionId}:${id}` || this.terminalViews.refers(entry.id, sessionId, id));
+      if (entry.kind === "tool" && entry.status === "running" && !independent) this.put(agentId, { ...entry, status: "failed" });
     }
   }
 
@@ -457,6 +476,7 @@ export class Workspace {
     if (!this.replaying) this.historyUpdates.get(agentId)?.push(update);
     if (update.sessionUpdate === "state_update") {
       if (this.replaying) return;
+      if (Array.isArray(update.background)) this.backgroundTools.set(agentId, new Set(update.background.map((b: any) => b.toolCallId ?? b.terminalId).filter(Boolean)));
       const agent = this.agents.get(agentId);
       if (update.state === "idle") {
         this.settle(agentId);
@@ -579,7 +599,12 @@ export class Workspace {
       this.pending.delete(update.messageId);
       this.unsend(update.messageId);
       this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? { kind: "user" }, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}), ...(this.replies.has(update.messageId) ? { reply: true } : {}) });
-    } else if (update.sessionUpdate === "tool_call_update") {
+    } else if (update.sessionUpdate === "terminal_update" || update.sessionUpdate === "terminal_output_chunk") {
+      for (const id of this.terminalViews.update(sessionId, update)) {
+        const tool = this.transcripts.get(agentId)?.find((e): e is Tool & { id: string } => e.kind === "tool" && e.id === id);
+        if (tool) this.put(agentId, { ...tool, terminalOutput: this.terminalViews.read(id) });
+      }
+    } else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
       this.settle(agentId, run?.id);
       const id = `${sessionId}:${update.toolCallId}`;
       const prior = this.transcripts.get(agentId)!.find((e): e is Tool & { id: string } => e.id === id);
@@ -591,6 +616,7 @@ export class Workspace {
         name: update.name ?? prior?.name,
         input: update.input ?? update.rawInput ?? prior?.input,
         output: update.output ?? update.rawOutput ?? update.content ?? prior?.output,
+        terminalOutput: this.terminalViews.attach(id, sessionId, update.content) ?? prior?.terminalOutput,
       });
       if (offTurn || run?.state === "idle") return;
       // While any tool call is open the agent is running tools; once the last one ends, its model reads the results.
@@ -745,7 +771,7 @@ export class Workspace {
     return new Promise((answer) => this.asking.set(entry.id, { agentId, entry, request, answer }));
   }
 
-  private async onElicitation(request: ElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
+  private async onElicitation(request: import("@xsb/protocol").FormElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
     if (!this.live) await this.ready;
     if (signal.aborted || this.left || this.conn.isClosed) return { action: "cancel" };
     const agentId = this.sessionAgent.get(request.sessionId);
@@ -768,6 +794,9 @@ export class Workspace {
       if (signal.aborted) cancel();
     });
   }
+
+  authenticationMethods(agentId: string): Promise<import("@xsb/protocol").AuthMethod[]> { return this.conn.request(Auth.methods, { agentId }); }
+  authenticate(agentId: string, methodId: string): Promise<unknown> { return this.conn.request(Auth.login, { agentId, methodId }); }
 
   /** Answer the permission request an entry shows. */
   permit(entryId: string, allow: boolean): void {

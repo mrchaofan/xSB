@@ -1,19 +1,19 @@
+import { AIR_COMPATIBILITY } from "./air-compat.ts";
+import { skillPrompt } from "./prompt-capabilities.ts";
 /**
  * One backend agent process, driven as a plain ACP v2 client over stdio.
  *
  * This is the end of the chain, and the only place where backends differ.
  * There is no per-vendor code: an official ACP agent and a wrapped third-party
  * one (@xsb/adapter) differ only in the command that starts them and in the
- * capabilities they report. ACP v2 takes a prompt while the agent works and
- * inserts it when it can (claude: into the work under way, at its next tool
- * call; codex: after it), answering with the id of the inserted message. To put
- * input into the work under way, a backend that reports `steering` (codex) is
- * given it with `_session/steering` instead (docs/DESIGN.md 3.1).
+ * capabilities they report. All input uses standard `session/prompt`. The pinned official
+ * adapters prioritize ordinary input into active work; input callbacks and control commands
+ * may defer it. A response acknowledges insertion, independently of execution completion.
  */
 import spawn from "cross-spawn";
 import type { ChildProcess } from "node:child_process";
 import { Connection, OriginExt, PROTOCOL_VERSION, RpcError, TurnIsolation, failure, text } from "@xsb/protocol";
-import type { ContentBlock, InitializeResponse, OriginMeta, PermissionRequest, PromptResponse } from "@xsb/protocol";
+import type { AuthMethod, ElicitationRequest, ElicitationResponse, UrlElicitationRequest, ContentBlock, InitializeResponse, OriginMeta, PermissionRequest, PromptResponse } from "@xsb/protocol";
 import { INSTALL_HINT, findCommand } from "./config.ts";
 import type { BackendSpec } from "./config.ts";
 import type { LiveSession } from "./session.ts";
@@ -21,27 +21,20 @@ import { VERSION, deferred } from "./util.ts";
 
 export type BackendCaps = {
   systemPrompt: boolean;
+  skill?: boolean;
+  inlineSkill?: boolean;
   additionalDirectories: boolean;
   /** Reads `image` content blocks. Text and `resource_link` are what every ACP agent reads. */
   image: boolean;
-  /**
-   * Takes `_session/steering`, which puts input into the work under way (codex-acp). Without it, a prompt sent while
-   * the agent works is what goes into that work (claude-agent-acp).
-   */
-  steering: boolean;
   /** Explicitly guarantees cancellation drains/fences old tool traffic before idle. Absent: rebind after stop. */
   orderedCancellation?: boolean;
 };
 
-/**
- * What `_session/steering` did with input: handed it to the work under way (`injected`; it is in the conversation
- * once the backend shows it, and dropped if the work ends first), or nothing, as no work runs (`idle`).
- */
-export type Steered = "injected" | "idle";
-
 export type BackendEvents = {
   onExit(reason: string): void;
   log(line: string): void;
+  url?(backend: Backend, request: UrlElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse>;
+  urlComplete?(backend: Backend, elicitationId: string): void;
 };
 
 /** How long a stopped backend may take to exit before it is killed. */
@@ -49,17 +42,19 @@ const STOP_GRACE_MS = 3000;
 
 export class Backend {
   readonly conn: Connection;
-  caps: BackendCaps = { systemPrompt: false, additionalDirectories: false, image: false, steering: false };
+  readonly agentId: string;
+  caps: BackendCaps = { systemPrompt: false, additionalDirectories: false, image: false };
   info = "";
   /** Names of the ways this agent can be signed in, as it reported them. */
-  authMethods: string[] = [];
+  authMethods: AuthMethod[] = [];
   private proc: ChildProcess;
   /** Settles once the process is gone (or never started): only then is what it held, such as session locks, free. */
   private ended: Promise<void>;
   /** Backend session id -> the hub session that has it open. */
   private sessions = new Map<string, LiveSession>();
 
-  private constructor(proc: ChildProcess, conn: Connection) {
+  private constructor(proc: ChildProcess, conn: Connection, agentId: string) {
+    this.agentId = agentId;
     this.proc = proc;
     this.conn = conn;
     this.ended = new Promise((resolve) => {
@@ -74,6 +69,8 @@ export class Backend {
     this.sessions.set(backendSessionId, session);
   }
 
+  session(id: string): LiveSession | undefined { return this.sessions.get(id); }
+
   /** Retire a stopped conversation before a new one can receive its late updates. */
   close(backendSessionId: string): void {
     this.sessions.delete(backendSessionId);
@@ -81,6 +78,7 @@ export class Backend {
 
   /** What this backend can read of some input: an image it cannot see is named instead, so the model knows one was there. */
   private readable(prompt: ContentBlock[]): ContentBlock[] {
+    prompt = skillPrompt(prompt, this.caps);
     if (this.caps.image) return prompt;
     return prompt.map((block) => (block.type === "image" ? text(`[An image (${block.mimeType}) was attached here; you cannot see images.]`) : block));
   }
@@ -91,23 +89,8 @@ export class Backend {
    * (`RpcError.CANCELLED`) when the work was cancelled before it was inserted.
    */
   async prompt(sessionId: string, prompt: ContentBlock[], origin: OriginMeta): Promise<string> {
-    const answer = await this.conn.request<PromptResponse>("session/prompt", { sessionId, prompt: this.readable(prompt), _meta: { [OriginExt.key]: origin } });
+    const answer = await this.conn.request<PromptResponse>("session/prompt", { sessionId, prompt: this.readable(prompt), ...(origin.messageId ? { idempotencyKey: origin.messageId } : {}), _meta: { [OriginExt.key]: origin } });
     return answer.messageId;
-  }
-
-  /**
-   * Put input into the session's work under way; only for a backend with `steering`. With no work running, nothing
-   * is done (`idleBehavior: "promptRequired"`): the hub gives it as a prompt then. Rejects when it could not be done.
-   */
-  async steer(sessionId: string, prompt: ContentBlock[]): Promise<Steered> {
-    const answer = await this.conn.request<{ outcome: string }>("_session/steering", {
-      sessionId,
-      prompt: this.readable(prompt),
-      _meta: { steering: { idleBehavior: "promptRequired" } },
-    });
-    if (answer.outcome === "injected") return "injected";
-    if (answer.outcome === "promptRequired") return "idle";
-    throw new RpcError(-32603, `the agent could not take the input into its work (${answer.outcome})`);
   }
 
   /** Stop the session's work, as Esc does in Claude Code and Codex; prompts not inserted yet are answered with -32800. */
@@ -132,9 +115,10 @@ export class Backend {
     const proc = spawn(spec.command, spec.args ?? [], { cwd, stdio: ["pipe", "pipe", "pipe"] });
     let stderrTail: string[] = [];
     const conn = new Connection(proc.stdout!, proc.stdin!, `backend:${name}`);
-    const backend = new Backend(proc, conn);
+    const backend = new Backend(proc, conn, name);
+    const codex = backendName === "codex" || /(^|[/\\])codex-acp(?:\.cmd|\.exe)?$/.test(spec.command);
     // Codex's turn-bound native forms cannot retain xSB ask's reply-after-turn interaction.
-    const nativeForms = backendName !== "codex" && !/(^|[/\\])codex-acp(?:\.cmd|\.exe)?$/.test(spec.command);
+    const nativeForms = !codex;
 
     let exited = false;
     let exitReason = "";
@@ -173,7 +157,9 @@ export class Backend {
       if (!session) throw RpcError.notFound(`session ${p.sessionId}`);
       return session.onBackendPermission(p);
     });
-    conn.onRequest("elicitation/create", (p, ctx) => {
+    conn.onNotification("elicitation/complete", (p) => events.urlComplete?.(backend, p.elicitationId));
+    conn.onRequest("elicitation/create", (p: ElicitationRequest, ctx) => {
+      if (p.mode === "url") return events.url?.(backend, p, ctx.signal) ?? { action: "decline" };
       if (!nativeForms) return { action: "cancel" };
       const session = backend.sessions.get(p.sessionId);
       if (!session) return { action: "cancel" };
@@ -186,7 +172,7 @@ export class Backend {
         protocolVersion: PROTOCOL_VERSION,
         info: { name: "xsb", title: "xsb hub", version: VERSION },
         // v2 compaction reports are standard session updates and need no client capability.
-        capabilities: nativeForms ? { elicitation: { form: {} } } : {},
+        capabilities: { auth: { terminal: {} }, elicitation: { url: {}, ...(nativeForms ? { form: {} } : {}) }, session: { promptSuggestions: {}, commands: { skill: {} } }, ...((spec.airCompatibility ?? codex) ? { _meta: AIR_COMPATIBILITY } : {}) },
       })
       .catch(async (e) => {
         // A process that died during startup is the real story, not the closed pipe.
@@ -203,11 +189,12 @@ export class Backend {
       systemPrompt: session.systemPrompt != null,
       additionalDirectories: session.additionalDirectories != null,
       image: session.prompt?.image != null,
-      steering: (init._meta as { steering?: { supported?: boolean } } | null | undefined)?.steering?.supported === true,
+      skill: session.prompt?.skill != null,
+      inlineSkill: session.prompt?.skill?.inline != null,
       orderedCancellation: (init._meta?.[TurnIsolation.key] as { version?: number; afterIdle?: boolean } | undefined)?.version === TurnIsolation.version &&
         (init._meta?.[TurnIsolation.key] as { afterIdle?: boolean } | undefined)?.afterIdle === true,
     };
-    backend.authMethods = (init.authMethods ?? []).map((m: any) => m?.name ?? m?.methodId ?? m?.id).filter(Boolean);
+    backend.authMethods = init.authMethods ?? [];
     backend.info = init.info ? `${init.info.name} ${init.info.version}` : name;
     return backend;
   }

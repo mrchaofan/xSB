@@ -9,7 +9,7 @@ function choices(option) {
   return (option?.options ?? []).flatMap(item => item.options ?? [item]);
 }
 
-export function composerSettings(agentId) {
+export function composerSettings(agentId, onUpdate = () => {}) {
   let latest = {}, sequence = 0, working = false, fetching = false, message = "";
   const trigger = h("button", { class: "model-settings", type: "button", "aria-haspopup": "dialog" });
   const ring = h("span", { class: "context-ring", tabindex: "0" });
@@ -18,11 +18,13 @@ export function composerSettings(agentId) {
   // 级联菜单：一级是"模型 ›""推理强度 ›"及当前值，悬停、点击或按 → 展开二级的选项列表，点一项即生效。
   const fields = h("div", { class: "cascade", role: "menu", "aria-label": t("composer.settings") });
   const status = h("small", { role: "status" });
-  const menu = h("div", { class: "composer-menu", popover: "auto" }, fields, status);
+  const login = h("button", { class: "btn sm", type: "button", onclick: () => { menu.hidePopover(); xsb.authenticate(agentId).then(value => { if (value) { latest = value; draw(); } }).catch(e => { message = e.message; menu.showPopover(); draw(); }); } }, t("composer.signIn"));
+  const menu = h("div", { class: "composer-menu", popover: "auto" }, fields, login, status);
   let openName = null;
   const el = h("div", { class: "composer-settings" }, trigger, menu);
   let lastFields;
   function draw() {
+    onUpdate(latest);
     const options = Array.isArray(latest.configOptions) ? latest.configOptions : [];
     const model = setting(options, "model", ["model"]);
     const effort = setting(options, "thought_level", ["reasoning_effort", "reasoning-effort", "effort", "thought_level"]);

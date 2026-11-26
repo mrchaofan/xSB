@@ -30,8 +30,8 @@ export function ledgerHook(kernel: Kernel): void {
     unprocessed.delete(sessionId);
   };
 
-  kernel.hooks.on("message.insertion_receipt", ({ messageId, about, inserted: inThere }) => {
-    if (!inThere) return kernel.mark(messageId, "discarded_unseen", about);
+  kernel.hooks.on("message.insertion_receipt", ({ messageId, about, inserted: inThere, outcome }) => {
+    if (!inThere) return kernel.mark(messageId, outcome === "unknown" ? "insertion_uncertain" : "discarded_unseen", about);
     kernel.mark(messageId, "inserted", about);
     of(inserted, about.sessionId, () => new Set()).add(messageId);
   });

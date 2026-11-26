@@ -25,7 +25,7 @@ export type SessionUpdate = { sessionUpdate: string; _meta?: Meta; [k: string]: 
 export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled" | "error";
 export type SessionState = "idle" | "running" | "requires_action";
 /** `state_update`; `error` comes with the stop reason `error`, as a JSON-RPC error object. */
-export type StateUpdate = { sessionUpdate: "state_update"; state: SessionState; stopReason?: StopReason | null; error?: { code: number; message: string; data?: unknown } | null; _meta?: Meta };
+export type StateUpdate = { sessionUpdate: "state_update"; state: SessionState; background?: Record<string, any>[] | null; stopReason?: StopReason | null; error?: { code: number; message: string; data?: unknown } | null; _meta?: Meta };
 export const isStateUpdate = (u: SessionUpdate): u is StateUpdate => u.sessionUpdate === "state_update";
 
 export type PermissionOption = { optionId: string; name: string; kind: string };
@@ -41,7 +41,7 @@ export type PermissionRequest = {
 
 export type PermissionResponse = { outcome: { outcome: "cancelled" } | { outcome: "selected"; optionId: string } };
 
-export type ElicitationRequest = {
+export type FormElicitationRequest = {
   mode: "form";
   sessionId: string;
   toolCallId?: string;
@@ -49,13 +49,20 @@ export type ElicitationRequest = {
   requestedSchema: { type: "object"; properties: Record<string, any>; required?: string[]; [k: string]: unknown };
   _meta?: Meta;
 };
+export type UrlElicitationRequest = ({ sessionId: string; toolCallId?: string } | { requestId: string | number }) & {
+  mode: "url"; elicitationId: string; url: string; message: string; _meta?: Meta;
+};
+export type ElicitationRequest = FormElicitationRequest | UrlElicitationRequest;
+export type AuthMethod = { type: "agent" | "terminal" | string; methodId: string; name: string; description?: string | null; args?: string[]; env?: { name: string; value: string }[]; [key: string]: unknown };
+export type AvailableCommand = { type: "command" | "skill" | string; name: string; description: string; [key: string]: unknown };
+export type PromptSuggestion = { prompt: ContentBlock[]; _meta?: Meta };
 export type ElicitationResponse = { action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> };
 
 export type Implementation = { name: string; title?: string | null; version: string };
 
 export type AgentCapabilities = {
   session?: {
-    prompt?: { image?: object | null; audio?: object | null; embeddedContext?: object | null } | null;
+    prompt?: { image?: object | null; audio?: object | null; embeddedContext?: object | null; skill?: { inline?: object | null } | null } | null;
     mcp?: { stdio?: object | null; http?: object | null } | null;
     additionalDirectories?: object | null;
     systemPrompt?: { mode?: object | null } | null;
@@ -66,13 +73,14 @@ export type AgentCapabilities = {
 };
 
 export type ClientCapabilities = {
+  session?: { promptSuggestions?: object | null; commands?: { skill?: object | null } | null } | null;
   auth?: { terminal?: object | null; [k: string]: unknown } | null;
   elicitation?: { form?: object | null; url?: object | null; [k: string]: unknown } | null;
   _meta?: Meta | null;
   [k: string]: unknown;
 };
 export type InitializeRequest = { protocolVersion: number; info: Implementation; capabilities?: ClientCapabilities; _meta?: Meta | null };
-export type InitializeResponse = { protocolVersion: number; info: Implementation; capabilities?: AgentCapabilities; authMethods?: unknown[]; _meta?: Meta | null };
+export type InitializeResponse = { protocolVersion: number; info: Implementation; capabilities?: AgentCapabilities; authMethods?: AuthMethod[]; _meta?: Meta | null };
 
 export type PromptResponse = { messageId: string };
 

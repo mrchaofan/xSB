@@ -24,11 +24,9 @@
  *
  * A prompt that comes while the agent works is held until the work is done, and then run (as codex-acp does). With
  * --steering it is inserted before the work's next step and its directives run next, in the same work; when the work
- * has no step left, it is the next work (as claude-agent-acp does). With --steer-ext the agent also takes
- * `_session/steering` (as codex-acp does): into running work, it answers "injected" and inserts the input before the
- * next step, showing it with a message id of its own; input the work ends without is dropped, silently; with no work
- * running, it answers "promptRequired". A cancel answers what is held with -32800 and drops what was steered.
- * Flags: --steering (and reads images), --steer-ext, --no-system-prompt, --no-resume (cannot restore a session),
+ * has no step left, it becomes the next work. Both behaviors use standard session/prompt.
+ * The official Claude/Codex wrappers prioritize ordinary input; generic v2 agents may hold it.
+ * Flags: --steering (and reads images), --no-system-prompt, --no-resume (cannot restore a session),
  * --auth-required, --protocol <n>.
  */
 import { spawn } from "node:child_process";
@@ -54,8 +52,6 @@ type Session = {
   servers: string[];
   /** Prompts held while it works. */
   held: Held[];
-  /** Input given with `_session/steering`, to insert before the next step. */
-  steered: any[][];
   images: string[];
   /** The agent message being written, until a tool call. */
   message?: string;
@@ -67,13 +63,12 @@ const conn = new Connection(process.stdin, process.stdout, "mock");
 const sessions = new Map<string, Session>();
 const flags = process.argv.slice(2);
 const steering = flags.includes("--steering");
-const steerExt = flags.includes("--steer-ext");
 let counter = 0;
 let formElicitation = false;
 let rejectedContext = false;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
-  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], steered: [], images: [] };
+  const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], images: [] };
   for (const server of mcpServers.filter((s) => s.name === "workflow" || s.name === "xsb")) {
     const env = Object.fromEntries(server.env.map((e: any) => [e.name, e.value]));
     const proc = spawn(server.command, server.args, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "inherit"] });
@@ -230,12 +225,9 @@ async function work(session: Session, origin?: unknown): Promise<void> {
     await step(session, session.lines.shift()!);
     // Between two steps, what came meanwhile goes in, and runs next.
     if (!session.lines.length || session.cancelled) break;
-    for (const prompt of session.steered.splice(0)) insert(session, prompt);
     if (steering) for (const held of session.held.splice(0)) insert(session, held.prompt, held.resolve);
   }
   session.lines = [];
-  // What was steered and did not get in before the work ended is dropped.
-  session.steered = [];
   session.running = false;
   session.message = undefined;
   update(session, { sessionUpdate: "state_update", state: "idle", stopReason: session.cancelled ? "cancelled" : "end_turn", ...(origin ? { _meta: { "_claude/origin": origin } } : {}) });
@@ -258,15 +250,8 @@ conn.onRequest("initialize", (p) => {
       ...(flags.includes("--no-system-prompt") ? {} : { systemPrompt: {} }),
     },
   },
-  _meta: { ...(flags.includes("--no-turn-isolation") ? {} : { [TurnIsolation.key]: { version: TurnIsolation.version, afterIdle: true } }), ...(steerExt ? { steering: { supported: true } } : {}) },
+  _meta: { ...(flags.includes("--no-turn-isolation") ? {} : { [TurnIsolation.key]: { version: TurnIsolation.version, afterIdle: true } }), ...(flags.includes("--legacy-steering-advertisement") ? { steering: { supported: true } } : {}) },
 });
-});
-conn.onRequest("_session/steering", (p) => {
-  const session = sessions.get(p.sessionId);
-  if (!steerExt || !session) throw new RpcError(-32601, "Method not found");
-  if (!session.running) return { outcome: "promptRequired", reason: "noRunningTurn" };
-  session.steered.push(p.prompt);
-  return { outcome: "injected" };
 });
 function config(session: Session) {
   const values = (values: string[]) => values.map(value => ({ value, name: value }));
@@ -311,7 +296,7 @@ conn.onRequest("session/prompt", (p) => {
       insert(session, p.prompt, resolve);
       void work(session);
     } else {
-      // Held: like claude (--steering), until the work's next step; like codex, until the work is done.
+      // Standard prompt: priority mode takes it at the next safe step; generic queued mode waits.
       session.held.push({ prompt: p.prompt, resolve, reject });
     }
   });
@@ -320,7 +305,6 @@ conn.onNotification("session/cancel", (p) => {
   const session = sessions.get(p.sessionId);
   if (!session) return;
   for (const held of session.held.splice(0)) held.reject(RpcError.cancelled());
-  session.steered = [];
   if (!session.running) return;
   session.cancelled = true;
   session.wake?.();

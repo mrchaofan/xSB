@@ -26,12 +26,16 @@ export class Jobs {
     hooks.on("task.stopping", (task) => this.calls.get(task.id)?.abort());
   }
 
+  close(): void { for (const call of this.calls.values()) call.abort(); }
+
   private run(task: Task): void {
+    if (this.hub.stopping) return;
     task = this.hub.state.tasks.get(task.id)!;
     if (!task || task.status !== "queued" || task.stopping) return;
     const agent = this.hub.agent(task.to.agentId);
     const server = this.hub.toolServers(agent).find((t) => t.server.name === task.tool!.server)?.server;
     this.hub.kernel.started(task.id);
+    const step = this.hub.lifecycle.step(task.source ?? { ...task.to, turnId: null }, `job:${task.id}`, { taskId: task.id, tool: task.tool!.name });
     const abort = new AbortController();
     this.calls.set(task.id, abort);
     const call = server
@@ -47,6 +51,7 @@ export class Jobs {
         (e): [TaskStatus, string] => (abort.signal.aborted ? ["cancelled", "The tool did not say what became of the call."] : ["failed", errorMessage(e)]),
       )
       .then(([status, result]) => {
+        step.end({ status });
         this.calls.delete(task.id);
         if (this.hub.stopping) return;
         this.hub.kernel.jobEnded(task.id, status, result);

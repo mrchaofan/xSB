@@ -24,6 +24,8 @@ import { updateJsonFile, lastGoodJson } from "./config-files.ts";
  * an agent without one (@xsb/adapter) through the same code.
  */
 export type BackendSpec = {
+  /** Preserve AIR-only suggestions of released Codex adapters; false disables the compatibility handshake. */
+  airCompatibility?: boolean;
   /** Executable, looked up on PATH unless it is a path. */
   command: string;
   args?: string[];
@@ -170,6 +172,7 @@ function readJson<T>(file: string, fallback: T): T {
 /** Write a config file whole or not at all: a reader never sees it half written. */
 const object = (value: unknown): value is Record<string, any> => !!value && typeof value === "object" && !Array.isArray(value);
 const backendSpec = (value: unknown): value is BackendSpec => object(value) && typeof value.command === "string" && !!value.command.trim() &&
+  (value.airCompatibility === undefined || typeof value.airCompatibility === "boolean") &&
   (value.args === undefined || Array.isArray(value.args) && value.args.every((arg: unknown) => typeof arg === "string"));
 
 export function validateGlobal(config: GlobalConfig): void {

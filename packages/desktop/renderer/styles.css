@@ -1107,3 +1107,9 @@ dialog.settings-dialog::backdrop { background: var(--backdrop); backdrop-filter:
 .backend-menu .session-menu-item .cascade-check { margin-left: auto; }
 /* 滚动容器会裁掉伸出去的描边：里面的焦点框画在控件内侧 */
 .tab-list :focus-visible, .rail-scroll :focus-visible, .flow-agents :focus-visible, .opened-tabs :focus-visible, .welcome-recent-list :focus-visible, .settings-nav :focus-visible { outline-offset: -2px; }
+
+.composer-capabilities { display: flex; align-items: center; gap: 8px; padding: 4px 0; min-width: 0; }
+.composer-capabilities[hidden] { display: none; }
+.native-commands { max-width: 180px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+.prompt-suggestions { display: flex; gap: 6px; overflow-x: auto; min-width: 0; }
+.prompt-suggestions button { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }

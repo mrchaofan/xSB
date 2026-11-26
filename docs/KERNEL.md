@@ -203,7 +203,7 @@ discarded_unseen ◄────────────────────
 inboxed ──随下一轮──► inserted …
 ```
 
-信号都是 v2 的：`inserted` 是 `session/prompt` 的应答，`discarded_unseen` 是 -32800 或停下时还在中枢里，`seen` 是之后后端报告了任何输出、或这一轮正常结束。台账只向前走，写在 `.xsb2/ledger.jsonl`，推给观察者（`_dev.xsb/messages/update`）；Agent 用 `message_status` 查自己发出的消息，`task_status` 里也有承接者是否已看到任务。用户的消息不会是 `queued`（规则 0）。
+`submitted` 在写入后端前带上持久化的 `offered`；连接断开或重启时仍没有回执、也没有 -32800 的，记为 `insertion_uncertain`（插入未确认，不重放、不自动重发）。信号都是 v2 的：`inserted` 是 `session/prompt` 的应答，`discarded_unseen` 是 -32800 或停下时还在中枢里，`seen` 是之后后端报告了任何输出、或这一轮正常结束。台账只向前走，写在 `.xsb2/ledger.jsonl`，推给观察者（`_dev.xsb/messages/update`）；Agent 用 `message_status` 查自己发出的消息，`task_status` 里也有承接者是否已看到任务。用户的消息不会是 `queued`（规则 0）。
 
 ## 11. 与方案不同之处
 

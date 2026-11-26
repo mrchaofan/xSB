@@ -1,0 +1,23 @@
+const assert = require("node:assert/strict");
+process.env.XSB_TEST_CAPABILITY_AGENT = "1";
+require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, click, send, has, until, untilJS }) => {
+  const lane = "#lanes .lane";
+  await until(() => has(lane), "first conversation");
+  const agent = await js('xsb.newSession("capabilities")');
+  await untilJS('document.querySelectorAll("#agents .row").length>=2', "listed");
+  const index = (await js('xsb.load().then(s=>s.agents.filter(a=>!a.workflowOwner).map(a=>a.id))')).indexOf(agent.id) + 1;
+  await click(`#agents .row:nth-child(${index})`);
+  await send(lane, "hello");
+  await until(() => has(lane + " .prompt-suggestions button"), "standard suggestion");
+  const prior = await js(q(lane + " .entries") + ".children.length");
+  await click(lane + " .prompt-suggestions button");
+  assert.equal(await js(q(lane) + '.editor.read()[0].text'), "Standard suggestion");
+  assert.equal(await js(q(lane + " .entries") + ".children.length"), prior, "suggestion edits a draft only");
+  await js(q(lane + " .native-commands") + '.value="0"; ' + q(lane + " .native-commands") + '.dispatchEvent(new Event("change"))');
+  assert.deepEqual(await js(q(lane) + '.editor.read()[0]'), { type: "skill", name: "pdf" });
+  assert.equal(await js(q(lane + " .entries") + ".children.length"), prior, "skill selection edits a draft only");
+  await click(lane + " .send");
+  await untilJS(q(lane + " .entries") + '.innerText.includes(\'"type":"skill"\')', "native skill reached the agent");
+  require("node:fs").writeFileSync("/tmp/xsb-capabilities-window.png", (await win.capturePage()).toPNG());
+  console.log("Electron + real Hub/ACP: standard suggestion edits draft; skill stays first and reaches the backend after Send");
+});

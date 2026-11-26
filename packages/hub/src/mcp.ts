@@ -105,6 +105,7 @@ export function serveMcp(
       typeof p._meta?.["dev.xsb/call-id"] === "string"
         ? p._meta["dev.xsb/call-id"]
         : connectionId + "/" + JSON.stringify(ctx.id);
+    const step = hub.lifecycle.step(owner.source(), `mcp:${receipt}`, { tool: p.name, server });
     const args = p.arguments ?? {};
     const budget = hub.policy(owner.agentId).outputTokens;
     const log = {
@@ -116,8 +117,8 @@ export function serveMcp(
       let result: unknown;
       if (server === XSB_SERVER) {
         if (p.name !== ASK_TOOL.name) throw Error(`Unknown tool ${p.name}`);
-        result = hub.questions.ask(owner, args);
-      } else result = hub.workflows.call(owner, p.name, args, receipt);
+        result = owner.withStep(step.source, () => hub.questions.ask(owner, args));
+      } else result = owner.withStep(step.source, () => hub.workflows.call(owner, p.name, args, receipt));
       const answer = boundedText(
         hub.paths,
         owner.agentId,
@@ -126,10 +127,12 @@ export function serveMcp(
       );
       if (server === WORKFLOW_SERVER) owner.recordWorkflow(turnId, { ...log, result: answer });
       owner.toolOutput(answer);
+      step.end({ status: "completed" });
       return { content: [{ type: "text", text: answer }] };
     } catch (error) {
       const message = (error as Error).message;
       if (server === WORKFLOW_SERVER) owner.recordWorkflow(turnId, { ...log, error: message });
+      step.end({ status: "failed" });
       return { content: [{ type: "text", text: message }], isError: true };
     }
   });

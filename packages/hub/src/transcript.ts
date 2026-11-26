@@ -7,7 +7,7 @@
  * @xsb/protocol). So whatever decides what a model sees reads the transcript backward and stops at the first
  * boundary of the kind `cleared`: what lies before it is the user's to keep, not the model's to be given.
  */
-import { Boundaries, OriginExt, RunExt } from "@xsb/protocol";
+import { Boundaries, InsertionTrace, OriginExt, RunExt } from "@xsb/protocol";
 import type { BackendRun, Boundary, ContentBlock, OriginMeta } from "@xsb/protocol";
 import type { Store } from "@xsb/store";
 import { Paths } from "./paths.ts";
@@ -28,6 +28,36 @@ export const boundaryOf = (update: any): Boundary | undefined =>
 
 const said = (content: ContentBlock | undefined): string =>
   !content ? "" : content.type === "text" ? (content.text ?? "") : `[${content.type}]`;
+
+type Record = { ts: string; update: any };
+/** Reconcile confirmed input with the native insertion evidence, preserving original stored records. */
+function insertionKey(update: any): string | undefined {
+  const trace = update?._meta?.[InsertionTrace.key];
+  return trace?.backendSessionId && trace?.nativeMessageId ? JSON.stringify([trace.backendSessionId, trace.nativeMessageId]) : undefined;
+}
+function insertionOrder(records: Record[]): Record[] {
+  const inputs = new Map<string, Record[]>(), first = new Map<string, number>(), observed = new Map<string, number>();
+  records.forEach((record, index) => {
+    const id = insertionKey(record.update); if (!id) return;
+    if (record.update.sessionUpdate === "user_message_chunk") {
+      const list = inputs.get(id) ?? []; list.push(record); inputs.set(id, list);
+      if (!first.has(id)) first.set(id, index);
+    } else if (record.update._meta[InsertionTrace.key].phase === "observed" && !observed.has(id)) observed.set(id, index);
+  });
+  const move = new Set([...first].filter(([id, index]) => (observed.get(id) ?? Infinity) < index).map(([id]) => id));
+  const ordered: Record[] = [], emitted = new Set<string>();
+  for (const record of records) {
+    const id = insertionKey(record.update);
+    if (id && move.has(id)) {
+      if (record.update.sessionUpdate === "user_message_chunk") continue;
+      if (!emitted.has(id) && record.update._meta[InsertionTrace.key].phase === "observed") {
+        ordered.push(...inputs.get(id)!.map(input => ({ ...input, ts: record.ts }))); emitted.add(id);
+      }
+    }
+    ordered.push(record);
+  }
+  return ordered;
+}
 
 /**
  * The turns of a session since its context was last cleared, oldest first. A turn begins with input that is not
@@ -52,7 +82,7 @@ export function turnsSinceCleared(store: Store, agentId: string, sessionId: stri
   // lifecycle updates refine one entry, while ids reused in later turns stay separate.
   let tools = new Map<string, number>();
   const turn = (): PastTurn | undefined => turns.at(-1);
-  for (const { ts, update } of records) {
+  for (const { ts, update } of insertionOrder(records)) {
     const run = update?._meta?.[RunExt.key] as BackendRun | undefined;
     if (run?.turnId === null && ["agent_message_chunk", "agent_message", "tool_call", "tool_call_update"].includes(update.sessionUpdate) && turn()?.run?.id !== run.id) {
       turns.push({ at: ts, inputs: [], tools: [], reply: "", run: { id: run.id, turnId: null } });
@@ -139,10 +169,26 @@ const firstLine = (s: string): string => {
  * calls left out, then only the end kept. A record that is one message and nothing else is that message.
  */
 export function taskRecord(store: Store, agentId: string, sessionId: string, taskId: string, limit = RECORD_LIMIT): string {
-  const updates: any[] = [];
+  const records: Record[] = [];
+  const observed = new Set<string>();
+  let insertion: string | undefined;
   for (const rec of store.readBackward(Paths.transcript(agentId, sessionId))) {
-    const update = (rec as { update?: any }).update;
+    const record = rec as Record, update = record.update;
     if (boundaryOf(update)?.kind === "cleared") break;
+    records.push(record);
+    const key = insertionKey(update);
+    if (key && update?._meta?.[InsertionTrace.key]?.phase === "observed") {
+      observed.add(key); if (key === insertion) break;
+    }
+    const origin = update?._meta?.[OriginExt.key] as OriginMeta | undefined;
+    if (update?.sessionUpdate === "user_message_chunk" && origin?.taskId === taskId && origin.role === "task") {
+      if (!key || observed.has(key)) break;
+      insertion ??= key;
+    }
+  }
+  records.reverse();
+  const updates: any[] = [];
+  for (const { update } of insertionOrder(records).reverse()) {
     const origin: OriginMeta | undefined = update?._meta?.[OriginExt.key];
     if (update?.sessionUpdate === "user_message_chunk" && origin?.taskId === taskId && origin.role === "task") break;
     updates.push(update);

@@ -1,7 +1,7 @@
 /** Native ACP questions: a live request bound to one execution, with durable UI records. */
 import { Ajv } from "ajv";
 import { Question, elicitationAnswers, elicitationForm } from "@xsb/protocol";
-import type { ElicitationRequest, ElicitationResponse, QuestionState } from "@xsb/protocol";
+import type { FormElicitationRequest, ElicitationResponse, QuestionState } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Hub } from "./hub.ts";
 import type { LiveSession } from "./session.ts";
@@ -11,7 +11,7 @@ import { Paths } from "./paths.ts";
 const validator = new Ajv({ strict: false, validateFormats: false });
 type Pending = {
   session: LiveSession; turnId: string; backendSessionId: string; id: string;
-  params: ElicitationRequest; form: ReturnType<typeof elicitationForm>;
+  params: FormElicitationRequest; form: ReturnType<typeof elicitationForm>;
   validate: ReturnType<typeof validator.compile>;
   answer: ReturnType<typeof deferred<ElicitationResponse>>;
   clients: Map<Client, AbortController>; unable: Set<Client>; signal: AbortSignal; onAbort: () => void;
@@ -26,7 +26,7 @@ export class Elicitations {
     return [...this.pending].some((p) => p.session.agentId === agentId && (p.params._meta?.codex as any)?.delivery !== "async");
   }
 
-  request(session: LiveSession, request: ElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
+  request(session: LiveSession, request: FormElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
     const form = elicitationForm(request);
     const id = newId("elicitation");
     const pending: Pending = {

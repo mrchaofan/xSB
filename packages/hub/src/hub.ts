@@ -1,3 +1,5 @@
+import { Authentication } from "./auth.ts";
+import { Lifecycle } from "./lifecycle.ts";
 /**
  * The hub: the one long-running process of a project.
  *
@@ -68,6 +70,8 @@ export class Hub {
   readonly permissions: Permissions;
   readonly questions: Questions;
   readonly elicitations: Elicitations;
+  readonly lifecycle: Lifecycle;
+  readonly authentication: Authentication;
   readonly assets: Assets;
   readonly workflows: Workflows;
   /** Set by `shutdown`: turns that die with it stay unacknowledged and run again on the next start. */
@@ -92,9 +96,14 @@ export class Hub {
     const movedBindings = [...this.state.sessions.values()].filter(rec => rec.backendSessionId &&
       (rec.backendWorkspace ? rec.backendWorkspace !== this.state.agents.get(rec.agentId)?.workspace : this.paths.moved || this.paths.previousRoots.length > 0));
     if (movedBindings.length) this.state.commit(movedBindings.map(rec => ops.putSession({ ...rec, backendSessionId: undefined, backendFresh: undefined, renew: "project_moved", used: undefined })));
-    this.backends = new BackendPool((line) => this.log(line));
+    this.backends = new BackendPool((line) => this.log(line), {
+      url: (backend, request, signal) => this.authentication.request(backend, request, signal),
+      urlComplete: (backend, id) => this.authentication.complete(backend, id),
+    });
     const hooks: KernelHooks = new Hooks(auditReports(this.state.store, (line) => this.log(line)));
     this.kernel = new Kernel(this.state, hooks, (to) => this.delivery.recipient(to));
+    this.lifecycle = new Lifecycle(hooks);
+    this.authentication = new Authentication(this);
     this.delivery = new Delivery(this);
     this.jobs = new Jobs(this);
     auditHook(hooks, this.state.store);
@@ -183,12 +192,15 @@ export class Hub {
     // From here no turn starts and no backend is started (LiveSession.pump, BackendPool.for): what waits, waits for
     // the next start.
     this.stopping = true;
+    this.authentication.close();
+    this.jobs.close();
     for (const session of this.live.values()) this.elicitations.cancel(session);
     this.contextTokens.clear();
     for (const conn of this.mcpClients) conn.close();
     for (const server of this.servers) server.close();
     for (const client of this.clients) client.conn.close();
     await this.backends.close();
+    for (const session of this.live.values()) this.lifecycle.emit("session.closed", session.source(), { reason: "shutdown" });
     fs.rmSync(this.paths.socket("acp"), { force: true });
     fs.rmSync(this.paths.socket("mcp"), { force: true });
   }
@@ -440,6 +452,7 @@ export class Hub {
     if (!gone.size) return { conversations: 0, bytes: 0 };
     for (const session of [...this.live.values()]) {
       if (!gone.has(session.agentId)) continue;
+      this.lifecycle.emit("session.closed", session.source(), { reason: "purged" });
       this.live.delete(session.id);
       this.bridgeTokens.delete(session.bridgeToken);
     }
@@ -488,6 +501,7 @@ export class Hub {
 
   private track(session: LiveSession): LiveSession {
     this.live.set(session.id, session);
+    this.lifecycle.emit("session.opened", session.source(), { restored: !!session.rec.backendSessionId });
     this.bridgeTokens.set(session.bridgeToken, session);
     return session;
   }
