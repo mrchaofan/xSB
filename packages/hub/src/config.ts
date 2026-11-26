@@ -1,5 +1,5 @@
 /**
- * Configuration, in two files with no field in common:
+ * User-local defaults and project overrides. Trust records live separately in trust.json.
  *
  *   ~/.xsb2_global/config.json        about this machine: which backends exist and how to start them, plugins turned
  *                             off and project plugins approved (plugins.ts)
@@ -16,6 +16,7 @@ import path from "node:path";
 import { LANGUAGES, failure } from "@xsb/protocol";
 import type { BackendInfo, Language } from "@xsb/protocol";
 import type { Paths } from "./paths.ts";
+import { updateJsonFile, lastGoodJson } from "./config-files.ts";
 
 /**
  * A backend is a command that speaks ACP on stdio. That is the whole contract:
@@ -110,6 +111,7 @@ export function limitSettings() {
     .map(([name, range]) => ({ name, ...range, value: inRange(range, set?.[name]) ? set![name] as number : undefined }));
   return {
     backends: Object.fromEntries(Object.keys(backends()).map((name) => [name, row(BACKEND_LIMITS, config.backendLimits?.[name])])),
+    issues: globalConfiguration().issues,
   };
 }
 
@@ -145,7 +147,11 @@ export const DEFAULT_BACKEND = "claude";
  * may be the home folder itself, and the two must not be one folder. Nor is it the earlier layout's `.xsb`.
  */
 export const GLOBAL_DIR = ".xsb2_global";
-export const globalDir = (): string => process.env.XSB_HOME ?? path.join(os.homedir(), GLOBAL_DIR);
+export const globalDir = (): string => {
+  const override = process.env.XSB_HOME;
+  if (override !== undefined && (!override.trim() || !path.isAbsolute(override))) throw new Error("XSB_HOME must be a nonempty absolute directory path");
+  return path.resolve(override ?? path.join(os.homedir(), GLOBAL_DIR));
+};
 export const globalConfigPath = (): string => path.join(globalDir(), "config.json");
 
 /** A config file's object; missing is `fallback`. Throws `invalid_json` when it is not a JSON object. */
@@ -162,37 +168,91 @@ function readJson<T>(file: string, fallback: T): T {
 }
 
 /** Write a config file whole or not at all: a reader never sees it half written. */
-function writeJson(file: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(value, null, 2) + "\n");
-  fs.renameSync(temporary, file);
+const object = (value: unknown): value is Record<string, any> => !!value && typeof value === "object" && !Array.isArray(value);
+const backendSpec = (value: unknown): value is BackendSpec => object(value) && typeof value.command === "string" && !!value.command.trim() &&
+  (value.args === undefined || Array.isArray(value.args) && value.args.every((arg: unknown) => typeof arg === "string"));
+
+export function validateGlobal(config: GlobalConfig): void {
+  if (config.version !== 1) throw new Error(`Unsupported global configuration version: ${config.version}`);
+  if (config.backends !== undefined && (!object(config.backends) || Object.values(config.backends).some(v => !backendSpec(v)))) throw new Error("Invalid backend command or arguments");
+  if (config.plugins !== undefined && (!object(config.plugins) || Object.values(config.plugins).some(v => !object(v) || v.enabled !== undefined && typeof v.enabled !== "boolean"))) throw new Error("Invalid plugin setting");
+  if (config.backendLimits !== undefined && !object(config.backendLimits)) throw new Error("Invalid backend limits");
+  for (const [backend, limits] of Object.entries(config.backendLimits ?? {})) {
+    if (!object(limits)) throw new Error(`Invalid limits for ${backend}`);
+    for (const [name, value] of Object.entries(limits)) if (Object.hasOwn(BACKEND_LIMITS, name) && !inRange(BACKEND_LIMITS[name as BackendLimit], value)) throw new Error(`Invalid ${name} for ${backend}`);
+    if ((limits.contextReserveTokens ?? BACKEND_LIMITS.contextReserveTokens.default) >= (limits.promptTokens ?? BACKEND_LIMITS.promptTokens.default))
+      throw new Error(`contextReserveTokens must be smaller than promptTokens for ${backend}`);
+  }
+}
+
+function validateProject(config: ProjectConfig): void {
+  if (![1, CONFIG_VERSION].includes(config.version)) throw new Error(`Unsupported project configuration version: ${config.version}`);
+  if (config.language !== undefined && !LANGUAGES.includes(config.language)) throw new Error("Invalid project language");
 }
 
 /**
  * Change a config file: read strictly, change, write atomically. A file that cannot be read is refused, not
  * overwritten: what the user wrote in it is theirs, and an empty stand-in would wipe it.
  */
-function updateJson<T>(file: string, fallback: T, change: (config: T) => T): T {
-  const next = change(readJson(file, fallback));
-  writeJson(file, next);
-  return next;
+const goodGlobal = new Map<string, GlobalConfig>();
+const goodProject = new Map<string, ProjectConfig>();
+
+export function globalConfiguration(): { config: GlobalConfig; available: boolean; issues: string[] } {
+  const file = globalConfigPath();
+  try {
+    const raw = loadGlobalConfig();
+    const issues: string[] = [];
+    const config: GlobalConfig = { ...raw, backends: {} };
+    if (raw.backends !== undefined && !object(raw.backends)) issues.push("Invalid backends configuration");
+    else for (const [name, value] of Object.entries(raw.backends ?? {})) {
+      if (backendSpec(value)) config.backends![name] = value;
+      else issues.push(`Backend ${name}: invalid command or arguments`);
+    }
+    if (raw.plugins !== undefined && !object(raw.plugins)) throw new Error("Invalid plugins configuration");
+    for (const value of Object.values(raw.plugins ?? {})) if (!object(value) || value.enabled !== undefined && typeof value.enabled !== "boolean") throw new Error("Invalid plugin setting");
+    if (raw.backendLimits !== undefined && !object(raw.backendLimits)) delete config.backendLimits;
+    else if (raw.backendLimits) {
+      config.backendLimits = {};
+      for (const [name, limits] of Object.entries(raw.backendLimits)) {
+        if (!object(limits)) { issues.push(`Backend ${name}: invalid limits`); continue; }
+        const valid = Object.fromEntries(Object.entries(limits).filter(([key, value]) => Object.hasOwn(BACKEND_LIMITS, key) && inRange(BACKEND_LIMITS[key as BackendLimit], value))) as Partial<Record<BackendLimit, number>>;
+        if (Object.keys(valid).length !== Object.keys(limits).length) issues.push(`Backend ${name}: invalid limit values ignored`);
+        if ((valid.contextReserveTokens ?? BACKEND_LIMITS.contextReserveTokens.default) >= (valid.promptTokens ?? BACKEND_LIMITS.promptTokens.default)) {
+          delete valid.contextReserveTokens; delete valid.promptTokens;
+          issues.push(`Backend ${name}: invalid prompt/reserve combination ignored`);
+        }
+        config.backendLimits[name] = valid;
+      }
+    }
+    goodGlobal.set(file, structuredClone(config));
+    return { config, available: true, issues };
+  } catch (error) {
+    const saved = goodGlobal.get(file) ?? lastGoodJson<GlobalConfig>(file);
+    let valid: GlobalConfig | undefined;
+    try { if (saved) { validateGlobal(saved); valid = saved; } } catch { /* an invalid backup never restores permissions */ }
+    return { config: valid ?? { version: 1 }, available: !!valid, issues: [`${file}: ${(error as Error).message}${valid ? " (using last valid configuration)" : ""}`] };
+  }
 }
 
 /** The machine's config for reading, empty when it cannot be read: a broken file sets nothing and stops nothing. */
-export const machineConfig = (): GlobalConfig => { try { return loadGlobalConfig(); } catch { return { version: 1 }; } };
+export const machineConfig = (): GlobalConfig => globalConfiguration().config;
 /** The project's config for reading, likewise. */
-export const projectConfig = (paths: Paths): ProjectConfig => { try { return loadProjectConfig(paths); } catch { return { version: CONFIG_VERSION }; } };
+export const projectConfig = (paths: Paths): ProjectConfig => {
+  try { const config = loadProjectConfig(paths); goodProject.set(paths.config, config); return config; }
+  catch { return goodProject.get(paths.config) ?? lastGoodJson<ProjectConfig>(paths.config) ?? { version: CONFIG_VERSION }; }
+};
 
 /** Change the machine's config (`updateJson`). */
 export const updateGlobalConfig = (change: (config: GlobalConfig) => GlobalConfig): GlobalConfig =>
-  updateJson(globalConfigPath(), { version: 1 } as GlobalConfig, change);
+  updateJsonFile(globalConfigPath(), loadGlobalConfig, change, validateGlobal);
 /** Change the project's config (`updateJson`). */
 export const updateProjectConfig = (paths: Paths, change: (config: ProjectConfig) => ProjectConfig): ProjectConfig =>
-  updateJson(paths.config, { version: CONFIG_VERSION } as ProjectConfig, change);
+  updateJsonFile(paths.config, () => loadProjectConfig(paths), change, validateProject);
 
 export function loadProjectConfig(paths: Paths): ProjectConfig {
-  return readJson<ProjectConfig>(paths.config, { version: CONFIG_VERSION });
+  const config = readJson<ProjectConfig>(paths.config, { version: CONFIG_VERSION });
+  validateProject(config);
+  return config;
 }
 
 /** The project's working language. English until a client has declared one. */
@@ -202,11 +262,12 @@ export const projectLanguage = (paths: Paths): Language => {
 };
 
 export function saveProjectConfig(paths: Paths, config: ProjectConfig): void {
-  writeJson(paths.config, config);
+  updateProjectConfig(paths, () => config);
 }
 
 /** Make a directory a project. Returns whether that also created the machine's config. */
 export function initProject(paths: Paths): boolean {
+  if (path.resolve(paths.dir) === globalDir()) throw new Error("The global configuration directory must differ from the project data directory");
   fs.mkdirSync(paths.shared, { recursive: true });
   fs.mkdirSync(paths.run, { recursive: true });
   if (!fs.existsSync(paths.config)) saveProjectConfig(paths, { version: CONFIG_VERSION });
@@ -214,23 +275,38 @@ export function initProject(paths: Paths): boolean {
   return initGlobalConfig();
 }
 
-export const loadGlobalConfig = (): GlobalConfig => readJson<GlobalConfig>(globalConfigPath(), { version: 1 });
+export const loadGlobalConfig = (): GlobalConfig => {
+  const config = readJson<GlobalConfig>(globalConfigPath(), { version: 1 });
+  if (config.version !== 1) throw new Error(`Unsupported global configuration version: ${config.version}`);
+  return config;
+};
 
 export function saveGlobalConfig(config: GlobalConfig): void {
-  writeJson(globalConfigPath(), config);
+  updateGlobalConfig(() => config);
+}
+
+/** Explicit import may replace damaged JSON; ordinary setting edits must never overwrite it. */
+export function replaceGlobalConfig(config: GlobalConfig): void {
+  validateGlobal(config);
+  updateJsonFile(globalConfigPath(), () => config, () => config, validateGlobal);
 }
 
 /** Create the global config if there is none. Returns whether it did. */
 function initGlobalConfig(): boolean {
   if (fs.existsSync(globalConfigPath())) return false;
-  fs.mkdirSync(globalDir(), { recursive: true });
-  fs.writeFileSync(globalConfigPath(), JSON.stringify({ version: 1, backends: {} } satisfies GlobalConfig, null, 2) + "\n");
-  return true;
+  let created = false;
+  updateGlobalConfig(config => {
+    if (fs.existsSync(globalConfigPath())) return config;
+    created = true;
+    return { version: 1, backends: {} };
+  });
+  return created;
 }
 
 /** The backends of this machine. Read on every use, so an edit needs no hub restart. */
 export function backends(): Record<string, BackendSpec> {
-  return { ...BUILTIN_BACKENDS, ...loadGlobalConfig().backends };
+  const table = { ...BUILTIN_BACKENDS, ...machineConfig().backends };
+  return Object.fromEntries(Object.entries(table).map(([name, spec]) => [name, { ...spec, command: !path.isAbsolute(spec.command) && /[\\/]/.test(spec.command) ? path.resolve(globalDir(), spec.command) : spec.command }]));
 }
 
 /**
@@ -257,7 +333,7 @@ export function findCommand(command: string, searchPath = process.env.PATH ?? ""
       return false;
     }
   };
-  if (command.includes(path.sep)) return runnable(command) ? path.resolve(command) : null;
+  if (/[\\/]/.test(command)) return runnable(command) ? path.resolve(command) : null;
   const exts = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
   for (const dir of searchPath.split(path.delimiter)) {
     for (const ext of exts) {

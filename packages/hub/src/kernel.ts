@@ -396,7 +396,7 @@ export class Kernel {
     if (task?.status !== "queued" || task.stopping) return;
     const running = { ...task, status: "running" as const, updatedAt: now() };
     this.write([ops.putTask(running)], { changed: [running] });
-    this.hooks.emit("task.started", running);
+    this.state.afterCommit(() => this.hooks.emit("task.started", running));
   }
 
   /** The task is as `task` now. */
@@ -444,31 +444,35 @@ export class Kernel {
    * result, as `task.pre_complete` judges it. Ended by the model's limits or refusal, they fail with it. Failed,
    * they are errors. Stopped, they were stopped already, by whoever stopped the turn.
    */
-  turnEnded(sessionId: string, stopReason: StopReason, record: (task: Task) => string, failure?: string): void {
-    for (const task of this.openTasks(sessionId)) {
-      if (failure) {
-        this.fail(task, failure);
-        continue;
+  turnEnded(sessionId: string, stopReason: StopReason, record: (task: Task) => string, failure?: string, consumed: string[] = []): void {
+    this.state.atomic(() => {
+      this.ack(consumed);
+      if (!failure && stopReason === "end_turn") for (const id of consumed) this.mark(id, "seen");
+      for (const task of this.openTasks(sessionId)) {
+        if (failure) {
+          this.fail(task, failure);
+          continue;
+        }
+        if (stopReason === "cancelled" || task.stopping) continue;
+        const said = record(task);
+        if (stopReason !== "end_turn") {
+          this.finish([{ task, status: "failed", result: `${said}\n(The turn ended: ${stopReason}.)`.trim(), reason: "failed", stopper: agentPrincipal(task.to.agentId) }]);
+          continue;
+        }
+        if (this.awaited(task)) continue;
+        const decided = this.hooks.decide("task.pre_complete", { task, result: said, assets: [], verdict: "complete" });
+        if (isVeto(decided)) continue;
+        if (decided.verdict === "retry") {
+          this.tell(task.to, task.topic, contractReminder(task, decided.why ?? ""), { steer: true, pref: "wake" });
+        } else if (decided.verdict === "fail") {
+          this.finish([{ task, status: "failed", result: `${said}\n${decided.why ?? ""}`.trim(), reason: "error", stopper: SYSTEM }]);
+        } else {
+          this.qualityTries.delete(task.id);
+          const assets = decided.assets.map((a) => `${a.id}@${a.version}`);
+          this.finish([{ task: { ...task, ...(assets.length ? { assets } : {}) }, status: "completed", result: decided.result, reason: "completed", stopper: agentPrincipal(task.to.agentId) }]);
+        }
       }
-      if (stopReason === "cancelled" || task.stopping) continue;
-      const said = record(task);
-      if (stopReason !== "end_turn") {
-        this.finish([{ task, status: "failed", result: `${said}\n(The turn ended: ${stopReason}.)`.trim(), reason: "failed", stopper: agentPrincipal(task.to.agentId) }]);
-        continue;
-      }
-      if (this.awaited(task)) continue;
-      const decided = this.hooks.decide("task.pre_complete", { task, result: said, assets: [], verdict: "complete" });
-      if (isVeto(decided)) continue;
-      if (decided.verdict === "retry") {
-        this.tell(task.to, task.topic, contractReminder(task, decided.why ?? ""), { steer: true, pref: "wake" });
-      } else if (decided.verdict === "fail") {
-        this.finish([{ task, status: "failed", result: `${said}\n${decided.why ?? ""}`.trim(), reason: "error", stopper: SYSTEM }]);
-      } else {
-        this.qualityTries.delete(task.id);
-        const assets = decided.assets.map((a) => `${a.id}@${a.version}`);
-        this.finish([{ task: { ...task, ...(assets.length ? { assets } : {}) }, status: "completed", result: decided.result, reason: "completed", stopper: agentPrincipal(task.to.agentId) }]);
-      }
-    }
+    });
   }
 
   /** A job's tool answered. If it was being called off, its end is as the stop said, unless it finished all the same. */
@@ -504,32 +508,41 @@ export class Kernel {
 
   /** User stop is a snapshot of all this session's accepted work, committed before the backend is cancelled. */
   stopSession(to: Addr, inputIds: string[], sentIds: string[] = [], insertedIds: string[] = []): Veto | { stopping: boolean; with: Task[] } {
-    const session = this.state.sessions.get(to.sessionId);
-    const accepted = [...this.state.tasks.values()].filter((t) => t.to.sessionId === to.sessionId && !isTerminal(t.status) && !t.stopping);
-    const agentRoots = accepted.filter((t) => !t.tool);
-    const covered = new Set(doomMany(this.state, agentRoots).doomed.map((t) => t.id));
-    const roots = [...agentRoots, ...accepted.filter((t) => t.tool && !covered.has(t.id))];
-    const ids = new Set(inputIds);
-    const sent = new Set(sentIds), inserted = new Set(insertedIds);
-    const mail = [...this.state.mail.values()].filter((m) => m.to.sessionId === to.sessionId && !inserted.has(m.id) && (this.withdrawable(m) || this.state.ledger.get(m.id)?.state === "submitted" || ids.has(m.id)));
-    // Keep facts, but give them a fresh, passive delivery. Withdrawn instructions are never digested again.
-    const kept = mail.filter((m) => !sent.has(m.id) && !m.workflowNotice && (m.kind === "results" || (m.kind === "message" && m.from.kind === "system" && !m.steer)))
-      .map((m) => ({ ...m, id: newId("m"), pref: "lazy" as const, steer: false }));
-    const gates = [...this.state.gates.values()].filter((g) => g.owner.sessionId === to.sessionId);
-    // Retire waits belonging to the stopped work. Shared children still return their facts individually, passively.
-    const keptIds = new Set(kept.flatMap((m) => m.results?.taskIds ?? []));
-    for (const gate of gates) for (const id of gate.taskIds) {
-      const task = this.state.tasks.get(id);
-      if (!task || !isTerminal(task.status) || keptIds.has(id)) continue;
-      keptIds.add(id);
-      kept.push({ id: newId("m"), to, from: { kind: "system" }, kind: "results", results: { taskIds: [id] }, pref: "lazy", steer: false, ts: now() });
-    }
-    const first = [...(session ? [ops.putSession({ ...session, workGeneration: this.generation(to.sessionId) + 1, updatedAt: now() })] : []), ...mail.map((m) => ops.ack(m.id)), ...gates.map((g) => ops.closeGate(g.id))];
-    const end = { status: "cancelled" as const, reason: "cancelled" as const, result: `The user stopped ${to.agentId}'s current and queued work.` };
-    return this.stopMany(roots, USER, end, first, mail.filter((m) => !sent.has(m.id)), kept, to.sessionId);
+    return this.stopSessions([{ to, pending: inputIds, sent: sentIds, inserted: insertedIds }]);
   }
 
-  private stopMany(roots: Task[], stopper: Principal, end: { status: "cancelled" | "failed"; reason: EndReason; result: string }, first: Op[] = [], taken: MailItem[] = [], kept: MailItem[] = [], stoppedSession?: string, commitGuard?: () => boolean): Veto | { stopping: boolean; with: Task[] } {
+  stopSessions(scopes: { to: Addr; pending: string[]; sent: string[]; inserted: string[] }[], extra: Op[] = []): Veto | { stopping: boolean; with: Task[] } {
+    return this.state.atomic(() => {
+      const scope = new Map(scopes.map(s => [s.to.sessionId, s]));
+      const accepted = [...this.state.tasks.values()].filter((t) => scope.has(t.to.sessionId) && !isTerminal(t.status) && !t.stopping);
+      const agentRoots = accepted.filter((t) => !t.tool);
+      const covered = new Set(doomMany(this.state, agentRoots).doomed.map((t) => t.id));
+      const roots = [...agentRoots, ...accepted.filter((t) => t.tool && !covered.has(t.id))];
+      const ids = new Set(scopes.flatMap(s => s.pending));
+      const sent = new Set(scopes.flatMap(s => s.sent)), inserted = new Set(scopes.flatMap(s => s.inserted));
+      const mail = [...this.state.mail.values()].filter((m) => scope.has(m.to.sessionId) && !inserted.has(m.id) && (this.withdrawable(m) || this.state.ledger.get(m.id)?.state === "submitted" || ids.has(m.id)));
+      // Keep facts, but give them a fresh, passive delivery. Withdrawn instructions are never digested again.
+      const kept = mail.filter((m) => !sent.has(m.id) && !m.workflowNotice && (m.kind === "results" || (m.kind === "message" && m.from.kind === "system" && !m.steer)))
+        .map((m) => ({ ...m, id: newId("m"), pref: "lazy" as const, steer: false }));
+      const gates = [...this.state.gates.values()].filter((g) => scope.has(g.owner.sessionId));
+      // Retire waits belonging to the stopped work. Shared children still return their facts individually, passively.
+      const keptIds = new Set(kept.flatMap((m) => m.results?.taskIds ?? []));
+      for (const gate of gates) for (const id of gate.taskIds) {
+        const task = this.state.tasks.get(id);
+        if (!task || !isTerminal(task.status) || keptIds.has(id)) continue;
+        keptIds.add(id);
+        kept.push({ id: newId("m"), to: gate.owner, from: { kind: "system" }, kind: "results", results: { taskIds: [id] }, pref: "lazy", steer: false, ts: now() });
+      }
+      const first = [...extra, ...scopes.flatMap(({ to }) => {
+        const session = this.state.sessions.get(to.sessionId);
+        return session ? [ops.putSession({ ...session, workGeneration: this.generation(to.sessionId) + 1, updatedAt: now() })] : [];
+      }), ...mail.map((m) => ops.ack(m.id)), ...gates.map((g) => ops.closeGate(g.id))];
+      const end = { status: "cancelled" as const, reason: "cancelled" as const, result: `The user stopped ${scopes.map(s => s.to.agentId).join(", ")}'s current and queued work.` };
+      return this.stopMany(roots, USER, end, first, mail.filter((m) => !sent.has(m.id)), kept, [...scope.keys()]);
+    });
+  }
+
+  private stopMany(roots: Task[], stopper: Principal, end: { status: "cancelled" | "failed"; reason: EndReason; result: string }, first: Op[] = [], taken: MailItem[] = [], kept: MailItem[] = [], stoppedSession?: string | string[], commitGuard?: () => boolean): Veto | { stopping: boolean; with: Task[] } {
     const forced = new Set<string>();
     for (const task of roots) {
       const asked = this.hooks.decide("task.pre_stop", { task, stopper });
@@ -581,7 +594,7 @@ export class Kernel {
       notices.push({ id: newId("m"), to: { agentId: own[0].to.agentId, sessionId }, from: { kind: "system" }, kind: "message", topic: own[0].topic, content: text, steer: true, pref: "lazy", ts: now() });
     }
     // A session told just now of what went is not told of each of them again; one whose work all went, of none.
-    const told = new Set([...notices.map((n) => n.to.sessionId), ...halted.keys(), ...(stoppedSession ? [stoppedSession] : [])]);
+    const told = new Set([...notices.map((n) => n.to.sessionId), ...halted.keys(), ...(typeof stoppedSession === "string" ? [stoppedSession] : stoppedSession ?? [])]);
     const quiet = new Set(doomed.filter((t) => same(stopper, t.initiator) || (t.from && told.has(t.from.sessionId))).map((t) => t.id));
     // The freeze: every task that goes is marked with the end it comes to, in one transaction with taking back its mail.
     const frozen: Task[] = [];
@@ -615,11 +628,13 @@ export class Kernel {
     } else {
       // The stop is recorded now; the tasks end once the sessions confirmed it (or on the next start of xsb).
       this.write(freeze, { changed: frozen, mail: notices, withdrawn });
-      const pending: PendingStop = { taskIds: ends.map((e) => e.task.id), sessions: halted, timer: setTimeout(() => this.settleStop(pending), STOP_CONFIRM_MS) };
-      this.pendingStops.push(pending);
-      for (const task of [...doomed.filter(handed), ...retired].filter((t) => halted.has(t.to.sessionId))) this.hooks.emit("task.stopping", { ...task, turnId: halted.get(task.to.sessionId) });
+      this.state.afterCommit(() => {
+        const pending: PendingStop = { taskIds: ends.map((e) => e.task.id), sessions: halted, timer: setTimeout(() => this.settleStop(pending), STOP_CONFIRM_MS) };
+        this.pendingStops.push(pending);
+        for (const task of [...doomed.filter(handed), ...retired].filter((t) => halted.has(t.to.sessionId))) this.hooks.emit("task.stopping", { ...task, turnId: halted.get(task.to.sessionId) });
+      });
     }
-    for (const task of calledOff) this.hooks.emit("task.stopping", task);
+    this.state.afterCommit(() => { for (const task of calledOff) this.hooks.emit("task.stopping", task); });
     return { stopping: calledOff.some((t) => roots.some((r) => r.id === t.id)) || halted.size > 0, with: doomed.filter((t) => !roots.some((r) => r.id === t.id)) };
   }
 
@@ -735,16 +750,25 @@ export class Kernel {
    * seen or discarded stays so.
    */
   mark(messageId: string, state: LedgerState, about?: Receipt["about"]): void {
+    const entry = this.ledgerEntry(messageId, state, about);
+    if (!entry) return;
+    this.state.commit([ops.mark(entry)]);
+    this.state.afterCommit(() => this.ledgerChanged(entry));
+  }
+
+  private ledgerEntry(messageId: string, state: LedgerState, about?: Receipt["about"]): LedgerEntry | undefined {
     const prior = this.state.ledger.get(messageId);
     if (prior && RANK[state] <= RANK[prior.state]) return;
     // What got into the conversation is not said afterwards never to have: only a renewed session drops it unprocessed.
     if (state === "discarded_unseen" && prior?.state === "inserted") return;
     if (!prior && !about) return;
-    const entry: LedgerEntry = { ...(prior ?? about!), messageId, state, ts: now() };
-    this.state.commit([ops.mark(entry)]);
+    return { ...(prior ?? about!), messageId, state, ts: now() };
+  }
+
+  private ledgerChanged(entry: LedgerEntry): void {
     this.hooks.emit("message.ledger", entry);
-    if (state === "seen") this.hooks.emit("message.seen", entry);
-    if (state === "discarded_unseen") this.hooks.emit("message.discarded", entry);
+    if (entry.state === "seen") this.hooks.emit("message.seen", entry);
+    if (entry.state === "discarded_unseen") this.hooks.emit("message.discarded", entry);
   }
 
   /**
@@ -756,15 +780,24 @@ export class Kernel {
     out: { changed?: Task[]; created?: Task[]; mail?: MailItem[]; withdrawn?: MailItem[]; ended?: { task: Task; was: TaskStatus }[] },
   ): Route[] {
     const mail = out.mail ?? [];
-    this.state.commit([...list, ...mail.map(ops.enqueue)]);
-    for (const task of out.created ?? []) this.hooks.emit("task.created", task);
-    for (const task of out.changed ?? []) this.hooks.emit("task.changed", task);
-    if (out.withdrawn?.length) {
-      for (const item of out.withdrawn) this.mark(item.id, "discarded_unseen");
-      this.hooks.emit("message.withdrawn", out.withdrawn);
+    const routes: Route[] = [];
+    const receipts = new Map<string, LedgerEntry>();
+    for (const item of out.withdrawn ?? []) {
+      const entry = this.ledgerEntry(item.id, "discarded_unseen");
+      if (entry) receipts.set(item.id, entry);
     }
-    if (out.ended?.length) this.hooks.emit("task.ended", { ended: out.ended });
-    return mail.map((item) => this.route(item));
+    this.state.commit([...list, ...mail.map(ops.enqueue), ...[...receipts.values()].map(ops.mark)]);
+    this.state.afterCommit(() => {
+      for (const entry of receipts.values()) this.ledgerChanged(entry);
+      for (const task of out.created ?? []) this.hooks.emit("task.created", task);
+      for (const task of out.changed ?? []) this.hooks.emit("task.changed", task);
+      if (out.withdrawn?.length) {
+        this.hooks.emit("message.withdrawn", out.withdrawn);
+      }
+      if (out.ended?.length) this.hooks.emit("task.ended", { ended: out.ended });
+      routes.push(...mail.map((item) => this.route(item)));
+    });
+    return routes;
   }
 
   /** Terminal input/task state is authoritative at routing, deferred delivery and dequeue, not just on restart. */
@@ -799,11 +832,17 @@ export class Kernel {
   }
 
   /** Mail that cannot be delivered leaves the inbox unseen; a task that cannot be is an error. */
+  reject(item: MailItem, why: string): void {
+    this.drop(item, why, { agentId: item.to.agentId, sessionId: item.to.sessionId, from: item.from, ...(item.taskId ? { taskId: item.taskId } : {}) });
+  }
+
   private drop(item: MailItem, why: string, about: Receipt["about"]): void {
-    this.mark(item.id, "discarded_unseen", about);
-    const task = item.kind === "task" ? this.state.tasks.get(item.taskId!) : undefined;
-    this.ack([item.id]);
-    if (task && !isTerminal(task.status)) this.stop(task, SYSTEM, { status: "failed", reason: "error", result: `It could not be delivered: ${why}.` });
+    this.state.atomic(() => {
+      this.mark(item.id, "discarded_unseen", about);
+      const task = item.kind === "task" ? this.state.tasks.get(item.taskId!) : undefined;
+      this.ack([item.id]);
+      if (task && !isTerminal(task.status)) this.stop(task, SYSTEM, { status: "failed", reason: "error", result: `It could not be delivered: ${why}.` });
+    });
   }
 
   /** The executor's turn that had a task could not run: the task is an error, and what it held up goes with it. */
@@ -875,8 +914,10 @@ export class Kernel {
       if (!TAKEN_IN.has(this.state.ledger.get(item.id)?.state ?? "inboxed")) { this.route(item); continue; }
       (taken.get(item.to.sessionId) ?? taken.set(item.to.sessionId, []).get(item.to.sessionId)!).push(item);
       const task = item.taskId ? this.state.tasks.get(item.taskId) : undefined;
-      this.ack([item.id]);
-      if (task && item.kind === "task") this.fail(task, uncertain);
+      this.state.atomic(() => {
+        this.ack([item.id]);
+        if (task && item.kind === "task") this.fail(task, uncertain);
+      });
     }
     return taken;
   }

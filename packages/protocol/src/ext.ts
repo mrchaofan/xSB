@@ -315,7 +315,7 @@ export const Ledger = {
  * isolated after an input it held expired (`isolated`); or the backend compacted it itself (`compacted`, no handoff:
  * the backend's own summary stands in for it).
  */
-export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed" | "stopped" | "isolated" | "compacted" | "migrated";
+export type BoundaryKind = "cleared" | "backend_changed" | "not_restored" | "renewed" | "stopped" | "isolated" | "compacted" | "migrated" | "project_moved";
 export type Boundary = {
   kind: BoundaryKind;
   /** The backend the session continues on. */
@@ -434,6 +434,7 @@ export const Assets = {
   capability: `${NS}/assets`,
   list: `_${NS}/assets/list`,
   update: `_${NS}/assets/update`,
+  removed: `_${NS}/assets/removed`,
 } as const;
 
 export type Asset = {

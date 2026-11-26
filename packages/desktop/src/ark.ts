@@ -26,7 +26,7 @@ import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import spawn from "cross-spawn";
 import fs from "node:fs";
-import fsp from "node:fs/promises";
+import { updateJsonFile, atomicWrite } from "@xsb/hub";
 import path from "node:path";
 import { run, type AgentCli, type Runner } from "./agent-cli.ts";
 import type { Clis } from "./clis.ts";
@@ -195,15 +195,13 @@ export class Ark {
    * started before keeps what it was started with (main.ts, `effect`).
    */
   async bind(name: AgentCli, binding: ArkBinding | null): Promise<void> {
-    const all = this.bindings();
-    if (binding) {
-      if (!NAME.test(binding.profile) || !NAME.test(binding.model) || !/^https:\/\/[^\s'"]+$/.test(binding.baseUrl)) throw new Error("Invalid Ark binding");
-      all[name] = { profile: binding.profile, model: binding.model, baseUrl: binding.baseUrl };
-    } else delete all[name];
-    await fsp.mkdir(path.dirname(this.file), { recursive: true });
-    const temporary = `${this.file}.${process.pid}.tmp`;
-    await fsp.writeFile(temporary, JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
-    await fsp.rename(temporary, this.file);
+    const all = updateJsonFile<Partial<Record<AgentCli, ArkBinding>>>(this.file, () => fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, "utf8")) : {}, all => {
+      if (binding) all[name] = { profile: binding.profile, model: binding.model, baseUrl: binding.baseUrl };
+      else delete all[name];
+      return all;
+    }, all => {
+      if (!all || typeof all !== "object" || Array.isArray(all) || Object.entries(all).some(([name, b]) => !["claude", "codex"].includes(name) || !b || !NAME.test(b.profile) || !NAME.test(b.model) || !/^https:\/\/[^\s'"]+$/.test(b.baseUrl))) throw new Error("Invalid Ark binding");
+    });
     writeClaudeFiles(this.dir, all.claude);
     // The launchers (clis.ts) read the bindings through `arkLaunch`.
     this.clis.resync();
@@ -271,8 +269,8 @@ function writeClaudeFiles(dir: string, binding: ArkBinding | undefined): void {
   if (!binding) return void fs.rmSync(path.dirname(files.program), { recursive: true, force: true });
   fs.mkdirSync(path.dirname(files.program), { recursive: true, mode: 0o700 });
   const env = Object.fromEntries(Object.entries(claudeEnv(binding)).filter(([key]) => key !== "ANTHROPIC_AUTH_TOKEN"));
-  fs.writeFileSync(files.settings, JSON.stringify({ env: { ...env, ANTHROPIC_API_KEY: "", CLAUDE_CODE_USE_BEDROCK: "", CLAUDE_CODE_USE_VERTEX: "", CLAUDE_CODE_USE_FOUNDRY: "" } }, null, 2) + "\n", { mode: 0o600 });
-  fs.writeFileSync(files.program, '#!/bin/sh\n# xSB: the user\'s claude, with the Volcengine Ark settings above their own (ark.ts).\nexec "$XSB_ARK_CLAUDE" --settings "$XSB_ARK_CLAUDE_SETTINGS" "$@"\n', { mode: 0o755 });
+  atomicWrite(files.settings, JSON.stringify({ env: { ...env, ANTHROPIC_API_KEY: "", CLAUDE_CODE_USE_BEDROCK: "", CLAUDE_CODE_USE_VERTEX: "", CLAUDE_CODE_USE_FOUNDRY: "" } }, null, 2) + "\n");
+  atomicWrite(files.program, '#!/bin/sh\n# xSB: the user\'s claude, with the Volcengine Ark settings above their own (ark.ts).\nexec "$XSB_ARK_CLAUDE" --settings "$XSB_ARK_CLAUDE_SETTINGS" "$@"\n', 0o755);
 }
 
 /**

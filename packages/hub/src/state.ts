@@ -12,6 +12,7 @@ import type { Op, Record_, Store } from "@xsb/store";
 import { Paths } from "./paths.ts";
 import { addEdges } from "./task-graph.ts";
 import type { Graph } from "./task-graph.ts";
+import path from "node:path";
 
 export type SessionRec = {
   id: string;
@@ -20,6 +21,8 @@ export type SessionRec = {
   titleEdited?: boolean;
   /** The backend's own session id, once one exists. */
   backendSessionId?: string;
+  /** Physical cwd of the saved backend binding; a relocation must never resume its old paths. */
+  backendWorkspace?: string;
   /**
    * The backend session has been given nothing yet (a new conversation's, opened for its settings, or one just
    * renewed). A backend may keep no such session (codex writes one at its first prompt), so failing to resume it loses
@@ -42,7 +45,7 @@ export type SessionRec = {
    * The conversation grew past `limits.sessionTokens`: its next turn starts a new backend session, handed the
    * conversation so far (session.ts, `renewed`). The session stays the same.
    */
-  renew?: boolean | "stopped" | "isolated";
+  renew?: boolean | "stopped" | "isolated" | "project_moved";
   /** How much of the backend's context window the conversation used at the end of its last turn, in tokens. */
   used?: number;
   /** Backend window and conservative renewal point, scoped to this conversation/backend. */
@@ -149,6 +152,7 @@ export const F = {
   mailbox: "conversations/mailbox.jsonl",
   ledger: "conversations/ledger.jsonl",
   assets: "conversations/assets.jsonl",
+  topics: "conversations/topics.jsonl",
 } as const;
 
 export const ops = {
@@ -192,26 +196,95 @@ export class State {
   topics = new Map<string, Map<string, { topic: string; peers: Map<string, TopicPeer> }>>();
   /** The edges between tasks, reversed (task-graph.ts): task -> the tasks started for it, and those that wait for it (`after`). */
   graph: Graph = { children: new Map(), waiters: new Map() };
+  private transaction?: { operations: Op[]; stored: Op[]; effects: (() => void)[] };
+  private writtenBytes = 0;
+  private paths?: Paths;
+  private loading = false;
+  onMaintenanceNeeded?: () => void;
 
-  constructor(store: Store) {
+  private tables() {
+    return { agents: this.agents, sessions: this.sessions, tasks: this.tasks, gates: this.gates, mail: this.mail,
+      ledger: this.ledger, assets: this.assets, assetPointers: this.assetPointers, workflows: this.workflows,
+      notes: this.notes, topics: this.topics, graph: this.graph, mainIds: this.mainIds };
+  }
+
+  /** Plan against isolated tables, commit once, and run effects only after publishing the committed state. */
+  atomic<T>(action: () => T): T {
+    if (this.transaction) return action();
+    const original = this.tables();
+    Object.assign(this, structuredClone(original));
+    const transaction = this.transaction = { operations: [] as Op[], stored: [] as Op[], effects: [] as (() => void)[] };
+    let result: T;
+    try {
+      result = action();
+      this.store.tx(transaction.stored);
+    } catch (error) {
+      Object.assign(this, original);
+      this.transaction = undefined;
+      throw error;
+    }
+    Object.assign(this, original);
+    this.transaction = undefined;
+    for (const op of transaction.operations) this.apply(op.file, op.rec);
+    this.account(transaction.stored);
+    for (const effect of transaction.effects) effect();
+    return result;
+  }
+
+  afterCommit(effect: () => void): void {
+    if (this.transaction) this.transaction.effects.push(effect);
+    else effect();
+  }
+
+  private account(list: Op[]): void {
+    this.writtenBytes += list.reduce((sum, op) => sum + Buffer.byteLength(JSON.stringify(op.rec)), 0);
+    if (this.writtenBytes > 64 * 1024 * 1024) this.onMaintenanceNeeded?.();
+  }
+
+  compact(): void {
+    if (this.transaction) throw new Error("Cannot compact an uncommitted state");
+    const logs: Record<string, Record_[]> = {
+      [F.agents]: [...this.agents.values()].map(agent => ({ op: "put", agent })),
+      [F.sessions]: [...this.sessions.values()].map(session => ({ op: "put", session })),
+      [F.tasks]: [...this.tasks.values()].map(task => ({ op: "put", task })),
+      [F.gates]: [...this.gates.values()].map(gate => ({ op: "open", gate })),
+      [F.mailbox]: [...this.mail.values()].map(item => ({ op: "enqueue", item, topicCounted: true })),
+      [F.ledger]: [...this.ledger.values()].map(entry => ({ op: "mark", entry })),
+      [F.workflows]: [...this.workflows.values()].map(flow => ({ flow })),
+      [F.assets]: [...this.assets].flatMap(([id, versions]) => [...versions.map(asset => ({ op: "put", asset })), { op: "pointer", id, version: this.assetPointers.get(id) ?? null }]),
+      [F.topics]: [{ topics: [...this.topics].map(([id, topics]) => [id, [...topics].map(([key, entry]) => [key, { ...entry, peers: [...entry.peers] }])]) }],
+    };
+    for (const [file, recs] of Object.entries(logs)) logs[file] = recs.map(rec => this.persisted({ file, rec }, true).rec);
+    this.store.compact(logs);
+    this.writtenBytes = 0;
+  }
+
+  constructor(store: Store, paths?: Paths) {
     this.store = store;
+    const root = store.filePath("");
+    this.paths = paths ?? (path.basename(root) === ".xsb2" ? new Paths(path.dirname(root)) : undefined);
   }
 
   load(): void {
-    this.store.recover();
-    for (const file of [F.agents, F.sessions, F.tasks, F.gates, F.mailbox, F.ledger, F.assets, F.workflows]) {
-      for (const rec of this.store.read(file)) this.apply(file, rec);
-    }
-    for (const id of this.agents.keys()) {
-      const file = Paths.memory(id);
-      const recs = this.store.read(file);
-      for (const rec of recs) this.apply(file, rec);
-      // Notes are rewritten in place, so the log is mostly superseded lines.
-      const live = [...(this.notes.get(id)?.values() ?? [])];
-      if (recs.length > 4 * live.length + 64) {
-        this.store.rewrite(file, live.map((note) => ({ op: "put", note })));
+    this.loading = true;
+    try {
+      this.store.recover();
+      for (const rec of this.store.read(F.topics)) this.apply(F.topics, rec);
+      for (const file of [F.agents, F.sessions, F.tasks, F.gates, F.mailbox, F.ledger, F.assets, F.workflows]) {
+        for (const rec of this.store.read(file)) this.apply(file, rec);
       }
-    }
+      for (const id of this.agents.keys()) {
+        const file = Paths.memory(id);
+        const recs = this.store.read(file);
+        for (const rec of recs) this.apply(file, rec);
+        // Notes are rewritten in place, so the log is mostly superseded lines.
+        const live = [...(this.notes.get(id)?.values() ?? [])];
+        if (recs.length > 4 * live.length + 64) {
+          this.store.rewrite(file, live.map((note) => ({ op: "put", note })));
+        }
+      }
+      this.writtenBytes = Object.values(F).reduce((sum, file) => sum + this.store.deltaBytes(file), 0);
+    } finally { this.loading = false; }
   }
 
   /**
@@ -220,46 +293,96 @@ export class State {
    * Returns the assets dropped, whose files the caller removes. Tasks, mail and ledger entries are small and stay.
    */
   forget(agentIds: Set<string>): Asset[] {
-    const sessions = new Set([...this.sessions.values()].filter((s) => agentIds.has(s.agentId)).map((s) => s.id));
-    for (const id of agentIds) {
-      this.agents.delete(id);
-      this.mainIds.delete(id);
-      this.notes.delete(id);
-      this.topics.delete(id);
-    }
-    for (const id of sessions) {
-      this.sessions.delete(id);
-      this.workflows.delete(id);
-    }
-    const dropped: Asset[] = [];
-    for (const [id, versions] of this.assets) {
-      if (!versions.every((v) => agentIds.has(v.by))) continue;
-      dropped.push(...versions);
-      this.assets.delete(id);
-      this.assetPointers.delete(id);
-    }
-    this.store.rewrite(F.agents, [...this.agents.values()].map((agent) => ({ op: "put", agent })));
-    this.store.rewrite(F.sessions, [...this.sessions.values()].map((session) => ({ op: "put", session })));
-    this.store.rewrite(F.workflows, [...this.workflows.values()].map((flow) => ({ flow })));
-    this.store.rewrite(F.assets, [...this.assets].flatMap(([id, versions]) => [
-      ...versions.map((asset) => ({ op: "put", asset })),
-      { op: "pointer", id, version: this.assetPointers.get(id) ?? null },
-    ]));
-    return dropped;
+    const original = this.tables();
+    Object.assign(this, structuredClone(original));
+    try {
+      const sessions = new Set([...this.sessions.values()].filter((s) => agentIds.has(s.agentId)).map((s) => s.id));
+      for (const id of agentIds) {
+        this.agents.delete(id);
+        this.mainIds.delete(id);
+        this.notes.delete(id);
+        this.topics.delete(id);
+      }
+      for (const id of sessions) {
+        this.sessions.delete(id);
+        this.workflows.delete(id);
+      }
+      const dropped: Asset[] = [];
+      for (const [id, versions] of this.assets) {
+        if (!versions.every((v) => agentIds.has(v.by))) continue;
+        dropped.push(...versions);
+        this.assets.delete(id);
+        this.assetPointers.delete(id);
+      }
+      this.compact();
+      return dropped;
+    } catch (error) { Object.assign(this, original); throw error; }
   }
 
   commit(list: Op[]): void {
-    this.store.tx(list);
-    for (const op of list) this.apply(op.file, op.rec);
+    if (!this.transaction && list.filter(op => op.file === F.workflows).length > 1) return this.atomic(() => this.commit(list));
+    const stored: Op[] = [];
+    if (this.transaction) {
+      for (const op of list) {
+        this.transaction.operations.push(op);
+        this.transaction.stored.push(this.persisted(op));
+        this.apply(op.file, op.rec);
+      }
+    } else {
+      // Most commits contain at most one workflow snapshot; encode against its committed predecessor.
+      stored.push(...list.map(op => this.persisted(op)));
+      this.store.tx(stored);
+      for (const op of list) this.apply(op.file, op.rec);
+    }
+    if (!this.transaction) this.account(stored);
+  }
+
+  private persisted(op: Op, snapshot = false): Op {
+    if (!snapshot && op.file === F.workflows && op.rec.flow) {
+      const flow: Flow = op.rec.flow, previous = this.workflows.get(flow.owner);
+      if (previous) {
+        const set: Record<string, unknown> = {}, remove: string[] = [], maps: Record<string, { set: Record<string, unknown>; remove: string[] }> = {};
+        for (const key of new Set([...Object.keys(previous), ...Object.keys(flow)])) {
+          const before = (previous as any)[key], after = (flow as any)[key];
+          if (["versions", "receipts", "instances"].includes(key)) {
+            const changed: Record<string, unknown> = {}, deleted: string[] = [];
+            for (const name of new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])) {
+              if (!Object.hasOwn(after ?? {}, name)) deleted.push(name);
+              else if (JSON.stringify(before?.[name]) !== JSON.stringify(after[name])) changed[name] = after[name];
+            }
+            if (deleted.length || Object.keys(changed).length) maps[key] = { set: changed, remove: deleted };
+          } else if (!Object.hasOwn(flow, key)) remove.push(key);
+          else if (JSON.stringify(before) !== JSON.stringify(after)) set[key] = after;
+        }
+        return { file: op.file, rec: { op: "patch", owner: flow.owner, set, remove, maps } };
+      }
+    }
+    if (!this.paths) return op;
+    if (op.file === F.agents && op.rec.agent) return { ...op, rec: { ...op.rec, agent: { ...op.rec.agent, workspace: this.paths.reference(op.rec.agent.workspace) } } };
+    if (op.file === F.assets && op.rec.asset) return { ...op, rec: { ...op.rec, asset: { ...op.rec.asset, path: this.paths.reference(op.rec.asset.path) } } };
+    return op;
   }
 
   private apply(file: string, rec: Record_): void {
     switch (file) {
+      case F.topics:
+        this.topics = new Map(rec.topics.map(([id, topics]: any) => [id, new Map(topics.map(([key, entry]: any) => [key, { ...entry, peers: new Map(entry.peers) }]))]));
+        return;
       case F.workflows:
-        this.workflows.set(rec.flow.owner, rec.flow);
+        if (rec.op === "patch") {
+          const flow = structuredClone(this.workflows.get(rec.owner));
+          if (!flow) throw new Error(`Missing workflow snapshot for ${rec.owner}`);
+          Object.assign(flow, rec.set);
+          for (const key of rec.remove) delete (flow as any)[key];
+          for (const [key, change] of Object.entries(rec.maps) as [string, { set: Record<string, unknown>; remove: string[] }][]) {
+            const map = (flow as any)[key] = { ...(flow as any)[key], ...change.set };
+            for (const name of change.remove) delete map[name];
+          }
+          this.workflows.set(rec.owner, flow);
+        } else this.workflows.set(rec.flow.owner, rec.flow);
         return;
       case F.agents:
-        if (rec.op === "put") this.agents.set(rec.agent.id, rec.agent);
+        if (rec.op === "put") this.agents.set(rec.agent.id, this.paths && (this.loading || typeof rec.agent.workspace !== "string") ? { ...rec.agent, workspace: this.paths.resolveStored(rec.agent.workspace) } : rec.agent);
         else this.agents.delete(rec.id);
         return;
       case F.sessions:
@@ -279,7 +402,7 @@ export class State {
       case F.mailbox:
         if (rec.op === "enqueue") {
           this.mail.set(rec.item.id, rec.item);
-          this.recordTopic(rec.item);
+          if (!rec.topicCounted) this.recordTopic(rec.item);
         } else this.mail.delete(rec.id);
         return;
       case F.ledger:
@@ -287,10 +410,11 @@ export class State {
         return;
       case F.assets: {
         if (rec.op === "pointer") {
-          this.assetPointers.set(rec.id,rec.version);
+          this.assetPointers.set(rec.id, rec.version);
           return;
         }
-        this.assetPointers.set(rec.asset.id,"v"+rec.asset.version);
+        if (this.paths && (this.loading || typeof rec.asset.path !== "string")) rec = { ...rec, asset: { ...rec.asset, path: this.paths.resolveStored(rec.asset.path) } };
+        this.assetPointers.set(rec.asset.id, "v" + rec.asset.version);
         const versions = this.assets.get(rec.asset.id);
         if (versions) versions.push(rec.asset);
         else this.assets.set(rec.asset.id, [rec.asset]);

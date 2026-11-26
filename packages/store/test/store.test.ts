@@ -73,7 +73,9 @@ for (const at of ["after-begin", "after-op-0", "after-op-1", "after-op-2"]) {
   assert.throws(() => store.tx(ops));
   store.failpoint = undefined;
   const big = "x".repeat(600_000);
-  store.tx([{ file: "d.jsonl", rec: { big } }, { file: "e.jsonl", rec: { big } }]);
+  assert.throws(() => store.tx([{ file: "d.jsonl", rec: { big } }, { file: "e.jsonl", rec: { big } }]), /restart/);
+  assert.throws(() => store.append("a.jsonl", { n: 9 }), /restart/);
+  assert.throws(() => store.rewrite("a.jsonl", [{ n: 9 }]), /restart/);
   const reopened = new Store(root);
   assert.equal(reopened.recover(), 1);
   assert.deepEqual(strip(reopened.read("sub/c.jsonl")), [{ n: 3 }]);

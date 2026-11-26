@@ -124,7 +124,7 @@ export function contentView(content, openLink, { streaming = false, lookupAsset 
   const el = h("div", { class: "content" }, ...parts.map((block) => {
     if (block.type === "asset_reference") {
       const preview = lookupAsset?.(block);
-      return h(preview ? "button" : "span", { class: "part chip", html: ICON.file, onclick: preview }, block.name + " · " + block.version);
+      return h(preview ? "button" : "span", { class: "part chip", title: preview ? "" : t("artifact.unavailable"), html: ICON.file, onclick: preview }, block.name + " · " + block.version + (preview ? "" : " · " + t("artifact.unavailable")));
     }
     if (block.type === "text") return markdownView(block.text, openLink);
     if (block.type === "resource_link") return h("button", { type: "button", class: "part chip", title: block.uri, html: ICON.file, onclick: () => openLink?.(block.uri, el) }, block.name);

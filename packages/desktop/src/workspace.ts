@@ -133,6 +133,11 @@ export class Workspace {
     conn.onNotification(Agents.update, (p) => this.onAgent(p.agent));
     conn.onNotification(Agents.removed, (p) => this.onAgentRemoved(p.id));
     conn.onNotification(Assets.update, (p) => this.asset(p.asset));
+    conn.onNotification(Assets.removed, ({ ids }: { ids: string[] }) => {
+      const removed: string[] = [];
+      for (const [id, artifact] of this.artifacts) if (artifact.assetId && ids.includes(artifact.assetId)) { this.artifacts.delete(id); removed.push(id); }
+      this.emit({ artifactsRemoved: removed });
+    });
     conn.onNotification(Workflow.update, ({ workflow }: { workflow: WorkflowView }) => {
       this.workflows.set(workflow.sessionId,workflow);
       this.emit({workflow});
@@ -259,7 +264,7 @@ export class Workspace {
     this.live = true;
     this.markReady();
     return {
-      workspace: { name: path.basename(this.paths.project), path: this.paths.project },
+      workspace: { name: path.basename(this.paths.project), path: this.paths.project, id: this.paths.projectId, previousPaths: this.paths.previousRoots },
       agents: [...this.agents.values()],
       tasks: [...this.tasks.values()],
       artifacts: [...this.artifacts.values()],
@@ -852,6 +857,7 @@ export class Workspace {
     const agent = agentId ? this.agents.get(agentId) : undefined;
     const directory = baseFile ? path.dirname(baseFile) : agent?.workspace || this.paths.project;
     let file = artifactPath(href, directory);
+    file = this.paths.resolveStored(file);
     // Project-relative links also occur when the agent has its own working directory.
     if (!baseFile && !fs.existsSync(file)) file = artifactPath(href, this.paths.project);
     const artifact = this.artifact(file, agentId ?? "");

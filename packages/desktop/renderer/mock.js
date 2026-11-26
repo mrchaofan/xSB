@@ -218,6 +218,10 @@
     setPluginEnabled: async (scope, name, enabled) => { off[scope][enabled ? "delete" : "add"](name); return pluginViews(); },
     approvePlugin: async (name) => { plugins.find((p) => p.name === name).approved = true; return pluginViews(); },
     reloadPlugins: async () => pluginViews(),
+    pluginApprovals: async () => [],
+    revokePluginApproval: async () => pluginViews(),
+    exportSettings: async () => false,
+    importSettings: async () => null,
     revealPlugins: async () => true,
     setBackend: async (id, backend) => {
       const a = get(id);

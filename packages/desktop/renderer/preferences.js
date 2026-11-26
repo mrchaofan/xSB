@@ -5,6 +5,25 @@ const workspaceKey = (path) => `xsb.ui.workspace:${path}`;
 export const GLOBAL_DEFAULTS = { theme: "light", showTools: true };
 export const WORKSPACE_DEFAULTS = { showCompleted: false };
 
+/** Move folder-keyed UI state to the project's persistent identity; keep old keys as a fallback. */
+export function migrateWorkspaceState(workspace) {
+  if (!workspace?.id) return;
+  const roots = new Set([workspace.path, ...(workspace.previousPaths ?? [])]);
+  try {
+    for (const key of Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i))) {
+      if (!key) continue;
+      let target;
+      for (const prefix of ["xsb.active:", "xsb.ui.workspace:"]) if (key.startsWith(prefix) && roots.has(key.slice(prefix.length))) target = prefix + workspace.id;
+      for (const prefix of ["xsb.draft:", "xsb.side:"]) if (key.startsWith(prefix)) {
+        let parts;
+        try { parts = JSON.parse(key.slice(prefix.length)); } catch { continue; }
+        if (Array.isArray(parts) && roots.has(parts[0])) target = prefix + JSON.stringify([workspace.id, ...parts.slice(1)]);
+      }
+      if (target && localStorage.getItem(target) === null) localStorage.setItem(target, localStorage.getItem(key));
+    }
+  } catch { /* originals remain available when storage is full */ }
+}
+
 function read(key, defaults) {
   try {
     const saved = JSON.parse(localStorage.getItem(key) ?? "{}");

@@ -18,11 +18,11 @@
  */
 import fs from "node:fs";
 import net from "node:net";
-import { Agents, Connection, Ledger, RpcError, Tasks, failure } from "@xsb/protocol";
+import { Agents, Assets as AssetsExt, Connection, Ledger, RpcError, Tasks, failure, errorMessage } from "@xsb/protocol";
 import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import { Workflows } from "./workflows.ts";
-import { Store } from "@xsb/store";
+import { Store, atomicWrite, syncDirectory } from "@xsb/store";
 import { Client } from "./acp-server.ts";
 import { Assets } from "./assets.ts";
 import { auditHook, auditReports } from "./audit.ts";
@@ -78,11 +78,20 @@ export class Hub {
   private bridgeTokens = new Map<string, LiveSession>();
   private contextTokens = new Map<string, ContextOwner>();
   private mcpClients = new Set<Connection>();
+  private failedStorage?: Promise<void>;
+  private maintenanceScheduled = false;
 
   constructor(project: string) {
     this.paths = new Paths(project);
-    this.state = new State(new Store(this.paths.dir));
+    const store = new Store(this.paths.dir);
+    const legacy = fs.existsSync(path.join(this.paths.dir, "project.json")) ? undefined : store.read("conversations/agents.jsonl").map(r => r.agent).find(a => a?.conversation && typeof a.workspace === "string")?.workspace;
+    this.paths.prepare(legacy);
+    this.state = new State(store, this.paths);
     this.state.load();
+    this.resumeCleanup();
+    const movedBindings = [...this.state.sessions.values()].filter(rec => rec.backendSessionId &&
+      (rec.backendWorkspace ? rec.backendWorkspace !== this.state.agents.get(rec.agentId)?.workspace : this.paths.moved || this.paths.previousRoots.length > 0));
+    if (movedBindings.length) this.state.commit(movedBindings.map(rec => ops.putSession({ ...rec, backendSessionId: undefined, backendFresh: undefined, renew: "project_moved", used: undefined })));
     this.backends = new BackendPool((line) => this.log(line));
     const hooks: KernelHooks = new Hooks(auditReports(this.state.store, (line) => this.log(line)));
     this.kernel = new Kernel(this.state, hooks, (to) => this.delivery.recipient(to));
@@ -104,6 +113,17 @@ export class Hub {
     hooks.on("acp.turn_changed", ({ sessionId }) => this.workflows.runtimeChanged(sessionId));
     // One conversation per agent (docs/DESIGN.md): sessions a client once opened besides it are history, not live.
     for (const rec of this.state.sessions.values()) if (rec.main) this.track(new LiveSession(this, this.titled(rec)));
+    this.state.store.onFailure = error => { void this.storageFailed(error); };
+    this.state.onMaintenanceNeeded = () => {
+      if (this.maintenanceScheduled || this.stopping) return;
+      this.maintenanceScheduled = true;
+      setImmediate(() => {
+        this.maintenanceScheduled = false;
+        if (!this.stopping) {
+          try { this.state.compact(); } catch (error) { this.log(`storage maintenance failed: ${errorMessage(error)}`); }
+        }
+      });
+    };
   }
 
   log(line: string): void {
@@ -171,6 +191,19 @@ export class Hub {
     await this.backends.close();
     fs.rmSync(this.paths.socket("acp"), { force: true });
     fs.rmSync(this.paths.socket("mcp"), { force: true });
+  }
+
+  /** Storage failure fences every execution without making further persistence calls. */
+  storageFailed(error: unknown): Promise<void> {
+    if (this.failedStorage) return this.failedStorage;
+    this.stopping = true;
+    this.bridgeTokens.clear();
+    this.contextTokens.clear();
+    for (const conn of this.mcpClients) conn.close();
+    for (const server of this.servers) server.close();
+    for (const client of this.clients) client.conn.close();
+    this.log(`storage failed; restart required: ${errorMessage(error)}`);
+    return this.failedStorage = this.backends.close();
   }
 
   // ---- agents -------------------------------------------------------------
@@ -275,8 +308,9 @@ export class Hub {
     title?: string,
     task?: { owner: string; node: string; bind(agentId: string, sessionId: string): Op },
     clientMcp?: McpServer[],
+    initial?: { agentId: string; migratedFrom: SessionRec["migratedFrom"]; update: SessionUpdate },
   ): LiveSession {
-    const id = newId(task ? "node" : "chat"),
+    const id = initial?.agentId ?? newId(task ? "node" : "chat"),
       sessionId = newId("ses");
     const spec: AgentSpec = {
       id,
@@ -295,11 +329,13 @@ export class Hub {
       main: true,
       clientMcp: task ? this.session(task.owner).clientMcp : clientMcp,
       title: title?.trim() || undefined,
+      ...(initial && { migratedFrom: initial.migratedFrom }),
       ...(title?.trim() && !task ? { titleEdited: true } : {}),
       createdAt: now(),
       updatedAt: now(),
     };
-    this.state.commit([ops.putAgent(spec), ops.putSession(rec), ...(task ? [task.bind(id, sessionId)] : [])]);
+    this.state.commit([ops.putAgent(spec), ops.putSession(rec), ...(task ? [task.bind(id, sessionId)] : []),
+      ...(initial ? [{ file: Paths.transcript(id, sessionId), rec: { ts: now(), update: initial.update } }] : [])]);
     const session = this.track(new LiveSession(this, rec));
     this.agentChanged(id);
     return session;
@@ -347,10 +383,12 @@ export class Hub {
     const prior = old.rec.migratedFrom;
     const earlier = prior ? fs.readFileSync(path.join(this.paths.dir, "agents", agentId, "context", `${prior.ref}.txt`), "utf8") : undefined;
     const record = conversationRecord(title, agent.backend, turnsSinceCleared(this.state.store, agentId, old.id), earlier);
-    const created = this.createConversation(backend, title);
-    const { ref } = contextRef(this.paths, created.agentId, record);
-    created.save({ migratedFrom: { agentId, sessionId: old.id, title, backend: agent.backend, ref, pending: true } });
-    created.emit({ sessionUpdate: "session_info_update", _meta: { [Boundaries.key]: { kind: "migrated", backend, from: title, handoff: false } } } as SessionUpdate);
+    const nextId = newId("chat");
+    const { ref } = contextRef(this.paths, nextId, record);
+    const created = this.createConversation(backend, title, undefined, undefined, {
+      agentId: nextId, migratedFrom: { agentId, sessionId: old.id, title, backend: agent.backend, ref, pending: true },
+      update: { sessionUpdate: "session_info_update", _meta: { [Boundaries.key]: { kind: "migrated", backend, from: title, handoff: false } } } as SessionUpdate,
+    });
     this.agentChanged(created.agentId);
     return created;
   }
@@ -405,16 +443,25 @@ export class Hub {
       this.live.delete(session.id);
       this.bridgeTokens.delete(session.bridgeToken);
     }
-    let bytes = 0;
-    const remove = (file: string) => {
-      bytes += sizeOf(file);
-      fs.rmSync(file, { recursive: true, force: true });
-    };
-    for (const id of gone) remove(this.paths.agentDir(id));
-    // Only files inside the project's data folder: an asset recorded elsewhere is the user's own file.
-    for (const asset of this.state.forget(gone))
-      if (path.resolve(asset.path).startsWith(this.paths.dir + path.sep)) remove(asset.path);
+    const assets = [...this.state.assets.values()].filter(versions => versions.every(v => gone.has(v.by))).flat();
+    const files = [...[...gone].map(id => this.paths.agentDir(id)), ...assets.filter(a => path.resolve(a.path).startsWith(this.paths.dir + path.sep)).map(a => a.path)];
+    const bytes = files.reduce((sum, file) => sum + sizeOf(file), 0);
+    atomicWrite(this.cleanupFile, JSON.stringify({ agents: [...gone], files }) + "\n");
+    this.resumeCleanup();
+    this.broadcast(AssetsExt.removed, { ids: [...new Set(assets.map(a => a.id))] });
     return { conversations: deleted.length, bytes };
+  }
+
+  private get cleanupFile(): string { return path.join(this.paths.dir, "conversations", "cleanup.json"); }
+  private resumeCleanup(): void {
+    if (!fs.existsSync(this.cleanupFile)) return;
+    const plan = JSON.parse(fs.readFileSync(this.cleanupFile, "utf8"));
+    if (Array.isArray(plan.files)) plan.files = plan.files.map((file: string) => this.paths.resolveStored(file));
+    if (!Array.isArray(plan.agents) || plan.agents.some((id: unknown) => typeof id !== "string") || !Array.isArray(plan.files) || plan.files.some((file: unknown) => typeof file !== "string" || !path.resolve(file).startsWith(this.paths.dir + path.sep))) throw new Error("Invalid cleanup plan");
+    this.state.forget(new Set(plan.agents));
+    for (const file of plan.files) fs.rmSync(file, { recursive: true, force: true });
+    fs.rmSync(this.cleanupFile);
+    syncDirectory(path.dirname(this.cleanupFile));
   }
 
   mainSession(agentId: string, clientMcp: McpServer[] = []): LiveSession {
