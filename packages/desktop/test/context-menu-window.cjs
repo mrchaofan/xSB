@@ -9,6 +9,16 @@ const { pathToFileURL } = require("node:url");
 require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, click, send, has, until, untilJS, root }) => {
   const text = (await import(pathToFileURL(path.join(root, "packages/desktop/renderer/text.js")).href)).TEXT[await js("xsb.language")];
   const shots = process.env.XSB_SCREENSHOTS;
+  // Session menus use a real Electron Menu. Control only popup completion so this test
+  // verifies IPC/item routing without depending on the OS's nested menu event loop.
+  const { Menu } = require("electron");
+  let nativeMenu, finishMenu;
+  Menu.prototype.popup = function(options) {
+    nativeMenu = this;
+    assert.equal(options.window, win);
+    assert.ok(Number.isInteger(options.x) && Number.isInteger(options.y));
+    finishMenu = () => { nativeMenu = null; options.callback(); };
+  };
   const shoot = async (name) => {
     if (!shots) return;
     await js("new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))");
@@ -26,10 +36,20 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
     await mouse("mouseMove", x, y);
     await mouse("mouseDown", x, y, "right");
     await mouse("mouseUp", x, y, "right");
-    await until(() => has(".context-menu:popover-open"), "context menu on " + sel);
+    await until(() => sel.startsWith("#agents") ? nativeMenu : has(".context-menu:popover-open"), "context menu on " + sel);
+    if (sel.startsWith("#agents")) assert.equal(await has(".context-menu"), false, "session menu uses the OS");
   };
-  const items = () => js('[...document.querySelectorAll(".context-menu [role=menuitem]")].map(b=>b.querySelector(".session-menu-name").textContent+(b.disabled?"(off)":""))');
-  const choose = (label) => js('[...document.querySelectorAll(".context-menu [role=menuitem]")].find(b=>b.querySelector(".session-menu-name").textContent===' + JSON.stringify(label) + ").click()");
+  const items = () => nativeMenu ? nativeMenu.items.map(item => item.label + (item.enabled ? "" : "(off)")) : js('[...document.querySelectorAll(".context-menu [role=menuitem]")].map(b=>b.querySelector(".session-menu-name").textContent+(b.disabled?"(off)":""))');
+  const choose = (label) => {
+    if (nativeMenu) {
+      const item = nativeMenu.items.find(item => item.label === label);
+      assert.ok(item?.enabled);
+      item.click(item, win, {});
+      finishMenu();
+      return;
+    }
+    return js('[...document.querySelectorAll(".context-menu [role=menuitem]")].find(b=>b.querySelector(".session-menu-name").textContent===' + JSON.stringify(label) + ").click()");
+  };
   const closed = (label) => until(async () => !(await has(".context-menu")), label);
   const count = () => js('document.querySelectorAll("#agents .row").length');
   const rowOf = async (agent) => "#agents .row:nth-child(" + ((await js("xsb.load().then(s=>s.agents.filter(a=>!a.workflowOwner).map(a=>a.id))")).indexOf(agent) + 1) + ")";
@@ -95,10 +115,8 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await rightClick(await rowOf(fresh.id));
   await shoot("session-menu");
   assert.deepEqual(await items(), [text["rail.delete"]], "sidebar menu only offers deletion");
-  win.focus();
-  win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
-  win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Escape" });
-  await closed("Esc closes the session menu");
+  finishMenu();
+  await until(() => !nativeMenu, "cancelled native session menu");
   await click(await rowOf(fresh.id));
   const title = "#lanes .lane .lane-title-button", titleInput = "#lanes .lane .lane-title-input";
   assert.equal(await js("getComputedStyle(" + q(title) + ").getPropertyValue('-webkit-app-region')"), "no-drag", "title is clickable in the draggable header");

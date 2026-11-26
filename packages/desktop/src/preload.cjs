@@ -14,7 +14,7 @@ const METHODS = [
   "consultationSettings", "setConsultation",
   "plugins", "setPluginEnabled", "approvePlugin", "reloadPlugins", "revealPlugins",
   "pluginApprovals", "revokePluginApproval",
-  "readClipboardImages", "copyText", "openArtifact", "revealArtifact",
+  "readClipboardImages", "copyText", "openArtifact", "revealArtifact", "contextMenu",
 ];
 
 /** Electron wraps a handler's error; the renderer shows only what main said, which is worded for the user (main.ts). */

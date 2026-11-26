@@ -116,6 +116,75 @@ xsb.on(event => {
     assert.ok(!result.isError, `${name} ${JSON.stringify(args)}: ${JSON.stringify(result)}`);
     return result;
   };
+  async function checkTabPresentation() {
+  // Check the production tab renderer independently of the shield/input fixture above.
+  await host.loadFile(tabHtml);
+  await until(async () => await host!.webContents.executeJavaScript('typeof window.selectPage === "function"'));
+  await host.webContents.executeJavaScript(`window.auditState.pages = ${JSON.stringify(pages.list())}; window.selectPage(null); document.querySelector('#hostEditor').focus(); true`);
+  browser = new BrowserSession(cwd, () => ({ pages: pages!, project: cwd }), runtime);
+  await invoke('browser_navigate', { url });
+  const agentPage = pages.list().at(-1)!;
+  await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === agentPage.id);
+  await until(() => pages!.contents(agentPage.id)!.isAttached());
+  assert.equal(await host.webContents.executeJavaScript("document.querySelector('#web-body webview2').getAttribute('web-contents-id')"), String(agentPage.contentsId), 'an agent-created tab is displayed');
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor');
+  // Opening another tab can change the displayed page even while a different window has focus.
+  const foreground = new BrowserWindow({ show: false });
+  await foreground.loadURL('data:text/html,<input id="foregroundEditor">');
+  host.hide();
+  foreground.show();
+  foreground.focus();
+  await until(() => foreground.isFocused());
+  await foreground.webContents.executeJavaScript("document.querySelector('#foregroundEditor').focus(); true");
+  let hostFocusEvents = 0;
+  const focusedHost = () => { hostFocusEvents++; };
+  host.on('focus', focusedHost);
+  await invoke('browser_open', { url: `${url}/popup` });
+  const additionalPage = pages.list().at(-1)!;
+  await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === additionalPage.id);
+  assert.equal(host.isVisible(), false, 'opening an agent tab does not show a hidden host window');
+  assert.equal(hostFocusEvents, 0, 'opening an agent tab never focuses the host window');
+  assert.equal(foreground.isFocused(), true);
+  assert.equal(await foreground.webContents.executeJavaScript('document.activeElement.id'), 'foregroundEditor');
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor');
+  await invoke('browser_select', { pageId: agentPage.id });
+  assert.equal(await host.webContents.executeJavaScript('window.auditState.tab'), additionalPage.id, 'selecting an existing agent target does not switch the displayed tab');
+  const elsewhere = pages.open(url, { sessionId: 'elsewhere', agent: true, background: true });
+  await pause(100);
+  assert.equal(await host.webContents.executeJavaScript('window.auditState.tab'), additionalPage.id, 'tabs from another conversation do not change this panel');
+  pages.call(elsewhere.id, 'close');
+  host.removeListener('focus', focusedHost);
+  foreground.destroy();
+  host.show();
+  host.focus();
+  await until(() => host!.isFocused());
+  const userPage = pages.open(url, { sessionId: 'sa' });
+  await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === userPage.id);
+  await until(() => pages!.contents(userPage.id)!.getTitle() === 'Opener' && !pages!.contents(userPage.id)!.isLoading());
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.tagName'), 'WEBVIEW2', 'a user-created tab selects and focuses its page');
+  await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
+  await pages.navigate(userPage.id, url);
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor', 'page updates do not focus an existing tab again');
+  await host.webContents.executeJavaScript(`window.selectPage('${agentPage.id}'); document.querySelector('#hostEditor').focus(); true`);
+  await until(() => pages!.contents(agentPage.id)!.isAttached());
+  const agentLink = Number(/\[(\d+)\] link "Agent popup"/.exec((await invoke('browser_snapshot')).content[0].text)![1]);
+  const beforePopup = pages.list().length;
+  await invoke('browser_click', { ref: agentLink });
+  await until(() => pages!.list().length > beforePopup);
+  const agentPopup = pages.list().at(-1)!;
+  await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === agentPopup.id);
+  assert.notEqual(agentPopup.id, userPage.id, 'an agent popup switches the displayed tab');
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor');
+  await host.webContents.executeJavaScript("window.selectPage(null); document.querySelector('.launcher-item').click(); true");
+  await until(async () => (await host!.webContents.executeJavaScript('document.activeElement.id')) === 'web-url');
+  const blankId = await host.webContents.executeJavaScript('window.auditState.tab');
+  assert.equal(pages.list().find((p) => p.id === blankId)!.background, false);
+  console.log("PASS user tabs focus, new agent tabs and popups switch display without host focus, existing agent selection stays in the background");
+  }
+  if (process.argv.includes("--tabs-only")) {
+    await checkTabPresentation();
+    return;
+  }
   // The shield is an element of the document that shows the page, over the whole of its webview2.
   const shieldIn = (window: BrowserWindow) => window.webContents.executeJavaScript(`(() => {
     const shield = document.querySelector('.web-body > .control-shield'), view = document.querySelector('.web-body > webview2');
@@ -300,7 +369,7 @@ xsb.on(event => {
   assert.equal(await child.executeJavaScript("typeof window.xsb"), "undefined");
   assert.equal(child.session, original.session);
   assert.equal(pages.list().find((p) => p.id === "p2")!.window, false);
-  // Only what the user caused takes the current tab: the agent's own page does not, the user's popup does.
+  // Opening provenance controls focus: agent pages are background, user popups are foreground.
   assert.equal(pages.list().find((p) => p.id === "p1")!.background, true);
   assert.equal(pages.list().find((p) => p.id === "p2")!.background, false);
   assert.equal(BrowserWindow.getAllWindows().length, 1, 'window.open must not create a BrowserWindow');
@@ -445,7 +514,7 @@ xsb.on(event => {
   original.sendInputEvent({ type: 'keyUp', keyCode: 'B' });
   await pause(100);
   assert.ok((await original.executeJavaScript("document.querySelector('#field').value")).includes('B'));
-  // A popup the agent's click opened is the agent's doing: it does not take the current tab either.
+  // A popup the agent's click opened is the agent's doing: it preserves host focus.
   const linkRef = Number(/\[(\d+)\] link "Agent popup"/.exec((await invoke('browser_snapshot', { from: 0 })).content[0].text)![1]);
   await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
   await invoke('browser_click', { ref: linkRef });
@@ -459,30 +528,7 @@ xsb.on(event => {
   assert.equal(pages.list().find((p) => p.id === 'p6')!.background, false);
   assert.equal(pages.list().find((p) => p.id === 'p6')!.window, false);
   assert.equal(BrowserWindow.getAllWindows().length, 1, 'user popups must also stay in tabs');
-  // Check the production tab renderer independently of the shield/input fixture above.
-  await host.loadFile(tabHtml);
-  await until(async () => await host!.webContents.executeJavaScript('typeof window.selectPage === "function"'));
-  await host.webContents.executeJavaScript(`window.auditState.pages = ${JSON.stringify(pages.list())}; window.selectPage(null); document.querySelector('#hostEditor').focus(); true`);
-  browser = new BrowserSession(cwd, () => ({ pages: pages!, project: cwd }), runtime);
-  await invoke('browser_navigate', { url });
-  assert.equal(await host.webContents.executeJavaScript('window.auditState.tab'), null);
-  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor');
-  const userPage = pages.open(url, { sessionId: 'sa' });
-  await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === userPage.id);
-  assert.equal(await host.webContents.executeJavaScript('document.activeElement.tagName'), 'WEBVIEW2', 'a user-created tab selects and focuses its page');
-  await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
-  await pages.navigate(userPage.id, url);
-  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor', 'page updates do not focus an existing tab again');
-  const agentLink = Number(/\[(\d+)\] link "Agent popup"/.exec((await invoke('browser_snapshot')).content[0].text)![1]);
-  await invoke('browser_click', { ref: agentLink });
-  await pause(100);
-  assert.equal(await host.webContents.executeJavaScript('window.auditState.tab'), userPage.id);
-  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor');
-  await host.webContents.executeJavaScript("window.selectPage(null); document.querySelector('.launcher-item').click(); true");
-  await until(async () => (await host!.webContents.executeJavaScript('document.activeElement.id')) === 'web-url');
-  const blankId = await host.webContents.executeJavaScript('window.auditState.tab');
-  assert.equal(pages.list().find((p) => p.id === blankId)!.background, false);
-  console.log("PASS user tabs focus, agent tabs preserve selection and focus, temporary screenshot windows preserve foreground editors and clean up on failure, annotations, DOM shields, controlled input, popups, downloads, explicit windows and restore");
+  await checkTabPresentation();
 } catch (e) {
   console.error(e);
   process.exitCode = 1;

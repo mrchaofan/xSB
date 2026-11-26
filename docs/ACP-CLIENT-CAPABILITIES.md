@@ -17,7 +17,7 @@
 
 当前上游初始化文档另列出 `session` 下的 unstable 能力，尚未出现在本项目锁定 SDK 的 `ClientCapabilities` 定义中：
 
-- `session.promptSuggestions`：展示 Agent 给出的后续输入建议；基础支持文本和资源链接，可另外声明 `image`、`audio`、`embeddedContext`。需要处理 `prompt_suggestions_update`，由用户选择后再发送。
+- `session.promptSuggestions`：展示 Agent 给出的后续输入建议；基础支持文本和资源链接，可另外声明 `image`、`audio`、`embeddedContext`。需要处理 `prompt_suggestions_update`；桌面端将首条建议显示为空输入框的 placeholder，用户按 Tab 将完整内容补入草稿，再自行发送。
 - `session.commands.skill`：识别可用命令中的 `skill` 并用 skill 内容块调用；需要命令列表、选择 UI 和内容块通路。
 
 建议优先补 URL 授权，其次输入建议；终端协议登录和 skill 命令需结合产品需求接入。升级 SDK/适配器后应按协商版本验证每项通路，不直接套用 v1 的 `fs`、`terminal` 能力。普通权限请求、会话状态、工具更新和 v2 压缩回执属于现有协议通路，并非额外的 ClientCapabilities 开关；Claude 0.107.0 的 v2 实现始终发送压缩更新，`session.compaction` 是其 v1 兼容判断。

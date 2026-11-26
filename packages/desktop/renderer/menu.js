@@ -47,3 +47,10 @@ export function openContextMenu(event, items, label) {
   menu.querySelector("button:not(:disabled)")?.focus();
   return menu;
 }
+
+/** 会话行的系统原生菜单；关闭菜单不执行动作。 */
+export async function openNativeContextMenu(event, items) {
+  event.preventDefault();
+  const index = await xsb.contextMenu(items.map(item => item ? { label: item.label, disabled: !!item.disabled, hint: item.hint } : null), event.clientX, event.clientY);
+  if (Number.isInteger(index) && items[index] && !items[index].disabled) items[index].run();
+}

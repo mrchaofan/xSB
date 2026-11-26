@@ -38,7 +38,7 @@ export const PREVIEW_PARTITION = "xsb-preview";
 /** A background page is drawn in a small, non-activating window for its screenshot. */
 const SCREENSHOT_SIZE = { width: 800, height: 600 };
 
-/** `background`: an agent opened it, or its page did while the agent was driving it; it does not take the user's current tab or focus. */
+/** `background`: an agent opened it, or its page did while the agent was driving it; its tab is shown without taking the user's focus. */
 export type PageOptions = { sessionId?: string; embedded?: boolean; agent?: boolean; background?: boolean; downloads?: BrowserDownloads; onPopup?: (id: string, openerId: string) => void };
 type Page = { id: string; contents: Webview2; embedded: boolean; agent: boolean; background: boolean; controlling?: boolean; window?: BrowserWindow; error?: string; favicon?: string; releaseDownloads?: () => void; annotator?: Annotator; options: PageOptions };
 /** Where the app's own files are, for a page's window. */

@@ -557,6 +557,23 @@ async function call(event: Electron.IpcMainInvokeEvent, method: string, args: an
   const pages = panels.get(event.sender.id) ?? [...panels.values()].find((p) => p.shownIn(event.sender));
   if (!pages) throw new Error("this window is closing");
   switch (method) {
+    case "contextMenu": {
+      // The renderer supplies labels and enabled state, never native roles or executable actions.
+      const [items, x, y] = args;
+      if (!Array.isArray(items) || items.length > 64 || !items.every(item => item === null ||
+        (item && typeof item.label === "string" && item.label.length <= 1000 &&
+          (item.disabled === undefined || typeof item.disabled === "boolean") &&
+          (item.hint === undefined || typeof item.hint === "string" && item.hint.length <= 2000))) ||
+        typeof x !== "number" || !Number.isFinite(x) || typeof y !== "number" || !Number.isFinite(y)) throw new Error("invalid context menu");
+      if (!items.some(Boolean)) return null;
+      return new Promise<number | null>((resolve) => {
+        const menu = Menu.buildFromTemplate(items.map((item, index) => item === null ? { type: "separator" as const } : {
+          label: item.label, enabled: !item.disabled, toolTip: item.hint,
+          click: () => { if (!item.disabled) resolve(index); },
+        }));
+        menu.popup({ window: win, x: Math.round(x), y: Math.round(y), callback: () => resolve(null) });
+      });
+    }
     case "readClipboardImages": {
       const formats = clipboard.availableFormats();
       const fileUrl = formats.includes("public.file-url") ? clipboard.readBuffer("public.file-url").toString("utf8").replace(/\0+$/, "") : "";
