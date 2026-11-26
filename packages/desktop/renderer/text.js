@@ -157,10 +157,10 @@ export const TEXT = {
 
     // 通用
     "common.cancel": "取消",
-    "rail.rename": "重命名对话",
-    "rail.rename.name": "对话名称",
-    "rail.rename.save": "保存",
-    "rail.rename.empty": "请输入对话名称。",
+    "lane.rename": "重命名对话",
+    "lane.rename.name": "对话名称",
+    "lane.rename.empty": "请输入对话名称。",
+    "lane.rename.failed": "没能保存对话名称：{error}",
     "rail.delete": "删除对话",
     "rail.delete.busy": "停止后才能删除",
     "rail.delete.title": "删除“{name}”？",
@@ -717,10 +717,10 @@ export const TEXT = {
     "app.title": "xsb",
 
     // Common
-    "rail.rename": "Rename conversation",
-    "rail.rename.name": "Conversation name",
-    "rail.rename.save": "Save",
-    "rail.rename.empty": "Enter a conversation name.",
+    "lane.rename": "Rename conversation",
+    "lane.rename.name": "Conversation name",
+    "lane.rename.empty": "Enter a conversation name.",
+    "lane.rename.failed": "Couldn't save the conversation name: {error}",
     "rail.delete": "Delete conversation",
     "rail.delete.busy": "Stop it first",
     "rail.delete.title": "Delete “{name}”?",
