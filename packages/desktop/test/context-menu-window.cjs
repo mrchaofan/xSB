@@ -118,6 +118,8 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   finishMenu();
   await until(() => !nativeMenu, "cancelled native session menu");
   await click(await rowOf(fresh.id));
+  // A new conversation connects its backend at once: its model is known without opening the settings menu.
+  await untilJS('document.querySelector("#lanes .lane .model-settings").textContent.startsWith("default")', "settings fetched without opening the menu");
   const title = "#lanes .lane .lane-title-button", titleInput = "#lanes .lane .lane-title-input";
   assert.equal(await js("getComputedStyle(" + q(title) + ").getPropertyValue('-webkit-app-region')"), "no-drag", "title is clickable in the draggable header");
   await leftClick(title);
@@ -159,10 +161,20 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   win.webContents.reload(); await loaded;
   await untilJS(q("#lanes .lane header strong") + "?.textContent===" + JSON.stringify(finalName), "rename survives reload");
   assert.equal(await js(q("#lanes .lane .editor") + ".textContent"), "keep this draft");
+  // Deleting the open conversation opens the one that takes its place in the list, or the new last one.
+  const roots = () => js("xsb.load().then(s=>s.agents.filter(a=>!a.workflowOwner).map(a=>a.id))");
+  const shown = () => js('document.querySelector("#lanes .lane")?.dataset.agent ?? null');
+  const successor = async (id) => { const ids = await roots(), i = ids.indexOf(id), rest = ids.filter(x => x !== id); return rest[Math.min(i, rest.length - 1)] ?? null; };
+  assert.equal(await shown(), fresh.id);
+  const afterFresh = await successor(fresh.id);
   await rightClick(await rowOf(fresh.id));
   await choose(text["rail.delete"]);
   await until(async () => (await count()) === before, "empty conversation deleted at once");
   assert.equal(await has("dialog[open]"), false);
+  await until(async () => (await shown()) === afterFresh, "the next conversation is shown");
+  await js("document.querySelector('#agents .row:nth-child(" + ((await roots()).indexOf(talker.id) + 1) + ")').click()");
+  await until(async () => (await shown()) === talker.id, "talker shown");
+  const afterTalker = await successor(talker.id);
   await rightClick(await rowOf(talker.id));
   await choose(text["rail.delete"]);
   await until(() => has("dialog[open]"), "a used conversation asks first");
@@ -170,6 +182,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.equal(await js(q("dialog[open] p") + ".textContent"), text["rail.delete.body"]);
   await js(q("dialog[open] .btn.primary") + ".click()");
   await until(async () => (await count()) === before - 1, "used conversation deleted after confirming");
+  await until(async () => (await shown()) === afterTalker, "the next conversation is shown after confirming");
   // A renderer preview counts service calls: opening settings is passive; only its Check button probes Ark.
   const preview = new BrowserWindow({ show: false, width: 1100, height: 800 });
   try {

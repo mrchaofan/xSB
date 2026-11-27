@@ -8,7 +8,8 @@ import { fill, h, ICON } from "./dom.js";
 import { confirmDialog, openDialog } from "./form.js";
 import { t } from "./i18n.js";
 
-export function backendPicker(agentId) {
+/** onSwitched：原地换了后端之后（还没有记录的对话）。 */
+export function backendPicker(agentId, onSwitched = () => {}) {
   const trigger = h("button", { class: "backend-picker", type: "button", "aria-haspopup": "menu", "aria-expanded": "false" });
   const menu = h("div", { class: "session-menu backend-menu", popover: "auto", role: "menu", "aria-label": t("composer.backend") });
   const failure = h("p", { class: "error", role: "alert" });
@@ -22,7 +23,11 @@ export function backendPicker(agentId) {
       return;
     }
     try {
-      if (!agent.conversed) return onAgent(await xsb.setBackend(agentId, name));
+      if (!agent.conversed) {
+        onAgent(await xsb.setBackend(agentId, name));
+        // 换了后端，原来的设置随旧后端会话作废：立即为新后端拉取模型和推理强度。
+        return onSwitched();
+      }
       if (!(await confirmDialog(t("composer.backend.confirmTitle", { name }),
         [h("p", {}, t("composer.backend.confirmBody", { from: agent.backend, to: name }))], t("composer.backend.confirm")))) return;
       const moved = await xsb.migrate(agentId, name);

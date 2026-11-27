@@ -238,8 +238,9 @@ export class Client {
         if (conversed(session.rec))
           throw new RpcError(-32602, "This conversation has records; switching backends moves it to a new conversation.", { errorKind: "backend_started" });
         next = { ...next, backend: p.backend };
-        // Its backend session held nothing: the new backend opens its own.
-        if (session.rec.backendSessionId) session.save({ backendSessionId: undefined, backendFresh: undefined, backend: undefined, selectedConfig: undefined });
+        // Its backend session held nothing: the new backend opens its own. It still has no records, said outright:
+        // without `conversed` a cleared `backendFresh` would read as records (`conversed`, for older records).
+        session.save({ conversed: false, ...(session.rec.backendSessionId ? { backendSessionId: undefined, backendFresh: undefined, backend: undefined, selectedConfig: undefined } : {}) });
         hub.backends.stop(agent.id);
       }
       hub.state.commit([ops.putAgent(next)]);

@@ -131,7 +131,7 @@ function applyProviderTheme() {
  * 工作中的对话由中枢拒绝删除（停下后才能删），菜单里这一项不可用。
  */
 async function deleteConversation(agent) {
-  if (agent.conversed && !(await confirmDialog(t("rail.delete.title", { name: agent.name }), [h("p", {}, t("rail.delete.body"))], t("rail.delete.confirm")))) return;
+  if (agent.conversed && !(await confirmDialog(t("rail.delete.title", { name: agent.name }), [h("p", { class: "hint" }, t("rail.delete.body"))], t("rail.delete.confirm")))) return;
   try { await xsb.deleteConversation(agent.id); }
   catch (e) { openDialog(t("rail.delete.failed"), [h("p", {}, e.message)], [{ label: t("common.close"), primary: true }]); }
 }
@@ -297,9 +297,9 @@ function openLane(agentId, panel, readonly) {
     setReferenceTarget(agentId);
   };
   const capabilities = composerCapabilities(editor);
-  const controls = composerSettings(agentId, value => capabilities.update(value));
+  const controls = composerSettings(agentId, value => capabilities.update(value), !panel && !readonly && !agentOf(agentId).conversed);
   // 主会话可以换后端（任务节点的后端由工作流决定）。
-  const picker = panel ? null : backendPicker(agentId);
+  const picker = panel ? null : backendPicker(agentId, () => controls.discover(true));
 
   const lane = h("section", { class: "lane", "data-agent": agentId, "data-session": agentOf(agentId).mainSessionId },
     h("header", { class: "bar lane-head" },
@@ -913,8 +913,14 @@ xsb.on((event) => {
     }
   } else if (event.agent) onAgent(event.agent);
   else if (event.removedAgent) {
+    // 删掉的是正在看的对话：改看列表里占它位置的那条（它是最后一条时看新的最后一条），一条不剩才不选中。
+    const roots = state.agents.filter((a) => !a.workflowOwner);
+    const index = state.open.includes(event.removedAgent) ? roots.findIndex((a) => a.id === event.removedAgent) : -1;
+    const rest = roots.filter((a) => a.id !== event.removedAgent);
+    const next = index < 0 ? undefined : rest[Math.min(index, rest.length - 1)];
     state.agents = state.agents.filter((a) => a.id !== event.removedAgent);
-    closeLane(event.removedAgent);
+    closeLane(event.removedAgent, !!next);
+    if (next) focusLane(next.id);
   }
   else if (event.task) { upsert(state.tasks, event.task); renderRail(); }
   else if (event.artifactsRemoved) {

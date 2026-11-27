@@ -9,7 +9,8 @@ function choices(option) {
   return (option?.options ?? []).flatMap(item => item.options ?? [item]);
 }
 
-export function composerSettings(agentId, onUpdate = () => {}) {
+/** eager：还没有对话记录的新对话一打开就为它连上后端，模型和推理强度的选项随即可选，不等点开菜单。 */
+export function composerSettings(agentId, onUpdate = () => {}, eager = false) {
   let latest = {}, sequence = 0, working = false, fetching = false, message = "";
   const trigger = h("button", { class: "model-settings", type: "button", "aria-haspopup": "dialog" });
   const ring = h("span", { class: "context-ring", tabindex: "0" });
@@ -129,12 +130,18 @@ export function composerSettings(agentId, onUpdate = () => {}) {
     menu.style.bottom = (innerHeight - rect.top + 7) + "px";
     menu.showPopover();
     fields.querySelector(".cascade-parent")?.focus();
-    request(() => xsb.composerState(agentId, true), true);
+    discover();
+  };
+  /** 拉取设置，需要时让中枢为对话连上后端（新对话建立后端会话）。reset：旧值已作废（换了后端），拉到之前显示获取中。 */
+  const discover = (reset = false) => {
+    if (reset) latest = {};
+    return request(() => xsb.composerState(agentId, true), true);
   };
   draw();
   let updated = false;
-  xsb.composerState(agentId).then(value => {
+  if (eager) discover();
+  else xsb.composerState(agentId).then(value => {
     if (!updated && !sequence) { latest = value; draw(); }
   }).catch(() => {});
-  return { el, usage, update(value) { updated = true; latest = value; draw(); } };
+  return { el, usage, discover, update(value) { updated = true; latest = value; draw(); } };
 }

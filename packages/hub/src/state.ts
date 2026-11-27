@@ -34,6 +34,7 @@ export type SessionRec = {
   /**
    * The conversation has records: something was given to its model. Until then its backend changes in place; from
    * then on switching moves it to a new conversation (`Agents.migrate`). Never unset: clearing the context keeps them.
+   * New conversations start with `false`; only records written before it existed lack it.
    */
   conversed?: boolean;
   /**
