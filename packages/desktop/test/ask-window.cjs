@@ -142,7 +142,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.ok((await js("xsb.load()")).transcripts[agent.id].some(e => e.kind === "question" && e.source === "acp" && e.state === "answered"), "native question answered");
 
   // Delivered workflows expose no meaningless pause/resume control.
-  const graph = [{ node: "审阅", prompt: '!call finish {"summary":"已审阅","assets":[]}' }, { node: "完成", kind: "end" }, { from: "审阅", to: "完成" }].map(v => JSON.stringify(v)).join("\n");
+  const graph = [{ node: "审阅", prompt: '!call finish {"summary":"已审阅"}' }, { node: "完成", kind: "end" }, { from: "审阅", to: "完成" }].map(v => JSON.stringify(v)).join("\n");
   await send(lane, '!call execute ' + JSON.stringify({ graphJsonl: graph }));
   // Loading the startup snapshot suspends live events. Observe delivery in the UI before reading it.
   await untilJS('document.querySelector("#flow-heading")?.textContent.includes(' + JSON.stringify(text["flow.finished"]) + ')', "completed workflow badge");

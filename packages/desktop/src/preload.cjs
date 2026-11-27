@@ -7,14 +7,14 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const METHODS = [
   "load", "pickFolder", "open", "newWindow", "windowColors",
   "history", "send", "resend", "cancelMessage", "sendMessageNow", "cancel", "clear", "permit",
-  "composerState", "setComposerOption", "newSession", "renameConversation", "setAvatar", "setBackend", "migrate", "deleteConversation", "cleanUp", "workflowControl", "backends", "locateProgram", "cliConfig", "revealCliConfig", "installCli", "checkCli",
+  "composerState", "setComposerOption", "newSession", "renameConversation", "setAvatar", "setBackend", "migrate", "deleteConversation", "cleanUp", "conversationFiles","workflowControl", "backends", "locateProgram", "cliConfig", "revealCliConfig", "installCli", "checkCli",
   "arkStatus", "arkModels", "arkLogin", "arkCancelLogin", "arkBind",
   "openPage", "page", "pageWindow", "overlay", "overlayDone",
   "limitSettings", "setLimit", "projectLanguage", "setProjectLanguage",
   "consultationSettings", "setConsultation",
   "plugins", "setPluginEnabled", "approvePlugin", "reloadPlugins", "revealPlugins",
   "pluginApprovals", "revokePluginApproval",
-  "readClipboardImages", "copyText", "openArtifact", "revealArtifact", "contextMenu",
+  "readClipboardImages", "copyText", "openArtifact", "revealArtifact", "refreshArtifact", "contextMenu",
 ];
 
 /** Electron wraps a handler's error; the renderer shows only what main said, which is worded for the user (main.ts). */

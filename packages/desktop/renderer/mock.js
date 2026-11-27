@@ -90,10 +90,6 @@
   const art = {
     id: "material",
     name: long ? "a-very-long-brief-file-name-for-checking-ellipsis-in-every-place.md" : "brief.md",
-    registeredName: "brief",
-    assetId: "workflow/brief",
-    assetType: "workflow",
-    assetVersion: 1,
     kind: "markdown",
     agentId: main.id,
     path: workspace.path + "/brief.md",
@@ -110,7 +106,6 @@
     artifacts: [art, file("poster", "poster.png", "image"), file("shots", "shots.json", "text"), file("cut", "cut.mp4", "video"), file("notes", "notes.xyz", "text")],
     backends: BACKENDS,
     tasks: [],
-    assetNames: {},
     history: {},
     activities: {},
     pages: [],
@@ -200,8 +195,10 @@
     contextMenu: async () => null, // Native menus exist only in Electron.
     overlay: async () => null,     // The overlay over web pages exists only in Electron (../src/overlay.ts).
     pathOf: (file) => file.name,
+    conversationFiles: async (owner) => owner === main.mainSessionId ? structuredClone(data.artifacts) : [],
     openArtifact: async () => structuredClone(art),
     revealArtifact: async () => {},
+    refreshArtifact: async () => {},
     history: async (id) => ({ entries: structuredClone(data.transcripts[id]), cursor: null }),
     newSession: async (backend, title) => {
       const a = agent("chat" + ++sequence, title || label("新会话", "New session"), backend);

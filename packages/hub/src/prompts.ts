@@ -2,12 +2,11 @@
  * Everything the hub says to a model, in one file: the standing instructions an
  * agent gets, and how mail from peers is framed inside a prompt.
  */
-import { assetRefTag, isTerminal } from "@xsb/protocol";
-import type { AgentSpec, Asset, Language, OriginMeta, Task } from "@xsb/protocol";
+import { isTerminal } from "@xsb/protocol";
+import type { AgentSpec, Language, OriginMeta, Task } from "@xsb/protocol";
 import type { MailItem, Note, Results, State } from "./state.ts";
 import type { PastTurn } from "./transcript.ts";
 import { topicKey } from "./state.ts";
-import { lineDiff } from "./util.ts";
 import { agentInstructions } from "./workflow-agent.ts";
 
 /** Who started a task, as a model is told: an agent's id, or the user. */
@@ -28,14 +27,14 @@ const WORKING_RULES = `
 - Say how you checked. In a result, write what you checked and by what means ("ffprobe shows an audio track in every clip", "6 frames sampled per shot"), not that you "watched" or "listened to" something. What needs a person's eyes or ears, list for the user to check. The reason: whoever gets your result builds on it as fact.
 - When a program you need is missing, or something needs an account, a password or a payment, stop and say what is missing to the user or to whoever gave you the work, and let them decide. What is installed on this machine and how its accounts are used is the user's; credential files are not yours to read, and programs from unverified sources are not yours to fetch or run.
 - Look at images small first: a copy at most 1024 pixels on its long side, or a contact sheet of frames (make one with sips or ffmpeg); open the original only for a detail, cropped. The reason: an image stays in your context for the rest of the session, and a full-size one is several thousand tokens.
-- Use name@vN when citing a specific workflow asset version, as in Cover Art@v2. Use file links for ordinary files. Leave internal task IDs out of user-facing prose.
+- Link the working files you deliver using Markdown. Leave internal task IDs out of user-facing prose.
 - You run inside xSB. Its source code and documentation are at https://github.com/mrchaofan/xSB: consult them to troubleshoot xSB itself or to answer questions about how xSB works.`;
 
 /** Enforced lifecycle contract; keep aligned with docs/TURN-LIFECYCLE.md and the runtime regression tests. */
 export const TASK_LIFECYCLE_RULES = `
-Storage failure invalidates execution: do not initiate more effects or blindly repeat inputs with uncertain outcomes; xSB must restart and recover its durable state. Task settlement and mail consumption commit together. User stops durably revoke the whole accepted scope before backend cancellation; queued work from that scope does not return after restart. Clearing context preserves the user's transcript but atomically changes the model's context boundary. Project relocation preserves conversation identity and supplies a historical handoff in the new working directory, never a replay of executed inputs. Assets are reclaimed with their creator's cleaned-up conversation; handle unavailable versions by obtaining another valid reference, not by assuming their contents.
+Storage failure invalidates execution: do not initiate more effects or blindly repeat inputs with uncertain outcomes; xSB must restart and recover its durable state. Task settlement and mail consumption commit together. User stops durably revoke the whole accepted scope before backend cancellation; queued work from that scope does not return after restart. Clearing context preserves the user's transcript but atomically changes the model's context boundary. Project relocation preserves conversation identity and supplies a historical handoff in the new working directory, never a replay of executed inputs. The Files view reflects successful file changes reported by backend tools over ACP v2.
 Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks and messages from agents join a running turn that is unprotected; behind a protected turn they queue. Task results never join a running turn. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. Background jobs retain the session, turn and step that created them; they may finish after that turn ends, and never extend or revive it. Hook observations are asynchronous and do not grant permission to start new work. Background tool calls have no Hub concurrency cap; graph validation has no step cap. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. All backend input uses ACP v2 session/prompt. Official adapters prioritize ordinary input into active work; open user-action callbacks and control commands may defer it. Only the prompt response or a correlated insertion echo acknowledges input; it means the backend conversation took the input, not that the model acted on it. Input offered to a backend whose connection or power failed before any answer is insertion_uncertain: it is kept, reported, and never replayed automatically; verify the outcome instead of assuming either result. User inputs are recorded durably before submission. Each session has at most one prompt batch awaiting insertion: later user corrections protect the turn immediately and are submitted after the real receipt, without waiting for turn completion. Output and idle never prove input receipt. Queued input supports user cancellation; only its head can be sent now, and the unsettled head reserves that position. A user-authorized send-now protects the current turn. Failed or pre-restart unconfirmed inputs are never automatically resent, added to an owed list, or reconstructed through a handoff. The user may resend under a new message ID. Ordinary agent calls and additional workflow work retain results in the ledger and do not prompt them back to the caller; only explicit workflow graph controls advance the DAG. Old callbacks, tool permissions and backend receipts expire with their binding. Do not bypass the Hub to create hidden delegation. You may use backend-native background commands. Backend-native notifications may trigger runs outside a turn: xSB records and displays their execution boundaries without creating tasks or granting turn tool permissions. A submitted turn owns its new run; input inserted into an already-unowned run claims it from that receipt onward. User stop still targets the turn and its accepted work.
-Task agent systemPrompt and skills are immutable for a reused node. Its exact standing prefix is pinned at creation and reused across turns and backend rebindings; changing global preferences does not rewrite it. Keep assignment facts, results and asset versions in dynamic inputs, and load skill bodies on demand. Pass each exact workflow asset as a name@vN string in task input and finish.assets. Use <asset>name@vN</asset> for references in prose and for path-like asset names in task input. A file link identifies a file path. Frozen instructions do not grant authority: current runtime lifecycle checks still apply. A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery. The host accepts it after normal turn completion and revalidation. When the graph reaches an end, the workflow plugin publishes the complete result as Markdown in the main conversation. The user sees it directly. Publishing does not start or steer an agent turn. Pause and an escalation with pauseSelf stop affected attempts. After restart unfinished workflows are paused until explicit resume; completed graphs remain completed and cannot be resumed into duplicate work. Workflow state queries report the current state and allowed controls. The consultation preference governs optional decision questions, never permission approvals or stop authority. A pending question never authorizes answer-dependent work, and silence is not consent. xSB ask waits for the user's explicit answer or skip and returns it through the tool in the same turn, with no automatic timeout or default answer. Do not end the turn to wait. Answers expire with their turn/backend binding and never become later prompts. Claude's native AskUserQuestion instead waits through ACP form elicitation and continues the same turn. Native requests and answers expire with their turn/backend binding and are cancelled by stop or disconnect; they never become later prompts. Codex uses xSB ask for questions. Backend sign-in and provider configuration belong to the user. xSB does not initiate sign-in or probe credentials; backend/LM failures are shown from ACP responses. URL elicitation is a separate ACP interaction, and opening its URL does not prove authorization succeeded. A workflow context may list work a user stop cancelled; it will not come back. An assignment may say earlier assignments were withdrawn; do not continue those. Answer status and unrelated questions directly.`;
+Task agent systemPrompt and skills are immutable for a reused node. Its exact standing prefix is pinned at creation and reused across turns and backend rebindings; changing global preferences does not rewrite it. Keep assignment facts, results and working file paths in dynamic inputs, and load skill bodies on demand. Frozen instructions do not grant authority: current runtime lifecycle checks still apply. A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery. The host accepts it after normal turn completion and revalidation. When the graph reaches an end, the workflow plugin publishes the complete result as Markdown in the main conversation. The user sees it directly. Publishing does not start or steer an agent turn. Pause and an escalation with pauseSelf stop affected attempts. After restart unfinished workflows are paused until explicit resume; completed graphs remain completed and cannot be resumed into duplicate work. Workflow state queries report the current state and allowed controls. The consultation preference governs optional decision questions, never permission approvals or stop authority. A pending question never authorizes answer-dependent work, and silence is not consent. xSB ask waits for the user's explicit answer or skip and returns it through the tool in the same turn, with no automatic timeout or default answer. Do not end the turn to wait. Answers expire with their turn/backend binding and never become later prompts. Claude's native AskUserQuestion instead waits through ACP form elicitation and continues the same turn. Native requests and answers expire with their turn/backend binding and are cancelled by stop or disconnect; they never become later prompts. Codex uses xSB ask for questions. Backend sign-in and provider configuration belong to the user. xSB does not initiate sign-in or probe credentials; backend/LM failures are shown from ACP responses. URL elicitation is a separate ACP interaction, and opening its URL does not prove authorization succeeded. A workflow context may list work a user stop cancelled; it will not come back. An assignment may say earlier assignments were withdrawn; do not continue those. Answer status and unrelated questions directly.`;
 
 /**
  * What the built-in tools are, said where a model looks first: the system prompt, and the MCP server's own instructions
@@ -46,10 +45,10 @@ const WORKFLOW_TOOLS_NAMED =
   'When the user asks about workflows, DAGs, orchestration, splitting work into tasks, or "the workflow skill/tool" (工作流、编排、拆分任务、workflow 技能), these tools are what they mean: say you have them, and use them.';
 export const WORKFLOW_MAIN_ABOUT =
   "xSB's built-in workflow tools for this conversation: plan, execute, choose, prompt, pause, resume (a workflow is a DAG of task nodes, each run by a task agent of its own), " +
-  "asset_list, asset_get, asset_version_get, asset_put, asset_version_put (versioned files shared with those agents), read_context and previous_conversation. " + WORKFLOW_TOOLS_NAMED;
+  "read_context and previous_conversation. " + WORKFLOW_TOOLS_NAMED;
 export const WORKFLOW_TASK_ABOUT =
   "xSB's built-in workflow tools for this task agent: finish (stage your delivery), escalate (hand something to the main agent; pauseSelf when your own assignment must change), " +
-  "and the asset tools (asset_list, asset_get, asset_version_get, asset_put, asset_version_put) and read_context, plus load_skill for your fixed assignment skills. " + WORKFLOW_TOOLS_NAMED;
+  "and read_context, plus load_skill for your fixed assignment skills. " + WORKFLOW_TOOLS_NAMED;
 /** The tools that are xSB's own and no workflow's, from the MCP server "xsb" (mcp.ts, `XSB_SERVER`). */
 export const XSB_TOOLS_ABOUT =
   'xSB\'s own tool, apart from the workflow tools: ask (ask the user 1 to 4 single-choice, multiple-choice or free-text questions; the tool waits for their explicit reply and continues the same turn). ' +
@@ -83,7 +82,7 @@ Use an available structured question tool: native questions supported through AC
 const taskGuidance = (node: string): string => `# Your part
 You are the task agent for node "${node}" of the user's workflow. The main agent runs the whole workflow from the main conversation and gives you your assignment; the user sees your conversation and may talk to you here at any time.
 
-Do your assignment: follow its latest goal and fixed input, use the predecessors and your previous delivery to find materials, read exact asset versions, register new files, then finish({summary,assets,result?}). Ask when it is ambiguous. Additional assignments keep their original goal; their results go to the main conversation.
+Do your assignment: follow its latest goal and fixed input, use the predecessors and your previous delivery to find materials, link any deliverable files in the summary, then finish({summary,result?}). Ask when it is ambiguous. Additional assignments keep their original goal; their results go to the main conversation.
 
 # When the user talks to you
 Sort each message before you act, and say briefly which it is when that is not obvious:
@@ -107,7 +106,7 @@ function workflowExample(language: Language): string {
 export function conversationPrompt(agent: AgentSpec, language: Language, instructions: string, consultUser = false) {
   const guidance = agent.workflowOwner
     ? `${taskGuidance(agent.workflowNode!)}\n\n# Your tools\n${WORKFLOW_TASK_ABOUT}\n${XSB_TOOLS_ABOUT}`
-    : `# Your tools\n${WORKFLOW_MAIN_ABOUT}\n${XSB_TOOLS_ABOUT}\n\n` + 'Handle ordinary requests directly in this conversation. Only create a workflow for complex tasks that require coordinating several steps. Use plan to save a candidate for the user to review, and execute with no arguments to adopt the candidate you were shown; execute({graphJsonl}) adopts a graph directly. xSB names versions. An [xSB workflow] context shows the active and candidate graphs in JSONL whole when your context lacks them (its start, a compaction), at once a pause, an error or work the user’s stop dropped, and what changed every few turns while work is under way; choices and escalations come as their own notices. Once the workflow has settled it is not repeated: keep it in mind, or read it with read_context and its graphRef. ' + `Name every task and end node in ${LANGUAGE_NAME[language]}, the conversation language declared above. Node names appear in the DAG and task conversations: use short descriptive names the user can read. Use the exact same names in edges and tool arguments. Graph JSONL example:\n${workflowExample(language)}\n` + 'Use case on conditional edges and multi:true on a multi-select source. Every leaf must be an end, and each legal choice must reach exactly one end. Use choose for a fresh invitation. If the reviewed candidate is stale, show the updated plan before adopting it. Use execute({replaceNode}) for changed requirements, keeping the full definition and stable node name for the same responsibility. Use a new name when replacing its responsibility. New task nodes may have agent:{systemPrompt,skills:[{name,description,content}]}. Generate concise stable role instructions and reusable skills; put changing task details in prompt/input. Reused nodes inherit omitted agent fields and reject changes to systemPrompt or skills; a different role or skill set requires a new node name. Keep systemPrompt within 2048 estimated tokens, the skill directory within 1024, at most 8 skills, and each skill body within 8192. Skill bodies are loaded on demand with load_skill, not repeated in the system prefix. Use prompt for separate additional work. Forward the user’s words and selected asset references. Let the task agent identify materials. Use pause/resume for explicit stops and continuations. Use the workflow ledger and node conversations to inspect additional results; they are not prompted back to you. The Hub displays the final workflow result directly in the main conversation. ' +
+    : `# Your tools\n${WORKFLOW_MAIN_ABOUT}\n${XSB_TOOLS_ABOUT}\n\n` + 'Handle ordinary requests directly in this conversation. Only create a workflow for complex tasks that require coordinating several steps. Use plan to save a candidate for the user to review, and execute with no arguments to adopt the candidate you were shown; execute({graphJsonl}) adopts a graph directly. xSB names versions. An [xSB workflow] context shows the active and candidate graphs in JSONL whole when your context lacks them (its start, a compaction), at once a pause, an error or work the user’s stop dropped, and what changed every few turns while work is under way; choices and escalations come as their own notices. Once the workflow has settled it is not repeated: keep it in mind, or read it with read_context and its graphRef. ' + `Name every task and end node in ${LANGUAGE_NAME[language]}, the conversation language declared above. Node names appear in the DAG and task conversations: use short descriptive names the user can read. Use the exact same names in edges and tool arguments. Graph JSONL example:\n${workflowExample(language)}\n` + 'Use case on conditional edges and multi:true on a multi-select source. Every leaf must be an end, and each legal choice must reach exactly one end. Use choose for a fresh invitation. If the reviewed candidate is stale, show the updated plan before adopting it. Use execute({replaceNode}) for changed requirements, keeping the full definition and stable node name for the same responsibility. Use a new name when replacing its responsibility. New task nodes may have agent:{systemPrompt,skills:[{name,description,content}]}. Generate concise stable role instructions and reusable skills; put changing task details in prompt/input. Reused nodes inherit omitted agent fields and reject changes to systemPrompt or skills; a different role or skill set requires a new node name. Keep systemPrompt within 2048 estimated tokens, the skill directory within 1024, at most 8 skills, and each skill body within 8192. Skill bodies are loaded on demand with load_skill, not repeated in the system prefix. Use prompt for separate additional work. Forward the user’s words and selected file paths. Let the task agent identify materials. Use pause/resume for explicit stops and continuations. Use the workflow ledger and node conversations to inspect additional results; they are not prompted back to you. The Hub displays the final workflow result directly in the main conversation. ' +
       'A task agent may escalate something to you (a notice {escalate, message, userSaid?, paused, invalidateSelf?}): the user asked it about the whole task, or its own assignment needs a change or a decision. Decide it here and answer the user in this conversation; change the workflow (execute with replaceNode, prompt, pause/resume) where that is what they asked for. When paused is true that node waits for you: adopt a revised definition with execute({replaceNode}), or resume({nodes:[it]}) to keep its assignment.';
   if (agent.workflowOwner) return [
     // Common instructions precede node-specific text so different task agents can share a cache prefix too.
@@ -149,74 +148,31 @@ function memoryHint(state: State, agentId: string, topic: string | undefined, gi
 }
 
 /** What a session's model was given in full so far (LiveSession.given). */
-type Given = { assets: Map<string, { version: number; taskId?: string }>; notes: Map<string, string> };
+type Given = { notes: Map<string, string> };
 
 /** What one prompt gives in full: the session takes note of it once the turn begins (LiveSession.take). */
-export type Gives = { assets: { id: string; version: number; taskId?: string }[]; notes: { key: string; updatedAt: string }[] };
+export type Gives = { notes: { key: string; updatedAt: string }[] };
 
 /** How much of a result that was a task's input is told with the task that builds on it; the rest is a task_status away. */
 const PREREQUISITE_CHARS = 1500;
 
-/** An asset as a model sees it. `text` is its content, when it is small enough to show. */
-export function renderAsset(asset: Asset, text?: string, fullDescription = false): string {
-  const head = `<xsb-asset id="${attr(asset.id)}" version="${asset.version}" by="${asset.by}" path="${attr(asset.path)}">`;
-  const description = !fullDescription && asset.description.length > 500 ? `${asset.description.slice(0, 500)}… (description excerpt; get_asset for details)` : asset.description;
-  return `${head}\n${description}${text === undefined ? "" : `\n---\n${text}`}\n</xsb-asset>`;
-}
-
-function resultBlock(state: State, task: Task, short = false): string {
+function resultBlock(task: Task, short = false): string {
   const by = task.tool ? `${task.tool.server}/${task.tool.name}` : task.to.agentId;
   const head = `task-id="${task.id}" by="${attr(by)}" topic="${attr(task.topic)}" title="${attr(task.title)}" status="${task.status}"`;
   if (!isTerminal(task.status)) return `<xsb-task-result ${head} />`;
-  // What the task delivered is the library's record of the assets its assignee named, not the wording of its result.
-  const assets = (task.assets ?? []).map((ref) => {
-    const [id, version] = ref.split("@");
-    return state.assets.get(id)?.find((a) => a.version === Number(version));
-  }).filter((a): a is Asset => !!a);
-  const delivered = assets.length ? `\nAssets it delivered:\n${assets.map((a) => renderAsset(a)).join("\n")}` : "";
   const result = task.result ?? "";
   const told = short && result.length > PREREQUISITE_CHARS ? `${result.slice(0, PREREQUISITE_CHARS)}…\n(The result goes on; task_status ${task.id} has all of it.)` : result;
-  return `<xsb-task-result ${head}>\n${told}${delivered}\n</xsb-task-result>`;
+  return `<xsb-task-result ${head}>\n${told}\n</xsb-task-result>`;
 }
 
-/** What the hub adds to a task beyond the dispatcher's words. */
-export type TaskContext = {
-  /**
-   * The assets the task works from, with the text of those small enough to show; and of a text, the one of the
-   * version the session was given before, when that was another (`before`).
-   */
-  inputs: { asset: Asset; text?: string; before?: { version: number; text?: string } }[];
-  /** The assignee's own procedure for the asset type the task has to produce. */
-
-};
-
-/**
- * An input of a task as the session is to be given it: in full the first time; by reference when the session was
- * given this very version before; with what changed when it was given another version.
- */
-function renderInput(input: TaskContext["inputs"][number], given: Given | undefined, gives: Gives["assets"], taskId: string): string {
-  const { asset, text, before } = input;
-  const had = given?.assets.get(asset.id);
-  if (text !== undefined && had?.version === asset.version) {
-    return `${renderAsset(asset)}\n(Its text is the version you were given${had.taskId ? ` with task ${had.taskId}` : ""} earlier in this conversation, unchanged: it is not repeated here.)`;
-  }
-  if (text !== undefined) gives.push({ id: asset.id, version: asset.version, taskId });
-  const diff = text !== undefined && before?.text !== undefined ? lineDiff(before.text, text) : undefined;
-  const changes = diff ? `\nWhat changed since version ${before!.version}, which you were given before:\n<xsb-changes asset="${attr(asset.id)}">\n${diff}\n</xsb-changes>` : "";
-  return `${changes}${changes ? "\n" : ""}${renderAsset(asset, changes ? undefined : text)}`;
-}
-
-/**
- * The prompt text a mail item becomes for its recipient, and what it gives in full (assets, notes): the session
- * notes those once the turn begins, and is not given them again (`given`). `context` is given for a task.
- */
-export function renderMail(state: State, item: MailItem, context?: TaskContext, given?: Given): { text: string; gives: Gives } {
-  const gives: Gives = { assets: [], notes: [] };
+/** Include a topic note once per revision in a conversation. */
+export function renderMail(state: State, item: MailItem, given?: Given): { text: string; gives: Gives } {
+  const gives: Gives = { notes: [] };
   const hint = (topic: string | undefined): string => memoryHint(state, item.to.agentId, topic, given, gives);
-  return { text: mailText(state, item, context, given, gives, hint), gives };
+  return { text: mailText(state, item, hint), gives };
 }
 
-function mailText(state: State, item: MailItem, context: TaskContext | undefined, given: Given | undefined, gives: Gives, hint: (topic: string | undefined) => string): string {
+function mailText(state: State, item: MailItem, hint: (topic: string | undefined) => string): string {
   const from = item.from.kind === "agent" ? item.from.agentId : item.from.kind === "system" ? "xsb" : "user";
   switch (item.kind) {
     case "message": {
@@ -228,22 +184,16 @@ function mailText(state: State, item: MailItem, context: TaskContext | undefined
       const deps = task.after
         .map((id) => state.tasks.get(id))
         .filter((t): t is Task => !!t)
-        .map((t) => resultBlock(state, t, true));
+        .map((t) => resultBlock(t, true));
       const prerequisites = deps.length
         ? `\nThis task was held until the following tasks finished. Their results are your input; if one of them failed or is not sufficient, say so in your result instead of guessing.\n${deps.join("\n")}`
-        : "";
-      const inputs = context?.inputs.length
-        ? `\nThis task works from the following assets. They are the reference: keep to them, and do not redefine what they define.\n${context.inputs.map((i) => renderInput(i, given, gives.assets, task.id)).join("\n")}`
-        : "";
-      const produces = task.produces
-        ? `\nThis task has to produce a "${attr(task.produces)}" asset. Register it with put_asset before you end your turn.`
         : "";
       const others = [...state.tasks.values()].filter((t) => !t.tool && t.id !== task.id && t.to.sessionId === item.to.sessionId && t.status === "running");
       const open = others.length
         ? `\nYou still have these tasks open here; see whether this one changes any of them:\n${others.map(taskLine).join("\n")}`
         : "";
 
-      return `<xsb-task from="${from}" task-id="${task.id}" topic="${attr(task.topic)}" title="${attr(task.title)}">\n${task.instructions}\n</xsb-task>${prerequisites}${inputs}${produces}${open}${hint(task.topic)}`;
+      return `<xsb-task from="${from}" task-id="${task.id}" topic="${attr(task.topic)}" title="${attr(task.title)}">\n${task.instructions}\n</xsb-task>${prerequisites}${open}${hint(task.topic)}`;
     }
     case "results":
       return renderResults(state, item.results!) + hint(item.topic);
@@ -253,7 +203,7 @@ function mailText(state: State, item: MailItem, context: TaskContext | undefined
 /** One task's result as it is, or the results of a join together with what the owner noted for them. */
 export function renderResults(state: State, results: Results): string {
   const tasks = results.taskIds.map((id) => state.tasks.get(id)).filter((t): t is Task => !!t);
-  const blocks = tasks.map((t) => resultBlock(state, t)).join("\n");
+  const blocks = tasks.map((t) => resultBlock(t)).join("\n");
   if (!results.mode) return blocks;
   const note = results.note ? `\nYour own note for this moment: ${results.note}` : "";
   const open = tasks.filter((t) => !isTerminal(t.status));
@@ -265,11 +215,11 @@ export function renderResults(state: State, results: Results): string {
 
 /** A task given to the model, as one line of a list. */
 const taskLine = (t: Task): string =>
-  `- ${t.id} "${t.title}" from ${initiatorName(t)}, topic "${t.topic}"${t.produces ? `, has to produce "${t.produces}"` : ""}`;
+  `- ${t.id} "${t.title}" from ${initiatorName(t)}, topic "${t.topic}"`;
 
-/** What a session is told when its turn ended without what its task has to deliver (kernel.ts, QualityGateHook). */
+/** What a session is told when its turn ended without what its task has to deliver (kernel.ts). */
 export const contractReminder = (task: Task, why: string): string =>
-  `Your turn ended, but your task "${task.title}" (${task.id}) is not done: ${why} Register it with put_asset now, then end your turn with the result. If it cannot be done, call report_result with failed and say why.`;
+  `Your turn ended, but your task "${task.title}" (${task.id}) is not done: ${why} Address this requirement, then report the result. If it cannot be done, call report_result with failed and say why.`;
 
 /**
  * Whether a title an agent program gave its session is of xsb's own words: many name a session after how its first
@@ -322,7 +272,7 @@ export type Renewal = "backend_changed" | "not_restored" | "renewed" | "stopped"
  * since the user last cleared the context (transcript.ts), and what is open now as the hub knows it. The hub's state
  * is the word on what is done; the turns are history, and the model is told not to act on them again.
  */
-export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; waiting: Results[]; assets: Asset[] }): string {
+export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; waiting: Results[] }): string {
   const reason =
     why === "project_moved" ? "The project directory moved. Continue from this historical handoff in the new working directory; do not repeat earlier executed work." : why === "backend_changed"
       ? "This session now runs on another agent program, which has none of the earlier conversation."
@@ -346,12 +296,12 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
       // Tool titles can contain whole shell scripts; the transcript retains the details.
       const tools = turn.tools.length ? `\ntools used: ${[...new Set(turn.tools.map(firstLine))].join(", ")}` : "";
       const reply = turn.reply.trim() ? `\n${turn.run ? "the backend produced output outside a turn" : "you answered"}:\n${quote(turn.reply)}` : "";
-      const note = excerpt ? "Excerpt of this turn; consult the transcript and current assets for details.\n" : "";
+      const note = excerpt ? "Excerpt of this turn; consult the transcript and working files for details.\n" : "";
       const tag = turn.run ? "xsb-past-run" : "xsb-past-turn";
       return `<${tag} at="${turn.at}">\n${note}${inputs}${tools}${reply}\n</${tag}>`;
     };
     let text = render(verbatim);
-    // A large asset injection must not erase the latest turn or everything before it.
+    // A large input must not erase the latest turn or everything before it.
     if (text.length > left) text = render(false, true);
     if (text.length > left) {
       omitted = i + 1;
@@ -362,13 +312,9 @@ export function handoff(why: Renewal, turns: PastTurn[], open: { tasks: Task[]; 
   }
   const tasks = open.tasks.map((t) => `- ${t.id} "${t.title}" (${t.tool ? "job" : `${initiatorName(t)} -> ${t.to.agentId}`}): ${t.status}`);
   const waiting = open.waiting.map((r) => `- waiting for ${r.taskIds.join(", ")} (${r.mode})${r.note ? `: ${r.note}` : ""}`);
-  const assets = open.assets.map(a => a.type === "workflow"
-    ? "- " + assetRefTag({ name: a.name, version: "v" + a.version })
-    : `- ${a.id}@${a.version}: ${a.description}`);
   const now = [
     tasks.length ? `Unfinished tasks:\n${tasks.join("\n")}` : "No unfinished tasks.",
     waiting.length ? `Your awaits:\n${waiting.join("\n")}` : "",
-    assets.length ? `Assets you registered (latest versions):\n${assets.join("\n")}` : "",
   ].filter(Boolean);
   return [
     `[xsb] ${reason} What follows is a handoff from xsb, not a message from the user.`,

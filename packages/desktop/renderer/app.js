@@ -1,5 +1,5 @@
 import { composerCapabilities } from "./capabilities.js";
-// 窗口本身：打开工作区、左栏、对话栏、制品栏。
+// 窗口本身：打开工作区、左栏、对话栏、文件栏。
 // 只通过 window.xsb 取数据和发指令，不知道背后是 mock 还是 Electron 的 preload。
 // xsb 是全局对象：Electron 里由 preload 注入，浏览器里直接打开时由 mock.js 提供。
 import { onArkLoginUrl } from "./ark.js";
@@ -29,19 +29,18 @@ export const state = {
   workspace: null, recent: [],
   workflows: {}, agents: [], backends: [], tasks: [], artifacts: [],
   activities: {},        // 智能体的标识 → 它此刻在做什么（有一轮在进行时）
-  assetNames: {},       // 资产类型 -> 显示名
   pages: [],            // 右栏打开的网页；null 表示这个 Electron 显示不了网页
-  tab: null,            // null = 启动页；"workflow"、"catalog"（资产管理）、制品标签或网页的 id
-  workflowTab: false,   // 工作流、资产管理的标签是否开着
+  tab: null,            // null = 启动页；"workflow"、"catalog"（文件）、文件标签或网页的 id
+  workflowTab: false,   // 工作流、文件的标签是否开着
   catalogTab: false,
   tabOrder: [],         // 侧栏标签被拖出的顺序（标签 id）
-  artifactTabs: [],     // { id, artifactId, mode }：每份打开的制品独立保留查看方式
+  artifactTabs: [],     // { id, artifactId, mode }：每份打开的文件独立保留查看方式
   history: {},
   transcripts: {},      // agentId -> Entry[]
   open: [],             // 当前打开的主会话。任务会话由工作流标签中的节点选择决定
   settings: null,      // 设置对话框开着时，其中的当前分类
-  artifactId: null,     // 右栏正在看的制品
-  listing: false,       // 右栏在显示制品列表
+  artifactId: null,     // 右栏正在看的文件
+  listing: false,       // 右栏在显示文件列表
   mode: "preview",      // preview | source
 };
 
@@ -61,8 +60,6 @@ export const agentOf = (id) => state.agents.find((a) => a.id === id);
 export const nameOf = (agentId) => agentOf(agentId)?.name ?? agentId;      // 已删除的 Agent 只剩 id
 /** 谁起的任务：用户起的没有 from，看 initiator。 */
 export const initiatorOf = (task) => task.initiator.kind === "agent" ? nameOf(task.initiator.agentId) : t(`task.initiator.${task.initiator.kind}`);
-/** 资产类型给人看的名字。 */
-export const assetName = (type) => state.assetNames[type] ?? type;
 const artifactOf = (id) => state.artifacts.find((a) => a.id === id);
 const windowState = new Map();
 function remember(key, value) {
@@ -479,7 +476,11 @@ function upsertEntry(agentId, entry) {
   const pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
   const old = lane.querySelector(`.entry[data-id="${CSS.escape(entry.id)}"]`);
   const node = entryNode(agentId, entry);
-  if (entry.kind === "tool" && old?.tagName === "DETAILS") node.open = old.open;
+  if (entry.kind === "tool" && old) {
+    const prior = old.matches("details") ? old : old.querySelector("details");
+    const current = node.matches("details") ? node : node.querySelector("details");
+    if (current && prior?.open) current.open = true;
+  }
   if (old) old.replaceWith(node); else lane.querySelector(".entries").append(node);
   if (entry.kind === "question") syncAsk(agentId);
   if (pinned) scroller.scrollTop = scroller.scrollHeight;
@@ -528,10 +529,7 @@ function entryNode(agentId, entry) {
       o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId)),
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
       o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),
-      h("div", { class: "said" }, contentView(entry.content, openLink, { lookupAsset: o.kind === "user" && (ref => {
-        const a = state.artifacts.find(a => a.assetType === "workflow" && a.registeredName === ref.name && "v" + a.assetVersion === ref.version);
-        return a && (() => followContentLink(a.url, laneOf(agentId), agentId));
-      }) })),
+      h("div", { class: "said" }, contentView(entry.content, openLink)),
       entry.deliveredAs && h("div", { class: "delivered-as" }, deliveredNote(entry.deliveredAs)),
       tag && h("span", { class: "tag" }, tag),
       entry.pending && entry.canCancel && h("button", { class: "btn sm", onclick: e => {
@@ -549,21 +547,32 @@ function entryNode(agentId, entry) {
   }
 
   if (entry.kind === "tool") {
-    const artifact = entry.artifactId && artifactOf(entry.artifactId);
+    const changes = entry.status === "done" ? [...(entry.changes ?? [])] : [];
+    if (entry.status === "done" && entry.savedFile && !changes.some(change => change.path === entry.savedFile.path))
+      changes.push({ operation: "save", ...entry.savedFile });
     const title = entry.title.split(/\r?\n/)[0].trim() || entry.name || t("tool.call");
     const body = h("div", { class: "tool-body" });
     const format = value => typeof value === "string" ? value : JSON.stringify(value, null, 2);
     const part = (label, value) => value !== undefined && h("div", { class: "tool-part" }, h("small", {}, t(label)), h("pre", {}, format(value)));
-    return h("details", { ...base, ontoggle: e => {
+    const details = h("details", { ...(changes?.length ? { class: "entry tool" } : base), ontoggle: e => {
       if (e.currentTarget.open && !body.childNodes.length) fill(body,
         entry.title && h("pre", { class: "tool-description" }, entry.title),
-        part("tool.input", entry.input), part("tool.output", entry.terminalOutput ?? entry.output),
-        artifact && h("button", { class: "chip", "data-artifact": artifact.id, "aria-pressed": String(artifact.id === state.artifactId), html: ICON.file, onclick: () => showArtifact(artifact.id) }, artifact.name));
+        part("tool.input", entry.input), part("tool.output", entry.terminalOutput ?? entry.output));
     } },
       h("summary", { title: t("tool.details") },
         h("span", { class: "tool-chevron", "aria-hidden": "true", html: ICON.forward }),
         h("i", { class: "state", "data-state": entry.status === "running" ? "running" : entry.status === "failed" ? "failed" : "done" }),
         h("span", { class: "tool-title" }, title), h("small", { class: "tool-status" }, t(`tool.status.${entry.status}`))), body);
+    if (!changes?.length) return details;
+    const files = h("div", { class: "changed-files" });
+    for (const change of changes) {
+      const path = change.oldPath ? `${change.oldPath} → ${change.path}` : change.path;
+      const target = change.operation === "delete"
+        ? h("span", {}, path)
+        : h("button", { type: "button", class: "link", onclick: () => openLink(change.uri, files) }, path);
+      files.append(h("div", { class: "changed-file" }, h("small", {}, t(`files.operation.${change.operation}`)), target));
+    }
+    return h("div", { ...base, class: "entry file-changes" }, details, files);
   }
 
   // permission
@@ -578,7 +587,7 @@ function entryNode(agentId, entry) {
           h("button", { class: "btn primary", onclick: () => answer(true) }, t("permission.allow"))));
 }
 
-// ---------- 右栏：制品 ----------
+// ---------- 右栏：文件 ----------
 
 async function followContentLink(href, container, agentId, baseFile) {
   const owner = rootSession();
@@ -614,7 +623,36 @@ export function rememberPosition() {
   const tab = state.artifactTabs.find(t => t.id === state.tab);
   if (tab) tab.scroll = scroll;
 }
-const artifactBrowser = createArtifactBrowser(showArtifact, nameOf, assetName, referenceArtifact, referenceTitle);
+const artifactBrowser = createArtifactBrowser(showArtifact, nameOf, referenceArtifact, referenceTitle);
+// The list is the Hub's projection of successful file edits across the main session and its task sessions.
+let fileList = null;
+async function loadFileList(owner) {
+  const previousFiles = fileList?.owner === owner ? fileList.files : null;
+  const request = fileList = { owner, files: previousFiles, pending: true, dirty: false };
+  try {
+    const files = await xsb.conversationFiles(owner);
+    if (fileList !== request) return;
+    request.files = files;
+    for (const file of files) upsert(state.artifacts, file);
+  } catch (error) {
+    if (fileList !== request) return;
+    request.error = error.message;
+  }
+  request.pending = false;
+  if (rootSession() === owner && state.tab === "catalog") renderArtifact();
+}
+// A preview opened from a Markdown link can also change, even if it was never in Files.
+export function refreshPreview() {
+  const tab = state.artifactTabs.find(tab => tab.id === state.tab);
+  if (tab) void xsb.refreshArtifact(tab.artifactId).catch(error => {
+    if (state.tab === tab.id) {
+      const message = $("#artifact-reveal-error");
+      message.dataset.file = tab.artifactId;
+      message.textContent = t("content.openFailed", { error: error.message });
+      message.hidden = false;
+    }
+  });
+}
 let artifactRender = 0;
 let artifactView = null;
 
@@ -623,7 +661,7 @@ function browseArtifacts() {
   selectTab("catalog");
 }
 
-// HTML 制品的预览是一个网页，和右栏的网页一样由主进程持有，只是不进标签栏：它在自己的进程里运行，
+// HTML 文件的预览是一个网页，和右栏的网页一样由主进程持有，只是不进标签栏：它在自己的进程里运行，
 // 脚本照常执行，又碰不到应用。同一时刻只有一个，换成别的内容时关掉。
 let embedded = null;      // { url, page: Promise<PageView> }
 function embed(url) {
@@ -662,8 +700,9 @@ function unavailablePreview(artifact, failure) {
 export async function renderArtifact(force = false) {
   const artifact = state.listing ? null : artifactOf(state.artifactId);
   document.querySelectorAll(".chip[data-artifact]").forEach((chip) => chip.setAttribute("aria-pressed", String(chip.dataset.artifact === artifact?.id)));
-  $("#asset-reference").hidden = !artifact || !state.open.length;
-  $("#asset-reference").title = referenceTitle();
+  $("#file-reference").hidden = !artifact || !!artifact.missing || !state.open.length;
+  $("#artifact-reveal").disabled = !!artifact?.missing;
+  $("#file-reference").title = referenceTitle();
   $(".artifact-toolbar").hidden = !artifact;
   const body = $("#artifact-body");
   const modes = $("#artifact-modes");
@@ -672,12 +711,14 @@ export async function renderArtifact(force = false) {
   navigation.hidden = !artifact;
   const revealError = $("#artifact-reveal-error");
   if (!artifact || revealError.dataset.file !== artifact.id) revealError.hidden = true;
-  const items = state.artifacts.filter(belongsHere);
+  const owner = rootSession();
+  if (state.tab === "catalog" && owner && (fileList?.owner !== owner || (fileList.dirty && !fileList.pending))) void loadFileList(owner);
+  const items = fileList?.owner === owner ? fileList?.files ?? [] : [];
   artifactBrowser.update(items, state.artifactId);
   const tasks = (currentFlow()?.nodes ?? []).filter(n => n.sessionId && agentOf(n.agentId));
   const destination = $("#reference-destination");
-  destination.hidden = !items.length || !tasks.length;
-  $("#artifact-references").hidden = $("#asset-reference").hidden && destination.hidden;
+  destination.hidden = !!artifact?.missing || (!items.length && !artifact) || !tasks.length;
+  $("#artifact-references").hidden = $("#file-reference").hidden && destination.hidden;
   if (!destination.hidden) {
     const select = destination.querySelector("select");
     fill(select, h("option", { value: state.open[0] }, t("artifact.mainComposer")),
@@ -692,6 +733,13 @@ export async function renderArtifact(force = false) {
     ++artifactRender;
     $("#artifact-name").textContent = t("artifact.list.title");
     modes.hidden = true;
+    if (state.tab === "catalog" && !fileList?.files) {
+      if (fileList?.error) {
+        fill(body, h("div", { class: "catalog-empty", role: "status" }, fileList.error,
+          h("button", { class: "btn", onclick: () => { fileList = null; renderArtifact(); } }, t("artifact.retry"))));
+      } else fill(body, h("div", { class: "catalog-empty", role: "status" }, t("artifact.loading")));
+      return;
+    }
     if (artifactBrowser.el.parentElement !== body) {
       fill(body, artifactBrowser.el);
       body.scrollTop = catalogScroll;
@@ -709,6 +757,14 @@ export async function renderArtifact(force = false) {
   modes.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String((b.dataset.mode === "preview") === preview)));
   $("#artifact-name").textContent = artifactLabel(artifact);
   $("#artifact-name").title = artifact.name;
+
+  if (artifact.missing) {
+    ++artifactRender;
+    artifactView = null;
+    closeEmbedded();
+    modes.hidden = true;
+    return fill(body, h("p", { class: "catalog-empty file-unavailable", role: "status" }, t("artifact.missing")));
+  }
 
   // 放大或调整窗口不重建同一预览，保留视频播放位置和图片节点。
   const view = JSON.stringify([artifact.id, artifact.url, artifact.kind, artifact.updatedAt, preview]);
@@ -795,20 +851,18 @@ function setReferenceTarget(id) {
   state.referenceAgent = id;
   $("#reference-destination select").value = referenceTarget();
   const title = referenceTitle();
-  $("#asset-reference").title = title;
+  $("#file-reference").title = title;
   document.querySelectorAll(".reference-action").forEach(b => { b.title = title; b.setAttribute("aria-label", [b.textContent, b.dataset.name, title].join(" · ")); });
 }
 function referenceTitle() { return t("artifact.referenceTo", { name: nameOf(referenceTarget()) ?? "" }); }
-function referenceArtifact(artifact, asAsset = false) {
+function referenceArtifact(artifact) {
   if (!artifact || !belongsHere(artifact)) return;
   const id = referenceTarget();
   if (id !== state.open[0]) { selectTab("workflow"); showTask(id); }
   else { document.body.classList.remove("artifact-focused", "artifact-expanded"); }
-  laneOf(id)?.editor.insert([asAsset
-    ? { type: "asset_reference", name: artifact.registeredName, version: "v" + artifact.assetVersion }
-    : { type: "resource_link", name: artifact.name, uri: artifact.fileUri }]);
+  laneOf(id)?.editor.insert([{ type: "resource_link", name: artifact.name, uri: artifact.fileUri }]);
 }
-$("#asset-reference").onclick = () => referenceArtifact(artifactOf(state.artifactId));
+$("#file-reference").onclick = () => referenceArtifact(artifactOf(state.artifactId));
 
 function sideKey() { return "xsb.side:" + JSON.stringify([state.workspace?.id ?? state.workspace?.path, rootSession()]); }
 function rememberSide() {
@@ -837,6 +891,7 @@ function restoreSide() {
     : state.artifactTabs.some(t => t.id === state.tab) || sessionPages().some(p => p.id === state.tab);
   if (!open) state.tab = null;
   renderSide();
+  refreshPreview();
   if (state.tab === "catalog") $("#artifact-body").scrollTop = catalogScroll;
 }
 window.addEventListener("pagehide", rememberSide);
@@ -934,17 +989,16 @@ xsb.on((event) => {
     if (next) focusLane(next.id);
   }
   else if (event.task) { upsert(state.tasks, event.task); renderRail(); }
-  else if (event.artifactsRemoved) {
-    state.artifacts = state.artifacts.filter(a => !event.artifactsRemoved.includes(a.id));
-    for (const lane of document.querySelectorAll(".lane")) {
-      const id = lane.dataset.agent;
-      fill(lane.querySelector(".entries"), ...(state.transcripts[id] ?? []).map(entry => entryNode(id, entry)));
+  else if (event.filesChanged) {
+    if (fileList?.owner === event.filesChanged) fileList.dirty = true;
+    if (rootSession() === event.filesChanged) {
+      if (state.tab === "catalog") renderArtifact();
+      else refreshPreview();
     }
-    renderArtifact(true);
   }
   else if (event.artifact) {
     upsert(state.artifacts, event.artifact);
-    if (belongsHere(event.artifact) && (state.tab === "catalog" || state.artifactId === event.artifact.id)) renderArtifact();
+    if (state.artifactTabs.some(tab => tab.id === state.tab && tab.artifactId === event.artifact.id)) renderArtifact();
   }
   else if (event.webAnnotation) addAnnotation(event.webAnnotation);
   else if (event.webAnnotationsRemoved) onAnnotationsRemoved(event.webAnnotationsRemoved);
@@ -973,6 +1027,7 @@ export async function start() {
   Object.assign(state, { activities: {}, workflows:{} }, await xsb.load(), { open: [], settings: null, listing: true, tab: null, workflowTab: false, catalogTab: false, tabOrder: [], artifactTabs: [] });
   catalogScroll = 0;
   $("#artifact-body").scrollTop = 0;
+  fileList = null;
   artifactBrowser.reset();
   document.body.classList.toggle("no-workspace", !state.workspace);
   $("#ws-name").textContent = document.title = state.workspace?.name ?? t("app.title");

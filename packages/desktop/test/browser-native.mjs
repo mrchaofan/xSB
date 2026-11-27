@@ -22,7 +22,7 @@ try {
     platform: "browser", output: { dir: directory, format: "esm", entryFileNames: "[name].js" } });
   // Exercise the real tab/focus routing with only unrelated app state and panels stubbed.
   const panelStubs = {
-    "./app.js": `export const state = window.auditState; export const rootSession = () => 'sa'; export const rememberPosition = () => {}; export const renderArtifact = () => {}; export const revealArtifacts = () => {};`,
+    "./app.js": `export const state = window.auditState; export const rootSession = () => 'sa'; export const rememberPosition = () => {}; export const refreshPreview = () => {}; export const renderArtifact = () => {}; export const revealArtifacts = () => {};`,
     "./workflow.js": `export const currentFlow = () => null; export const renderWorkflow = () => {};`,
     "./artifacts.js": `export const artifactLabel = () => '';`,
     "./file-icons.js": `export const fileIcon = () => null;`,

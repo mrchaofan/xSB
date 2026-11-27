@@ -6,7 +6,7 @@ xsb 的线上层：两个进程之间说的每一句话都在这里定义，别�
 | - | - |
 | [src/jsonrpc.ts](src/jsonrpc.ts) | 按行分隔的 JSON-RPC 2.0：`Connection`、`RpcError`。ACP（对外、对后端）和 MCP（协作工具）都跑在它上面 |
 | [src/acp.ts](src/acp.ts) | 系统读写到的那部分 ACP v2 类型（插入回执、`state_update`、v2 的权限请求与 MCP server），以及 `text()` / `textOf()`。类型故意宽松：不认识的字段原样透传 |
-| [src/ext.ts](src/ext.ts) | 通用 ACP 扩展：`Agents`（多 Agent）、`Tasks`（任务观察与停止）、`Ledger`（台账）、`Assets`（资产库）、`SessionControls`（会话模型配置与实际上下文用量）、`OriginExt`（消息来源），以及跨扩展传输的数据形状 `AgentInfo`、`Task`（含发起方、结束归因、投递档位、授予）、`Asset`。插话是 ACP v2 本身的，不再是扩展 |
+| [src/ext.ts](src/ext.ts) | 通用 ACP 扩展：`Agents`（多 Agent）、`Tasks`（任务观察与停止）、`Ledger`（台账）、`SessionControls`（会话模型配置与实际上下文用量）、`OriginExt`（消息来源），以及跨扩展传输的数据形状 `AgentInfo`、`Task`（含发起方、结束归因、投递档位、授予）。插话是 ACP v2 本身的，不再是扩展 |
 | [src/errors.ts](src/errors.ts) | 给人看的报错：`error.data.reason` 与事实、每种语言的措辞（`explain`），以及后端错误的 `error.code` 与 CLI 退出码 |
 
 ## 使用

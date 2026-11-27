@@ -1,11 +1,9 @@
-import type { ContentBlock, AssetRef, NodeDef, WorkflowGraph, WorkflowHistory, WorkflowView } from "@xsb/protocol";
-import { assetRefsInText, canonicalAssetTags } from "@xsb/protocol";
+import type { ContentBlock, NodeDef, WorkflowGraph, WorkflowHistory, WorkflowView } from "@xsb/protocol";
 import { canonical, entrance, fingerprint, indexGraph, parseGraph, word } from "./workflow-graph.ts";
 import type { Signal } from "./workflow-graph.ts";
-import { inputAssetRefs, materialFields } from "./workflow-materials.ts";
 import { newId, now } from "./util.ts";
 
-export type Output = { summary: string; assets: AssetRef[]; result?: unknown };
+type Output = { summary: string; result?: unknown };
 export type Completion = { id: string; version: string; end: string; deliveries: (Output & { node: string })[] };
 type Delivery = Output & { id: string; basis: string; valid: boolean; choice?: { id: string; cases: string[] } };
 export type Work = {
@@ -22,9 +20,6 @@ export type Work = {
   suspendedBy?: "pause" | "failure";
   /** The question (questions.ts) this work asked the user: it waits for the reply, which continues it. */
   asking?: string;
-  selected: Record<string, string>;
-  reads?: AssetRef[];
-  grants: AssetRef[];
 };
 type Interruption = { id: string; target: string; prompt: ContentBlock[]; retry?: boolean };
 type Instance = {
@@ -99,8 +94,10 @@ function executionCompleted(f: Flow): boolean {
   return !!graph && graph.nodes.some((n) => n.kind === "end" && f.instances[n.node]?.last?.valid) &&
     !f.interruptions.length && Object.values(f.instances).every((i) => !i.work && !i.extras.length && !i.invitation && !i.interruptions.length);
 }
-/** What a main conversation's model was last told of its workflow, in its current context (`LiveSession.given`). */
-export type WorkflowTold = { epoch?: number; definitions: Map<string, NodeDef>; candidate?: string; state: string; turns: number };
+/** Workflow information received in the current model context. A task only tracks its legacy tool guidance. */
+export type WorkflowTold =
+  | { epoch?: number; definitions: Map<string, NodeDef>; candidate?: string; state: string; turns: number }
+  | { epoch: number; taskFileGuidance: true };
 export function instance(f: Flow, name: string): Instance {
   if (!Object.hasOwn(f.instances, name)) throw Error(`Unknown active node: ${name}`);
   return f.instances[name];
@@ -115,7 +112,7 @@ const definition = ({ kind, prompt, input, schema, model }: NodeDef) => ({ kind,
  * Plan saves `graphJsonl` as the candidate; execute adopts `graphJsonl`, `replaceNode`, or with neither the candidate.
  * Versions are named here, in order, and a graph already named keeps its name: a model never names or quotes one.
  */
-export function adopt(f: Flow, args: Record<string, any>, plan: boolean, knownAsset?: (ref: AssetRef) => boolean) {
+export function adopt(f: Flow, args: Record<string, any>, plan: boolean) {
   const given = ["graphJsonl", "replaceNode"].filter((k) => args[k] !== undefined);
   if (plan ? given.length !== 1 || given[0] !== "graphJsonl" : given.length > 1)
     throw Error("Specify a single adoption method");
@@ -141,13 +138,8 @@ export function adopt(f: Flow, args: Record<string, any>, plan: boolean, knownAs
   graph = structuredClone(graph);
   const priorNodes = new Map(old?.nodes.map(n => [n.node, n]));
   for (const n of graph.nodes) {
-    if (args.graphJsonl !== undefined || args.replaceNode?.node === n.node) n.input = materialFields(n.input, false, knownAsset);
     const prior = priorNodes.get(n.node);
     if (!prior || prior.kind !== n.kind || n.kind !== "task") continue;
-    // Re-adopting a graph shown in the current wire format keeps the original delivery basis.
-    if (prior.prompt && n.prompt && canonicalAssetTags(prior.prompt) === canonicalAssetTags(n.prompt)) n.prompt = prior.prompt;
-    if (canonical(materialFields(n.input, true)) === canonical(materialFields(prior.input, true)) &&
-        canonical(inputAssetRefs(n.input)) === canonical(inputAssetRefs(prior.input))) n.input = prior.input;
     const agent = { ...prior.agent, ...n.agent };
     if (canonical({ systemPrompt: agent.systemPrompt ?? "", skills: agent.skills ?? [] }) !==
         canonical({ systemPrompt: prior.agent?.systemPrompt ?? "", skills: prior.agent?.skills ?? [] }))
@@ -287,8 +279,8 @@ function snapshot(f: Flow, graph: WorkflowGraph, gate: Gate) {
   return graph.nodes
     .filter((n) => gate.ancestors.has(n.node))
     .map((n) => {
-      const { id, summary, assets, result } = f.instances[n.node].last!;
-      return { node: n.node, id, summary, assets, ...(direct.has(n.node) && { result }) };
+      const { id, summary, result } = f.instances[n.node].last!;
+      return { node: n.node, id, summary, ...(direct.has(n.node) && { result }) };
     });
 }
 export function additional(f: Flow, name: string, text: string) {
@@ -305,7 +297,7 @@ export function additional(f: Flow, name: string, text: string) {
 }
 function previous(f: Flow, name: string) {
   const last = f.instances[name].last;
-  return last && { summary: last.summary, assets: last.assets };
+  return last && { summary: last.summary };
 }
 export function notice(f: Flow, text: string, invitation?: string) {
   f.outbox.push({ id: newId("notice"), text, invitation });
@@ -320,8 +312,8 @@ export function suspend(w: Work, why: "pause" | "failure" = "pause") {
 /** Freeze the accepted path. Task assignments expose direct results only; the user gets every contributing delivery in full. */
 function completion(f: Flow, end: string, version: string, ancestors: Set<string>): Completion {
   const deliveries = graphOf(f)!.nodes.filter(n => ancestors.has(n.node)).map(({ node }) => {
-    const { summary, assets, result } = f.instances[node].last!;
-    return { node, summary, assets, ...(result !== undefined && { result }) };
+    const { summary, result } = f.instances[node].last!;
+    return { node, summary, ...(result !== undefined && { result }) };
   });
   return { id: f.instances[end].last!.id, version, end, deliveries };
 }
@@ -361,7 +353,6 @@ export function normalize(f: Flow): Completion | undefined {
           basis: gate.basis!,
           valid: true,
           summary,
-          assets: predecessors.flatMap((p) => p.assets),
         };
         result = completion(f, end.node, f.active!, gate.ancestors);
         finished = true;
@@ -379,7 +370,8 @@ export function normalize(f: Flow): Completion | undefined {
       }
       if (gate.hard && w.state === "running") suspend(w);
       if (w.state !== "ended" || !w.staged || gate.blocked) continue;
-      const delivery = { ...w.staged, id: newId("delivery"), valid: true, basis: w.basis! };
+      const { summary, result } = w.staged;
+      const delivery = { summary, result, id: newId("delivery"), valid: true, basis: w.basis! };
       if (w.kind === "graph") i.last = delivery;
       else (i.additionalResults ??= []).push(delivery);
       delete i.work;
@@ -431,14 +423,6 @@ export function claim(f: Flow, name: string): Work | undefined {
       basis: onGraph ? gate.basis : undefined,
       state: "dispatch",
       assignment,
-      selected: {},
-      grants: [
-        ...inputAssetRefs(assignment.input as Record<string, unknown> | undefined),
-        ...assetRefsInText(String(assignment.target)),
-        ...assetRefsInText("text" in assignment ? String(assignment.text) : ""),
-        ...((assignment.previous as Output | undefined)?.assets ?? []),
-        ...(assignment.predecessors as Output[]).flatMap((p) => p.assets),
-      ],
     };
   }
   if (i.work.state !== "dispatch") return;

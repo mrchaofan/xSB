@@ -4,8 +4,8 @@ import path from "node:path";
 import readline from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Paths, describeBackends, findProject, globalConfigPath, hubSocket, initProject, readHubInfo, stopHub } from "@xsb/hub";
-import { Agents, Assets, Backends, Workflow, Tasks, exitCode, explain, isTerminal, text } from "@xsb/protocol";
-import type { AgentInfo, Asset, BackendInfo, Connection, PermissionRequest, PermissionResponse, Task, Language } from "@xsb/protocol";
+import { Agents, Backends, Workflow, Tasks, exitCode, explain, isTerminal, text } from "@xsb/protocol";
+import type { AgentInfo, BackendInfo, Connection, PermissionRequest, PermissionResponse, Task, Language } from "@xsb/protocol";
 import { connectHub } from "./client.ts";
 import type { HubConnection } from "./client.ts";
 import type { WorkflowView } from "@xsb/protocol";
@@ -94,7 +94,6 @@ async function run(args: Args): Promise<void> {
       return report(args, command);
     case "status":
     case "sessions":
-    case "assets":
       return report(args, command);
     case "hub":
       return hub(args, rest[0]);
@@ -299,10 +298,6 @@ async function report(args: Args, what: string): Promise<void> {
       const shown = what === "tasks" ? tasks : tasks.filter((task) => !isTerminal(task.status));
       if (what === "status" && shown.length) console.log(t.openTasks);
       for (const task of shown) console.log(`${task.id}  ${t.taskStatus[shownStatus(task)].padEnd(10)} ${initiatorOf(task)} -> ${doer(task)}  [${task.topic}] ${task.title}`);
-    }
-    if (what === "assets") {
-      const { assets } = await conn.request<{ assets: Asset[] }>(Assets.list, { type: flag(args, "type"), history:args.history === true });
-      for (const a of assets) console.log(`${a.id.padEnd(28)} v${a.version}  ${a.by.padEnd(12)} ${a.description}\n${" ".repeat(28)} ${a.path}`);
     }
     if (what === "sessions") {
       const { sessions } = await conn.request("session/list", {});

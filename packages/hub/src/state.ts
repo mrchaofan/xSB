@@ -7,7 +7,7 @@
  * in memory is therefore always what a restart would rebuild.
  */
 import type { Flow } from "./workflow-state.ts";
-import type { Addr, AgentSpec, Asset, ContentBlock, McpServer, DeliveryPref, LedgerEntry, Origin, Task } from "@xsb/protocol";
+import type { Addr, AgentSpec, ContentBlock, McpServer, DeliveryPref, LedgerEntry, Origin, Task } from "@xsb/protocol";
 import type { Op, Record_, Store } from "@xsb/store";
 import { Paths } from "./paths.ts";
 import { addEdges } from "./task-graph.ts";
@@ -154,7 +154,6 @@ export const F = {
   gates: "conversations/gates.jsonl",
   mailbox: "conversations/mailbox.jsonl",
   ledger: "conversations/ledger.jsonl",
-  assets: "conversations/assets.jsonl",
   topics: "conversations/topics.jsonl",
 } as const;
 
@@ -169,15 +168,12 @@ export const ops = {
   enqueue: (item: MailItem): Op => ({ file: F.mailbox, rec: { op: "enqueue", item } }),
   ack: (id: string): Op => ({ file: F.mailbox, rec: { op: "ack", id } }),
   mark: (entry: LedgerEntry): Op => ({ file: F.ledger, rec: { op: "mark", entry } }),
-  assetPointer: (id:string,version:string|null):Op => ({file:F.assets,rec:{op:"pointer",id,version}}),
-  putAsset: (asset: Asset): Op => ({ file: F.assets, rec: { op: "put", asset } }),
   putNote: (agentId: string, note: Note): Op => ({ file: Paths.memory(agentId), rec: { op: "put", note } }),
   removeNote: (agentId: string, topic: string): Op => ({ file: Paths.memory(agentId), rec: { op: "remove", topic } }),
 };
 
 export class State {
   readonly store: Store;
-  assetPointers = new Map<string,string|null>();
   workflows = new Map<string, Flow>();
   agents = new Map<string, AgentSpec>();
   sessions = new Map<string, SessionRec>();
@@ -187,8 +183,6 @@ export class State {
   mail = new Map<string, MailItem>();
   /** Message id -> what became of it, last word (ext.ts, `LedgerState`). */
   ledger = new Map<string, LedgerEntry>();
-  /** Asset id -> its versions, oldest first. */
-  assets = new Map<string, Asset[]>();
   /** agent -> topic key -> note. Maintained by the agent itself. */
   notes = new Map<string, Map<string, Note>>();
   /**
@@ -207,7 +201,7 @@ export class State {
 
   private tables() {
     return { agents: this.agents, sessions: this.sessions, tasks: this.tasks, gates: this.gates, mail: this.mail,
-      ledger: this.ledger, assets: this.assets, assetPointers: this.assetPointers, workflows: this.workflows,
+      ledger: this.ledger, workflows: this.workflows,
       notes: this.notes, topics: this.topics, graph: this.graph, mainIds: this.mainIds };
   }
 
@@ -254,7 +248,6 @@ export class State {
       [F.mailbox]: [...this.mail.values()].map(item => ({ op: "enqueue", item, topicCounted: true })),
       [F.ledger]: [...this.ledger.values()].map(entry => ({ op: "mark", entry })),
       [F.workflows]: [...this.workflows.values()].map(flow => ({ flow })),
-      [F.assets]: [...this.assets].flatMap(([id, versions]) => [...versions.map(asset => ({ op: "put", asset })), { op: "pointer", id, version: this.assetPointers.get(id) ?? null }]),
       [F.topics]: [{ topics: [...this.topics].map(([id, topics]) => [id, [...topics].map(([key, entry]) => [key, { ...entry, peers: [...entry.peers] }])]) }],
     };
     for (const [file, recs] of Object.entries(logs)) logs[file] = recs.map(rec => this.persisted({ file, rec }, true).rec);
@@ -273,7 +266,7 @@ export class State {
     try {
       this.store.recover();
       for (const rec of this.store.read(F.topics)) this.apply(F.topics, rec);
-      for (const file of [F.agents, F.sessions, F.tasks, F.gates, F.mailbox, F.ledger, F.assets, F.workflows]) {
+      for (const file of [F.agents, F.sessions, F.tasks, F.gates, F.mailbox, F.ledger, F.workflows]) {
         for (const rec of this.store.read(file)) this.apply(file, rec);
       }
       for (const id of this.agents.keys()) {
@@ -292,10 +285,9 @@ export class State {
 
   /**
    * Forget agents for good (a deleted conversation, cleaned up): their agents, sessions, the workflows those sessions
-   * own, notes, and assets only they made. Each file they appear in is rewritten without them, so the space comes back.
-   * Returns the assets dropped, whose files the caller removes. Tasks, mail and ledger entries are small and stay.
+   * own, and their notes. Compact the remaining records. Tasks, mail and ledger entries stay.
    */
-  forget(agentIds: Set<string>): Asset[] {
+  forget(agentIds: Set<string>): void {
     const original = this.tables();
     Object.assign(this, structuredClone(original));
     try {
@@ -310,15 +302,7 @@ export class State {
         this.sessions.delete(id);
         this.workflows.delete(id);
       }
-      const dropped: Asset[] = [];
-      for (const [id, versions] of this.assets) {
-        if (!versions.every((v) => agentIds.has(v.by))) continue;
-        dropped.push(...versions);
-        this.assets.delete(id);
-        this.assetPointers.delete(id);
-      }
       this.compact();
-      return dropped;
     } catch (error) { Object.assign(this, original); throw error; }
   }
 
@@ -362,7 +346,6 @@ export class State {
     }
     if (!this.paths) return op;
     if (op.file === F.agents && op.rec.agent) return { ...op, rec: { ...op.rec, agent: { ...op.rec.agent, workspace: this.paths.reference(op.rec.agent.workspace) } } };
-    if (op.file === F.assets && op.rec.asset) return { ...op, rec: { ...op.rec, asset: { ...op.rec.asset, path: this.paths.reference(op.rec.asset.path) } } };
     return op;
   }
 
@@ -411,18 +394,6 @@ export class State {
       case F.ledger:
         this.ledger.set(rec.entry.messageId, rec.entry);
         return;
-      case F.assets: {
-        if (rec.op === "pointer") {
-          this.assetPointers.set(rec.id, rec.version);
-          return;
-        }
-        if (this.paths && (this.loading || typeof rec.asset.path !== "string")) rec = { ...rec, asset: { ...rec.asset, path: this.paths.resolveStored(rec.asset.path) } };
-        this.assetPointers.set(rec.asset.id, "v" + rec.asset.version);
-        const versions = this.assets.get(rec.asset.id);
-        if (versions) versions.push(rec.asset);
-        else this.assets.set(rec.asset.id, [rec.asset]);
-        return;
-      }
     }
     const memory = /^agents\/([^/]+)\/memory\.jsonl$/.exec(file);
     if (memory) {

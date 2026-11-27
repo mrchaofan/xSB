@@ -47,7 +47,7 @@ try {
     void hub.shutdown();
   }, 120000);
   timer.unref();
-  const graphJsonl = [{node:"draft",prompt:"Finish with summary DRAFT and assets []"},{node:"check",prompt:"Check the predecessor and finish with summary VERIFIED and assets []"},{node:"end",kind:"end"},{from:"draft",to:"check"},{from:"check",to:"end"}].map(v=>JSON.stringify(v)).join("\n");
+  const graphJsonl = [{node:"draft",prompt:"Call finish with summary DRAFT"},{node:"check",prompt:"Check the predecessor and call finish with summary VERIFIED"},{node:"end",kind:"end"},{from:"draft",to:"check"},{from:"check",to:"end"}].map(v=>JSON.stringify(v)).join("\n");
   await conn.request("session/prompt", {sessionId,prompt:[{type:"text",text:"Run this two-step workflow with execute and acknowledge its final delivery. Graph JSONL:\n"+graphJsonl}]});
   const deadline = Date.now()+100000;
   while (Date.now()<deadline && !delivered) {

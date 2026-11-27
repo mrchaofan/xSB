@@ -4,8 +4,7 @@
 //   内容 → 对话        contentView
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { assetRefTag, formatAssetRef } from "@xsb/protocol";
-import { append, assetReferenceParts } from "../src/content.ts";
+import { append } from "../src/content.ts";
 import { fromClipboard } from "./clipboard.js";
 import { openDialog } from "./form.js";
 import { ICON, fill, h } from "./dom.js";
@@ -114,20 +113,14 @@ function partNode(block) {
       h("span", { class: "web-annotation-text" }, t("composer.annotation", { index: block.index, note: note.length > 40 ? `${note.slice(0, 40)}…` : note })));
   }
   if (block.type === "image") return h("img", { class: "part", src: block.url || `data:${block.mimeType};base64,${block.data}`, loading: "lazy", decoding: "async", alt: t("content.image.alt") });
-  if (block.type === "asset_reference") return h("span", { class: "part chip asset-ref", title: formatAssetRef(block), html: ICON.file }, formatAssetRef(block));
   if (block.type === "resource_link") return h("span", { class: "part chip file-ref", title: fileTitle(block.uri), html: ICON.file }, block.name);
   if (block.type === "skill") return h("span", { class: "part chip", title: block.name, html: ICON.file }, t("composer.skillName", { name: block.name }));
   return h("span", { class: "part chip", title: block.uri, html: ICON.file }, block.type);
 }
 
 /** 内容 → 对话里的样子：文本按 markdown 渲染，其余各占一块。 */
-export function contentView(content, openLink, { streaming = false, lookupAsset } = {}) {
-  const parts = lookupAsset ? content.flatMap(assetReferenceParts) : content;
-  const el = h("div", { class: "content" }, ...parts.map((block) => {
-    if (block.type === "asset_reference") {
-      const preview = lookupAsset?.(block);
-      return h(preview ? "button" : "span", { class: "part chip asset-ref", title: preview ? formatAssetRef(block) : t("artifact.unavailable"), html: ICON.file, onclick: preview }, formatAssetRef(block) + (preview ? "" : " · " + t("artifact.unavailable")));
-    }
+export function contentView(content, openLink, { streaming = false } = {}) {
+  const el = h("div", { class: "content" }, ...content.map((block) => {
     if (block.type === "text") return markdownView(block.text, openLink);
     if (block.type === "resource_link") return h("button", { type: "button", class: "part chip file-ref", title: fileTitle(block.uri), html: ICON.file, onclick: () => openLink?.(block.uri, el) }, block.name);
     return partNode(block);
@@ -207,7 +200,7 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
     const node = partNode(block);
     node.contentEditable = "false";
     blocks.set(node, block);
-    if (block.type === "asset_reference" || block.type === "resource_link" || block.type === "skill") node.append(h("button", { class: "remove-ref", tabindex: "-1", type: "button", "aria-label": t("composer.remove"), title: t("composer.remove"), html: ICON.close, onclick: () => { node.remove(); el.focus(); onChange(); } }));
+    if (block.type === "resource_link" || block.type === "skill") node.append(h("button", { class: "remove-ref", tabindex: "-1", type: "button", "aria-label": t("composer.remove"), title: t("composer.remove"), html: ICON.close, onclick: () => { node.remove(); el.focus(); onChange(); } }));
     return node;
   }
 
@@ -273,9 +266,7 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
     if (!trim) return content;
     const trimmed = content.map((block, i) => (block.type !== "text" ? block
       : { ...block, text: block.text.slice(i === 0 ? block.text.search(/\S|$/) : 0).replace(i === content.length - 1 ? /\s+$/ : /$^/, "") }));
-    return trimmed.filter(block => block.type !== "text" || block.text).flatMap(block => block.type === "asset_reference"
-      ? [{ type: "text", text: assetRefTag(block) }]
-      : [block]);
+    return trimmed.filter(block => block.type !== "text" || block.text);
   }
 
   const take = (data, native = false) => {
@@ -314,7 +305,7 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
   function restore(content) {
     caret = null;
     notes = [];
-    content = attach(content).flatMap(assetReferenceParts);
+    content = attach(content);
     renderTray();
     el.replaceChildren(...content.map((block) => {
       if (block.type === "text") return document.createTextNode(block.text);

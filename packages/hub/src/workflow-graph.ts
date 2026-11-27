@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 import { Ajv } from "ajv";
-import { canonicalAssetTags } from "@xsb/protocol";
 import type { Edge, NodeDef, WorkflowGraph } from "@xsb/protocol";
 import { nodeAgent } from "./workflow-agent.ts";
-import { materialFields } from "./workflow-materials.ts";
 
 const validator = new Ajv({ strict: true, ownProperties: true, addUsedSchema: false });
 export function validateResult(schema: object, result: unknown) {
@@ -174,8 +172,8 @@ export function parseGraph(raw: string): WorkflowGraph {
 export function graphJsonl({ nodes, edges }: WorkflowGraph): string {
   const node = ({ node, kind, prompt, input, model, schema, multi, agent }: NodeDef) => ({
     node,
-    ...(kind === "end" ? { kind } : { prompt: canonicalAssetTags(prompt!) }),
-    ...(Object.keys(input).length > 0 && { input: materialFields(input, true) }),
+    ...(kind === "end" ? { kind } : { prompt }),
+    ...(Object.keys(input).length > 0 && { input }),
     ...(model !== undefined && { model }),
     ...(schema !== undefined && { schema }),
     ...(agent !== undefined && { agent }),

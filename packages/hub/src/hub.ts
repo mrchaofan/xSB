@@ -14,20 +14,18 @@ import { Lifecycle } from "./lifecycle.ts";
  * says so on its hooks; the effectors registered there act on it (`delivery`
  * into sessions, `jobs` the tool calls, the audit and the
  * clients' feed). `backends` runs the agent processes, `permissions`
- * finds a human for a backend's question, `assets` is the library they all
- * work from. What an agent is beyond its name comes from its role (roles.ts).
+ * finds a human for a backend's question.
  * All durable state is in `state`.
  */
 import fs from "node:fs";
 import net from "node:net";
-import { Agents, Assets as AssetsExt, Connection, Ledger, PluginPublication, RpcError, Tasks, failure, errorMessage } from "@xsb/protocol";
+import { Agents, Connection, Ledger, PluginPublication, RpcError, Tasks, failure, errorMessage } from "@xsb/protocol";
 import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import { Workflows } from "./workflows.ts";
 import { nodeAgent } from "./workflow-agent.ts";
 import { Store, atomicWrite, syncDirectory } from "@xsb/store";
 import { Client } from "./acp-server.ts";
-import { Assets } from "./assets.ts";
 import { auditHook, auditReports } from "./audit.ts";
 import { BackendPool } from "./backends.ts";
 import { consultationSettings, DEFAULT_BACKEND, projectLanguage } from "./config.ts";
@@ -79,7 +77,6 @@ export class Hub {
   readonly elicitations: Elicitations;
   readonly lifecycle: Lifecycle;
   readonly urlElicitations: UrlElicitations;
-  readonly assets: Assets;
   readonly workflows: Workflows;
   /** Set by `shutdown`: turns that die with it stay unacknowledged and run again on the next start. */
   stopping = false;
@@ -125,7 +122,6 @@ export class Hub {
     this.permissions = new Permissions(this);
     this.questions = new Questions(this);
     this.elicitations = new Elicitations(this);
-    this.assets = new Assets(this);
     this.workflows = new Workflows(this);
     hooks.on("acp.turn_changed", ({ sessionId }) => this.workflows.runtimeChanged(sessionId));
     // One conversation per agent (docs/DESIGN.md): sessions a client once opened besides it are history, not live.
@@ -152,7 +148,6 @@ export class Hub {
   async start(): Promise<void> {
     fs.mkdirSync(this.paths.run, { recursive: true });
     fs.mkdirSync(this.paths.shared, { recursive: true });
-    fs.mkdirSync(this.paths.assets, { recursive: true });
     this.questions.restart();
     this.elicitations.restart();
     this.workflows.restart();
@@ -486,7 +481,7 @@ export class Hub {
 
   /**
    * Clean up the project (`Agents.purge`): what deleted conversations left goes for good — the agents' folders
-   * (transcripts, drafts, notes), the asset files only they made, their records — and the logs are compacted.
+   * (transcripts, drafts, notes) and their records. The remaining logs are compacted.
    */
   purgeDeleted(): { conversations: number; bytes: number } {
     const deleted = [...this.state.agents.values()].filter((a) => a.deleted && !a.workflowOwner);
@@ -499,12 +494,9 @@ export class Hub {
       this.bridgeTokens.delete(session.bridgeToken);
       this.revokePublications(session.id);
     }
-    const assets = [...this.state.assets.values()].filter(versions => versions.every(v => gone.has(v.by))).flat();
-    const files = [...[...gone].map(id => this.paths.agentDir(id)), ...assets.filter(a => path.resolve(a.path).startsWith(this.paths.dir + path.sep)).map(a => a.path)];
-    const bytes = files.reduce((sum, file) => sum + sizeOf(file), 0);
-    atomicWrite(this.cleanupFile, JSON.stringify({ agents: [...gone], files }) + "\n");
+    const bytes = [...gone].reduce((sum, id) => sum + sizeOf(this.paths.agentDir(id)), 0);
+    atomicWrite(this.cleanupFile, JSON.stringify({ agents: [...gone] }) + "\n");
     this.resumeCleanup();
-    this.broadcast(AssetsExt.removed, { ids: [...new Set(assets.map(a => a.id))] });
     return { conversations: deleted.length, bytes };
   }
 
@@ -512,10 +504,13 @@ export class Hub {
   private resumeCleanup(): void {
     if (!fs.existsSync(this.cleanupFile)) return;
     const plan = JSON.parse(fs.readFileSync(this.cleanupFile, "utf8"));
-    if (Array.isArray(plan.files)) plan.files = plan.files.map((file: string) => this.paths.resolveStored(file));
-    if (!Array.isArray(plan.agents) || plan.agents.some((id: unknown) => typeof id !== "string") || !Array.isArray(plan.files) || plan.files.some((file: unknown) => typeof file !== "string" || !path.resolve(file).startsWith(this.paths.dir + path.sep))) throw new Error("Invalid cleanup plan");
-    this.state.forget(new Set(plan.agents));
-    for (const file of plan.files) fs.rmSync(file, { recursive: true, force: true });
+    if (!Array.isArray(plan.agents) || plan.agents.some((id: unknown) =>
+      typeof id !== "string" || !id || id === "." || id === ".." || /[\\/]/.test(id)
+    )) throw new Error("Invalid cleanup plan");
+    const agents = new Set<string>(plan.agents);
+    this.state.forget(agents);
+    // Older plans included registered workspace files. Only conversation directories belong to this cleanup.
+    for (const id of agents) fs.rmSync(this.paths.agentDir(id), { recursive: true, force: true });
     fs.rmSync(this.cleanupFile);
     syncDirectory(path.dirname(this.cleanupFile));
   }

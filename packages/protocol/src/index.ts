@@ -3,7 +3,7 @@
  * other is defined here and nowhere else:
  *
  *   jsonrpc.ts   newline-delimited JSON-RPC 2.0 (carries ACP and MCP alike)
- *   acp.ts       the slice of ACP v1 the system reads or writes
+ *   acp.ts       the slice of ACP v2 the system reads or writes
  *   ext.ts       the ACP extensions it uses, and the shapes that cross them
  *   errors.ts    errors a person has to read: their reasons, and what each says in each language
  */
@@ -15,3 +15,4 @@ export * from "./tool-context.ts";
 export * from "./workflow.ts";
 export * from "./conversation-event.ts";
 export * from "./elicitation.ts";
+export * from "./file-changes.ts";
