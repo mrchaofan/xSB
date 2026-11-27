@@ -1,12 +1,11 @@
-import type { ContentBlock, Edge, NodeDef, WorkflowGraph, WorkflowHistory, WorkflowView } from "@xsb/protocol";
-import { canonical, entrance, fingerprint, indexGraph, parseGraph, resolveInputs, word } from "./workflow-graph.ts";
+import type { ContentBlock, NodeDef, WorkflowGraph, WorkflowHistory, WorkflowView } from "@xsb/protocol";
+import { canonical, entrance, fingerprint, indexGraph, parseGraph, word } from "./workflow-graph.ts";
 import type { Signal } from "./workflow-graph.ts";
 import { newId, now } from "./util.ts";
 
 type Output = { summary: string; result?: unknown };
-export type Completion = { id: string; version: string; end: string; result?: unknown; deliveries: (Output & { node: string })[] };
+export type Completion = { id: string; version: string; end: string; deliveries: (Output & { node: string })[] };
 type Delivery = Output & { id: string; basis: string; valid: boolean; choice?: { id: string; cases: string[] } };
-type InputResolution = { basis: string; values: ReturnType<typeof resolveInputs> } | { basis: string; error: string; notified?: boolean };
 export type Work = {
   id: string;
   kind: "graph" | "extra";
@@ -31,8 +30,6 @@ type Instance = {
   /** Assignments the node's agent had in its conversation that were withdrawn since: it is told so with its next one. */
   revoked?: string[];
   last?: Delivery;
-  /** Frozen values and delivery IDs for this definition and incoming choices. */
-  resolved?: InputResolution;
   /** Additional deliveries are retained in the workflow ledger, never prompted back to the caller. */
   additionalResults?: Delivery[];
   paused: boolean;
@@ -42,7 +39,7 @@ type Instance = {
   interruptions: Interruption[];
 };
 /** `attempts`: how many times it was posted and discarded unseen (the model never got it); retried a few times on its own. */
-type Notice = { id: string; text: string; invitation?: string; delivery?: string; inputFailure?: { node: string; basis: string }; posted?: string; attempts?: number };
+type Notice = { id: string; text: string; invitation?: string; delivery?: string; posted?: string; attempts?: number };
 export type Flow = {
   owner: string;
   active?: string;
@@ -108,7 +105,7 @@ export function nodeOf(f: Flow, name: string): NodeDef {
   if (n?.kind !== "task") throw Error(`Unknown task: ${name}`);
   return n;
 }
-const definition = ({ kind, prompt, input, inputSchema, schema, model }: NodeDef) => ({ kind, prompt, input, inputSchema, schema, model });
+const definition = ({ kind, prompt, input, schema, model }: NodeDef) => ({ kind, prompt, input, schema, model });
 /**
  * Plan saves `graphJsonl` as the candidate; execute adopts `graphJsonl`, `replaceNode`, or with neither the candidate.
  * Versions are named here, in order, and a graph already named keeps its name: a model never names or quotes one.
@@ -183,7 +180,8 @@ export function adopt(f: Flow, args: Record<string, any>, plan: boolean) {
     if (
       reuse &&
       (prior!.multi !== n.multi ||
-        canonical(choicesFrom(oldEdges.outgoing.get(n.node)!)) !== canonical(choicesFrom(edges.outgoing.get(n.node)!)))
+        canonical(oldEdges.outgoing.get(n.node)?.filter((e) => e.case)) !==
+          canonical(edges.outgoing.get(n.node)?.filter((e) => e.case)))
     ) {
       if (i.last) delete i.last.choice;
       delete i.invitation;
@@ -195,32 +193,16 @@ export function adopt(f: Flow, args: Record<string, any>, plan: boolean) {
   return version;
 }
 
-function choicesFrom(edges: Edge[]) {
-  return [...new Set(edges.filter(e => e.case).map(e => canonical([e.to, e.case])))].sort();
-}
-
 type Gate = {
   signal: Signal;
   basis?: string;
   ancestors: Set<string>;
   direct: Set<string>;
-  bindings: Edge[];
-  resolved?: InputResolution;
   blocked: boolean;
   hard: boolean;
   skipHard: boolean;
   skipBlocked: boolean;
 };
-function boundInputs(f: Flow, n: NodeDef, edges: Edge[]) {
-  return resolveInputs(n, edges.map(edge => ({ edge, delivery: f.instances[edge.from].last! })));
-}
-function resolveNodeInputs(f: Flow, n: NodeDef, basis: string, edges: Edge[]): InputResolution {
-  try {
-    return { basis, values: boundInputs(f, n, edges) };
-  } catch (error) {
-    return { basis, error: error instanceof Error ? error.message : String(error) };
-  }
-}
 /** Evaluate in topological order. Every downstream signal sees upstream invalidations in this transaction. */
 function evaluate(f: Flow, graph: WorkflowGraph, invalidate = false) {
   const gates = new Map<string, Gate>();
@@ -252,7 +234,6 @@ function evaluate(f: Flow, graph: WorkflowGraph, invalidate = false) {
     }
     const ancestors = new Set<string>();
     const direct = new Set<string>();
-    const bindings: Edge[] = [];
     const hardHere = i.paused || !!i.replan;
     let hard = hardHere || f.paused,
       blocked = hard || !!i.interruptions.length || !!f.interruptions.length;
@@ -281,53 +262,35 @@ function evaluate(f: Flow, graph: WorkflowGraph, invalidate = false) {
         skipBlocked ||= upstreamBlocked;
       }
       if (s.state === "ready") {
-        if (edge.bind) bindings.push(edge);
         for (const ancestor of src.ancestors) ancestors.add(ancestor);
         ancestors.add(edge.from);
         direct.add(edge.from);
       }
     }
-    let resolved: InputResolution | undefined;
-    if (n.inputSchema && basis) {
-      if (i.resolved?.basis === basis) resolved = i.resolved;
-      else if (!blocked) resolved = resolveNodeInputs(f, n, basis, bindings);
-    }
-    if (invalidate && i.resolved !== resolved) {
-      if (resolved) i.resolved = resolved;
-      else delete i.resolved;
-    }
-    if (resolved && "error" in resolved) hard = blocked = true;
-    gates.set(n.node, { signal, basis, ancestors, direct, bindings, resolved, hard, blocked, skipHard, skipBlocked });
+    gates.set(n.node, { signal, basis, ancestors, direct, hard, blocked, skipHard, skipBlocked });
   }
   return gates;
 }
 
-function snapshot(f: Flow, graph: WorkflowGraph, gate: Gate, includeResults = true) {
+function snapshot(f: Flow, graph: WorkflowGraph, gate: Gate) {
   const direct = gate.direct;
   return graph.nodes
     .filter((n) => gate.ancestors.has(n.node))
     .map((n) => {
       const { id, summary, result } = f.instances[n.node].last!;
-      return { node: n.node, id, summary, ...(includeResults && direct.has(n.node) && { result }) };
+      return { node: n.node, id, summary, ...(direct.has(n.node) && { result }) };
     });
-}
-function assignmentInputs(f: Flow, n: NodeDef, gate: Gate) {
-  if (!n.inputSchema) return { input: n.input };
-  if (gate.resolved && "error" in gate.resolved) throw Error(gate.resolved.error);
-  // An independent extra can precede graph activation. Only snapshot currently available values that satisfy its input schema.
-  return { inputSchema: n.inputSchema, ...(gate.resolved?.values ?? boundInputs(f, n, gate.bindings)) };
 }
 export function additional(f: Flow, name: string, text: string) {
   const n = nodeOf(f, name),
-    graph = graphOf(f)!,
-    gate = evaluate(f, graph).get(name)!;
+    graph = graphOf(f)!;
   instance(f, name).extras.push({
     target: n.prompt,
     model: n.model,
-    ...assignmentInputs(f, n, gate),
+    input: n.input,
     text: word(text, "prompt"),
     previous: previous(f, name),
-    predecessors: snapshot(f, graph, gate, !n.inputSchema),
+    predecessors: snapshot(f, graph, evaluate(f, graph).get(name)!),
   });
 }
 function previous(f: Flow, name: string) {
@@ -349,8 +312,7 @@ function completion(f: Flow, end: string, version: string, ancestors: Set<string
     const { summary, result } = f.instances[node].last!;
     return { node, summary, ...(result !== undefined && { result }) };
   });
-  const last = f.instances[end].last!;
-  return { id: last.id, version, end, deliveries, ...(last.result !== undefined && { result: last.result }) };
+  return { id: f.instances[end].last!.id, version, end, deliveries };
 }
 
 /** Only the old Hub put an end delivery ID in the notice outbox. Its transport envelope is not a new execution. */
@@ -388,7 +350,6 @@ export function normalize(f: Flow): Completion | undefined {
           basis: gate.basis!,
           valid: true,
           summary,
-          ...(gate.resolved && "values" in gate.resolved && { result: gate.resolved.values.input }),
         };
         result = completion(f, end.node, f.active!, gate.ancestors);
         finished = true;
@@ -419,15 +380,6 @@ export function normalize(f: Flow): Completion | undefined {
       const gate = gates.get(n.node)!,
         i = f.instances[n.node];
       if (finished && i.work?.kind === "graph") delete i.work;
-      // This delivery can end the graph without that branch. A later revision can make its input actionable again.
-      if (i.resolved && "error" in i.resolved) {
-        if (finished) delete i.resolved;
-        else if (!i.resolved.notified) {
-          const inputFailure = { node: n.node, basis: i.resolved.basis };
-          f.outbox.push({ id: newId("notice"), inputFailure, text: JSON.stringify({ inputError: i.resolved.error, node: n.node }) });
-          i.resolved.notified = true;
-        }
-      }
       if (finished || !i.last?.valid || i.last.choice || gate.blocked) delete i.invitation;
       if (!finished && !gate.blocked && i.last?.valid && !i.last.choice && !i.invitation) {
         const options = [...new Set(graph.edges.filter((e) => e.from === n.node && e.case).map((e) => e.case!))];
@@ -437,7 +389,6 @@ export function normalize(f: Flow): Completion | undefined {
         }
       }
     }
-    f.outbox = f.outbox.filter(n => !n.inputFailure || f.instances[n.inputFailure.node]?.resolved?.basis === n.inputFailure.basis);
     return result;
   }
 }
@@ -456,10 +407,10 @@ export function claim(f: Flow, name: string): Work | undefined {
           target: n.prompt,
           model: n.model,
           revisions: i.goals.splice(0),
-          ...assignmentInputs(f, n, gate),
+          input: n.input,
           schema: n.schema,
           previous: previous(f, name),
-          predecessors: snapshot(f, graph, gate, !n.inputSchema),
+          predecessors: snapshot(f, graph, gate),
           reason: i.last ? "Definition or predecessor delivery changed" : "Initial assignment",
         }
       : i.extras.shift()!;
@@ -505,7 +456,7 @@ export function control(f: Flow, pause: boolean, names?: string[]) {
 export function blocked(f: Flow, name: string) {
   return evaluate(f, graphOf(f)!).get(name)!.blocked;
 }
-export function view(f: Flow, includeContracts = true): WorkflowView {
+export function view(f: Flow): WorkflowView {
   const graph = graphOf(f),
     gates = graph && evaluate(f, graph);
   const finished = graph?.nodes.some((n) => n.kind === "end" && f.instances[n.node].last?.valid);
@@ -516,9 +467,7 @@ export function view(f: Flow, includeContracts = true): WorkflowView {
     state,
     controls: { pause: !!graph && !done && !held, resume: !!graph && !done && held },
     sessionId: f.owner,
-    history: includeContracts ? f.history ?? [] : f.history?.map(h => ({
-      ...h, nodes: h.nodes.map(({ contract, ...node }) => node),
-    })) ?? [],
+    history: f.history ?? [],
     version: f.active,
     candidate: f.candidate && { version: f.candidate.version, graph: f.versions[f.candidate.version] },
     paused: f.paused,
@@ -529,7 +478,6 @@ export function view(f: Flow, includeContracts = true): WorkflowView {
       graph?.nodes.map((n) => {
         const i = f.instances[n.node],
           gate = gates!.get(n.node)!;
-        const inputError = !finished && gate.resolved && "error" in gate.resolved ? gate.resolved.error : undefined;
         const status =
           i.work?.state ??
           (i.last?.valid
@@ -538,7 +486,7 @@ export function view(f: Flow, includeContracts = true): WorkflowView {
               : "completed"
             : finished
               ? "skipped"
-              : inputError ? "input_error" : gate.blocked
+              : gate.blocked
                 ? "paused"
                 : gate.signal.state);
         const actionable = !finished || !!i.work || !!i.extras.length || !!i.interruptions.length;
@@ -552,12 +500,6 @@ export function view(f: Flow, includeContracts = true): WorkflowView {
           sessionId: i.sessionId,
           target: i.work?.kind === "graph" ? i.work.id : i.last?.valid ? i.last.id : undefined,
           summary: i.last?.valid ? i.last.summary : undefined,
-          ...(includeContracts && n.inputSchema && { contract: {
-            goal: n.prompt, inputSchema: n.inputSchema, schema: n.schema, fixedInput: n.input,
-            ...(gate.resolved && "values" in gate.resolved && gate.resolved.values),
-            ...(i.last?.valid && i.last.result !== undefined && { result: i.last.result }),
-            ...(inputError && { error: inputError }),
-          } }),
           additionalResults: i.additionalResults?.map(({ id, summary }) => ({ id, summary })),
           controls: {
             pause: n.kind === "task" && actionable && !i.paused && !f.paused,

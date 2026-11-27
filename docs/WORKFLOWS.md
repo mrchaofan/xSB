@@ -35,35 +35,30 @@ DAG 的任务节点和结束节点使用系统提示词声明的对话语言，�
 
 全文随时可凭 `graphRef` 用 `read_context` 读取。主对话的消息只交给主 Agent，任务 Agent 收不到；上下文里只有工作流的状态和交付摘要，没有任务 Agent 的对话。
 
-主 Agent 从用户要拿到的结果倒推。JSONL 中每个节点或每条边独占一行。为每个节点（含终点）用 `inputSchema` 描述命名输入、类型和必填项，为每个任务节点用 `schema` 描述 `finish.result` 的类型、含义和单位。任务可以产出正文、布尔判断、金额、数组、对象或工作文件链接；按照下游或用户实际需要的类型交付。
-
-建图时已经知道的值填入 `input`。前驱执行后才产生的值用数据边的 `bind` 声明，键是接收节点的输入字段名，值是从前驱 `result` 取值的 JSON Pointer。空字符串 `""` 取整个结果，`"/订单行"` 取该对象的“订单行”字段。需要换算、改写或判断时，由一个带输入和交付契约的任务执行。终点直接发布其命名输入，也可以提供 `schema` 对这个结果对象再做校验。
-
-例如，用户要求从订单原文提取明细，再交给另一个节点核算金额。这张图先传订单行数组，再传整数金额。
+JSONL 中每个节点和每条边各占一行。任务节点支持 `input`、`model`、结果的 JSON Schema `schema`，以及固定的 `agent:{systemPrompt?,skills?:[{name,description,content}]}` 配置。主 Agent 为新职责生成简短角色和可复用的技能正文；同名同类型节点重用时，省略的角色和技能配置自动继承，显式改动被运行时拒绝。完整规则与 ACP 能力边界见 [任务 Agent 配置与缓存](WORKFLOW-AGENT-CONFIG.md)。下面的审片图通过后直接汇总，需要修订时先执行修图。
 
 ```jsonl
-{"node":"提取明细","prompt":"提取商品、数量和以分为单位的单价。","inputSchema":{"type":"object","properties":{"原始订单":{"type":"string"}},"required":["原始订单"],"additionalProperties":false},"input":{"原始订单":"铅笔 2 支，每支 3 元，橡皮 1 块，4 元。"},"schema":{"type":"object","properties":{"订单行":{"type":"array","items":{"type":"object","properties":{"品名":{"type":"string"},"数量":{"type":"integer","minimum":1},"单价（分）":{"type":"integer","minimum":0}},"required":["品名","数量","单价（分）"],"additionalProperties":false}}},"required":["订单行"],"additionalProperties":false}}
-{"node":"核算总额","prompt":"按数量和单价核算订单总额，以分为单位交付。","inputSchema":{"type":"object","properties":{"明细":{"type":"array","items":{"type":"object","properties":{"品名":{"type":"string"},"数量":{"type":"integer","minimum":1},"单价（分）":{"type":"integer","minimum":0}},"required":["品名","数量","单价（分）"],"additionalProperties":false}}},"required":["明细"],"additionalProperties":false},"schema":{"type":"integer","minimum":0}}
-{"node":"完成","kind":"end","inputSchema":{"type":"object","properties":{"总额（分）":{"type":"integer","minimum":0}},"required":["总额（分）"],"additionalProperties":false}}
-{"from":"提取明细","to":"核算总额","bind":{"明细":"/订单行"}}
-{"from":"核算总额","to":"完成","bind":{"总额（分）":""}}
+{"node":"绘制","prompt":"绘制定妆图并在交付摘要中附上文件链接。"}
+{"node":"审片","prompt":"审查本次定妆图。"}
+{"node":"修图","prompt":"按审片意见修订定妆图。"}
+{"node":"通过","kind":"end"}
+{"node":"修订完成","kind":"end"}
+{"from":"绘制","to":"审片"}
+{"from":"审片","to":"通过","case":"pass"}
+{"from":"审片","to":"修图","case":"revise"}
+{"from":"修图","to":"修订完成"}
 ```
 
-“核算总额”收到两行明细后，调用 `finish({"summary":"两项合计 10.00 元","result":1000})`，终点得到 `{"总额（分）":1000}`。即使摘要只写“已完成”，下游取到的仍然是同一个整数。原样传值包括 `0`、`false` 和空字符串。确实没有外部输入的节点可以声明 `"inputSchema":{"type":"object","properties":{},"additionalProperties":false}`。
-
-普通边等待有效交付。条件边还等待针对该次交付的选择。单选须选一个已有选项，多选源加 `"multi":true`，允许 `choose({from,cases:[]})`。若所有条件入边均跳过，或全部入边均跳过，节点也跳过。其余节点等所有入边有结果。每条可达路径上有效边和固定值须覆盖接收节点的必填字段，同一字段只有一个来源。所有合法选路必须各自到达一个终点。校验不设探索步数上限。
-
-任务节点还可以指定 `model` 和固定的 `agent:{systemPrompt?,skills?:[{name,description,content}]}`。主 Agent 为新职责生成简短角色和可复用的技能正文，同名同类型节点继承省略的配置。配置、缓存与 ACP 能力边界见[任务 Agent 配置与缓存](WORKFLOW-AGENT-CONFIG.md)。
+普通边等待有效交付。条件边还等待针对该次交付的选择。单选须选一个已有选项，多选源加 `"multi":true`，允许 `choose({from,cases:[]})`。若所有条件入边均跳过，或全部入边均跳过，节点也跳过。其余节点等所有入边有结果。所有合法选路必须各自到达一个终点。校验不设探索步数上限。
 
 ## 改图与交付
 
 - 单点改目标用 `execute({replaceNode:{node,prompt,input,…}})` 提交完整节点。保留同名同类型节点的会话和原边。调整依赖、增加或删除节点时提交完整图。
 - 宿主在采用时撤销已经过期的工作与交付。依赖过期交付的下游重新等待，独立任务沿用同一次执行。删除后重建的同名节点获得新实例。
-- 任务 Agent 按本节点的命名输入工作。通过 `finish({summary,result})` 暂存交付，`summary` 面向用户，`result` 装入约定类型的实际内容。校验错误会返回给当前模型，它可以按报错位置修正再提交。该次执行正常结束且依据仍然有效时，宿主才接纳交付。
-- 派发下游前，插件读取本次实际生效的边和接纳的交付，组装并按 `inputSchema` 校验完整输入。校验失败的节点保持未启动。成功时，指派保存输入及来源，ACP 把对应的任务目标、输入、前序摘要及输出要求送给模型。
-- 主 Agent 用 `prompt({node,text})` 派独立的追加工作。追加指派保存提出时的目标与材料。契约图用当时已知的固定输入与已生效的前驱交付组装命名输入并校验。尚缺必填值时，调用返回字段错误，主 Agent 可以在材料到达后再派。追加结果记在节点的追加交付记录里，数据边只消费正式图任务的交付。相同正文的两次独立调用会产生两项工作。传输层使用同一收据重投时返回原结果，跨连接重投使用相同的 MCP `_meta["dev.xsb/call-id"]`。
+- 指派中包含本轮实际采用的全部前序摘要，共同祖先只出现一次。直接前驱还可带结构化结果。任务 Agent 通过 `finish({summary,result?})` 暂存交付，需要向用户或下游提供文件时在摘要中附上 Markdown 链接。该次执行正常结束且依据仍然有效时，宿主才接纳交付。
+- 主 Agent 用 `prompt({node,text})` 派追加工作。每项沿用提出时的目标和素材线索，排队逐项处理，结果保存在节点的追加交付记录里。相同正文的两次独立调用会产生两项工作。传输层使用同一收据重投时返回原结果，跨连接重投使用相同的 MCP `_meta["dev.xsb/call-id"]`。
 
-契约图的终点把本次实际选路得到的命名输入发布到主对话，复杂结果可以包含对象、列表和工作文件链接。同一图中一旦使用 `inputSchema` 或 `bind`，其全部节点都需要声明输入契约，全部任务都需要声明交付契约。旧版图及其在途指派继续按原有定义运行，旧版终点仍列出所选路径上参与节点的交付。对话账本只接收通用的来源、条目标识与 Markdown。实时显示和重新打开主对话读取同一份正文。插件发布接口见[设计文档](DESIGN.md#插件向主对话发布-markdown)。
+终点结果按本次实际选中的路径生成。正文列出版本、结束节点，以及每个参与节点的完整交付摘要和结构化结果。共同前序只出现一次，嵌套对象和列表转成 Markdown，摘要中的工作文件链接可直接打开。对话账本只接收通用的来源、条目标识与 Markdown。实时显示和重新打开主对话读取同一份正文。插件发布接口见[设计文档](DESIGN.md#插件向主对话发布-markdown)。
 
 工作流工具的参数、收据、返回值，以及实际送达模型的工作流上下文和作用域说明，单独记录在项目的 `.xsb2/agents/<agentId>/workflow/<sessionId>.jsonl` 中。记录包含格式版本、来源、时间、会话和 turn ID。插件读取旧审计数据时也识别原对话日志里的 `dev.xsb/workflow-log`，无需改写既有对话。
 
@@ -111,4 +106,4 @@ Claude 的 `NotebookEdit` 和向空文件写入内容的 `Edit` 有时只提供�
 
 重启前未确认输入终结且不补发；不得恢复原邮件、加入欠交清单或将原文再次注入。明确 resume 可以继续保存的工作流 assignment；已接收用户插话的继续请求只引用原消息 ID，如果上下文已经缺失要求用户重新发送，不复制原文。
 
-Hub 从已保存的指派生成 ACP 消息，按任务要求、命名输入、前置成果与输出要求分段。追加任务和继续任务有明确标题，旧任务撤回提示仍可见。模型和 transcript 收到同一份正文。数据绑定与派发直接读取插件中的结构化值，不需要解析摘要或界面 Markdown。
+Hub 在发送 assignment 时直接生成 Markdown：任务要求、输入材料与前置成果各自分段；追加任务和继续任务有明确标题，旧任务撤回提示仍可见。任务 ID、依据和模型等信息放在可展开的详情中。模型和 transcript 收到同一份正文，桌面端沿用普通 Markdown 渲染和原文复制，不按消息文案做正则解析。JSONL 图定义和工具参数继续使用结构化协议。

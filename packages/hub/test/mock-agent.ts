@@ -5,7 +5,7 @@
  *   !sleep <ms>           wait (a cancel ends the work here)
  *   !waitForInput         wait at this step until a prompt is queued or work is cancelled
  *   !busy <ms>            wait, and finish waiting even if cancelled (a tool call that has to run out)
- *   !background <delay> <ms|waitForInput> schedule native background notification work after this execution
+ *   !background <delay> <ms> schedule native background notification work after this execution
  *   !call <tool> <json>   call a tool of the "workflow" MCP server and emit its result;
  *                         "$last" in the JSON is the id of the task or job started last,
  *                         "$task" the id of the <xsb-task> it stands in, or else of the one
@@ -128,12 +128,11 @@ async function step(session: Session, line: string): Promise<void> {
       session.onInput = undefined;
       return;
     case "background": {
-      const [delay, duration] = rest.split(" ");
-      const wait = duration === "waitForInput" ? "!waitForInput" : `!sleep ${duration}`;
+      const [delay, duration] = rest.split(" ").map(Number);
       setTimeout(() => {
-        session.lines = ["!say BACKGROUND START", wait, "!say BACKGROUND END"];
+        session.lines = ["!say BACKGROUND START", `!sleep ${duration}`, "!say BACKGROUND END"];
         void work(session, { kind: "task-notification" });
-      }, Number(delay));
+      }, delay);
       return;
     }
     case "sleep":

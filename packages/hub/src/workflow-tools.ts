@@ -2,33 +2,19 @@ import { Ajv } from "ajv";
 const string = { type: "string" };
 const strings = { type: "array", items: string };
 const obj = { type: "object" };
-export const graphContractGuidance =
-  "Design the graph backwards from the user's deliverable. Give every new node an object inputSchema with named properties and required fields. With no inputs, declare an empty object schema. " +
-  "Put known values in input. For each value supplied by a predecessor, map the receiving field in edge.bind to a JSON Pointer into the producer's result (an empty string selects the whole result). " +
-  "Give each task a result JSON Schema in schema. Describe fields in the user's terms, including units. On every active route supply all required inputs, with a single source per field. " +
-  "The end publishes its named inputs. Put any final calculation, writing or decision in a task before the end.";
-export const deliveryGuidance =
-  "Use the assignment's named inputs and their units. In finish, write a summary for the user and put the actual deliverable in result using its declared JSON type. " +
-  "Text, booleans, numbers, lists and objects can be delivered directly. Include working file links when the task produces files. " +
-  "If validation fails, correct the indicated field and call finish again. The workflow starts eligible successors after it accepts the delivery.";
 function tool(name: string, description: string, properties: Record<string, unknown>, required: string[] = []) {
   return { name, description, inputSchema: { type: "object", properties, required, additionalProperties: false } };
 }
 const main = [
   tool(
     "plan",
-    "xSB workflow: save one candidate DAG for review, replacing the earlier candidate. Write one JSON object per line: " +
-    "{node,prompt,inputSchema,schema,input?,model?,multi?,agent?}, {node,kind:'end',inputSchema,input?,schema?}, or {from,to,case?,bind?}. " +
-    graphContractGuidance + " Use names in the conversation language. xSB assigns the version. " +
-    "For a stable role, use agent:{systemPrompt?,skills?:[{name,description,content}]}. Limits: systemPrompt 2048 estimated tokens, up to 8 skills, directory 1024 tokens, each body 8192 tokens. Reused nodes inherit omitted role/skills and reject changes.",
+    "xSB workflow: save one candidate workflow (a DAG of task nodes) for review, in place of any earlier candidate. One JSON object per line: {node,prompt,input?,model?,schema?,multi?,agent?:{systemPrompt?,skills?:[{name,description,content}]}}, {node,kind:'end'}, or {from,to,case?}. Generate a short stable agent role and reusable skills when useful; keep assignment facts in prompt/input. Limits: systemPrompt 2048 estimated tokens, at most 8 skills, directory 1024 estimated tokens, each skill body 8192 estimated tokens. A reused node inherits omitted systemPrompt/skills and cannot change them. Task and end node names are shown to the user: write them in the conversation language declared in the system prompt. xSB names the version; the workflow context shows it with the graph.",
     { graphJsonl: string },
     ["graphJsonl"],
   ),
   tool(
     "execute",
-    "xSB workflow: adopt and run the candidate shown in the workflow context with no arguments, or supply a complete graphJsonl or one complete replaceNode definition. " +
-    graphContractGuidance + " Keep the node name for the same responsibility and include its contracts when replacing it. Change edges by submitting a complete graph. " +
-    "Name nodes in the conversation language. Reused nodes inherit omitted agent.systemPrompt and skills. Give a changed role or skill set a new node name.",
+    "xSB workflow: adopt and run a workflow. With no arguments, adopt the candidate the workflow context shows; or supply a complete graphJsonl, or one complete replaceNode definition. Name new task and end nodes in the conversation language declared in the system prompt; preserve existing names when updating the same responsibility. A task node may configure agent:{systemPrompt?,skills?:[{name,description,content}]}; reused nodes inherit omitted settings and reject changes to systemPrompt or skills. Use a new node name for a different role or skill set.",
     { graphJsonl: string, replaceNode: obj },
   ),
   tool(
@@ -39,7 +25,7 @@ const main = [
   ),
   tool(
     "prompt",
-    "xSB workflow: queue independent additional work for one task node using its current goal and material. Its named inputs must already satisfy the node's inputSchema. Additional results are kept separately from the graph delivery.",
+    "xSB workflow: queue independent additional work for one task node, using its current goal and material.",
     { node: string, text: string },
     ["node", "text"],
   ),
@@ -57,8 +43,7 @@ const task = [
   tool("load_skill", "Read a fixed skill from this task agent's assignment skill directory before applying it. This loads Hub-managed instructions, not a backend-native slash command. Long content is retained with a read_context reference.", { name: string }, ["name"]),
   tool(
     "finish",
-    "Stage the current assignment's delivery for acceptance on normal turn completion. " + deliveryGuidance +
-    " A graph assignment with an output schema requires result. For additional work or an older assignment with no output schema, result is optional.",
+    "Stage this assignment's summary and optional structured result. Link relevant working files in the summary using Markdown. The host accepts the delivery on a normal end.",
     {
       summary: string,
       result: {},

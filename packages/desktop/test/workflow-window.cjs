@@ -274,57 +274,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await click("#artifact-list");
   await until(() => has("#artifact-body .artifact-browser"), "file list restored");
   await until(async () => !(await listed("final review.md")), "delete removes the file");
-
-  const shape = (properties) => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
-  const cents = { type: "integer", description: "Amount in cents" };
-  const contracts = [
-    { node: "Calculate", prompt: '!call finish {"summary":"Checked the order","result":{"amount":0}}',
-      input: { order: "Free sample" }, inputSchema: shape({ order: { type: "string" } }), schema: shape({ amount: cents }) },
-    { node: "Bill", kind: "end", inputSchema: shape({ cents }) },
-    { from: "Calculate", to: "Bill", bind: { cents: "/amount" } },
-  ];
-  const graphArgs = rows => JSON.stringify({ graphJsonl: rows.map(row => JSON.stringify(row)).join("\n") });
-  await send(main, "!call plan " + graphArgs(contracts));
-  await click('#tabs .tab[data-id="workflow"] .tab-main');
-  await until(() => has(".flow-plans button:last-child"), "candidate contract plan");
-  await click(".flow-plans button:last-child");
-  const bill = '.dag-node[data-node="Bill"]';
-  const rawContract = () => js("JSON.parse(" + q("#flow-contract .contract-raw pre") + ".textContent)");
-  await click(bill);
-  const version = await js(q("#flow-contract") + ".dataset.version");
-  assert.match(await js(q("#flow-contract .contract-source") + ".textContent"), /Calculate.*\/amount/);
-  assert.deepEqual((await rawContract()).bindings[0].bind, { cents: "/amount" });
-  assert.equal((await rawContract()).input, undefined, "planned input has no invented value");
-  await click('.dag-node[data-node="Calculate"]');
-  assert.match(await js(q("#flow-contract .contract-field pre") + ".textContent"), /Free sample/);
-  assert.match(await js(q('#flow-contract [data-part="expected"]') + ".innerText"), /amount/);
-  await send(main, "!call execute {}");
-  const atEnd = bill + '[data-state="completed"]';
-  await until(() => has(atEnd), "end node publishes its bound input");
-  await click(atEnd);
-  const accepted = await rawContract();
-  assert.deepEqual(accepted.input, { cents: 0 });
-  assert.deepEqual(accepted.result, { cents: 0 });
-  assert.equal(accepted.inputSources.cents.node, "Calculate");
-  assert.equal(accepted.inputSources.cents.pointer, "/amount");
-  assert.ok(accepted.inputSources.cents.delivery);
-  await untilJS(`[...document.querySelectorAll(${JSON.stringify(publication + " .content")})].some(el => el.innerText.includes("cents") && el.innerText.includes("0") && el.querySelector("details"))`, "named final result is visible before collapsed contributing tasks");
-  const missingAmount = [
-    { ...contracts[0], node: "ReadAmount", prompt: '!call finish {"summary":"Checked","result":{}}', schema: { ...shape({ amount: cents }), required: [] } },
-    { ...contracts[1], node: "Quote" }, { from: "ReadAmount", to: "Quote", bind: { cents: "/amount" } },
-  ];
-  await send(main, "!call execute " + graphArgs(missingAmount));
-  const invalid = '.dag-node[data-node="Quote"][data-state="input_error"]';
-  await until(() => has(invalid), "binding error is visible on the blocked node");
-  await click(invalid);
-  const errorMessage = await js(q('#flow-contract [role="alert"]') + ".textContent");
-  assert.ok(["ReadAmount", "/amount", "Quote", "cents"].every(field => errorMessage.includes(field)));
-  assert.equal((await rawContract()).result, undefined);
-  await untilJS(`[...document.querySelectorAll("#flow-heading select option")].some(o => o.value === ${JSON.stringify(version)})`, "contract snapshot kept in history");
-  await js(`(() => { const select = document.querySelector("#flow-heading select"); select.value = ${JSON.stringify(version)}; select.dispatchEvent(new Event("change")); })()`);
-  await click(bill);
-  assert.deepEqual(await rawContract(), accepted, "history shows the same exact input, delivery and provenance");
   console.log(
-    "Electron + real Hub/ACP: direct chat, DAG, task prompts, stop/resume, native files, web tabs, drafts, model/effort, usage, publication and candidate/active/history node contracts passed",
+    "Electron + real Hub/ACP: direct chat, DAG, task prompts, stop/resume, native file changes, web tabs, drafts, model/effort, usage and published Markdown results passed",
   );
 });

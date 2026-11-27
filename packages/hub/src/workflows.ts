@@ -546,10 +546,7 @@ export class Workflows {
     // turn, after a compaction or a renewal); at once, what it cannot learn otherwise (a pause, an error, work the user's
     // stop dropped); and while work is under way, every WORKFLOW_REFRESH_TURNS turns. Choices and escalations
     // have their own actionable notices. A completion publishes display text directly to the main conversation.
-    const inputErrors = Object.fromEntries(Object.entries(f.instances).flatMap(([name, i]) =>
-      i.resolved && "error" in i.resolved ? [[name, i.resolved.error]] : []));
-    const errors = Object.keys(inputErrors).length ? { inputErrors } : {};
-    const state = canonical({ paused: f.paused, error: f.error ?? null, ...errors });
+    const state = canonical({ paused: f.paused, error: f.error ?? null });
     if (prior && !f.cancelled?.length && prior.state === state && (settled(f) || prior.turns + 1 < WORKFLOW_REFRESH_TURNS)) {
       prior.turns++;
       return;
@@ -559,7 +556,7 @@ export class Workflows {
     const changed = graph?.nodes.flatMap((n) => {
       const old = prior?.definitions.get(n.node);
       if (!old) return [n];
-      const entries = (["kind", "prompt", "input", "inputSchema", "schema", "multi", "model", "agent"] as const)
+      const entries = (["kind", "prompt", "input", "schema", "multi", "model", "agent"] as const)
         .filter((key) => canonical(old[key]) !== canonical(n[key]))
         .map((key) => [key, n[key] ?? null]);
       return entries.length ? [{ node: n.node, ...Object.fromEntries(entries) }] : [];
@@ -567,11 +564,10 @@ export class Workflows {
     // A context that has not had them (a first turn, a compacted or renewed one) gets the graphs whole, in the JSONL the
     // model writes them in; later turns get what changed. Versions are named for reading: execute takes none.
     const fresh = !prior;
-    const { candidate, edges, ...active } = view(f, false);
+    const { candidate, edges, ...active } = view(f);
     const candidateJsonl = candidate && graphJsonl(candidate.graph);
     const details = {
       ...active,
-      ...errors,
       ...(fresh && graph ? { graphJsonl: graphJsonl(graph) } : { edges, definitions: changed }),
       graphRef: graph && contextRef(this.hub.paths, s.agentId, graphJsonl(graph)).ref,
       candidate: candidate && {

@@ -1,11 +1,11 @@
 # 工作流任务 Agent 配置与缓存
 
-节点的 `prompt`、`input`、`inputSchema`、`model` 和交付 `schema` 描述当前工作，`agent` 定义长期执行这类工作的角色和技能。主 Agent 在规划新节点时生成配置，Hub 校验并持久化。
+节点有两个生命周期：`prompt/input/model/schema` 描述当前工作，`agent` 定义长期执行这类工作的角色和技能。主 Agent 在规划新节点时推理生成配置，Hub 校验、持久化并强制执行。
 
 ```jsonl
-{"node":"审阅","prompt":"检查记录是否符合交付标准。","input":{"标准":"全部检查通过","记录":"3 项检查均通过"},"inputSchema":{"type":"object","properties":{"标准":{"type":"string"},"记录":{"type":"string"}},"required":["标准","记录"],"additionalProperties":false},"schema":{"type":"boolean","description":"记录是否符合标准"},"agent":{"systemPrompt":"依据实际交付和验证证据审阅，明确区分事实与推测。","skills":[{"name":"证据核对","description":"核对记录与验收标准。","content":"逐项核对验收条件和实际证据，报告检查方法与未验证项。"}]}}
-{"node":"完成","kind":"end","inputSchema":{"type":"object","properties":{"通过审阅":{"type":"boolean"}},"required":["通过审阅"],"additionalProperties":false}}
-{"from":"审阅","to":"完成","bind":{"通过审阅":""}}
+{"node":"审阅","prompt":"检查这次交付并给出结果。","agent":{"systemPrompt":"依据实际文件和验证证据审阅，明确区分事实与推测。","skills":[{"name":"证据核对","description":"核对文件、测试和验收标准。","content":"逐项核对验收条件；读取实际产物；报告具体检查方法与未验证项。"}]}}
+{"node":"完成","kind":"end"}
+{"from":"审阅","to":"完成"}
 ```
 
 ## 不可变配置与可变任务
@@ -49,6 +49,6 @@ ACP v2 还有初始 configOptions。当前 model 沿用已有的模型配置与�
 
 ## 人类可读的任务消息
 
-Hub 从本次 Work 生成 Markdown 指派，包含任务正文、命名输入、输出要求和必要元数据。契约图的命名输入来自校验后的结构化记录，边引用具体前驱交付的 result。继续任务只在原指派已确认插入且 contextEpoch 相同时使用短正文，上下文更新后仍发送完整指派。撤回列表保留明确指令和准确 ID。
+Hub 直接从 Work 生成 Markdown assignment，包含任务正文、输入材料、历史结果、版本和必要元数据；历史结果以引用表达，结构化结果和内部 ID 放入可展开详情。继续任务只在原 assignment 已确认插入且 contextEpoch 相同时使用短正文；上下文更新后仍发送完整 assignment。撤回列表保留明确指令和准确 ID。
 
-模型和对话记录使用同一份正文，界面支持普通 Markdown 渲染和原文复制。字段绑定、schema 校验和调度由 workflow 插件完成，Claude 和 Codex 等后端沿用标准 ACP 输入和 MCP 工具调用。节点的具体值与输出要求随指派发送，常驻前缀只说明如何读取输入、交付和处理校验错误。
+界面沿用普通 Markdown 渲染和原文复制，无文案正则解析。模型与用户记录使用同一份内容；格式修改发生在动态输入，不污染常驻前缀。结构化图与工具契约保持不变；语义完整性用生成与真实 ACP 测试核对，实际模型任务质量需要单独实验，不能仅由格式测试证明。

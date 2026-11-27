@@ -212,7 +212,7 @@ test("runtime-only turn changes publish fresh workflow controls for a pending co
   assert.equal(hub.workflows.read(root.id).interruptions[0].id, "correction", "query publication does not consume input");
 });
 
-test("workflow examples run with named inputs and typed results in the system prompt's conversation language", (t) => {
+test("workflow examples and task/end node names follow the system prompt's conversation language", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-language-"));
   const hub = new Hub(dir); hub.stopping = true;
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -222,26 +222,12 @@ test("workflow examples run with named inputs and typed results in the system pr
     assert.match(prompt, language === "zh-CN" ? /Name every task and end node in Simplified Chinese/ : /Name every task and end node in English/);
     const example = prompt.split("Graph JSONL example:\n")[1].split("\nUse case")[0];
     const parsed = parseGraph(example);
-    const zh = language === "zh-CN";
-    const expected = zh ? ["提取明细", "核算总额", "完成"] : ["Extract items", "Calculate total", "Done"];
+    const expected = language === "zh-CN" ? ["起草", "审阅", "完成"] : ["Draft", "Review", "Done"];
     assert.deepEqual(new Set(parsed.nodes.map(n => n.node)), new Set(expected));
     const f = build(example);
-    const rows = zh
-      ? [{ 品名: "铅笔", 数量: 2, "单价（分）": 300 }, { 品名: "橡皮", 数量: 1, "单价（分）": 400 }]
-      : [{ product: "pencil", quantity: 2, unitPriceCents: 300 }, { product: "eraser", quantity: 1, unitPriceCents: 400 }];
-    const extraction = claim(f, expected[0])!;
-    const lines = zh ? { 订单行: rows } : { orderLines: rows };
-    validateResult(parsed.nodes[0].schema!, lines);
-    extraction.staged = { summary: "OK", result: lines };
-    extraction.state = "ended";
-    normalize(f);
-    const calculation = claim(f, expected[1])!;
-    assert.deepEqual(calculation.assignment.input, zh ? { 明细: rows } : { items: rows });
-    validateResult(parsed.nodes[1].schema!, 1000);
-    calculation.staged = { summary: "OK", result: 1000 };
-    calculation.state = "ended";
-    assert.deepEqual(normalize(f)?.result, zh ? { "总额（分）": 1000 } : { totalCents: 1000 });
-    assert.ok(settled(f));
+    deliver(f, expected[0]);
+    deliver(f, expected[1]);
+    assert.ok(settled(f), "localized names survive assignment and delivery matching");
     const taskPrompt = conversationPrompt({ ...hub.agent(root.agentId), workflowOwner: root.id, workflowNode: expected[0] }, language, "");
     assert.ok(taskPrompt.includes(`node "${expected[0]}"`), "task conversations retain the localized node name");
   }
@@ -281,124 +267,6 @@ test("valid branch combinations beyond the former step cap are all checked", () 
   assert.equal(parseGraph(jsonl).nodes.length, 15);
   const f = empty("uncapped");
   assert.equal(adopt(f, { graphJsonl: jsonl }, true), "plan-1");
-});
-
-test("a binding error holds its consumer and survives restart; repairing only the edge reuses the accepted producer", () => {
-  const integer = { type: "integer" }, emptyInput = { type: "object", additionalProperties: false };
-  const fields = (properties: Record<string, object>) => ({ type: "object", properties, required: Object.keys(properties) });
-  const rows = [
-    { ...task("source"), inputSchema: emptyInput, schema: fields({ first: integer, corrected: integer }) },
-    { ...task("other"), inputSchema: emptyInput, schema: integer },
-    { ...task("check"), inputSchema: fields({ count: { type: "integer", minimum: 1 } }), schema: { type: "boolean" } },
-    { ...end(), inputSchema: fields({ checked: { type: "boolean" }, other: integer }) },
-    { ...edge("check", "end"), bind: { checked: "" } }, { ...edge("other", "end"), bind: { other: "" } },
-  ];
-  const wire = (pointer: string) => graph(...rows, { ...edge("source", "check"), bind: { count: pointer } });
-  const f = build(wire("/first"));
-  assert.throws(() => additional(f, "check", "Check these inputs too"), /count/);
-  assert.deepEqual(f.instances.check.extras, []);
-  const producer = claim(f, "source")!;
-  producer.staged = { summary: "Finished", result: { first: 0, corrected: 3 } };
-  producer.state = "ended";
-  normalize(f);
-  const accepted = f.instances.source.last!.id;
-  const detail = view(f).nodes.find(n => n.name === "check")!;
-  assert.equal(detail.status, "input_error");
-  assert.match(detail.contract!.error!, /count/);
-  assert.ok(detail.contract!.error!.includes(accepted));
-  assert.equal(claim(f, "check"), undefined);
-  const other = claim(f, "other")!;
-  assert.ok(other);
-  normalize(f);
-  assert.equal(f.outbox.filter(n => n.inputFailure).length, 1);
-
-  const restored: Flow = JSON.parse(JSON.stringify(f));
-  normalize(restored);
-  assert.equal(claim(restored, "check"), undefined);
-  assert.equal(restored.outbox.filter(n => n.inputFailure).length, 1);
-  adopt(restored, { graphJsonl: wire("/corrected") }, false);
-  normalize(restored);
-  const check = claim(restored, "check")!;
-  assert.deepEqual(check.assignment.input, { count: 3 });
-  assert.deepEqual(check.assignment.inputSources, { count: { node: "source", pointer: "/corrected", delivery: accepted } });
-  additional(restored, "check", "Check these inputs too");
-  assert.deepEqual(restored.instances.check.extras[0].input, check.assignment.input);
-  assert.equal(restored.instances.other.work!.attempt, other.attempt);
-  assert.ok(restored.history![0].nodes.find(n => n.name === "check")!.contract!.error);
-
-  // A later edit can invalidate a running consumer even when the source and its accepted data stay the same.
-  adopt(restored, { graphJsonl: wire("/first") }, false);
-  normalize(restored);
-  assert.equal(restored.instances.check.work, undefined);
-  assert.ok(!restored.instances.end.last?.valid);
-  assert.equal(restored.instances.source.last!.id, accepted);
-});
-
-test("mutually exclusive edges from the same producer bind only the selected result field", () => {
-  const inputSchema = { type: "object" }, json = (pick: string) => graph(
-    { ...task("route"), inputSchema, schema: { type: "object" } }, { ...end(), inputSchema },
-    { ...edge("route", "end", "yes"), bind: { decision: "/yes" } },
-    { ...edge("route", "end", "no"), bind: { decision: pick } },
-  );
-  const f = build(json("/no"));
-  const work = claim(f, "route")!;
-  work.staged = { summary: "Decisions ready", result: { yes: true, no: false, count: 0 } };
-  work.state = "ended";
-  normalize(f);
-  assert.equal(view(f).nodes.find(n => n.name === "end")?.status, "waiting");
-  select(f, "route", ["no"]);
-  assert.deepEqual(f.instances.end.last?.result, { decision: false });
-  const choice = f.instances.route.last!.choice;
-  adopt(f, { graphJsonl: json("/count") }, false);
-  const publication = normalize(f);
-  assert.deepEqual(publication?.result, { decision: 0 });
-  assert.deepEqual(f.instances.route.last!.choice, choice);
-});
-
-test("editing only a skipped binding preserves the running consumer and its eventual publication", () => {
-  const inputSchema = { type: "object" }, plan = (unused: string) => graph(
-    { ...task("source"), inputSchema, schema: { type: "object" } },
-    { ...task("consumer"), inputSchema, schema: { type: "string" } }, { ...end(), inputSchema },
-    { ...edge("source", "consumer", "used"), bind: { data: "/middle" } },
-    { ...edge("source", "consumer", "unused"), bind: { data: unused } },
-    { ...edge("consumer", "end"), bind: { answer: "" } },
-  );
-  const f = build(plan("/a"));
-  const source = claim(f, "source")!;
-  source.staged = { summary: "Ready", result: { middle: 2 } };
-  source.state = "ended";
-  normalize(f);
-  select(f, "source", ["used"]);
-  const running = claim(f, "consumer")!;
-  adopt(f, { graphJsonl: plan("/z") }, false);
-  normalize(f);
-  assert.equal(f.instances.consumer.work, running);
-  running.staged = { summary: "Complete", result: "done" };
-  running.state = "ended";
-  assert.deepEqual(normalize(f)?.result, { answer: "done" });
-  const endId = f.instances.end.last!.id;
-  adopt(f, { graphJsonl: plan("/another") }, false);
-  assert.equal(normalize(f), undefined);
-  assert.equal(f.instances.end.last!.id, endId);
-});
-
-test("reaching a selected end withdraws input-error notices from the abandoned branch", () => {
-  const inputSchema = { type: "object" };
-  const f = build(graph(
-    { ...task("source"), inputSchema, schema: { type: "object" } },
-    { ...task("calc"), inputSchema, schema: { type: "number" } },
-    { ...end("full"), inputSchema }, { ...end("brief"), inputSchema },
-    { ...edge("source", "calc"), bind: { amount: "/amount" } }, edge("calc", "full"),
-    edge("source", "full", "long"), edge("source", "brief", "short"),
-  ));
-  deliver(f, "source");
-  assert.ok(f.outbox.some(n => n.inputFailure?.node === "calc"));
-  select(f, "source", ["short"]);
-  assert.ok(f.instances.brief.last?.valid);
-  assert.ok(!f.outbox.some(n => n.inputFailure));
-  const skipped = view(f).nodes.find(n => n.name === "calc")!;
-  assert.equal(skipped.status, "skipped");
-  assert.equal(skipped.contract?.error, undefined);
 });
 
 test("adoption invalidates in-flight consumers before redispatch, keeps siblings and unions actual predecessors", () => {

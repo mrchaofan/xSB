@@ -589,7 +589,7 @@ function entryNode(agentId, entry) {
 
 // ---------- 右栏：文件 ----------
 
-export async function followContentLink(href, container, agentId, baseFile) {
+async function followContentLink(href, container, agentId, baseFile) {
   const owner = rootSession();
   container.querySelector(".content-error")?.remove();
   try {
