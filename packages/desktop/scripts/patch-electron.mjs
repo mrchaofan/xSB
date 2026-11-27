@@ -1,6 +1,6 @@
 // Applies patches/electron@<version>.patch to node_modules/electron after every install.
 //
-// The app runs on a private Electron build (it has <webview2>). The npm package is the
+// The app runs on a private Electron build (src/page-input.ts reads its debugger input flag). The npm package is the
 // official one; the patch teaches its installer to download the binary from the mirror
 // that ../.electron.mirror.mjs names, instead of the official release.
 // Both the root and desktop postinstall run this idempotent check after dependency installation.

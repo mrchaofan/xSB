@@ -4,6 +4,8 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { app, BrowserWindow, ipcMain, nativeImage } from "electron";
+import type { WebContentsView } from "electron";
+import { PageHost } from "../src/page-host.ts";
 import { Pages } from "../src/pages.ts";
 import { BrowserSession } from "../src/browser.ts";
 
@@ -53,16 +55,15 @@ let browser: BrowserSession | undefined;
 async function main() {
 try {
   await app.whenReady();
-  assert.ok(Pages.supported, "this integration test requires the project's private Electron with webview2");
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as { port: number };
   const url = `http://127.0.0.1:${address.port}`;
   const preload = path.join(cwd, "empty-preload.cjs");
+  // The calls of window.xsb that showing pages uses, routed as main.ts routes them.
   fs.writeFileSync(preload, `const {contextBridge, ipcRenderer} = require('electron');
+const call = (method) => (...args) => ipcRenderer.invoke('xsb-test', method, ...args).catch((e) => { throw new Error(e.message.replace(/^Error invoking remote method 'xsb-test': (\\w*Error: )?/, '')); });
 contextBridge.exposeInMainWorld('xsb', {
-  openPage: (url, embedded, sessionId) => ipcRenderer.invoke('test-open-page', url, embedded, sessionId),
-  page: (id, op, arg) => ipcRenderer.invoke('test-page', id, op, arg),
-  pageWindow: () => ipcRenderer.invoke('test-page-window'),
+  ...Object.fromEntries(['openPage', 'page', 'pageWindow', 'overlay', 'overlayDone'].map((method) => [method, call(method)])),
   language: 'zh-CN',
   on: fn => ipcRenderer.on('xsb:event', (_, event) => fn(event))
 });`);
@@ -71,13 +72,12 @@ contextBridge.exposeInMainWorld('xsb', {
   const tabHtml = path.join(cwd, 'tabs.html');
   fs.writeFileSync(tabHtml, `<html><link rel="stylesheet" href="styles.css"><body style="margin:0;height:100vh;display:flex;flex-direction:column"><input id="hostEditor" style="position:absolute;left:-9999px">
 <div id="tabs"></div><div id="side-workflow"></div><div id="side-launcher"></div><div id="side-artifacts"></div>
-<section id="side-web" style="display:flex;flex:1;flex-direction:column"><header><button id="web-back"></button><button id="web-forward"></button><button id="web-reload"></button><button id="web-external"></button><button id="web-detach"></button><button id="web-annotate"></button><input id="web-url"></header><main id="web-body" class="web-body"></main></section>
+<section id="side-web" style="display:flex;flex:1;flex-direction:column"><header><button id="web-back"></button><button id="web-forward"></button><button id="web-reload"></button><button id="web-external"></button><button id="web-detach"></button><button id="web-annotate"></button><input id="web-url"></header><div id="web-annotate-bar" class="annotate-bar" hidden></div><main id="web-body" class="web-body"></main></section>
 <script>window.auditState = { pages: [], agents: [], artifacts: [], artifactTabs: [], tab: null, workflowTab: false, catalogTab: false };</script>
 <script type="module">
 import {onPage, onPageRemoved, selectTab} from './pages-audit.js';
 window.selectPage = selectTab;
 xsb.on(event => {
-  if (event.annotationTarget) window.target = event.annotationTarget;
   if (event.webAnnotation) window.notes = [...(window.notes ?? []), event.webAnnotation];
   if (event.webAnnotationsRemoved) window.removed = [...(window.removed ?? []), event.webAnnotationsRemoved];
   if (event.page) onPage(event.page);
@@ -86,12 +86,11 @@ xsb.on(event => {
 </script></body></html>`);
   fs.writeFileSync(html, `<html><link rel="stylesheet" href="styles.css"><body style="margin:0;height:100vh;display:flex"><input id="hostEditor" style="position:absolute;left:-9999px"><main class="web-body"></main>
 <script type="module">
-import {showWeb} from './webview.js';
+import {showWeb} from './page-slot.js';
 const pages = new Map(); let selected;
 const container = document.querySelector('main');
 const show = page => page.window ? container.replaceChildren() : showWeb(container, page);
 xsb.on(event => {
-  if (event.annotationTarget) window.target = event.annotationTarget;
   if (event.webAnnotation) window.notes = [...(window.notes ?? []), event.webAnnotation];
   if (event.webAnnotationsRemoved) window.removed = [...(window.removed ?? []), event.webAnnotationsRemoved];
   if (event.page) {
@@ -101,12 +100,28 @@ xsb.on(event => {
   }
 });
 </script></body></html>`);
-  ipcMain.handle('test-page-window', event => pages?.shownIn(event.sender));
-  host = new BrowserWindow({ show: false, webPreferences: { preload, webview2Tag: true } as any });
+  host = new BrowserWindow({ show: false, webPreferences: { preload } });
+  const file = (name: string) => new URL(`file://${path.join(cwd, name)}`).href;
+  const shell = { preload, overlayUrl: file('overlay.html'), editorUrl: file('annotation.html'), controlText: "智能体正在控制网页" };
+  pages = new Pages(new PageHost(host, shell), { ...shell, pageWindowUrl: file('page.html'), toneOf: (sessionId) => sessionId === 'sa' ? 'claude' : 'default' });
+  ipcMain.handle('xsb-test', async (event, method: string, ...args: any[]) => {
+    const owner = pages!.hostOwning(event.sender);
+    if (!owner) throw new Error('this window is closing');
+    if (method === 'openPage') return pages!.open(args[0], { embedded: args[1], sessionId: args[2] });
+    if (method === 'pageWindow') return pages!.shownIn(event.sender);
+    if (method === 'overlay') return owner.overlay.show(args[0], event.sender);
+    if (method === 'overlayDone') return owner.overlay.done(args[0], args[1]);
+    const [id, op, arg] = args;
+    if (op === 'bounds' || op === 'focus') return pages!.present(id, event.sender, op, arg);
+    if (/^annotat/.test(op)) return pages!.annotate(id, event.sender, op, arg);
+    return pages!.call(id, op, arg);
+  });
   await host.loadURL(hostUrl);
-  pages = new Pages(host.webContents, { preload, pageWindowUrl: new URL(`file://${path.join(cwd, 'page.html')}`).href, controlText: "智能体正在控制网页", toneOf: (sessionId) => sessionId === 'sa' ? 'claude' : 'default' });
-  ipcMain.handle('test-open-page', (_event, url, embedded, sessionId) => pages!.open(url, { embedded, sessionId }));
-  ipcMain.handle('test-page', (_event, id, op, arg) => pages!.call(id, op, arg));
+  // What a window shows, bottom to top: its views.
+  const views = (window: BrowserWindow) => window.contentView.children as WebContentsView[];
+  const pageViewIn = (window: BrowserWindow, id: string) => views(window).find((view) => view.webContents === pages!.contents(id));
+  const shown = (id: string) => BrowserWindow.getAllWindows().some((window) => !!pageViewIn(window, id));
+  const appView = (window: BrowserWindow, name: string) => views(window).find((view) => view.webContents.getURL().endsWith(name));
   let context = { agentId: 'a', sessionId: 'sa', turnId: 'native-turn', active: true, turns: [{ id: 'native-turn', startedAt: Date.now() - 1 }] };
   const listeners = new Set<(state: any) => void>();
   const runtime = { snapshot: async () => context, watch: (fn: (state: any) => void) => { listeners.add(fn); fn(context); return () => listeners.delete(fn); }, close: () => listeners.clear() };
@@ -125,8 +140,9 @@ xsb.on(event => {
   await invoke('browser_navigate', { url });
   const agentPage = pages.list().at(-1)!;
   await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === agentPage.id);
-  await until(() => pages!.contents(agentPage.id)!.isAttached());
-  assert.equal(await host.webContents.executeJavaScript("document.querySelector('#web-body webview2').getAttribute('web-contents-id')"), String(agentPage.contentsId), 'an agent-created tab is displayed');
+  await until(() => !!pageViewIn(host!, agentPage.id));
+  assert.equal(views(host).filter((view) => pages!.list().some((p) => pages!.contents(p.id) === view.webContents)).length, 1, 'a window shows one page');
+  assert.equal(pages.contents(agentPage.id)!.isFocused(), false, 'an agent-created tab is displayed without the focus');
   assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor');
   // Opening another tab can change the displayed page even while a different window has focus.
   const foreground = new BrowserWindow({ show: false });
@@ -161,22 +177,27 @@ xsb.on(event => {
   const userPage = pages.open(url, { sessionId: 'sa' });
   await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === userPage.id);
   await until(() => pages!.contents(userPage.id)!.getTitle() === 'Opener' && !pages!.contents(userPage.id)!.isLoading());
-  assert.equal(await host.webContents.executeJavaScript('document.activeElement.tagName'), 'WEBVIEW2', 'a user-created tab selects and focuses its page');
+  await until(() => pages!.contents(userPage.id)!.isFocused());
+  assert.ok(pageViewIn(host, userPage.id), 'a user-created tab selects and shows its page');
   await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
   await pages.navigate(userPage.id, url);
   assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor', 'page updates do not focus an existing tab again');
+  host.webContents.focus();
   await host.webContents.executeJavaScript(`window.selectPage('${agentPage.id}'); document.querySelector('#hostEditor').focus(); true`);
-  await until(() => pages!.contents(agentPage.id)!.isAttached());
+  await until(() => !!pageViewIn(host!, agentPage.id));
   const agentLink = Number(/\[(\d+)\] link "Agent popup"/.exec((await invoke('browser_snapshot')).content[0].text)![1]);
   const beforePopup = pages.list().length;
   await invoke('browser_click', { ref: agentLink });
   await until(() => pages!.list().length > beforePopup);
   const agentPopup = pages.list().at(-1)!;
   await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === agentPopup.id);
+  await until(() => !!pageViewIn(host!, agentPopup.id));
   assert.notEqual(agentPopup.id, userPage.id, 'an agent popup switches the displayed tab');
   assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor');
+  assert.equal(host.webContents.isFocused(), true, 'an agent popup leaves the keyboard with the window');
   await host.webContents.executeJavaScript("window.selectPage(null); document.querySelector('.launcher-item').click(); true");
   await until(async () => (await host!.webContents.executeJavaScript('document.activeElement.id')) === 'web-url');
+  assert.equal(host.webContents.isFocused(), true, 'a blank tab leaves the keyboard with the address bar');
   const blankId = await host.webContents.executeJavaScript('window.auditState.tab');
   assert.equal(pages.list().find((p) => p.id === blankId)!.background, false);
   console.log("PASS user tabs focus, new agent tabs and popups switch display without host focus, existing agent selection stays in the background");
@@ -185,14 +206,16 @@ xsb.on(event => {
     await checkTabPresentation();
     return;
   }
-  // The shield is an element of the document that shows the page, over the whole of its webview2.
-  const shieldIn = (window: BrowserWindow) => window.webContents.executeJavaScript(`(() => {
-    const shield = document.querySelector('.web-body > .control-shield'), view = document.querySelector('.web-body > webview2');
-    if (!shield || !view) return null;
-    const a = shield.getBoundingClientRect(), b = view.getBoundingClientRect();
-    return { label: shield.textContent, animation: getComputedStyle(shield).animationName, covers: a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && b.width > 0,
-      top: document.elementFromPoint(a.x + a.width / 2, a.y + a.height / 2) === shield, focused: shield.contains(document.activeElement) };
-  })()`);
+  // The shield is a view of the window over the page's view, the same size.
+  const shieldIn = async (window: BrowserWindow) => {
+    const all = views(window), shield = all.find((view) => view.webContents.getURL().startsWith('data:text/html'));
+    const page = all.find((view) => pages!.list().some((p) => pages!.contents(p.id) === view.webContents));
+    if (!shield || !page || shield.webContents.isLoadingMainFrame()) return null;
+    const a = shield.getBounds(), b = page.getBounds();
+    const { label, animation } = await shield.webContents.executeJavaScript("({ label: document.querySelector('.label').textContent, animation: getComputedStyle(document.querySelector('.frame')).animationName })");
+    return { label, animation, covers: a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && b.width > 0,
+      top: all.indexOf(shield) > all.indexOf(page), focused: shield.webContents.isFocused() };
+  };
   const SHIELD = { label: '智能体正在控制网页', animation: 'control-breathe', covers: true, top: true, focused: false };
   const userTypes = async (key: string) => {
     await original.executeJavaScript("document.querySelector('#field').focus(); true");
@@ -208,7 +231,7 @@ xsb.on(event => {
   await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
   await invoke("browser_navigate", { url });
   const original = pages.contents("p1")!;
-  await until(() => original.isAttached());
+  await until(() => shown('p1'));
   // Control lasts the tool call only: the page is the user's again afterwards.
   assert.equal(pages.list()[0].controlling, false);
   await userTypes('A');
@@ -219,7 +242,7 @@ xsb.on(event => {
   const slowCall = invoke("browser_navigate", { url: `${url}/later` });
   await until(async () => pages!.list()[0].controlling && !!(await shieldIn(host!)));
   assert.deepEqual(await shieldIn(host), SHIELD);
-  assert.equal(host.contentView.children.length, 0, 'no view is laid over the window');
+  assert.deepEqual(views(host).map((view) => view.webContents === original ? 'page' : 'shield'), ['page', 'shield'], 'the page and its shield, nothing else');
   assert.throws(() => pages!.call('p1', 'reload'), /智能体/);
   await userTypes('A');
   await userClicks();
@@ -248,28 +271,32 @@ xsb.on(event => {
   await invoke('browser_click', { ref: Number(/\[(\d+)\] button "Change"/.exec(again)![1]) });
   await invoke('browser_type', { ref: Number(/\[(\d+)\] textbox "Agent input"/.exec(again)![1]), text: 'agent works' });
   assert.equal(await original.executeJavaScript("window.clicks"), 2);
-  // The user's click on the same place lands on the shield.
+  // The user's click on the page while the shield is up does nothing there.
   pages.setAgentControl('p1', true);
   await until(async () => !!(await shieldIn(host!)));
-  const button = await original.executeJavaScript("(()=>{const r=document.querySelector('button').getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()");
-  const viewOffset = await host.webContents.executeJavaScript("(()=>{const r=document.querySelector('main webview2').getBoundingClientRect();return {x:r.x,y:r.y}})()");
-  await host.webContents.executeJavaScript("addEventListener('mousedown', e => { window.shielded = e.target.className; }, true); true");
-  for (const type of ['mouseDown', 'mouseUp'] as const) host.webContents.sendInputEvent({ type, x: button.x + viewOffset.x, y: button.y + viewOffset.y, button: 'left', clickCount: 1 });
-  await until(async () => (await host!.webContents.executeJavaScript("window.shielded")) === 'control-shield');
+  await userClicks();
+  await pause(100);
   assert.equal(await original.executeJavaScript("window.clicks"), 2);
   pages.setAgentControl('p1', false);
+  await until(async () => !(await shieldIn(host!)));
   // Focus emulation: the agent's clicks and typing leave the host's real focus where the user had it.
   assert.equal(await host.webContents.executeJavaScript("document.activeElement.id"), 'hostEditor');
   assert.doesNotThrow(() => pages!.call('p1', 'forward'));
 
-  // Annotations: the debugger's node selection, edited in the host, embedded in the page.
-  const target = () => host!.webContents.executeJavaScript("window.target ?? null");
+  // Annotations: the debugger's node selection, edited in a view over the page, embedded in the page.
+  const target = async () => (pages as any).pages.get('p1')?.annotator?.pending ?? { seq: 0, rect: null };
+  const editor = () => appView(host!, 'annotation.html');
   const userClicksAt = async (selector: string) => {
     const point = await original.executeJavaScript(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()`);
-    original.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y });
-    original.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 });
-    original.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    // The user's pointer, through the renderer's input like a real one. Not sendInputEvent: on macOS a window covered by
+    // others (as on a busy test machine) leaves a page's new document without frames, and native pointer events are dropped.
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased'])
+      await original.debugger.sendCommand('Input.dispatchMouseEvent', { type, x: point.x, y: point.y, button: type === 'mouseMoved' ? 'none' : 'left', clickCount: 1 });
   };
+  // The debugger's node selection only works on a page that is drawn: the user annotates in a window they see.
+  // On macOS a window under others is not drawn, so keep this one on top of everything while annotating.
+  host.setAlwaysOnTop(true, 'screen-saver');
+  host.showInactive();
   await assert.rejects(pages.annotate('p1', original, 'annotate', true), /elsewhere/);
   await assert.rejects(pages.annotate('p1', host.webContents, 'annotationSave', 'x'), /off/);
   await pages.annotate('p1', host.webContents, 'annotate', true);
@@ -277,15 +304,41 @@ xsb.on(event => {
   await userClicksAt('button');
   await until(async () => (await target())?.seq === 1 && !!(await target()).rect);
   assert.match((await target()).label, /^button/);
+  // The editor is a view over the page, below the element, labelled with it.
+  await until(async () => !!editor() && !editor()!.webContents.isLoadingMainFrame() && /^button/.test(await editor()!.webContents.executeJavaScript("document.querySelector('.annotate-label').textContent")));
+  const placed = editor()!.getBounds(), pageBox = pageViewIn(host, 'p1')!.getBounds(), element = (await target()).rect;
+  assert.equal(views(host).at(-1), editor(), 'the editor is the top view');
+  assert.equal(await editor()!.webContents.executeJavaScript("getComputedStyle(document.querySelector('.annotate-editor')).borderTopColor"), 'rgb(217, 119, 87)', 'the editor uses the tone of the page being annotated');
+  assert.ok(placed.y >= pageBox.y + element.y + element.height, 'the editor is below the element');
+  assert.equal(placed.width, 300);
+  // A fixed CSS slot still moves and grows in native DIPs when the app is zoomed. The
+  // inspector reports the selected element in the website's independently zoomed CSS pixels.
+  await host.webContents.executeJavaScript("document.querySelector('.page-slot').style.cssText = 'position:fixed;left:40px;top:32px;width:540px;height:360px'; true");
+  host.webContents.setZoomFactor(1.25);
+  original.setZoomFactor(1.5);
+  await until(async () => {
+    const page = pageViewIn(host!, 'p1')!.getBounds(), editorBox = editor()!.getBounds();
+    const rect = (await target()).rect;
+    return page.x === 50 && page.y === 40 && page.width === 675 && page.height === 450
+      && editorBox.width === 375 && rect && editorBox.y === page.y + Math.round((rect.y + rect.height) * 1.5 + 10);
+  });
+  await until(async () => Math.abs(editor()!.webContents.getZoomFactor() - 1.25) < 0.001);
+  host.webContents.setZoomFactor(1);
+  original.setZoomFactor(1);
+  await host.webContents.executeJavaScript("document.querySelector('.page-slot').removeAttribute('style'); true");
+  await until(() => editor()!.getBounds().width === 300);
   assert.equal(await original.executeJavaScript("window.clicks"), 2, 'selection takes the click, not the page');
   assert.equal(pages.list()[0].annotating, true, 'a selection does not end the mode');
   await userTypes('Z');
   await pause(100);
   assert.equal(await original.executeJavaScript("document.querySelector('#field').value"), 'agent works', 'the keyboard is blocked while annotating');
   await assert.rejects(pages.annotate('p1', host.webContents, 'annotationSave', ' '), /characters/);
-  await pages.annotate('p1', host.webContents, 'annotationSave', '检查这个按钮 <b>not html</b>');
-  assert.equal(pages.list()[0].annotations, 1);
+  await assert.rejects(pages.annotate('p1', pages.contents('p1')!, 'annotationSave', 'x'), /elsewhere/);
+  // The editor's own document saves the note.
+  await editor()!.webContents.executeJavaScript("document.querySelector('.annotate-text').value = '检查这个按钮 <b>not html</b>'; document.querySelector('.annotate-editor').requestSubmit(); true");
+  await until(() => pages!.list()[0].annotations === 1);
   assert.equal((await target()).seq, 0);
+  assert.equal(editor(), undefined, 'the editor goes when its note is saved');
   // The note goes to the conversation: the user's words, the element's HTML and its picture.
   const [sent] = await host.webContents.executeJavaScript("window.notes");
   assert.equal(sent.sessionId, 'sa');
@@ -315,8 +368,10 @@ xsb.on(event => {
   await until(async () => Math.abs(((await target()).rect?.y ?? -1) - (first.y + 20)) < 1.5);
   await original.executeJavaScript("document.querySelector('#region').scrollTop = 0; true");
   await until(async () => (await target()).seq === 2 && (await target()).rect === null);
-  await pages.annotate('p1', host.webContents, 'annotationDiscard');
-  await until(async () => (await target()).seq === 0);
+  const moved = editor()!.getBounds();
+  await editor()!.webContents.executeJavaScript("document.querySelector('.annotate-text').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true");
+  await until(async () => (await target()).seq === 0 && !editor());
+  assert.ok(moved.width > 0);
   // An agent taking the page ends the annotating; the note stays.
   await invoke('browser_snapshot');
   assert.equal(pages.list()[0].annotating, false);
@@ -338,6 +393,8 @@ xsb.on(event => {
   await pages.navigate('p1', url);
   await until(() => !original.isLoading() && pages!.list()[0].annotations === 0);
   await pause(200);
+  // Node selection needs a drawn page; this native suite runs on an unlocked desktop.
+  await until(async () => await original.executeJavaScript('document.visibilityState') === 'visible');
   await userClicksAt('button');
   await until(async () => (await target())?.seq === 3 && !!(await target()).rect);
   // Clearing on the page tells the main window which notes went, for the composer to drop them too.
@@ -354,17 +411,15 @@ xsb.on(event => {
   assert.deepEqual({ ...cleared, ids: [...cleared.ids].sort() }, { pageId: 'p1', sessionId: 'sa', ids: [...kept].sort() });
   await pages.annotate('p1', host.webContents, 'annotate', false);
   assert.equal(pages.list()[0].annotating, false);
+  host.setAlwaysOnTop(false);
+  host.hide();
   await original.executeJavaScript("document.querySelector('#field').value = 'agent works'; true");
-  // A popup is a webview2 page in a tab, like any other; it has no opener. An empty one, which only its opener could fill, is not opened.
-  await original.executeJavaScript("window.open('about:blank'); true", true);
-  await pause(200);
-  assert.equal(pages.list().length, 1);
+  // A popup is a page in a tab, like any other, and keeps its opener.
   await original.executeJavaScript("window.open('/popup'); true", true);
   await until(() => pages!.list().length === 2 && pages!.contents('p2')!.getTitle() === 'Popup');
   assert.equal(original.getURL(), `${url}/`);
   const child = pages.contents("p2")!;
-  assert.equal(String(child.getType()), 'webview2');
-  assert.equal(await child.executeJavaScript("!!window.opener"), false);
+  assert.equal(await child.executeJavaScript("!!window.opener"), true);
   assert.equal(await child.executeJavaScript("document.referrer"), `${url}/`);
   assert.equal(await child.executeJavaScript("typeof window.xsb"), "undefined");
   assert.equal(child.session, original.session);
@@ -375,13 +430,32 @@ xsb.on(event => {
   assert.equal(BrowserWindow.getAllWindows().length, 1, 'window.open must not create a BrowserWindow');
   const snapshot = await invoke("browser_snapshot");
   assert.match(snapshot.content[0].text, /Popup page/);
+  // The host is hidden: the page it shows is drawn in the screenshot window for the while, then goes back.
+  assert.equal(host.isVisible(), false);
+  await until(() => !!pageViewIn(host!, 'p2'));
   await invoke("browser_screenshot");
-  assert.equal(host.contentView.children.length, 0);
+  assert.ok(pageViewIn(host, 'p2'), 'a page drawn away from a hidden window goes back to it');
+  assert.equal(host.isVisible(), false, 'the screenshot does not show the hidden window');
+  // The renderer can switch tabs or hide its slot while the screenshot is in flight.
+  const slot = pageViewIn(host, 'p2')!.getBounds();
+  const resizedSlot = { x: 10, y: 20, width: 320, height: 240 };
+  await pages.drawn('p2', async () => {
+    const capture = BrowserWindow.getAllWindows().find((win) => win !== host)!;
+    pages!.present('p2', host!.webContents, 'bounds', resizedSlot);
+    assert.ok(pageViewIn(capture, 'p2'), 'a hidden window reporting new bounds leaves the screenshot in progress');
+    assert.equal(pageViewIn(host!, 'p2'), undefined);
+  });
+  assert.deepEqual(pageViewIn(host, 'p2')!.getBounds(), resizedSlot, 'after capture the page takes its latest slot');
+  await pages.drawn('p2', async () => pages!.present('p1', host!.webContents, 'bounds', slot));
+  assert.ok(pageViewIn(host, 'p1'), 'returning a loan does not replace another tab');
+  pages.present('p2', host.webContents, 'bounds', slot);
+  await pages.drawn('p2', async () => pages!.present('p2', host!.webContents, 'bounds', null));
+  assert.equal(pageViewIn(host, 'p2'), undefined, 'returning a loan does not uncover a hidden slot');
+  pages.present('p2', host.webContents, 'bounds', slot);
   // An agent works in the background: selecting and drawing a page that is not on screen leaves the user's view alone.
   await invoke("browser_select", { pageId: "p1" });
-  const shownBefore = await host.webContents.executeJavaScript("document.querySelector('main webview2')?.getAttribute('web-contents-id')");
-  assert.equal(shownBefore, String(child.id));
-  assert.equal(original.isAttached(), false);
+  await until(() => !!pageViewIn(host!, 'p2'));
+  assert.equal(shown('p1'), false);
   host.show();
   host.focus();
   await until(() => host!.isFocused());
@@ -396,7 +470,7 @@ xsb.on(event => {
       assert.equal(drawing.isFocused(), false);
       assert.equal(focused.isFocused(), true, 'creating and showing the screenshot window keeps the active window');
       assert.equal(await host!.webContents.executeJavaScript("document.activeElement.id"), 'hostEditor');
-      assert.equal(await host!.webContents.executeJavaScript("document.querySelectorAll('webview2').length"), 1, 'the screenshot never attaches a second page to the host');
+      assert.deepEqual(views(host!).map((view) => view.webContents), [child], 'the screenshot never puts a second page in the host');
       screenshotScale = await original.executeJavaScript('devicePixelRatio');
       return draw();
     });
@@ -408,9 +482,9 @@ xsb.on(event => {
   assert.deepEqual(nativeImage.createFromBuffer(Buffer.from(offscreen.content[0].data, 'base64')).getSize(), { width: 800 * screenshotScale, height: 600 * screenshotScale });
   assert.equal(host.isFocused(), true, 'closing the screenshot window keeps the active window');
   assert.equal(await host.webContents.executeJavaScript("document.activeElement.id"), 'hostEditor');
-  assert.equal(await host.webContents.executeJavaScript("document.querySelector('main webview2')?.getAttribute('web-contents-id')"), shownBefore);
+  assert.ok(pageViewIn(host, 'p2'), 'the page shown stays shown');
   assert.equal(BrowserWindow.getAllWindows().length, 1, 'the temporary screenshot window is cleaned up');
-  await until(() => !original.isAttached());
+  assert.equal(shown('p1'), false);
   // The screenshot must also leave a different foreground window and its editor alone.
   const other = new BrowserWindow({ show: false });
   await other.loadURL('data:text/html,<input id="otherEditor">');
@@ -427,13 +501,74 @@ xsb.on(event => {
   assert.equal(await other.webContents.executeJavaScript("document.activeElement.id"), 'otherEditor');
   await assert.rejects(pages.drawn('p1', async () => { throw new Error('capture failed'); }), /capture failed/);
   assert.equal(other.isFocused(), true, 'a failed screenshot also keeps the active window');
-  assert.equal(original.isAttached(), false, 'the page is detached after a failed screenshot');
+  assert.equal(shown('p1'), false, 'the page leaves the window after a failed screenshot');
   assert.equal(original.isDestroyed(), false);
   assert.equal(BrowserWindow.getAllWindows().length, 2, 'a failed capture leaves no screenshot window');
   other.destroy();
   host.show();
   host.focus();
   await until(() => host!.isFocused());
+  // The overlay: a menu over the page, drawn in a view the size of the window, closing itself.
+  const overlay = () => appView(host!, 'overlay.html');
+  const menu = (items = "[{ label: 'A' }, null, { label: 'B', icon: 'copy' }]") => host!.webContents.executeJavaScript(`window.answer = undefined; xsb.overlay({ kind: 'menu', x: 40, y: 40, label: 'menu', items: ${items} }).then((a) => { window.answer = a; }); true`);
+  const answer = async () => { let a: unknown; await until(async () => (a = await host!.webContents.executeJavaScript('window.answer')) !== undefined); return a; };
+  const overlayReady = () => until(async () => !!overlay() && !overlay()!.webContents.isLoadingMainFrame() && await overlay()!.webContents.executeJavaScript("!!document.querySelector('.overlay-menu')"));
+  await menu();
+  await overlayReady();
+  assert.equal(views(host).at(-1), overlay(), 'the overlay is the top view');
+  const { width, height } = host.getContentBounds();
+  assert.deepEqual(overlay()!.getBounds(), { x: 0, y: 0, width, height }, 'the overlay is the size of the window');
+  assert.ok(overlay()!.webContents.isFocused(), 'the overlay takes the keyboard while it is open');
+  assert.equal(await overlay()!.webContents.executeJavaScript("document.querySelectorAll('.overlay-menu button').length"), 2);
+  await overlay()!.webContents.executeJavaScript("document.querySelectorAll('.overlay-menu button')[1].click(); true");
+  assert.equal(await answer(), 2, 'the answer is the index of the item chosen');
+  await until(() => !overlay());
+  await until(() => host!.webContents.isFocused());
+  // A click outside the menu, on the overlay's own backdrop, closes it with no answer.
+  await menu();
+  await overlayReady();
+  await overlay()!.webContents.executeJavaScript("document.querySelector('.overlay-layer').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); true");
+  assert.equal(await answer(), null);
+  await until(() => !overlay());
+  host.webContents.setZoomFactor(1.25);
+  await menu();
+  await overlayReady();
+  const menuPosition = await overlay()!.webContents.executeJavaScript("document.querySelector('.overlay-menu').getBoundingClientRect().toJSON()");
+  const menuZoom = overlay()!.webContents.getZoomFactor();
+  assert.deepEqual([menuPosition.x, menuPosition.y].map((n: number) => Math.round(n * menuZoom)), [50, 50], 'the menu stays at the zoomed pointer');
+  overlay()!.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+  await answer();
+  host.webContents.setZoomFactor(1);
+  // So does Escape, and losing the focus.
+  await menu();
+  await overlayReady();
+  overlay()!.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+  assert.equal(await answer(), null);
+  await menu();
+  await overlayReady();
+  host.webContents.focus();
+  assert.equal(await answer(), null);
+  await until(() => !overlay());
+  // A second menu replaces the first, which answers nothing.
+  await host.webContents.executeJavaScript("window.first = undefined; xsb.overlay({ kind: 'menu', x: 0, y: 0, items: [{ label: 'A' }] }).then((a) => { window.first = a; }); true");
+  await menu();
+  await until(async () => (await host!.webContents.executeJavaScript('window.first')) === null);
+  await overlayReady();
+  overlay()!.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+  await answer();
+  // The shield sits between the page and the overlay; the page keeps the bottom.
+  pages.setAgentControl('p2', true);
+  await until(async () => !!(await shieldIn(host!)));
+  await menu();
+  await overlayReady();
+  assert.deepEqual(views(host).map((view) => view.webContents === child ? 'page' : view === overlay() ? 'overlay' : 'shield'), ['page', 'shield', 'overlay']);
+  // A click on the shield leaves the keyboard with the window's document.
+  overlay()!.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+  await answer();
+  views(host).find((view) => view.webContents.getURL().startsWith('data:'))!.webContents.focus();
+  await until(() => host!.webContents.isFocused());
+  pages.setAgentControl('p2', false);
+  await until(async () => !(await shieldIn(host!)));
   // In a window of its own a page is shown by the app's page.html, shield and all.
   await invoke("browser_select", { pageId: "p2", presentation: "window" });
   assert.equal(pages.contents("p2"), child);
@@ -443,19 +578,22 @@ xsb.on(event => {
   pages.setAgentControl('p2', true);
   await until(async () => !!(await shieldIn(own)));
   assert.deepEqual(await shieldIn(own), SHIELD);
-  assert.equal(own.contentView.children.length, 0);
   assert.equal(await shieldIn(host), null);
+  assert.equal(pageViewIn(host, 'p2'), undefined, 'a page is shown in one window at a time');
   if (process.env.XSB_SHOTS) fs.writeFileSync(path.join(process.env.XSB_SHOTS, 'shield-window.png'), (await own.webContents.capturePage()).toPNG());
   pages.setAgentControl('p2', false);
   await until(async () => !(await shieldIn(own)));
   await invoke("browser_select", { pageId: "p2", presentation: "panel" });
   await invoke("browser_screenshot");
   assert.equal(BrowserWindow.getAllWindows().length, 1);
+  await until(() => !!pageViewIn(host!, 'p2'));
+  assert.equal(child.isDestroyed(), false, 'the page came back without loading again');
+  assert.equal(child.getTitle(), 'Popup');
   await original.executeJavaScript("document.querySelector('#post').submit(); true", true);
   await until(() => postBody === "value=preserved+%C3%A9");
   await until(() => pages!.list().length === 3 && pages!.contents("p3")!.getTitle() === "POST child");
   await original.executeJavaScript("document.querySelector('#download').submit(); true", true);
-  await until(async () => JSON.parse((await invoke("browser_downloads_list")).content[0].text).downloads.length === 1);
+  await until(async () => JSON.parse((await invoke("browser_downloads_list")).content[0].text).downloads[0]?.state === 'completed');
   const downloaded = await invoke("browser_downloads_list");
   const records = JSON.parse(downloaded.content[0].text).downloads;
   assert.equal(records.length, 1);
@@ -528,18 +666,43 @@ xsb.on(event => {
   assert.equal(pages.list().find((p) => p.id === 'p6')!.background, false);
   assert.equal(pages.list().find((p) => p.id === 'p6')!.window, false);
   assert.equal(BrowserWindow.getAllWindows().length, 1, 'user popups must also stay in tabs');
+  // An empty popup that its opener writes into is a tab too.
+  await original.executeJavaScript("window.written = window.open('about:blank'); window.written.document.write('<title>Written</title>'); true", true);
+  await until(() => pages!.list().some((p) => p.id === 'p7'));
+  await until(() => pages!.contents('p7')!.getTitle() === 'Written');
+  await until(() => !!pageViewIn(host!, 'p7'));
+  await original.executeJavaScript("window.written.close(); true");
+  await until(() => !pages!.contents('p7'));
+  console.log("PASS page views, shield and editor layers, overlay menus, popups with their opener, downloads, screenshots and page windows");
   await checkTabPresentation();
+  // Production tears down the panel from the BrowserWindow's closed event. Include an
+  // outstanding menu and attached page so their cleanup runs after the native window closes.
+  const children = pages.list().map((p) => pages!.contents(p.id)!);
+  const closingMenu = pages.host.overlay.show({ kind: 'menu', x: 10, y: 10, items: [{ label: 'Close' }] }, host.webContents);
+  await overlayReady();
+  const menuContents = overlay()!.webContents;
+  host.once('closed', () => pages!.dispose());
+  host.destroy();
+  assert.equal(await closingMenu, null);
+  await until(() => children.every((contents) => contents.isDestroyed()) && menuContents.isDestroyed());
+  assert.equal(pages.list().length, 0);
+  console.log("PASS closing a window with a page and a menu cleans up its native views");
 } catch (e) {
   console.error(e);
   process.exitCode = 1;
 } finally {
   browser?.release();
-  pages?.dispose();
-  host?.destroy();
+  if (host && !host.isDestroyed()) {
+    pages?.dispose();
+    host.destroy();
+  }
   server.closeAllConnections();
   server.close();
+  if (!process.exitCode) fs.writeFileSync(path.join(cwd, 'passed'), '');
   app.exit(process.exitCode ?? 0);
 }
 
 }
+// Closing the last window is itself under test. Only the completed test should exit the process.
+app.on('window-all-closed', () => {});
 void main();

@@ -2,7 +2,7 @@
  * The user's annotations on a web page.
  *
  *   annotation mode  ── Overlay.setInspectMode: the debugger's node selection ──▶ a node
- *   host page (renderer/annotate.js) ── edits the note, where the page cannot reach it
+ *   editor (renderer/annotation.js) ── a view of the app over the page (page-host.ts): edits the note, where the page cannot reach it
  *   confirmed note   ── embedded in the page, in an isolated world ──▶ follows its node
  *
  * While the mode is on, the debugger's selection takes the page's clicks and
@@ -80,9 +80,15 @@ const PAGE_SCRIPT = String.raw`(() => {
   style.textContent = ".box{position:fixed;box-sizing:border-box;border:2px solid var(--xsb-accent);border-radius:3px;background:var(--xsb-wash)}" +
     ".badge{position:absolute;left:-2px;top:-2px;transform:translateY(-100%);min-width:18px;height:18px;padding:0 5px;box-sizing:border-box;border-radius:9px 9px 9px 0;background:var(--xsb-accent);color:#fff;font:600 11px/18px system-ui,sans-serif;text-align:center}" +
     ".note{position:absolute;left:-2px;top:calc(100% + 4px);width:max-content;max-width:260px;padding:6px 9px;border-radius:6px;background:var(--xsb-paper);color:#1f1d1a;border:1px solid var(--xsb-line);border-left:3px solid var(--xsb-accent);box-shadow:0 2px 8px rgba(0,0,0,.14);font:12px/1.45 system-ui,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}" +
-    ".box.up .note{top:auto;bottom:calc(100% + 22px)}";
+    ".box.up .note{top:auto;bottom:calc(100% + 22px)}" +
+    ".selected{position:fixed;box-sizing:border-box;border:2px solid var(--xsb-accent);border-radius:3px;box-shadow:0 0 0 9999px rgba(0,0,0,.06)}";
   root.append(style);
   const notes = [];
+  // The element being annotated, framed until its note is saved or dropped.
+  const selected = document.createElement("div");
+  selected.className = "selected";
+  selected.hidden = true;
+  root.append(selected);
   let pending = null, reported = "", numbered = 0;
 
   // The part of a node that shows: its box, cut by every scrolling or clipping ancestor and by the viewport.
@@ -111,8 +117,12 @@ const PAGE_SCRIPT = String.raw`(() => {
       box.style.cssText = "left:" + r.x + "px;top:" + r.y + "px;width:" + r.width + "px;height:" + r.height + "px";
       box.classList.toggle("up", r.y + r.height > innerHeight - 80);
     }
-    const now = JSON.stringify(pending ? visible(pending) : null);
-    if (pending && now !== reported) { reported = now; report(now); }
+    const shown = pending ? visible(pending) : null;
+    selected.hidden = !shown;
+    if (shown) selected.style.cssText = "left:" + shown.x + "px;top:" + shown.y + "px;width:" + shown.width + "px;height:" + shown.height + "px";
+    const now = JSON.stringify(shown);
+    const position = devicePixelRatio + ":" + now;
+    if (pending && position !== reported) { reported = position; report(now); }
   };
   // Next frame; a timer as well, since a page in a hidden or background window gets no frames.
   let queued = false;
@@ -137,7 +147,7 @@ const PAGE_SCRIPT = String.raw`(() => {
       pending = element; reported = ""; resized.observe(element); schedule();
       return label(element);
     },
-    untrack() { pending = null; reported = ""; },
+    untrack() { pending = null; reported = ""; selected.hidden = true; },
     tint(value) { colors = String(value); host.style.cssText = base + colors; },
     // For a picture of the element alone: the notes step aside, and it comes into view if it is not.
     hide(hidden) { host.style.visibility = hidden ? "hidden" : ""; },
@@ -157,7 +167,7 @@ const PAGE_SCRIPT = String.raw`(() => {
       box.append(badge, note);
       root.append(box);
       notes.push({ id, node: pending, box });
-      pending = null; reported = "";
+      pending = null; reported = ""; selected.hidden = true;
       schedule();
       return numbered;
     },
@@ -201,7 +211,7 @@ export class Annotator {
 
   get active(): boolean { return !!this.letGo; }
 
-  /** The node being annotated, for a host that newly shows the page. */
+  /** The node being annotated: where the editor of its note goes (page-host.ts). */
   get pending(): AnnotationTarget | undefined { return this.target; }
 
   async start(): Promise<void> {
@@ -338,7 +348,7 @@ export class Annotator {
     const world = await this.ensureWorld();
     const { object } = await this.send("DOM.resolveNode", { backendNodeId, executionContextId: world });
     const { result, exceptionDetails } = await this.send("Runtime.callFunctionOn", {
-      objectId: object.objectId, functionDeclaration: "function () { return globalThis.xsbNotes.track(this); }", returnByValue: true,
+      objectId: object.objectId, functionDeclaration: `function () { globalThis.xsbNotes.tint(${JSON.stringify(tint(this.tone))}); return globalThis.xsbNotes.track(this); }`, returnByValue: true,
     });
     void this.send("Runtime.releaseObject", { objectId: object.objectId }).catch(() => {});
     if (exceptionDetails) return;

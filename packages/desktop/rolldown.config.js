@@ -7,7 +7,8 @@
 //   dist/bin/claude-agent-acp, codex-acp   the ACP wrappers of the agents that do not speak ACP themselves
 //   dist/plugins/<name>/      the plugins shipped with the app (plugins/<name>/.mcp.json, which starts ./server.mjs):
 //                             the same layout as a plugin the user adds (the hub's plugins.ts)
-//   dist/renderer/            the pages, served as app://xsb/…
+//   dist/renderer/            the pages, served as app://xsb/…: the window (index.html), a page's own window (page.html),
+//                             and what a window draws over its web pages (overlay.html, annotation.html)
 //
 // The layout repeats the sources': code in one directory finds the pages in
 // ../renderer, the hub's two programs in ../bin (see daemon.ts and mcp.ts in @xsb/hub) and the shipped plugins in
@@ -63,7 +64,7 @@ const pages = {
   },
   generateBundle() {
     const avatars = fs.readdirSync("renderer/avatars").filter((name) => name.endsWith(".png")).map((name) => `avatars/${name}`);
-    for (const fileName of ["index.html", "page.html", "styles.css", "mock.js", ...avatars]) {
+    for (const fileName of ["index.html", "page.html", "overlay.html", "annotation.html", "styles.css", "mock.js", ...avatars]) {
       this.emitFile({ type: "asset", fileName, source: fs.readFileSync(`renderer/${fileName}`) });
     }
   },
@@ -80,4 +81,7 @@ export default defineConfig([
   { platform: "browser", input: "renderer/main.js", output: { dir: "dist/renderer", format: "iife", entryFileNames: "main.js" }, plugins: [pages] },
   // The page of a web page's own window.
   { platform: "browser", input: "renderer/page-window.js", output: { dir: "dist/renderer", format: "iife", entryFileNames: "page-window.js" } },
+  // What a window draws over its web pages (../src/page-host.ts): menus, and the editor of a note.
+  { platform: "browser", input: "renderer/overlay.js", output: { dir: "dist/renderer", format: "iife", entryFileNames: "overlay.js" } },
+  { platform: "browser", input: "renderer/annotation.js", output: { dir: "dist/renderer", format: "iife", entryFileNames: "annotation.js" } },
 ]);

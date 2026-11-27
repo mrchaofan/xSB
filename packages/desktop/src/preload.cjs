@@ -9,7 +9,7 @@ const METHODS = [
   "history", "send", "resend", "cancelMessage", "sendMessageNow", "cancel", "clear", "permit",
   "composerState", "setComposerOption", "newSession", "renameConversation", "setAvatar", "setBackend", "migrate", "deleteConversation", "cleanUp", "workflowControl", "backends", "locateProgram", "cliConfig", "revealCliConfig", "installCli", "checkCli",
   "arkStatus", "arkModels", "arkLogin", "arkCancelLogin", "arkBind",
-  "openPage", "page", "pageWindow",
+  "openPage", "page", "pageWindow", "overlay", "overlayDone",
   "limitSettings", "setLimit", "projectLanguage", "setProjectLanguage",
   "consultationSettings", "setConsultation",
   "plugins", "setPluginEnabled", "approvePlugin", "reloadPlugins", "revealPlugins",

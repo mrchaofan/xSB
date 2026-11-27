@@ -9,8 +9,8 @@ import { openDialog } from "./form.js";
 import { openContextMenu } from "./menu.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { t } from "./i18n.js";
-import { showWeb } from "./webview.js";
-import { annotateButton, clearAnnotations } from "./annotate.js";
+import { showWeb } from "./page-slot.js";
+import { annotateButton, showAnnotateBar } from "./annotate.js";
 
 function ownerOf(page) {
   const agent = state.agents.find(a => a.mainSessionId === page.sessionId);
@@ -193,12 +193,12 @@ export function renderSide(focusPage = false) {
   const launching = state.tab === null;
   $("#side-workflow").hidden = !workflow;
   if (workflow || !hasWorkflow) renderWorkflow(hasWorkflow ? flow : null);
-  if (!page || page.window) clearAnnotations();
+  showAnnotateBar($("#web-annotate-bar"), page && !page.window ? page : null);
   $("#side-launcher").hidden = !launching;
   if (launching) fill($("#side-launcher"), launcher(hasWorkflow));
   $("#side-artifacts").hidden = !!page || workflow || launching;
   $("#side-web").hidden = !page;
-  $("#tabs").hidden = false;      // 没有 webview2 时仍然可以打开制品标签
+  $("#tabs").hidden = false;
   // 标签栏本身也留着（见 syncTabs）；它后面的按钮每次重画。
   const tabList = $("#tabs .tab-list") ?? h("div", { class: "tab-list" });
   tabList.classList.toggle("frozen", !!frozenWidth);
@@ -285,9 +285,13 @@ function openedTabs() {
   list.querySelector('[aria-pressed="true"]')?.focus();
 }
 
+/** 下一个新标签是 newTab 开的空白标签：键盘给地址栏。它的 page 事件先于 openPage 的答复到达。 */
+let addressBarNext = false;
+
 async function newTab() {
   const owner = rootSession();
-  await xsb.openPage("about:blank", false, owner);     // 新标签随 page 事件出现并被选中
+  addressBarNext = true;
+  await xsb.openPage("about:blank", false, owner).finally(() => { addressBarNext = false; });     // 新标签随 page 事件出现并被选中
   if (rootSession() === owner) $("#web-url").focus();
 }
 
@@ -304,7 +308,9 @@ export function onPage(page) {
       rememberPosition();
       state.tab = page.id;
       revealArtifacts();
-      focusPage = !page.background;
+      // 用户从启动页新开的空白标签由 newTab 聚焦地址栏，网页不拿走键盘。
+      focusPage = !page.background && !addressBarNext;
+      addressBarNext = false;
     }
   }
   if (here) renderSide(focusPage);

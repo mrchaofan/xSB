@@ -519,20 +519,33 @@ body:not(.no-workspace) .welcome { display: none; }
 .web-url:focus { border-color: var(--ink); }
 .web-body { position: relative; flex: 1; min-height: 0; display: flex; }
 #web-annotate[aria-pressed="true"], #annotate[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
-/* 批注：宿主页里叠在网页上的一层，网页碰不到它。只有提示条和编辑框接收指针，其余照常落到网页（调试器的节点选择）。 */
-/* 颜色跟着网页所属智能体的风格：claude 橘，codex 及其他黑（和嵌进网页的批注一致，../src/page-annotations.ts）。 */
-.annotate-layer { --annotate: #141414; position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
-.annotate-layer[data-tone="claude"] { --annotate: #d97757; }
-.annotate-layer > * { pointer-events: auto; }
-.annotate-box { position: absolute; pointer-events: none !important; box-sizing: border-box; border: 2px solid var(--annotate); border-radius: var(--radius-xs); box-shadow: 0 0 0 9999px #0000000f; }
-.annotate-bar { position: absolute; top: var(--space-2); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: var(--space-2); max-width: calc(100% - 16px); padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); box-shadow: var(--shadow); font-size: var(--text-sm); color: var(--ink-2); }
-.annotate-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.annotate-editor { position: absolute; display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); box-shadow: var(--shadow); }
+/* 网页的位置（page-slot.js）：网页是盖在页面上的原生视图，这里只占地方；页面在这块区域挖空（mask），网页没跟上布局时不透出底下的界面。 */
+.page-slot { flex: 1; width: 100%; height: 100%; min-height: 0; }
+body.page-hole {
+  -webkit-mask: linear-gradient(#000 0 0), linear-gradient(#000 0 0) var(--page-x) var(--page-y) / var(--page-width) var(--page-height) no-repeat;
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+/* 批注时网页上方的提示条（annotate.js）。颜色跟着网页所属智能体的风格：claude 橘，codex 及其他黑（和嵌进网页的批注一致，../src/page-annotations.ts）。 */
+.annotate-bar { --annotate: #141414; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3); border-bottom: 1px solid var(--line); background: var(--paper); font-size: var(--text-sm); color: var(--ink-2); }
+.annotate-bar[hidden] { display: none; }
+.annotate-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.annotate-bar [hidden] { display: none; }
+/* 批注的编辑框：盖在网页上的一个视图（annotation.html），视图就是编辑框那么大 */
+.annotation-window { margin: 0; height: 100vh; background: transparent; }
+:root:has(.annotation-window) { --annotate: #141414; background: transparent; }
+.annotate-bar[data-tone="claude"], :root[data-tone="claude"] { --annotate: #d97757; }
+.annotate-editor { box-sizing: border-box; height: 100%; display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2); border: 1px solid var(--line); border-top: 3px solid var(--annotate); border-radius: var(--radius-md); background: var(--paper); }
 .annotate-label { font: var(--text-xs) var(--mono, monospace); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.annotate-text { width: 100%; box-sizing: border-box; resize: vertical; min-height: 60px; padding: var(--space-1h) var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--wash); color: var(--ink); font: var(--text-md) var(--sans); outline: 0; }
+.annotate-text { flex: 1; width: 100%; box-sizing: border-box; resize: none; min-height: 0; padding: var(--space-1h) var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--wash); color: var(--ink); font: var(--text-md) var(--sans); outline: 0; }
 .annotate-text:focus { border-color: var(--annotate); }
-.annotate-editor { border-top: 3px solid var(--annotate); }
 .annotate-editor .btn.primary, .annotate-bar .btn.primary { background: var(--annotate); border-color: var(--annotate); color: #fff; }
+.annotate-error { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); color: var(--danger); }
+/* 窗口的覆盖层（overlay.html）：透明，和窗口一样大；底接住"点在外面" */
+.overlay-window { margin: 0; height: 100vh; background: transparent; overflow: hidden; }
+:root:has(.overlay-window) { background: transparent; }
+.overlay-layer { position: fixed; inset: 0; }
+.overlay-menu { display: flex; flex-direction: column; gap: var(--space-0); }
 .web-annotation { display: inline-flex; align-items: center; gap: var(--space-1h); max-width: 280px; vertical-align: middle; }
 /* 输入框上方的批注附件栏 */
 .annotation-tray { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-bottom: var(--space-2); }
@@ -540,14 +553,7 @@ body:not(.no-workspace) .welcome { display: none; }
 .annotation-tray .web-annotation { padding: var(--space-1) var(--space-1) var(--space-1) var(--space-1); background: var(--paper); }
 .web-annotation img { height: 28px; max-width: 56px; object-fit: cover; border-radius: var(--radius-xs); border: 1px solid var(--line); background: #fff; }
 .web-annotation-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.annotate-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
-.annotate-layer [hidden] { display: none !important; }
-/* 智能体正在操作网页：盖住整个网页的蒙层（page-control.js） */
-.control-shield { position: absolute; inset: 0; z-index: 2; overflow: hidden; cursor: not-allowed; user-select: none; border: 3px solid #f04452; background: rgba(240, 68, 82, .025); box-shadow: inset 0 0 18px rgba(240, 68, 82, .55); animation: control-breathe 1.8s ease-in-out infinite; }
-.control-label { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); padding: 7px 14px; border-radius: 18px; color: #fff; background: #b92335; font-size: var(--text-md); white-space: nowrap; box-shadow: 0 3px 12px #0003; }
-@keyframes control-breathe { 50% { border-color: #ff8790; box-shadow: inset 0 0 34px rgba(240, 68, 82, .8); } }
-@media (prefers-reduced-motion: reduce) { .control-shield { animation: none; } }
-.web-body webview2, .artifact-body webview2 { display: block; flex: 1; width: 100%; height: 100%; border: 0; background: #fff; }
+.annotate-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .web-note { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-3); padding: var(--space-6); color: var(--ink-3); text-align: center; }
 .web-note p { margin: 0; }
 .web-note .actions { display: flex; gap: var(--space-2); }
@@ -557,8 +563,6 @@ body:not(.no-workspace) .welcome { display: none; }
 .titlebar .web-title { font-size: var(--text-lg); }
 .web-title { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #pin[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
-/* 拖动分隔线时，鼠标经过网页也仍然是在拖 */
-body:has(.divider.dragging) webview2 { pointer-events: none; }
 
 .artifact-body { flex: 1; min-height: 0; overflow: auto; }
 .artifact-body .listing { padding: var(--space-2); }

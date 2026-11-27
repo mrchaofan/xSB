@@ -19,7 +19,6 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, net, protocol, session, shell, webContents } from "electron";
-import type { WebPreferences } from "electron";
 import { Paths, approvePlugin, consultationSettings, setConsultation, describeBackends, ensurePluginRoot, findCommand, limitSettings, listPlugins, projectLanguageSetting, setLimit, setPluginEnabled, setProjectLanguage, stopHub, pluginApprovals, revokePluginApproval } from "@xsb/hub";
 import { explain, languageOf, reasonOf } from "@xsb/protocol";
 import type { Answer, Language } from "@xsb/protocol";
@@ -31,6 +30,7 @@ import { serveBrowser } from "./browser.ts";
 import { imagesFromPaths } from "./clipboard-image.ts";
 import { Clis, wrapped } from "./clis.ts";
 import { notice, setUpNotices } from "./notices.ts";
+import { PageHost } from "./page-host.ts";
 import { PREVIEW_PARTITION, Pages } from "./pages.ts";
 import { ARTIFACT_SCHEME, Workspace } from "./workspace.ts";
 import type { Notice } from "./workspace.ts";
@@ -402,19 +402,17 @@ async function createWindow(project?: string): Promise<void> {
     ...(process.platform === "darwin"
       ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 18, y: 20 } }
       : { titleBarStyle: "hidden" as const, titleBarOverlay: { color: "#ffffff", symbolColor: "#474747", height: 52 } }),
-    webPreferences: { preload: PRELOAD, webview2Tag: Pages.supported } as WebPreferences,
+    webPreferences: { preload: PRELOAD },
   });
   const id = win.webContents.id;
-  const pages = new Pages(win.webContents, { preload: PRELOAD, pageWindowUrl: `${APP_SCHEME}://xsb/page.html`, controlText: TEXT[language()].agentControl,
+  const shell = { preload: PRELOAD, overlayUrl: `${APP_SCHEME}://xsb/overlay.html`, editorUrl: `${APP_SCHEME}://xsb/annotation.html`, controlText: TEXT[language()].agentControl };
+  const pages = new Pages(new PageHost(win, shell), { ...shell, pageWindowUrl: `${APP_SCHEME}://xsb/page.html`,
     // The same rule as the window's style (renderer/backend-icons.js): a backend named for claude is claude's.
     toneOf: (sessionId) => /claude/i.test((sessionId && workspaceOf(id)?.backendOf(sessionId)) || "") ? "claude" : "default" });
   panels.set(id, pages);
-  // A window shows the app and nothing else. A link in what an agent wrote opens as a page
-  // of the side panel, or in the user's browser where there are no such pages.
+  // A window shows the app and nothing else. A link in what an agent wrote opens as a page of the side panel.
   const follow = (url: string): void => {
-    if (!/^https?:/.test(url)) return;
-    if (Pages.supported) pages.open(url);
-    else void shell.openExternal(url);
+    if (/^https?:/.test(url)) pages.open(url);
   };
   win.webContents.setWindowOpenHandler(({ url }) => (follow(url), { action: "deny" }));
   win.webContents.on("will-navigate", (event, url) => {
@@ -525,8 +523,14 @@ async function pickFolder(win: BrowserWindow): Promise<{ path: string; initializ
 
 // ---- window.xsb -------------------------------------------------------------
 
-/** The calls that are a method of the window's workspace, arguments and all. */
-/** The renderer's answer to an agent's question (ask.js), as the hub takes it: anything else is not an answer. */
+/** Where a window's document laid out a page: a rectangle of numbers, or null for nowhere. */
+function boundsOf(given: unknown): Electron.Rectangle | null {
+  const r = given as Electron.Rectangle | null | undefined;
+  if (!r || typeof r !== "object") return null;
+  return [r.x, r.y, r.width, r.height].every((n) => typeof n === "number" && Number.isFinite(n)) ? { x: r.x, y: r.y, width: r.width, height: r.height } : null;
+}
+
+/** The renderer's answer to an agent's question (ask.js), as the hub takes it. */
 function answerOf(given: unknown): Answer | undefined {
   const a = given as Answer | undefined;
   if (!a || typeof a !== "object" || typeof a.questionId !== "string") return undefined;
@@ -553,9 +557,11 @@ ipcMain.handle("xsb", async (event, method: string, ...args: any[]) => {
 async function call(event: Electron.IpcMainInvokeEvent, method: string, args: any[]): Promise<unknown> {
   const win = BrowserWindow.fromWebContents(event.sender)!;
   const workspace = workspaceOf(event.sender.id);
-  // The caller's pages: those of its side panel, or, for a page's own window, those the page is among.
-  const pages = panels.get(event.sender.id) ?? [...panels.values()].find((p) => p.shownIn(event.sender));
-  if (!pages) throw new Error("this window is closing");
+  // The caller's pages: those of its window's side panel, or, for a page's own window, those the page is among.
+  // The caller is a window's document, or one the window draws over its pages (its overlay, a note's editor).
+  const pages = [...panels.values()].find((p) => p.hostOwning(event.sender));
+  const host = pages?.hostOwning(event.sender);
+  if (!pages || !host) throw new Error("this window is closing");
   switch (method) {
     case "contextMenu": {
       // The renderer supplies labels and enabled state, never native roles or executable actions.
@@ -598,11 +604,10 @@ async function call(event: Electron.IpcMainInvokeEvent, method: string, args: an
       if (!workspace) throw new Error("this window has no workspace open");
       return workspace.openArtifact(args[0], args[1], args[2]);
     case "openPage":
-      if (Pages.supported) return pages.open(args[0], { embedded: args[1] === true, sessionId: args[2] });
-      if (args[1] !== true && /^https?:\/\//i.test(args[0])) return shell.openExternal(args[0]);
-      return null;
+      return pages.open(args[0], { embedded: args[1] === true, sessionId: args[2] });
     case "page":
       try {
+        if (args[1] === "bounds" || args[1] === "focus") return pages.present(args[0], event.sender, args[1], boundsOf(args[2]));
         if (["annotate", "annotationSave", "annotationDiscard", "annotationsClear", "annotationsRemove"].includes(args[1])) return pages.annotate(args[0], event.sender, args[1], args[2]);
         return pages.call(args[0], args[1], args[2]);
       } catch (e) {
@@ -610,9 +615,17 @@ async function call(event: Electron.IpcMainInvokeEvent, method: string, args: an
       }
     case "pageWindow":
       return pages.shownIn(event.sender);
+    // Menus over the window, web pages included (overlay.ts): the window's document asks, the overlay answers.
+    case "overlay":
+      if (event.sender !== host.document) throw new Error("only the window's document opens its overlay");
+      if (!args[0] || typeof args[0] !== "object" || typeof args[0].kind !== "string" || JSON.stringify(args[0]).length > 100_000) throw new Error("invalid overlay");
+      return host.overlay.show(args[0], event.sender);
+    case "overlayDone":
+      if (host.overlay.owns(event.sender) && Number.isSafeInteger(args[0])) host.overlay.done(args[0], args[1]);
+      return;
     case "load":
       return workspace
-        ? workspace.load().then(async (snapshot) => ({ ...snapshot, backends: await backends(workspace), pages: Pages.supported ? pages.list() : null }))
+        ? workspace.load().then(async (snapshot) => ({ ...snapshot, backends: await backends(workspace), pages: pages.list() }))
         : { workspace: null, recent: recent() };
     case "pickFolder":
       return pickFolder(win);

@@ -53,12 +53,12 @@ export type Activity = { kind: "waiting" | "thinking" | "writing" | "tool"; deta
 export type Artifact = { sessionIds?: string[]; fileUri?: string; id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string; assetId?: string; assetVersion?: number; registeredName?: string; description?: string };
 
 /**
- * A web page of the side panel (pages.ts), shown by `<webview2 web-contents-id>` using `contentsId`.
+ * A web page of the side panel (pages.ts), shown where the window's document lays out a place for it (renderer/page-slot.js).
  * `window`: it is shown in a window of its own, `pinned` on top of the others. `agent`: an agent opened it and drives it.
  * `favicon`: the site's icon (http(s) or data: image), once the page named one.
  * `annotating`: the user is annotating it; `annotations`: the notes embedded in its current document.
  */
-export type PageView = { sessionId?: string; id: string; contentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; pinned: boolean; agent: boolean; background?: boolean; controlling?: boolean; annotating?: boolean; annotations?: number; tone?: "claude" | "default"; error?: string; favicon?: string };
+export type PageView = { sessionId?: string; id: string; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; window: boolean; pinned: boolean; agent: boolean; background?: boolean; controlling?: boolean; annotating?: boolean; annotations?: number; tone?: "claude" | "default"; error?: string; favicon?: string };
 
 /**
  * `missing` is set when the backend is one of the known agents and its
@@ -89,8 +89,8 @@ export type Snapshot = {
   history: Record<string, number | null>;
   /** Agent id -> what it is doing, for those with a turn running. */
   activities: Record<string, Activity>;
-  /** The page tabs. `null` on an Electron that cannot show web pages (no `<webview2>`). */
-  pages: PageView[] | null;
+  /** The page tabs. */
+  pages: PageView[];
 };
 
 /** What changed since. Things are replaced by key: an agent, task, artifact and entry by `id`, a role by `name`. */
@@ -106,11 +106,10 @@ export type Event =
   | { removedPage: string }
   /** The connection to the workspace's hub is gone. Opening the workspace again makes a new one. */
   | { hub: "down" }
-  /**
-   * The element the user selected to annotate on a page this window shows: where it is in the page's
-   * viewport (`rect` null: out of sight, or nothing selected when `seq` is 0). A new `seq` is a new selection.
-   */
-  | { annotationTarget: { pageId: string; seq: number; rect: { x: number; y: number; width: number; height: number } | null; label: string } }
+  /** To the editor of a note (renderer/annotation.js, page-host.ts): the element the user selected. A new `seq` is a new selection. */
+  | { annotationEditor: { pageId: string; seq: number; label: string; tone: "claude" | "default" } }
+  /** To a window's overlay (renderer/overlay.js, overlay.ts): what to show; its answer goes back with `seq`. */
+  | { overlay: { kind: string; seq: number; [key: string]: unknown } }
   /** A confirmed note on a page of `sessionId`, for that conversation's composer (page-annotations.ts `WebAnnotation`). */
   | { webAnnotation: { pageId: string; sessionId?: string; annotation: WebAnnotation } }
   /** The user cleared these notes on the page: the composer drops them too. */

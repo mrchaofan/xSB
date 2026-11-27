@@ -22,7 +22,7 @@ import { openNativeContextMenu } from "./menu.js";
 import { questionRecord, syncAskPanel } from "./ask.js";
 import { bindArtifactResize } from "./resize.js";
 
-import { showWeb } from "./webview.js";
+import { showWeb } from "./page-slot.js";
 
 export const state = {
   workspace: null, recent: [],
@@ -686,7 +686,9 @@ export async function renderArtifact(force = false) {
 
   // 改详情、放大或调整窗口不重建同一预览：视频播放位置和图片节点保持原样。
   const view = JSON.stringify([artifact.id, artifact.url, artifact.kind, artifact.updatedAt, preview]);
-  if (!force && artifactView === view) return;
+  // 原生网页和浏览器标签共用窗口的位置，切回同一个 HTML 预览时也要重新摆好它。
+  const htmlPreview = preview && artifact.kind === "html";
+  if (!htmlPreview && !force && artifactView === view) return;
   artifactView = view;
   const request = ++artifactRender;
 
@@ -700,11 +702,9 @@ export async function renderArtifact(force = false) {
     node.onerror = () => { if (request === artifactRender) fill(body, h("div", { class: "catalog-empty", role: "status" }, t("artifact.unavailable"))); };
     return fill(body, h("figure", {}, node));
   }
-  if (preview && artifact.kind === "html") {
-    // 显示不了网页的 Electron 上，退回到不执行脚本的 iframe
-    if (!state.pages) return fill(body, h("iframe", { src: artifact.url, sandbox: "", title: artifact.name }));
+  if (htmlPreview) {
     const page = await embed(artifact.url);
-    if (request === artifactRender && embedded?.url === artifact.url) showWeb(body, page);
+    if (request === artifactRender && !$("#side-artifacts").hidden) showWeb(body, page);
     return;
   }
 

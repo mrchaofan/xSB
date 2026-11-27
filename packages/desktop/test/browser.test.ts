@@ -159,7 +159,7 @@ class FakePages {
     else this.entries.get(id).window = op === "detach";
   }
   async drawn<T>(id: string, draw: () => Promise<T>) { this.operations.push(`${id}:drawn`); return draw(); }
-  list() { return [...this.entries.values()].map(({ id, contents, url, window }) => ({ id, contentsId: id, url, title: contents.getTitle(), window })); }
+  list() { return [...this.entries.values()].map(({ id, contents, url, window }) => ({ id, url, title: contents.getTitle(), window })); }
   releaseAgent(id: string) { this.entries.get(id).options = {}; }
   popup(parent: string) {
     const options = this.entries.get(parent).options;

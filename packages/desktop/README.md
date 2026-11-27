@@ -15,12 +15,15 @@ npm start -w @xsb/desktop -- <文件夹>      # 直接打开一个工作区
 | [src/workspace.ts](src/workspace.ts) | 一个窗口到 Hub 的 ACP 连接，线上数据到界面数据的转换 |
 | [src/preload.cjs](src/preload.cjs) | `window.xsb`：界面与 main 之间唯一的通道 |
 | [src/bridge.ts](src/bridge.ts) | main 与界面之间的契约，只有类型 |
-| [src/pages.ts](src/pages.ts) | 右栏的网页：主进程持有的 WebContents，界面用 `<webview2>` 显示；独立窗口 |
+| [src/pages.ts](src/pages.ts) | 右栏的网页：主进程持有的 `WebContentsView`，放在窗口页面量出的位置；独立窗口 |
+| [src/page-host.ts](src/page-host.ts) | 显示网页的业务窗口（主窗口、网页窗口）：网页、Agent 蒙层、批注编辑框各占一层 |
+| [src/view-stack.ts](src/view-stack.ts) | 窗口里原生视图的层级：按层排序，用最少的移除、重新添加得到最终顺序 |
+| [src/overlay.ts](src/overlay.ts) | 窗口的覆盖层：盖住网页的菜单，自己关闭（点外面、Esc、失焦） |
 | [src/notices.ts](src/notices.ts) | 系统通知：工作完成、失败、等用户确认或授权时告诉用户；macOS 与 Windows 的差别 |
 | [src/browser.ts](src/browser.ts) | browser use：Agent 经 MCP 操控右栏的网页，走 CDP（`webContents.debugger`） |
 | [renderer/](renderer) | 界面。打包后在浏览器里直接打开 `dist/renderer/index.html`，会用 `mock.js` 的假数据运行 |
 
-Electron 用的是带 `<webview2>` 的私有构建：根项目和桌面包的 `postinstall` 都运行 [scripts/patch-electron.mjs](scripts/patch-electron.mjs)，覆盖 `npm install` 与 `npm ci`。脚本从 Git 根目录应用补丁，并逐项核对已安装内容，适用于普通仓库、linked worktree 和源码目录；重复执行只校验，补丁缺失或不完整时安装失败。首次运行时下载器按 [.electron.mirror.mjs](.electron.mirror.mjs) 从私有镜像下载二进制。版本在 `package.json` 里写死为 43.8.1。
+Electron 用的是私有构建（输入保护用到它暴露的调试器来源标志，见 src/page-input.ts）：根项目和桌面包的 `postinstall` 都运行 [scripts/patch-electron.mjs](scripts/patch-electron.mjs)，覆盖 `npm install` 与 `npm ci`。脚本从 Git 根目录应用补丁，并逐项核对已安装内容，适用于普通仓库、linked worktree 和源码目录；重复执行只校验，补丁缺失或不完整时安装失败。首次运行时下载器按 [.electron.mirror.mjs](.electron.mirror.mjs) 从私有镜像下载二进制。版本在 `package.json` 里写死为 43.8.1。
 
 Electron 43.8.1 npm 包自身没有 `preinstall/install/postinstall`；它在首次 `require('electron')` 时才调用下载器。因此依赖安装先完成，项目 `postinstall` 只解析 Electron 的 `package.json` 并修改下载器，最后启动时才按镜像下载。回归测试校验这三个钩子均不存在，并通过真实 `npm install`、`npm ci` 检验项目钩子确实执行；Electron 升级若改变这个顺序，须先调整安装机制。
 
