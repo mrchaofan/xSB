@@ -417,6 +417,41 @@ for (const backend of ["mock", "bare"]) {
   if (backend === "mock") assert.ok(said.get(worker.id)!.includes(JSON.stringify({ mode: "append", content: [{ type: "text", text: prefix }] })), "resume receives the identical prefix");
 }
 
+// Ordinary ACP text and MCP calls carry a typed delivery through the graph, even on a backend without systemPrompt.
+{
+  const main = await create("bare");
+  const number = { type: "integer" };
+  const emptyInput = { type: "object", additionalProperties: false };
+  const quantities = { type: "array", items: number };
+  const resultSchema = { type: "object", properties: { counts: quantities, note: { type: "string" } }, required: ["counts"] };
+  const rows = [
+    { node: "Count", inputSchema: emptyInput, schema: resultSchema, prompt: [
+      call("finish", { summary: "OK", result: { counts: ["0"] } }),
+      call("finish", { summary: "OK", result: { counts: [0, 3], note: "producer-only-field" } }),
+    ].join("\n") },
+    { node: "Compare", inputSchema: { type: "object", properties: { quantities }, required: ["quantities"] },
+      schema: { type: "boolean" }, prompt: "!echo\n" + call("finish", { summary: "OK", result: false }) },
+    { node: "End", kind: "end", inputSchema: { type: "object", properties: { higher: { type: "boolean" } }, required: ["higher"] } },
+    { from: "Count", to: "Compare", bind: { quantities: "/counts" } },
+    { from: "Compare", to: "End", bind: { higher: "" } },
+  ];
+  await prompt(main.id, call("execute", { graphJsonl: rows.map(row => JSON.stringify(row)).join("\n") }));
+  const report = await until("typed final delivery", () => publications.get(main.id)?.[0]);
+  const { Count, Compare, End } = hub.workflows.read(main.id).instances;
+  assert.match(answered(Count.agentId!), /counts\/0.*integer/);
+  const assignment = received(Compare.agentId!).find(m => m.text.includes("quantities"))!.text;
+  assert.match(assignment, /"quantities"\s*:\s*\[\s*0,\s*3\s*\]/);
+  assert.ok(!assignment.includes("producer-only-field"), "unbound fields stay at the producer");
+  assert.deepEqual(End.last?.result, { higher: false });
+  const detail = hub.workflows.get(main.id).nodes.find(n => n.name === "Compare")!.contract!;
+  assert.deepEqual(detail.inputSources, { quantities: { node: "Count", pointer: "/counts", delivery: Count.last!.id } });
+  assert.deepEqual(detail.input, { quantities: [0, 3] });
+  assert.equal(detail.result, false);
+  assert.match(report.markdown, /higher[\s\S]*false/);
+  assert.equal(received(main.agentId).length, 1, "publishing a contracted end starts no parent turn");
+  console.log("ok typed workflow inputs, result validation, field binding and publication over ACP/MCP");
+}
+
 // Workspace file links stay usable in workflow inputs, task summaries and the published result.
 {
   const main = await create();

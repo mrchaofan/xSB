@@ -2,8 +2,9 @@
 // so keyboard navigation, the transcript and the prompt composer use native controls.
 import { $, ICON, h, fill } from "./dom.js";
 import { language, t } from "./i18n.js";
-import { state, agentOf, openTaskLane } from "./app.js";
+import { state, agentOf, openTaskLane, followContentLink } from "./app.js";
 import { avatarImage } from "./avatars.js";
+import { renderContract } from "./workflow-contract.js";
 
 export const currentFlow = () => state.workflows?.[agentOf(state.open[0])?.mainSessionId];
 // 每个工作流（按主会话）各自记住：选中的节点、正在看的版本（空 = 当前版本）、图是否折叠。
@@ -44,10 +45,15 @@ export function showTask(id) {
 function versionOf(flow) {
   const want = viewing.get(flow.sessionId) ?? (!flow.version && flow.candidate ? flow.candidate.version : null);
   if (want && flow.candidate?.version === want) {
-    return { kind: "candidate", version: want, nodes: flow.candidate.graph.nodes.map((n) => ({ name: n.node, status: "proposed" })), edges: flow.candidate.graph.edges };
+    const { nodes, edges } = flow.candidate.graph;
+    return { kind: "candidate", version: want, edges, nodes: nodes.map(n => ({
+      name: n.node, kind: n.kind, status: "proposed",
+      contract: n.inputSchema && { goal: n.prompt, inputSchema: n.inputSchema, fixedInput: n.input, schema: n.schema },
+    })) };
   }
-  const old = want && flow.history?.find((v) => v.version === want);
+  const old = want && want !== flow.version && flow.history?.find((v) => v.version === want);
   if (old) return { kind: "history", version: old.version, at: old.retiredAt, nodes: old.nodes, edges: old.edges };
+  if (want) viewing.delete(flow.sessionId);
   return { kind: "active", version: flow.version, nodes: flow.nodes, edges: flow.edges };
 }
 
@@ -95,7 +101,7 @@ function diagram(nodes, edges, active, choose) {
   surface.append(lines);
   for (const n of nodes) {
     const { x, y } = positions.get(n.name),
-      disabled = !openable(n);
+      disabled = !openable(n) && !n.contract;
     const deps = incoming
       .get(n.name)
       .map((e) => [e.from, e.case].filter(Boolean).join(" · "))
@@ -109,11 +115,12 @@ function diagram(nodes, edges, active, choose) {
           style: `left:${x}px;top:${y}px`,
           disabled,
           "data-agent": n.agentId,
+          "data-node": n.name,
           "data-state": n.status,
-          "aria-pressed": String(!disabled && active === n.agentId),
+          "aria-pressed": String(!disabled && active === n.name),
           title: [n.name, label, deps, n.summary, ...(n.additionalResults ?? []).map(r => r.summary)].filter(Boolean).join("\n"),
           "aria-label": [n.name, label, deps].filter(Boolean).join(", "),
-          onclick: () => choose(n.agentId),
+          onclick: () => choose(n),
         },
         h("strong", {}, n.name),
         h("small", {}, label),
@@ -136,13 +143,20 @@ export function renderWorkflow(flow) {
     fill($("#flow-heading"));
     $("#flow-map").hidden = true;
     fill($("#flow-map"));
+    renderContract();
+    panel.hidden = false;
     fill(panel, h("div", { class: "catalog-empty flow-none" }, h("span", { class: "launcher-icon", html: ICON.flow }),
       h("strong", {}, t("flow.none")), h("small", {}, t("flow.noneHint"))));
     return;
   }
   const shown = versionOf(flow);
   const folded = !!collapsed.get(flow.sessionId);
-  const id = selected.get(flow.sessionId) ?? state.referenceAgent;
+  const choice = selected.get(flow.sessionId);
+  const focused = typeof choice === "object" && choice?.version === shown.version && shown.nodes.find(n => n.name === choice.name);
+  const fallback = typeof choice === "string" ? choice : state.referenceAgent;
+  const node = focused || shown.nodes.find(n => openable(n) && n.agentId === fallback) ||
+    (shown.kind === "candidate" && shown.nodes.find(n => n.contract));
+  const id = node ? node.agentId : fallback;
   const error = h("small", { class: "error", role: "alert" }, flow.error);
   const held = flow.controls?.resume;
   const button = (pause, names, label) => h("button", { class: "btn sm",
@@ -171,24 +185,37 @@ export function renderWorkflow(flow) {
     error);
   document.querySelector("#side-workflow").classList.toggle("flow-folded", folded);
   const map = $("#flow-map");
-  const focusedAgent = map.contains(document.activeElement) && document.activeElement.dataset.agent;
+  const focusedNode = map.contains(document.activeElement) && document.activeElement.dataset.node;
   // 折叠：整块图收起，只留标题栏，空间都给下方的节点对话。
   map.hidden = folded;
-  if (folded) fill(map); else fill(map, diagram(shown.nodes, shown.edges, id, showTask));
-  if (focusedAgent)
-    map.querySelector(`button[data-agent="${CSS.escape(focusedAgent)}"]:enabled`)?.focus({ preventScroll: true });
+  if (folded) fill(map); else fill(map, diagram(shown.nodes, shown.edges, node?.name, n => {
+    if (openable(n)) showTask(n.agentId);
+    else {
+      selected.set(flow.sessionId, { version: shown.version, name: n.name });
+      renderWorkflow(flow);
+    }
+  }));
+  if (focusedNode)
+    map.querySelector(`button[data-node="${CSS.escape(focusedNode)}"]:enabled`)?.focus({ preventScroll: true });
+
+  renderContract(flow, shown.version, node, shown.edges, (href, container) => followContentLink(href, container, id ?? state.open[0]));
 
   // 下方的对话：当前版本里的节点可以对话；已被删掉的节点、历史版本里的节点只能查看。
-  const node = shown.kind !== "candidate" && shown.nodes.find((n) => n.agentId === id && openable(n));
+  const chat = node && openable(node);
+  if (focused && chat && shown.kind === "active") {
+    selected.set(flow.sessionId, id);
+    state.referenceAgent = id;
+  }
   const dropped = shown.kind === "active" && !node && agentOf(id)?.retired && agentOf(id)?.workflowOwner === flow.sessionId;
   const readonly = shown.kind === "history" ? "flow.readonly.history" : dropped || agentOf(id)?.retired ? "flow.readonly.dropped" : null;
   const lane = panel.firstElementChild;
-  const same = (node || dropped) && lane?.dataset.agent === id && (lane.dataset.readonly ?? null) === (readonly && t(readonly));
+  const same = (chat || dropped) && lane?.dataset.agent === id && (lane.dataset.readonly ?? null) === (readonly && t(readonly));
+  panel.hidden = !!node?.contract && !chat;
   if (!same) {
     lane?.saveDraft?.();
     fill(panel);
-    if (node || dropped) openTaskLane(id, panel, readonly && t(readonly));
-    else fill(panel, h("p", { class: "empty" }, t(shown.kind === "candidate" ? "flow.preview" : "flow.pick")));
+    if (chat || dropped) openTaskLane(id, panel, readonly && t(readonly));
+    else if (!panel.hidden) fill(panel, h("p", { class: "empty" }, t(shown.nodes.some(n => n.contract) ? "flow.inspect" : shown.kind === "candidate" ? "flow.preview" : "flow.pick")));
   }
   placeAgents(panel, shown.nodes.filter(openable), id);
 }

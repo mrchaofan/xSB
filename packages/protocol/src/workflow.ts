@@ -17,12 +17,14 @@ export type NodeDef = {
   kind: "task" | "end";
   prompt?: string;
   input: Record<string, unknown>;
+  /** Schema for the assembled named inputs (fixed values and active edge bindings). */
+  inputSchema?: object;
   model?: string;
   agent?: NodeAgentConfig;
   schema?: object;
   multi: boolean;
 };
-export type Edge = { from: string; to: string; case?: string };
+export type Edge = { from: string; to: string; case?: string; bind?: Record<string, string> };
 export type WorkflowGraph = { nodes: NodeDef[]; edges: Edge[] };
 /** A node as a view shows it: its definition's name and kind, where its work stands, and who did it. */
 export type WorkflowNodeView = {
@@ -36,6 +38,17 @@ export type WorkflowNodeView = {
   sessionId?: string;
   target?: string;
   summary?: string;
+  /** Declared inputs and output, with the values and provenance of this version's assignment. */
+  contract?: {
+    goal?: string;
+    inputSchema: object;
+    schema?: object;
+    fixedInput?: Record<string, unknown>;
+    input?: Record<string, unknown>;
+    inputSources?: Record<string, { node: string; delivery: string; pointer: string }>;
+    result?: unknown;
+    error?: string;
+  };
   additionalResults?: { id: string; summary: string }[];
   controls?: { pause: boolean; resume: boolean };
 };
