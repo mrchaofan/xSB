@@ -47,7 +47,7 @@ test("handoffs preserve autonomous output separately from the preceding turn's r
   assert.deepEqual(turns[1].run, { id: "background", turnId: null });
   assert.equal(turns[1].inputs.length, 0);
   assert.equal(turns[2].inputs[0].text, "new instructions");
-  const told = handoff("renewed", turns, { tasks: [], waiting: [], assets: [] });
+  const told = handoff("renewed", turns, { tasks: [], waiting: [] });
   assert.match(told, /<xsb-past-run[^]*output outside a turn/);
 });
 
@@ -66,13 +66,6 @@ test("handoff retains tools reported only as updates and the final answer after 
   ]);
   assert.deepEqual(turns.map(t => t.tools), [["Read image", "Verify dimensions"], ["Read next image"]]);
   assert.deepEqual(turns.map(t => t.reply), ["Verified and registered.", "Next image ready."]);
-});
-
-test("workflow assets keep their usable version references across a context handoff", () => {
-  const asset = { id: "workflow/行程 @ 上海.md", type: "workflow", name: "行程 @ 上海.md", version: 2,
-    by: "author", description: "行程 @ 上海.md", path: "/work/trip.md", createdAt: "2026-01-01T00:00:00Z" };
-  const prompt = handoff("renewed", [], { tasks: [], waiting: [], assets: [asset] });
-  assert.ok(prompt.includes("<asset>行程 @ 上海.md@v2</asset>"));
 });
 
 test("handoff respects cleared boundaries and keeps steered inputs and tool updates in one turn", () => {
@@ -97,7 +90,7 @@ test("an oversized latest input still hands off the recent decision without enla
     inputs: [{ origin: { kind: "user" }, text: `Use the selected image.\n${"asset contents\n".repeat(5000)}` }],
     tools: ["Read image\n" + "command details\n".repeat(5000)],
     reply: "Selected image registered; proceed to editing.",
-  }], { tasks: [], waiting: [], assets: [] });
+  }], { tasks: [], waiting: [] });
   assert.ok(text.includes("Use the selected image."));
   assert.ok(text.includes("Selected image registered; proceed to editing."));
   assert.ok(text.includes("Excerpt"));

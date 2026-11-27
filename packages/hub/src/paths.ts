@@ -6,14 +6,13 @@
  *     config.json                      project settings (machine settings: ~/.xsb2_global/config.json)
  *     conversations/agents.jsonl       the conversations' agents (event log)
  *     conversations/sessions.jsonl     sessions and the backend session each maps to
- *     conversations/tasks.jsonl …      dispatched work, joins, mailbox, ledger, assets index
+ *     conversations/tasks.jsonl …      dispatched work, joins, mailbox, ledger
  *     wal.jsonl                        write-ahead log for multi-file changes
  *     agents/<id>/instructions.md      what this agent is (free text, user-edited)
  *     agents/<id>/memory.jsonl         the agent's own notes, by topic
  *     agents/<id>/sessions/<sid>.jsonl transcript of one session
  *     agents/<id>/scratch/             the agent's own drafts and intermediate files
  *     shared/                          files agents hand to each other
- *     assets/                          the asset library's files
  *     run/                             lock, pid, sockets, log of the running hub
  */
 import { createHash, randomUUID } from "node:crypto";
@@ -109,10 +108,6 @@ export class Paths {
   }
   get shared(): string {
     return path.join(this.dir, "shared");
-  }
-  /** The asset library: `assets/<type>/<name>/v<n><ext>`. */
-  get assets(): string {
-    return path.join(this.dir, "assets");
   }
   get run(): string {
     return path.join(this.dir, "run");

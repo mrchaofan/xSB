@@ -19,7 +19,7 @@ import { isVeto } from "./hooks.ts";
 import { TAKEN_IN } from "./kernel.ts";
 import type { Recipient, Route } from "./kernel.ts";
 import { inboxDigest, renderMail } from "./prompts.ts";
-import type { Gives, TaskContext } from "./prompts.ts";
+import type { Gives } from "./prompts.ts";
 import { boundedText, contentTokens } from "./context.ts";
 import type { LiveSession, Turn, TurnEnd } from "./session.ts";
 import type { MailItem } from "./state.ts";
@@ -124,9 +124,8 @@ export class Delivery {
   /** The prompt a mail item becomes (`message.pre_submit` may rewrite it, or veto it: then it is not delivered). */
   render(item: MailItem, session: LiveSession): Delivered | undefined {
     const { state, kernel } = this.hub;
-    const source = item.workflowNotice && item.prompt ? this.hub.workflows.noticePrompt(item.prompt) : item.prompt;
-    const rendered = source ? { prompt: source, gives: undefined } : (() => {
-      const { text: said, gives } = renderMail(state, item, this.taskContext(item, session), session.given);
+    const rendered = item.prompt ? { prompt: item.prompt, gives: undefined } : (() => {
+      const { text: said, gives } = renderMail(state, item, session.given);
       const history = item.results && (item.workGeneration ?? 0) < kernel.generation(session.id)
         ? "These results belong to work accepted before the user's stop. They are historical context; do not resume that work unless the user asks.\n"
         : "";
@@ -360,29 +359,6 @@ export class Delivery {
       const record = (task: { id: string }): string => taskRecord(this.hub.state.store, session.agentId, session.id, task.id);
       kernel.turnEnded(session.id, end.stopReason, record, end.failure ? errorMessage(end.failure) : undefined, turn.items.map(m => m.id));
     });
-  }
-
-  /**
-   * What the hub adds to a task for its assignee: the assets it works from, the skill for what it produces. Of an
-   * input the session was given another version of, that version's text too, to tell what changed.
-   */
-  private taskContext(item: MailItem, session: LiveSession): TaskContext | undefined {
-    const task = item.kind === "task" ? this.hub.state.tasks.get(item.taskId!) : undefined;
-    const agent = this.hub.state.agents.get(item.to.agentId);
-    if (!task || !agent) return undefined;
-    const inputs = (task.inputs ?? [])
-      .map((ref) => this.hub.assets.get(ref))
-      .filter((a) => a !== undefined)
-      .map((asset) => {
-        const had = session.given.assets.get(asset.id);
-        const earlier = had && had.version !== asset.version ? this.hub.assets.get(`${asset.id}@${had.version}`) : undefined;
-        const body = this.hub.assets.text(asset);
-        const budget = Math.min(1500, this.hub.policy(session.agentId).outputTokens, this.hub.policy(session.agentId).promptTokens / Math.max(4, (task.inputs?.length ?? 1) * 4));
-        // Overlarge materials remain available via get_asset/read_context; never mark an excerpt as fully seen.
-        return { asset, text: body !== undefined && contentTokens([text(body)]) <= budget ? body : undefined,
-          ...(earlier ? { before: { version: earlier.version, text: this.hub.assets.text(earlier) } } : {}) };
-      });
-    return { inputs };
   }
 }
 

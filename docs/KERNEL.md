@@ -73,13 +73,13 @@ blocked ──前置都结束──► queued ──交给执行方──► run
                                                    ├ cancelled   发起方或用户撤销
                                                    ├ cascaded    随它为之而起的任务一起撤（stopper = 根因）
                                                    ├ superseded  派发方以 onBusy: replace 派来新任务取代它（status 为 cancelled）
-                                                   ├ error       中枢跑不了它，或交付契约追问后仍未满足（stopper = SYSTEM）
+                                                   ├ error       中枢执行失败，或完成检查返回失败（stopper = SYSTEM）
                                                    └ interrupted 退出时用户选择不继续（stopper = USER）
 ```
 
 - **开始**：必有发起方。Agent 经 `dispatch_task`；用户在一个空闲、没有开着的用户任务的会话里说话，就是一个以 USER 为发起方的任务（`Kernel.dispatchUser`），之后在那个会话里说的话都属于它，直到它结束。会话在工作时用户说的话是插话，不开任务，属于这一轮（[DESIGN.md](DESIGN.md) 3.1）。任务在交给模型的那一刻开始（`running`）：它的输入进了对话，不是它所在的那一轮开始。
 - **隐式完结（默认）**：执行方的一轮以 `idle(end_turn)` 结束时，它在那个会话里开着的任务就结束，结果是任务从交给模型起的完整经过（智能体的每条消息、用户插话、其他输入和工具调用各一行，[DESIGN.md](DESIGN.md) 3.1 第 10 条），不只是最后一条消息。执行方不需要调用任何工具。例外：为它启动、结果要唤醒执行方的工作（`wake`/`sync` 的子任务、后台任务）、执行方会话的订阅、或已在路上的这类结果，还有一样没完的，这一轮的结束就不算，等带回结果的那一轮结束再判断。
-- **ResultExtractionHook / QualityGateHook**（`task.pre_complete`）：有产物契约（`produces`）的任务，从执行方在任务创建后登记的资产里取出契约要的类型；没有就追问执行方（插进下一轮），最多两次，仍没有就以 `error` 结束并写明原因。执行方显式 `report_result` 时以显式为准。
+- **完成检查**由 `task.pre_complete` 裁决，默认接纳执行记录。扩展可返回 `retry` 并附上继续处理的原因，或用 `fail` 报告失败。
 - **非自然结束**：撤销、用户停止、传染、后端出错，见第 9 节。
 - **统一收口**：无论哪种结束，都在 `Kernel.finish` 这一个事务里记录结束、通知发起方、结算汇合、放行被 `after` 挡住的任务，再发出同一个 `task.ended` 事件。
 
@@ -97,7 +97,7 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 | | `task.changed` | 观察 | UserFeed（`tasks/update`）、工具列表变化通知 | 任务的每次变化 |
 | | `task.pre_stop` | 裁决 | 只有发起方、用户、中枢能停 | 撤销 |
 | | `task.stopping` | 观察 | Delivery（停下只为它工作的会话）、Jobs（中止调用）、Audit | 撤销要等的时候 |
-| | `task.pre_complete` | 裁决 | ResultExtractionHook、QualityGateHook | 隐式完结 |
+| | `task.pre_complete` | 裁决 | 默认接纳执行记录 | 隐式完结 |
 | | `task.ended` | 观察 | Jobs（撤出等待队列）、Audit | 结束（统一收口） |
 | 级联 | `cascade.pre_propagate` | 裁决 | 无：默认 `spare`，可改为 `force` | 撤销 |
 | 投递 | `message.pre_deliver` | 裁决 | 投递策略（第 6 节） | 每条消息 |
@@ -112,13 +112,13 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 | | `acp.turn_ended` | 观察 | LedgerHook、Kernel（撤销的确认）、Audit | 一轮结束 |
 | | `acp.session_renewed` | 观察 | LedgerHook（未处理的作废）、Audit | 后端会话被替换 |
 
-方案表外补的点（`task.changed`、`task.stopping`、`task.pre_complete`、`message.routed`、`message.withdrawn`、`message.ledger`、`notify.delivered`、`acp.turn_ended`、`acp.session_renewed`）都有内置的使用者：Effector 要有事件可挂，台账和撤销要知道一轮怎么结束。
+方案表外补的点（`task.changed`、`task.stopping`、`message.routed`、`message.withdrawn`、`message.ledger`、`notify.delivered`、`acp.turn_ended`、`acp.session_renewed`）都有内置的使用者：Effector 要有事件可挂，台账和撤销要知道一轮怎么结束。
 
 ### 5.2 执行语义
 
 - **裁决**：按注册顺序成链，每个处理者拿到前一个的结果，原样或改写后返回，或者否决；处理者抛异常也算否决（fail-closed）。否决写进审计。Kernel 自己的策略最先注册，后注册的看得到它的答案，可以推翻。
 - **观察**：在变化提交之后异步扇出，按发出的顺序，但不在发出它的那次调用之内。每个处理者都拿到每个事件；失败的重试两次，仍失败就记为死信（写进审计）；一个失败不影响其他。
-- **内置 Hooks**：NotificationHook（第 7 节）、CascadeHook（第 9 节）、ResultExtractionHook 与 QualityGateHook（第 4 节）、LedgerHook（第 10 节）、AuditHook（`.xsb2/audit.jsonl`）、UserFeedHook（推给客户端）。
+- **内置 Hooks**：NotificationHook（第 7 节）、CascadeHook（第 9 节）、LedgerHook（第 10 节）、AuditHook（`.xsb2/audit.jsonl`）、UserFeedHook（推给客户端）。
 - **通知在事务里，投递在事务外**：谁被通知在 `finish` 的同一个 WAL 事务里写定，崩溃不会丢；怎么投递是提交之后的裁决与 Effector。
 
 ## 6. 唯一的投递管线：被通知 ≠ 调用后端
@@ -181,7 +181,7 @@ blocked ──前置都结束──► queued ──交给执行方──► run
 
 持久边保存的是角色类型，执行时才解析成具体实例。这使同类型的现有和未来实例复用权限，不必增加一套实例到实例的持久授权图。无角色 Agent 的 `agent:<id>` 是独立实例键，不能被同名动态角色继承。启动时旧配置中明确对应无角色 Agent 的键会迁移；若旧键同时是已存在的角色名，保留为类型权限，无角色的同名 Agent 需重新获得授权。
 
-**不需要权限**（随工作而来）：向派自己活的 Agent 交差、提问（`report_result`、`ask`）；回复正在读的消息的发送方；`escalate_to_user`；查看、订阅、撤销自己发起的东西；非协作工具（资产、记忆、技能、后台任务）。`report_result` 在没有 Agent 派来的任务时被拒，并说明原因。
+**不需要权限**（随工作而来）：向派自己活的 Agent 交差、提问（`report_result`、`ask`）；回复正在读的消息的发送方；`escalate_to_user`；查看、订阅、撤销自己发起的东西；非协作工具（记忆、技能、后台任务）。`report_result` 在没有 Agent 派来的任务时被拒，并说明原因。
 
 ## 9. 停止与传染（CascadeHook + 任务图）
 
@@ -233,7 +233,7 @@ inboxed ──随下一轮──► inserted …
 | 停止只沿起因边传染，根因唯一；确认后落账 | `doom`；`ended.cause`；等 `acp.turn_ended` | kernel 3、e2e 14、32、34 |
 | Kernel 零 ACP/UI 依赖 | kernel.ts 只引用 protocol 与 store 的类型、hooks、ledger、state、task-graph、prompts（措辞）、util | kernel.test.ts |
 | 后端无感知 | 后端只收到标准的 v2 请求 | 全部 e2e（mock 后端说 v2） |
-| 隐式协作优先：任务完结不依赖模型调用工具 | 隐式完结；契约由 QualityGate 追问 | kernel 6、e2e 2、14、25 |
+| 隐式协作优先：任务完结不依赖模型调用工具 | 隐式完结并等待仍需返回的依赖结果 | kernel 6、e2e 2、14、25 |
 | 权限按角色，工具清单固定 | `capabilities.ts`；`tools.ts` 的 `authorize` | e2e 8、33、35；cli 2 |
 
 当前 turn ID、保护状态、追加指令、未读输入恢复及后端隔离的具体规则见 [TURN-LIFECYCLE.md](TURN-LIFECYCLE.md)。

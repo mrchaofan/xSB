@@ -9,9 +9,10 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { contextRef } from "../src/context.ts";
 import { F, State } from "../src/state.ts";
-import { Workflow, Agents, SessionControls, Assets, Backends, Boundaries, Connection, Discarded, History, Ledger, RunExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Tasks, conversationEntry, explain, languageOf } from "@xsb/protocol";
+import { Workflow, Agents, SessionControls, Backends, Boundaries, Connection, Discarded, History, Ledger, RunExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Tasks, conversationEntry, explain, languageOf } from "@xsb/protocol";
 import type { AgentInfo, ConversationEntry, Language, SessionUpdate, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { isVeto } from "../src/hooks.ts";
@@ -70,8 +71,6 @@ let permissionAsked = 0;
 /** What the test's client answers to a permission request; the first option when unset. */
 let permissionChoice: string | undefined;
 const removed: string[] = [];
-/** Asset versions the hub announced. */
-const assetEvents: string[] = [];
 /** Agents that said they wait for the user (`ask_user`), with their question. */
 const asks: string[] = [];
 
@@ -121,7 +120,6 @@ async function connect(): Promise<Client> {
     }
   });
   conn.onNotification(Agents.removed, ({ id }) => removed.push(id));
-  conn.onNotification(Assets.update, ({ asset }) => assetEvents.push(`${asset.id}@${asset.version}`));
   conn.onNotification(Agents.asks, ({ agentId, question }) => asks.push(`${agentId}: ${question}`));
   conn.onRequest("session/request_permission", (p) => {
     permissionAsked++;
@@ -391,7 +389,7 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
 for (const backend of ["mock", "bare"]) {
   const main = await create(backend);
   const profile = { systemPrompt: "E2E stable reviewer role", skills: [{ name: "review", description: "Inspect evidence", content: "E2E portable skill procedure" }] };
-  const program = "!instructions\n!echo\n" + call("load_skill", { name: "review" }) + "\n" + call("finish", { summary: "profile tested", assets: [] });
+  const program = "!instructions\n!echo\n" + call("load_skill", { name: "review" }) + "\n" + call("finish", { summary: "profile tested" });
   const rows = [{ node: "reviewer", prompt: program, agent: profile }, { node: "done", kind: "end" }, { from: "reviewer", to: "done" }];
   await prompt(main.id, call("execute", { graphJsonl: rows.map(row => JSON.stringify(row)).join("\n") }));
   await until("configured node completes", () => hub.workflows.read(main.id).instances.reviewer.last?.valid);
@@ -419,25 +417,22 @@ for (const backend of ["mock", "bare"]) {
   if (backend === "mock") assert.ok(said.get(worker.id)!.includes(JSON.stringify({ mode: "append", content: [{ type: "text", text: prefix }] })), "resume receives the identical prefix");
 }
 
-// Exact workflow references reach the backend through both user-message and typed tool boundaries.
+// Workspace file links stay usable in workflow inputs, task summaries and the published result.
 {
-  const main = await create(), name = "Cover @ draft", ref = name + "@v1";
-  const file = path.join(project, "cover.txt");
+  const main = await create();
+  const file = path.join(project, "cover draft.txt"), uri = pathToFileURL(file).href;
   fs.writeFileSync(file, "Original cover text");
-  await prompt(main.id, call("asset_put", { name, path: file }));
-  assert.ok(answered(main.agentId).includes("result(asset_put): " + ref));
-  const legacy = "<asset>" + JSON.stringify({ name, version: "v1" }) + "</asset>";
-  await prompt(main.id, "!echo\nUse " + legacy);
-  assert.ok(answered(main.agentId).includes("Use <asset>" + ref + "</asset>"));
-  assert.ok(received(main.agentId).some(m => m.text.includes(legacy)), "historical user text remains verbatim");
-  const worker = [call("asset_get", { ref }), call("finish", { summary: "Cover checked", assets: [ref] })].join("\n");
-  const graph = [{ node: "Check", prompt: worker, input: { cover: ref } }, { node: "End", kind: "end" }, { from: "Check", to: "End" }];
+  const link = `[Cover draft](<${uri}>)`;
+  await prompt(main.id, "!echo\nUse " + link);
+  assert.ok(answered(main.agentId).includes("Use " + link));
+  const worker = "!echo\n" + call("finish", { summary: "Cover checked. " + link });
+  const graph = [{ node: "Check", prompt: worker, input: { cover: uri } }, { node: "End", kind: "end" }, { from: "Check", to: "End" }];
   await prompt(main.id, call("execute", { graphJsonl: graph.map(n => JSON.stringify(n)).join("\n") }));
-  const report = await until("published Markdown identifies the delivered asset", () => publications.get(main.id)?.[0]);
-  assert.ok(report.markdown.includes("Cover checked") && report.markdown.includes(ref));
-  assert.equal(received(main.agentId).length, 3, "asset creation, the user's reference, and execute are the only inputs");
+  const report = await until("published Markdown includes the working file link", () => publications.get(main.id)?.[0]);
+  assert.ok(report.markdown.includes("Cover checked. " + link));
+  assert.equal(received(main.agentId).length, 2);
   const { agentId } = hub.workflows.read(main.id).instances.Check;
-  assert.ok(answered(agentId!).includes('"ref": "' + ref + '"') && answered(agentId!).includes("Original cover text"));
+  assert.ok(received(agentId!).some(m => m.text.includes("### cover") && m.text.includes(uri)));
 }
 
 // 14. An agent without ACP, wrapped with @xsb/adapter, goes through the same chain as the others.
@@ -521,7 +516,7 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
   const x=give(parent,middle,"middle"); await started(x);
   const z=give(middle,leaf,"leaf"); await started(z);
   const y=give(parent,waiting,"waiting",[z.id]);
-  hub.kernel.complete(hub.state.tasks.get(x.id)!,"completed","middle done",[]);
+  hub.kernel.complete(hub.state.tasks.get(x.id)!,"completed","middle done");
   const cancelled=hub.kernel.stop(hub.state.tasks.get(p.id)!,agentPrincipal(root.agentId),{status:"cancelled",reason:"cancelled",result:"stop parent"});
   assert.ok(!isVeto(cancelled));
   assert.deepEqual(cancelled.with.map(t=>t.id).sort(),[y.id,z.id].sort());
@@ -595,6 +590,7 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
     const boundaries = () => hub.state.store.read(Paths.transcript(agentId, sessionId))
       .map((r: any) => r.update._meta?.[Boundaries.key]).filter(Boolean);
     const boundaryCount = boundaries().length;
+    const { ref } = contextRef(hub.paths, agentId, "MCP context survived");
     let backendId: string | undefined, bridgeToken: string | undefined;
     for (let n = 0; n < 3; n++) {
       const blocks = [{ type: "text", text: "!sleep 3000\n!say MUST-NOT-RUN" },
@@ -609,9 +605,9 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
       assert.equal(session.rec.backendSessionId, backendId);
       assert.equal(session.bridgeToken, bridgeToken);
       assert.notEqual(session.rec.renew, "stopped");
-      await prompt(sessionId, `${call("asset_list", { name:"example" })}\n!images\n!say CONTEXT-AFTER-${n}`);
+      await prompt(sessionId, `${call("read_context", { ref })}\n!images\n!say CONTEXT-AFTER-${n}`);
       await idle(agentId);
-      assert.match(answered(agentId), /result\(asset_list\):/);
+      assert.match(answered(agentId), /result\(read_context\):[^]*MCP context survived/);
       assert.doesNotMatch(answered(agentId), /work was stopped|revoked|MUST-NOT-RUN/);
       if (backend === "steerable") assert.ok(answered(agentId).includes(`images: ["${image.data}"]`), "original image bytes remain in backend context");
       assert.equal(session.rec.backendSessionId, backendId);
@@ -661,7 +657,7 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
     const audit = { id: "inspection-12", project: "Station", checks: ["Lighting", "Signage"] };
     const publish = (probe?: string) => "!plugin inspection " + JSON.stringify({ ...audit, probe });
     const worker = [publish(), publish(), ...["role", "tool", "lifecycle", "readOnly"].map(publish),
-      call("finish", { summary: "Inspection filed.", assets: [] })].join("\n");
+      call("finish", { summary: "Inspection filed." })].join("\n");
     const graph = [{ node: "Inspection", prompt: worker }, { node: "Done", kind: "end" }, { from: "Inspection", to: "Done" }];
     await prompt(main.id, call("execute", { graphJsonl: graph.map(row => JSON.stringify(row)).join("\n") }));
     await until("external plugin and workflow both finish", () => publications.get(main.id)?.some(e => e.source.id === "workflow"));
@@ -809,7 +805,7 @@ let refusedId: string;
 // delivery basis disappears. The independent sibling must keep the same turn.
 {
   const session = await create(), id = session.id;
-  const finish = (summary: string, ms = 0) => (ms ? "!sleep " + ms + "\n" : "") + call("finish",{summary,assets:[]});
+  const finish = (summary: string, ms = 0) => (ms ? "!sleep " + ms + "\n" : "") + call("finish",{summary});
   const graphJsonl = [
     {node:"A",prompt:finish("A1")},{node:"D",prompt:finish("composition",1000)},
     {node:"E",prompt:finish("music",2800)},{node:"end",kind:"end"},
@@ -847,12 +843,12 @@ let refusedId: string;
 // completion. The first inserted work is resumed before the next duplicate text.
 {
   const main=await create(), owner=main.id;
-  const finish=call("finish",{summary:"base",assets:[]});
+  const finish=call("finish",{summary:"base"});
   const graphJsonl=[{node:"A",prompt:finish},{node:"end",kind:"end"},{from:"A",to:"end"}].map(v=>JSON.stringify(v)).join("\n");
   await prompt(owner,call("execute",{graphJsonl}));
   const state=()=>hub.workflows.read(owner);
   await until("initial result",()=>state().instances.end?.last?.valid);
-  const extra={node:"A",text:"!sleep 750\n"+call("finish",{summary:"extra",assets:[]})};
+  const extra={node:"A",text:"!sleep 750\n"+call("finish",{summary:"extra"})};
   await prompt(owner,[call("prompt",extra),call("prompt",extra)].join("\n"));
   await until("first extra inserted",()=>state().instances.A.work?.inserted);
   const first=state().instances.A.work!, id=state().instances.A.sessionId!;

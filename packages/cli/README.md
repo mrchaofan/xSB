@@ -13,7 +13,6 @@
 | `xsb workflow show 主会话ID` | 输出当前 DAG、候选及节点状态 |
 | `xsb workflow pause 主会话ID [节点…]` | 暂停全图或指定节点及受影响的下游 |
 | `xsb workflow resume 主会话ID [节点…]` | 明确继续 |
-| `xsb assets [--history]` | 查看当前登记或全部历史版本 |
 | `xsb watch` | 订阅工作区活动 |
 | `xsb hub status\|start\|stop\|log` | 管理本工作区的 Hub |
 | `xsb acp` | 从标准输入输出连接 Hub |

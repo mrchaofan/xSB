@@ -7,7 +7,10 @@ export function loadDraft(key) {
   if (memory.has(key)) return structuredClone(memory.get(key));
   try {
     const content = JSON.parse(localStorage.getItem(storageKey(key)) ?? "[]");
-    return Array.isArray(content) && content.every((block) => block && typeof block.type === "string") ? content : [];
+    if (!Array.isArray(content) || !content.every(block => block && typeof block.type === "string")) return [];
+    return content.map(block => block.type === "asset_reference"
+      ? { type: "text", text: [block.name, block.version].filter(value => typeof value === "string").join("@") }
+      : block);
   } catch { return []; }
 }
 

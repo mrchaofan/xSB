@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { Paths } from "@xsb/hub";
-import { Answer, Workflow, Agents, Assets, Connection, ConversationEvent, History, Question, RunExt, Tasks } from "@xsb/protocol";
+import { Answer, Workflow, Agents, Connection, ConversationEvent, History, Question, RunExt, Tasks } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
@@ -43,7 +43,6 @@ function snapshot(peer: Peer, agents = []) {
   peer.requests.set(Workflow.list, () => ({ workflows: [] }));
   peer.requests.set(Agents.list, () => ({ agents }));
   peer.requests.set(Tasks.list, () => ({ tasks: [] }));
-  peer.requests.set(Assets.list, () => ({ assets: [] }));
 }
 
 test("node controls carry the workflow session and selected node names", async () => {
@@ -67,6 +66,86 @@ test("tool status patches retain input/output and the original tool description"
   assert.equal(tool.status, "done");
   assert.deepEqual(tool.input, { paths: ["a.ts"] });
   assert.deepEqual(tool.output, { count: 1 });
+  ws.close();
+});
+
+test("successful backend file operations and saved images are linked by call ID without treating reads as edits", async () => {
+  const peer = new Peer();
+  snapshot(peer, [{ ...agent("a"), mainSessionId: "main" }]);
+  peer.requests.set(History.page, () => ({ updates: [], cursor: null, agent: { ...agent("a"), mainSessionId: "main" } }));
+  const events = [];
+  const ws = new Workspace(new Paths("/tmp/xsb-file-events"), peer, String, event => events.push(event), () => {});
+  await ws.load();
+  const emit = (toolCallId, fields) => peer.emit("session/update", { sessionId: "main", update: { sessionUpdate: "tool_call_update", toolCallId, ...fields } });
+  const refreshes = () => events.filter(event => event.filesChanged === "main").length;
+  const file = "/tmp/海报 #1.png", next = "/tmp/final.png";
+  emit("r", { title: "Read", kind: "read", status: "completed", locations: [{ path: file }] });
+  emit("edit", { title: "Edit", status: "in_progress", content: [{ type: "diff", changes: [
+    { operation: "add", path: file }, { operation: "move", oldPath: file, path: next }, { operation: "delete", path: "/tmp/old.txt" },
+  ] }] });
+  emit("no", { status: "failed", content: [{ type: "diff", changes: [{ operation: "modify", path: next }] }] });
+  assert.equal(refreshes(), 0);
+  emit("edit", { status: "completed" });
+  const edit = ws["transcripts"].get("a").find(entry => entry.id === "main:edit");
+  assert.equal(edit.status, "done");
+  assert.deepEqual(edit.changes.map(change => change.operation), ["add", "move", "delete"]);
+  assert.ok(edit.changes[0].uri.includes("%231.png"));
+  assert.equal(edit.changes[1].oldPath, file);
+  assert.equal(refreshes(), 1);
+  emit("edit", { status: "completed" });
+  assert.equal(refreshes(), 1);
+  emit("image", { status: "in_progress", rawOutput: { savedPath: next } });
+  emit("image", { status: "completed" });
+  assert.equal(ws["transcripts"].get("a").find(entry => entry.id === "main:image").savedFile.path, next);
+  assert.equal(refreshes(), 2);
+  emit("empty", { status: "completed", rawOutput: { result: "aW1hZ2U=" } });
+  assert.equal(refreshes(), 2);
+  emit("edit", { content: null });
+  assert.equal(refreshes(), 3);
+  emit("notebook", { name: "NotebookEdit", kind: "other", rawInput: { notebook_path: file } });
+  emit("notebook", { status: "completed" });
+  assert.equal(refreshes(), 4);
+  assert.equal(ws["transcripts"].get("a").find(entry => entry.id === "main:notebook").savedFile.path, file);
+  emit("notebook", { status: "completed" });
+  assert.equal(refreshes(), 4);
+  ws["rebuildHistory"]("a");
+  assert.equal(refreshes(), 4);
+  ws.close();
+});
+
+test("Files refreshes for edits completed before a task attached or started before its first history page", async () => {
+  const peer = new Peer(), main = { ...agent("main"), mainSessionId: "owner" };
+  const worker = { ...agent("worker"), mainSessionId: "task-session", workflowOwner: "owner", state: "running" };
+  snapshot(peer, [main]);
+  const taskPage = Promise.withResolvers();
+  const start = (id, path) => ({ sessionUpdate: "tool_call_update", toolCallId: id, kind: "edit", status: "in_progress",
+    content: [{ type: "diff", changes: [{ operation: "add", path }] }] });
+  const done = id => ({ sessionUpdate: "tool_call_update", toolCallId: id, status: "completed" });
+  peer.requests.set(History.page, ({ sessionId, before }) => {
+    if (sessionId === "owner") return { updates: [], cursor: null, agent: main };
+    if (before === undefined) return taskPage.promise;
+    return { updates: [start("earlier", "/tmp/earlier.md")], cursor: null, agent: worker };
+  });
+  const events = [];
+  const ws = new Workspace(new Paths("/tmp/xsb-file-events"), peer, String, event => events.push(event), () => {});
+  await ws.load();
+  const refreshes = () => events.filter(event => event.filesChanged === "owner").length;
+  peer.emit(Agents.update, { agent: worker });
+  taskPage.resolve({ updates: [start("attached", "/tmp/one.md"), done("attached")], cursor: 10, agent: worker });
+  await ws["mains"].get("worker");
+  assert.equal(refreshes(), 1, "one owner refresh covers the whole initial replay");
+  const emit = update => peer.emit("session/update", { sessionId: worker.mainSessionId, update });
+  emit({ sessionUpdate: "tool_call_update", toolCallId: "read", kind: "read", status: "in_progress" });
+  emit(done("read"));
+  assert.equal(refreshes(), 1, "a known read has no file operation");
+  emit(done("earlier"));
+  emit(done("earlier"));
+  assert.equal(refreshes(), 2, "a completion without its older diff refreshes once");
+  const entry = () => ws["transcripts"].get(worker.id).find(entry => entry.id === "task-session:earlier");
+  assert.equal(entry().changes, undefined, "the transcript does not invent a file change");
+  await ws.history(worker.id);
+  assert.equal(entry().changes[0].path, "/tmp/earlier.md");
+  assert.equal(refreshes(), 2, "pagination replays the diff without another file-list refresh");
   ws.close();
 });
 
@@ -149,7 +228,7 @@ test("coalesced RPC responses and later notifications cannot restore busy snapsh
   const lists = {
     [Workflow.list]: { workflows: [] },
     [Agents.list]: { agents: [{ ...agent("a"), state: "running" }, agent("b")] },
-    [Tasks.list]: { tasks: [task] }, [Assets.list]: { assets: [] },
+    [Tasks.list]: { tasks: [task] },
   };
   output.on("data", chunk => {
     const request = JSON.parse(chunk.toString());

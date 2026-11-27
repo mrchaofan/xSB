@@ -7,7 +7,7 @@
  *
  *   task.pre_create         is the task acceptable                       `after` names known tasks
  *   task.pre_stop           may this principal stop this task            its initiator, the user, or xsb
- *   task.pre_complete       does the task end with this turn's result    ResultExtraction, QualityGate
+ *   task.pre_complete       does the task end with this turn's result    complete by default
  *   cascade.pre_propagate   does work held up by others go too           no ("spare")
  *   message.pre_deliver     how a message in an inbox reaches its session  `deliveryPolicy`
  *
@@ -22,7 +22,7 @@
  * settles, the tasks it releases. Done and stopped differ only in what the end says.
  */
 import { isTerminal, textOf } from "@xsb/protocol";
-import type { Addr, Asset, ExecutionSource, BackendRun, ContentBlock, DeliveryPref, EndReason, LedgerEntry, LedgerState, Origin, Principal, SessionUpdate, StopReason, Task, TaskStatus } from "@xsb/protocol";
+import type { Addr, ExecutionSource, BackendRun, ContentBlock, DeliveryPref, EndReason, LedgerEntry, LedgerState, Origin, Principal, SessionUpdate, StopReason, Task, TaskStatus } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import type { Hooks, Veto } from "./hooks.ts";
 import { isVeto } from "./hooks.ts";
@@ -59,7 +59,7 @@ export type Delivery = { to: Addr; from: Origin; item: MailItem; route?: Route }
 /** What a session is to be given for a message: may be rewritten, or vetoed (then it is not delivered). */
 export type Submission = { to: Addr; from: Origin; item: MailItem; prompt: ContentBlock[] };
 /** A task its executor's turn ended with: `verdict` says whether that ends it, and how. */
-export type Completion = { task: Task; result: string; assets: Asset[]; verdict: "complete" | "retry" | "fail"; why?: string };
+export type Completion = { task: Task; result: string; verdict: "complete" | "retry" | "fail"; why?: string };
 
 export type KernelDecide = {
   "task.pre_create": { task: Task };
@@ -128,8 +128,6 @@ const endOf = (task: Task, said = ""): End => {
 /** Of tasks being stopped, those whose initiators are not to be told. */
 const quietOf = (tasks: Task[]): Set<string> => new Set(tasks.filter((t) => t.stopping?.quiet).map((t) => t.id));
 
-/** How often a turn that ended without what its task has to deliver is asked again, before the task fails. */
-const QUALITY_RETRIES = 2;
 /** How long a stop waits for a session to confirm that it stopped. */
 const STOP_CONFIRM_MS = 10_000;
 
@@ -150,8 +148,6 @@ export class Kernel {
   readonly hooks: KernelHooks;
   private recipient: (to: Addr) => Recipient;
   private pendingStops: PendingStop[] = [];
-  /** Task id -> how often its turn ended without what it has to deliver. */
-  private qualityTries = new Map<string, number>();
 
   constructor(state: State, hooks: KernelHooks, recipient: (to: Addr) => Recipient) {
     this.state = state;
@@ -174,22 +170,6 @@ export class Kernel {
       const { task, stopper } = p;
       if (stopper.kind === "agent" && !same(stopper, task.initiator)) return { veto: `no task "${task.id}" dispatched by ${stopper.agentId}` };
       return p;
-    });
-    // ResultExtractionHook: what the task delivered is what its executor registered of the type it has to produce.
-    hooks.decider("task.pre_complete", (p) => {
-      if (!p.task.produces || p.assets.length) return p;
-      const assets = [...this.state.assets.values()]
-        .map((versions) => versions.at(-1)!)
-        .filter((a) => a.by === p.task.to.agentId && a.type === p.task.produces && a.createdAt >= p.task.createdAt);
-      return { ...p, assets };
-    });
-    // QualityGateHook: a task without what it has to deliver is asked for it again, a few times, then fails.
-    hooks.decider("task.pre_complete", (p) => {
-      if (!p.task.produces || p.assets.length || p.verdict !== "complete") return p;
-      const tries = (this.qualityTries.get(p.task.id) ?? 0) + 1;
-      this.qualityTries.set(p.task.id, tries);
-      const why = `It did not register a "${p.task.produces}" asset, which it had to produce.`;
-      return { ...p, verdict: tries > QUALITY_RETRIES ? "fail" : "retry", why };
     });
     hooks.decider("message.pre_deliver", (p) => ({ ...p, route: p.route ?? this.deliveryPolicy(p) }));
     hooks.decider("acp.pre_unowned_run", (p) => ({ ...p, action: p.action ?? "show" }));
@@ -277,7 +257,7 @@ export class Kernel {
   dispatch(
     from: Addr,
     to: Addr,
-    input: { title: string; topic: string; instructions: string; after: string[]; produces?: string; inputs?: string[]; deliveryPref?: DeliveryPref },
+    input: { title: string; topic: string; instructions: string; after: string[]; deliveryPref?: DeliveryPref },
   ): Task | Veto {
     if (this.sourceStopped(from)) return { veto: "This work was stopped; no new work was submitted." };
     const held = input.after.some((id) => !this.finished(id));
@@ -437,11 +417,9 @@ export class Kernel {
     return state === "queued" || state === "inboxed";
   }
 
-  /** The executor reported a task: `completed`, or `failed` by its own word. `assets`: what it named as delivered. */
-  complete(task: Task, status: "completed" | "failed", result: string, assets: Asset[]): void {
-    const done = { ...task, ...(assets.length ? { assets: assets.map((a) => `${a.id}@${a.version}`) } : {}) };
-    this.qualityTries.delete(task.id);
-    this.finish([{ task: done, status, result, reason: status, stopper: agentPrincipal(task.to.agentId) }]);
+  /** The executor explicitly reported the outcome of this task. */
+  complete(task: Task, status: "completed" | "failed", result: string): void {
+    this.finish([{ task, status, result, reason: status, stopper: agentPrincipal(task.to.agentId) }]);
   }
 
   /**
@@ -465,16 +443,14 @@ export class Kernel {
           continue;
         }
         if (this.awaited(task)) continue;
-        const decided = this.hooks.decide("task.pre_complete", { task, result: said, assets: [], verdict: "complete" });
+        const decided = this.hooks.decide("task.pre_complete", { task, result: said, verdict: "complete" });
         if (isVeto(decided)) continue;
         if (decided.verdict === "retry") {
           this.tell(task.to, task.topic, contractReminder(task, decided.why ?? ""), { steer: true, pref: "wake" });
         } else if (decided.verdict === "fail") {
           this.finish([{ task, status: "failed", result: `${said}\n${decided.why ?? ""}`.trim(), reason: "error", stopper: SYSTEM }]);
         } else {
-          this.qualityTries.delete(task.id);
-          const assets = decided.assets.map((a) => `${a.id}@${a.version}`);
-          this.finish([{ task: { ...task, ...(assets.length ? { assets } : {}) }, status: "completed", result: decided.result, reason: "completed", stopper: agentPrincipal(task.to.agentId) }]);
+          this.finish([{ task, status: "completed", result: decided.result, reason: "completed", stopper: agentPrincipal(task.to.agentId) }]);
         }
       }
     });

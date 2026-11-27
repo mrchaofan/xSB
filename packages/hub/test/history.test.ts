@@ -9,7 +9,8 @@ import { Paths } from "../src/paths.ts";
 import { Workspace } from "../../desktop/src/workspace.ts";
 import { Hub } from "../src/hub.ts";
 import { initProject } from "../src/config.ts";
-import { historyPage, historyImage } from "../src/history.ts";
+import { ops } from "../src/state.ts";
+import { historyPage, historyImage, historyFiles, historyUpdate } from "../src/history.ts";
 
 test("history pages keep multi-block messages intact and fetch normal and discarded images on demand", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-history-"));
@@ -46,6 +47,62 @@ test("history pages keep multi-block messages intact and fetch normal and discar
     const records = [...store.readBackwardEntries(file, undefined, 7)];
     assert.equal(records.length, updates.length);
     assert.deepEqual(records.map(r => store.readAt(file, r.offset)), records.map(r => r.record));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("successful native file changes across a conversation survive paging, rename, deletion and retries", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-file-history-"));
+  try {
+    const hub = new Hub(dir);
+    const main = hub.createConversation(), worker = hub.createConversation(), other = hub.createConversation();
+    const workspace = path.join(dir, "work");
+    hub.state.commit([ops.putAgent({ ...hub.agent(worker.agentId), workspace, workflowOwner: main.id, workflowNode: "Write" })]);
+    const report = path.join(workspace, "report.md"), final = path.join(workspace, "final.md"), cover = path.join(dir, "cover.png");
+    const event = (id: string, fields: object) => ({ sessionUpdate: "tool_call_update", toolCallId: id, ...fields });
+    const diff = (changes: object[]) => [{ type: "diff", changes, patch: { format: "git_patch", text: "private patch text" } }];
+    const files = () => historyFiles(hub, main.id).files;
+    const start = event("write", { name: "Write", kind: "edit", status: "in_progress", content: diff([{ operation: "add", path: report }]) });
+    assert.deepEqual(historyUpdate(start, main.id, 0)?.content, [{ type: "diff", changes: [{ operation: "add", path: report }] }]);
+    main.emit(start);
+    other.emit(event("outside", { status: "completed", content: diff([{ operation: "add", path: cover }]) }));
+    worker.emit(event("read", { status: "completed", locations: [{ path: cover }] }));
+    worker.emit(event("failed", { status: "failed", content: diff([{ operation: "modify", path: cover }]) }));
+    assert.deepEqual(files(), []);
+    main.emit(event("write", { status: "completed" }));
+    assert.deepEqual(files(), [{ path: report, agentId: main.agentId }]);
+    for (const id of ["edit", "edit-again"]) {
+      worker.emit(event(id, { name: "Edit", status: "completed", content: diff([{ operation: "modify", path: "report.md" }]) }));
+      assert.deepEqual(files(), [{ path: report, agentId: worker.agentId }]);
+    }
+
+    worker.emit(event("rename", { status: "completed", content: diff([{ operation: "move", oldPath: "report.md", path: "final.md" }]) }));
+    main.emit(event("write", { status: "completed" })); // A repeated terminal update must not resurrect the old path.
+    for (let i = 0; i < 14; i++)
+      main.emit({ sessionUpdate: "user_message_chunk", messageId: "m" + i, content: { type: "text", text: "later message" } });
+    assert.deepEqual(files(), [{ path: final, agentId: worker.agentId }]);
+    worker.emit(event("delete", { status: "completed", content: diff([{ operation: "delete", path: final }]) }));
+    assert.deepEqual(files(), []);
+
+    const image = event("image", { status: "completed", rawOutput: { status: "completed", savedPath: cover, result: "base64" } });
+    main.emit(image);
+    assert.deepEqual(historyUpdate(image, main.id, 0)?.rawOutput, { savedPath: cover });
+    main.emit(event("inline-image", { status: "completed", rawOutput: { status: "completed", result: "base64" } }));
+    main.emit(event("preview", { content: diff([{ operation: "add", path: final }]) }));
+    main.emit(event("preview", { status: "completed", content: null }));
+    assert.deepEqual(files(), [{ path: cover, agentId: main.agentId }]);
+
+    const notebook = path.join(dir, "work.ipynb");
+    main.emit(event("notebook", { name: "NotebookEdit", status: "in_progress" }));
+    main.emit(event("notebook", { rawInput: { notebook_path: notebook, new_source: "private cell" } }));
+    main.emit(event("notebook", { status: "completed", content: [{ type: "content", content: { type: "text", text: "ok" } }] }));
+    const fill = event("fill", { rawInput: { file_path: final, old_string: "", new_string: "private text" } });
+    assert.deepEqual(historyUpdate(fill, main.id, 0)?.rawInput, { file_path: final, old_string: "" });
+    main.emit(fill);
+    main.emit(event("fill", { name: "Edit", status: "completed" }));
+    main.emit(event("unchanged", { name: "Write", status: "completed", rawInput: { file_path: report } }));
+    main.emit(event("read-notebook", { name: "Read", status: "completed", rawInput: { notebook_path: report } }));
+    assert.deepEqual(files(), [cover, notebook, final].map(path => ({ path, agentId: main.agentId })));
+    assert.deepEqual(historyFiles(new Hub(dir), main.id).files, files());
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

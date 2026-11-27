@@ -1,7 +1,7 @@
-// 右栏的标签：工作流、资产管理（制品目录）、独立制品预览，以及主进程持有的网页（../src/pages.ts）。
+// 右栏的标签：工作流、文件目录、独立文件预览，以及主进程持有的网页（../src/pages.ts）。
 // 每个标签都由用户打开、可以关闭；没有当前标签时显示启动页，从那里在新标签中打开它们。
 // 网页也可以移到自己的窗口里（page-window.js）。
-import { rootSession, rememberPosition, renderArtifact, revealArtifacts, state } from "./app.js";
+import { rootSession, rememberPosition, refreshPreview, renderArtifact, revealArtifacts, state } from "./app.js";
 import { currentFlow, renderWorkflow } from "./workflow.js";
 import { artifactLabel } from "./artifacts.js";
 import { fileIcon } from "./file-icons.js";
@@ -29,13 +29,15 @@ function pageIcon(page) {
     onerror: (event) => event.currentTarget.replaceWith(globe()) });
 }
 
-/** id："workflow"、"catalog"、制品标签或网页的 id；null 显示启动页。打开工作流或资产管理即让它的标签出现。 */
+/** id："workflow"、"catalog"、文件标签或网页的 id；null 显示启动页。打开工作流或文件即让它的标签出现。 */
 export function selectTab(id, focusPage = true) {
-  if (id !== state.tab) rememberPosition();
+  const changed = id !== state.tab;
+  if (changed) rememberPosition();
   if (id === "workflow") state.workflowTab = true;
   if (id === "catalog") state.catalogTab = true;
   state.tab = id;
   renderSide(focusPage);
+  if (changed) refreshPreview();
 }
 
 /** 标签栏从左到右的 id。 */
@@ -153,7 +155,7 @@ function launcher(hasWorkflow) {
       h("span", { class: "row-text" }, h("strong", {}, title), h("small", {}, hint)));
   return h("div", { class: "launcher" },
     state.pages && item(ICON.globe, t("side.launcher.browser"), t("side.launcher.browserHint"), newTab),
-    item(ICON.grid, t("tabs.artifacts"), t("side.launcher.assetsHint"), () => selectTab("catalog")),
+    item(ICON.grid, t("tabs.artifacts"), t("side.launcher.filesHint"), () => selectTab("catalog")),
     item(ICON.flow, t("flow.title"), t(hasWorkflow || !session ? "side.launcher.workflowHint" : "side.launcher.workflowNone"), () => selectTab("workflow")));
 }
 

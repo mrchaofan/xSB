@@ -69,7 +69,7 @@ const settle = () => hooks.settled();
 // Done and stopped share one pipeline: the end says why and who; every party but the one who ended it is notified.
 {
   const t = handed(give(A, B, "done"));
-  kernel.complete(t, "completed", "DONE", []);
+  kernel.complete(t, "completed", "DONE");
   assert.deepEqual(state.tasks.get(t.id)!.ended, { reason: "completed", stopper: agentPrincipal("b") });
   assert.equal(results(A, t.id).length, 0, "ordinary task results do not prompt the dispatcher");
   const u = handed(give(A, B, "stopped"));
@@ -119,7 +119,7 @@ const settle = () => hooks.settled();
   hooks.decider("cascade.pre_propagate", (p) => p.root.id === R.id ? { ...p, cascade: "force" } : p);
   const forced = kernel.stop(R, agentPrincipal("a"), { status: "cancelled", reason: "cancelled", result: "" });
   assert.ok(!isVeto(forced) && forced.with.some((t) => t.id === shared.id));
-  for (const t of [Q, S]) kernel.complete(state.tasks.get(t.id)!, "completed", "", []);
+  for (const t of [Q, S]) kernel.complete(state.tasks.get(t.id)!, "completed", "");
   console.log("ok 3 cascade and its policy");
 }
 
@@ -128,13 +128,13 @@ const settle = () => hooks.settled();
 {
   routed.length = 0;
   const lazy = handed(give(A, B, "lazy"));
-  kernel.complete(lazy, "completed", "", []);
+  kernel.complete(lazy, "completed", "");
   const sync = handed(give(A, B, "sync", { deliveryPref: "sync" }));
   awaited.add(sync.id);
-  kernel.complete(sync, "completed", "", []);
+  kernel.complete(sync, "completed", "");
   awaited.clear();
   const wake = handed(give(A, B, "wake", { deliveryPref: "wake" }));
-  kernel.complete(wake, "completed", "", []);
+  kernel.complete(wake, "completed", "");
   await settle();
   for (const id of [lazy.id, sync.id, wake.id]) assert.equal(results(A, id).length, 0, "ordinary calls have no automatic return regardless of legacy preference");
   console.log("ok 4 ordinary calls do not return results as prompts");
@@ -160,7 +160,7 @@ const settle = () => hooks.settled();
   protectedTurns.clear();
   busy.clear();
   assert.equal(say({ kind: "user" }, "now idle").route, "turn");
-  kernel.complete(state.tasks.get(t.id)!, "completed", "", []);
+  kernel.complete(state.tasks.get(t.id)!, "completed", "");
   console.log("ok 5 arbitration");
 }
 
@@ -193,12 +193,12 @@ const settle = () => hooks.settled();
   assert.deepEqual(state.tasks.get(theirs.id)!.ended?.stopper, agentPrincipal("c"), "replacement did not cancel another initiator's work");
   assert.equal(results(A, first.id).length, 0, "its dispatcher stopped it, and is not told");
   assert.equal(state.tasks.get(second.id)!.status, "queued");
-  kernel.complete(handed(state.tasks.get(second.id)!), "completed", "", []);
+  kernel.complete(handed(state.tasks.get(second.id)!), "completed", "");
   console.log("ok 5b explicit replacement");
 }
 
 // Implicit completion: a turn's end ends the session's tasks with its last words, unless something started for one is
-// to come back; one without the asset it has to produce is asked again (QualityGate), then fails.
+// to come back.
 {
   const plain = handed(give(A, B, "implicit"));
   kernel.turnEnded("sb", "end_turn", () => "THE ANSWER");
@@ -209,7 +209,7 @@ const settle = () => hooks.settled();
   kernel.subscribe(B, [child], "all", "explicit dependency");
   kernel.turnEnded("sb", "end_turn", () => "WAITING");
   assert.equal(state.tasks.get(waiting.id)!.status, "running", "its child is to wake it");
-  kernel.complete(handed(state.tasks.get(child.id)!), "completed", "", []);
+  kernel.complete(handed(state.tasks.get(child.id)!), "completed", "");
   kernel.turnEnded("sb", "end_turn", () => "still waiting");
   assert.equal(state.tasks.get(waiting.id)!.status, "running", "the child's result is on its way");
   // The turn that brings it reads it (the effectors acknowledge it), and ends.
@@ -217,14 +217,13 @@ const settle = () => hooks.settled();
   kernel.turnEnded("sb", "end_turn", () => "NOW DONE");
   assert.equal(state.tasks.get(waiting.id)!.result, "NOW DONE");
 
-  const contract = handed(give(A, B, "must make a frame", { produces: "frame" }));
-  kernel.turnEnded("sb", "end_turn", () => "nothing");
-  kernel.turnEnded("sb", "end_turn", () => "nothing");
-  assert.equal(state.tasks.get(contract.id)!.status, "running", "asked again, twice");
-  assert.equal([...state.mail.values()].filter((m) => m.to.sessionId === "sb" && m.content?.includes("is not done")).length, 2);
-  kernel.turnEnded("sb", "end_turn", () => "nothing");
-  assert.deepEqual([state.tasks.get(contract.id)!.status, state.tasks.get(contract.id)!.ended!.reason], ["failed", "error"]);
-  console.log("ok 6 implicit completion and its quality gate");
+  const old = handed(give(A, B, "pre-upgrade task"));
+  const oldRecord = { ...old, produces: "frame", inputs: ["character/lead"] };
+  state.commit([ops.putTask(oldRecord)]);
+  kernel.turnEnded("sb", "end_turn", () => "Frame saved to shot.png");
+  assert.equal(state.tasks.get(old.id)!.status, "completed");
+  assert.equal(state.tasks.get(old.id)!.result, "Frame saved to shot.png");
+  console.log("ok 6 implicit completion and awaited work");
 }
 
 // The ledger only moves forward, from the receipts and what follows them; the stop of a turn decides the rest.
@@ -310,7 +309,7 @@ const settle = () => hooks.settled();
   kernel.mark(message.id, "discarded_unseen");
   const task = handed(give(A, B, "finished before mail acknowledgement"));
   const taskMail = [...state.mail.values()].find(m => m.taskId === task.id)!;
-  kernel.complete(task, "completed", "done", []);
+  kernel.complete(task, "completed", "done");
   await settle(); // Drain the original, valid routing events before measuring resume events.
   routed.length = 0;
   kernel.resume(); await settle();

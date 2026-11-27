@@ -18,6 +18,7 @@
  *   !servers              emit the names of the MCP servers the session was given
  *   !tools                emit the names of the team's tools the session has now
  *   !usage <n>            report that the conversation uses n tokens of context
+ *   !update <json>        emit a native ACP session update
  *   !images               emit image data retained in this backend conversation
  *
  * A prompt without directives is echoed. As ACP v2 has it, a prompt is answered with its message id once it is
@@ -109,6 +110,8 @@ async function step(session: Session, line: string): Promise<void> {
   const [, directive, own, rest = ""] = /^!(\w+)(?:@(t_\w+))?\s*(.*)$/.exec(line) ?? [];
   const task = own ?? session.task ?? "";
   switch (directive) {
+    case "update":
+      return update(session, JSON.parse(rest));
     case "say":
       return say(session, rest + "\n");
     case "title":
