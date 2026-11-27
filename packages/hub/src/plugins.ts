@@ -144,14 +144,17 @@ const approvedIn = (config: { approvedPlugins?: unknown }): Set<string> =>
  * What a project plugin was approved as: its `.mcp.json` and the files of its folder that its servers are started
  * with. A change to either asks again. (Files those load in turn are not in it; the approval says to check the folder.)
  */
-const fingerprint = (p: Found, paths: Paths) => {
-  const hash = createHash("sha256").update(JSON.stringify([paths.project, p.name, p.text]));
+const fingerprint = (p: Found, paths?: Paths) => {
+  const hash = createHash("sha256").update(JSON.stringify([paths?.project, p.name, p.text]));
   for (const server of serversOf(p)) {
     if (server.type !== "stdio") continue;
     for (const file of [server.command, ...server.args ?? []]) {
       const inside = path.relative(p.dir, file);
       if (!path.isAbsolute(file) || !inside || inside.startsWith("..") || path.isAbsolute(inside)) continue;
-      try { hash.update(inside).update(fs.readFileSync(file)); } catch { /* not a file: nothing of it to approve */ }
+      hash.update(inside);
+      try {
+        if (fs.statSync(file).isFile()) hash.update(fs.readFileSync(file));
+      } catch { /* not a file: nothing of it to approve */ }
     }
   }
   return hash.digest("hex");
@@ -166,12 +169,13 @@ function survey(paths?: Paths): { found: Found; view: PluginView }[] {
   const last = new Map(found.filter((p) => !p.problem).map((p) => [p.name, p]));
   return found.map((p) => {
     const enabled = configuration.available && !(p.scope === "project" ? offProject : offGlobal).has(p.name) && !offProject.has(p.name);
-    const ok = p.scope !== "project" || (!!paths && approved.has(fingerprint(p, paths)));
+    const revision = p.scope === "project" && paths ? fingerprint(p, paths) : undefined;
+    const ok = p.scope !== "project" || (!!revision && approved.has(revision));
     const view: PluginView = {
       name: p.name, scope: p.scope, dir: p.dir, problem: p.problem,
       runs: p.servers && Object.values(p.servers).map((s) => s.type === "http" ? s.url
         : [...Object.entries(s.env ?? {}).map(([k, v]) => `${k}=${v}`), s.command, ...s.args ?? []].join(" ")).join("\n"),
-      enabled, ...(p.scope === "project" ? { approved: ok, ...(ok && paths ? { approvalFingerprint: fingerprint(p, paths) } : {}) } : {}),
+      enabled, ...(p.scope === "project" ? { approved: ok, ...(ok && revision ? { approvalFingerprint: revision } : {}) } : {}),
       replaced: !p.problem && last.get(p.name) !== p,
       active: !p.problem && last.get(p.name) === p && enabled && ok,
     };
@@ -181,13 +185,21 @@ function survey(paths?: Paths): { found: Found; view: PluginView }[] {
 
 export const listPlugins = (paths?: Paths): PluginView[] => survey(paths).map((x) => x.view);
 
+type PluginServer = { server: McpServer; pluginId: string; revision: string };
+
 /**
  * The servers a conversation of the project gets, in name order: the same set gives the same prompt. Of two servers
  * of one name, the later plugin's is it.
  */
-export const activePlugins = (paths?: Paths): { server: McpServer }[] =>
-  [...new Map(survey(paths).filter((x) => x.view.active).flatMap(({ found }) => serversOf(found)).map((server) => [server.name, server])).values()]
-    .sort((a, b) => a.name.localeCompare(b.name)).map((server) => ({ server }));
+export function activePlugins(paths?: Paths): PluginServer[] {
+  const selected = new Map<string, PluginServer>();
+  for (const { found, view } of survey(paths)) {
+    if (!view.active) continue;
+    const revision = found.scope + "/" + (view.approvalFingerprint ?? fingerprint(found, paths));
+    for (const server of serversOf(found)) selected.set(server.name, { server, pluginId: found.name, revision });
+  }
+  return [...selected.values()].sort((a, b) => a.server.name.localeCompare(b.server.name));
+}
 
 /** Turn a plugin on or off on this machine (`global`) or in the project (`project`). */
 export function setPluginEnabled(scope: "global" | "project", name: string, enabled: boolean, paths?: Paths): void {
@@ -216,5 +228,6 @@ export function ensurePluginRoot(scope: "global" | "project", paths?: Paths): st
 }
 
 /** Fingerprint of what a set of tool servers starts, without the per-session tokens: equal means no change. */
-export const toolsKey = (tools: { server: McpServer }[]): string => JSON.stringify(tools.map(({ server }) => server));
+export const toolsKey = (tools: { server: McpServer; pluginId?: string; revision?: string }[]): string =>
+  JSON.stringify(tools.map(({ server, pluginId, revision }) => [server, pluginId, revision]));
 

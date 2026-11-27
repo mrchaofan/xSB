@@ -52,24 +52,17 @@
     <section class="side" id="side-artifacts">
     <header class="bar artifact-toolbar">
       <button class="icon-btn" id="artifact-list" data-t-title="artifact.list.all" data-t-aria-label="artifact.list.all"><svg viewBox="0 0 16 16"><path d="M10 3L5 8l5 5"/></svg></button>
-      <div class="artifact-title"><strong id="artifact-name"></strong><small id="artifact-meta"></small></div>
+      <div class="artifact-title"><strong id="artifact-name"></strong></div>
+      <div class="segmented" id="artifact-modes" role="group" data-t-aria-label="artifact.mode.label" hidden><button data-mode="preview" data-t="artifact.mode.preview"></button><button data-mode="source" data-t="artifact.mode.source"></button></div>
       <div id="artifact-navigation" hidden></div>
-      <button class="icon-btn" id="artifact-info" hidden aria-expanded="false" aria-controls="artifact-details" data-t-title="artifact.details" data-t-aria-label="artifact.details"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 7v4M8 4.5v.5"/></svg></button>
+      <button type="button" class="icon-btn" id="artifact-reveal" data-t-title="artifact.reveal" data-t-aria-label="artifact.reveal"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 11.5v-8h5l2 2h5v2M2.5 13l2-5.5h10L12.5 13z"/></svg></button>
     </header>
+    <p class="content-error" id="artifact-reveal-error" role="status" hidden></p>
     <div id="artifact-references" hidden>
       <label id="reference-destination" hidden><span data-t="artifact.destination"></span><select></select></label>
-      <button class="btn" id="asset-reference" hidden data-t="flow.reference"></button>
+      <button class="btn" id="asset-reference" hidden data-t="artifact.referenceFile"></button>
     </div>
-    <div class="artifact-stage">
-      <div class="artifact-body" id="artifact-body"></div>
-      <aside class="artifact-details" id="artifact-details" hidden data-t-aria-label="artifact.details">
-        <header><strong data-t="artifact.details"></strong><button class="icon-btn" id="artifact-details-close" data-t-title="common.close" data-t-aria-label="common.close"><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></header>
-        <div class="artifact-detail-content" id="artifact-detail-content"></div>
-        <div class="segmented" id="artifact-modes" role="group" data-t-aria-label="artifact.mode.label"><button data-mode="preview" data-t="artifact.mode.preview"></button><button data-mode="source" data-t="artifact.mode.source"></button></div>
-        <button class="btn" id="artifact-reveal" data-t="artifact.reveal"></button>
-        <p class="content-error" id="artifact-detail-error" role="status" hidden></p>
-      </aside>
-    </div>
+    <div class="artifact-body" id="artifact-body"></div>
     </section>
 
     <section class="side" id="side-web" hidden>

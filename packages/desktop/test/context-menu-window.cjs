@@ -137,8 +137,18 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await until(() => win.contentView.children.includes(previewView), "HTML preview reattached");
   assert.equal(await previewView.webContents.executeJavaScript("document.querySelector('#draft').value"), "retained");
 
+  const { shell } = require("electron");
+  const originalReveal = shell.showItemInFolder;
+  let revealed;
+  try {
+    shell.showItemInFolder = file => { revealed = file; };
+    assert.equal(await js(q(".artifact-toolbar #artifact-reveal") + ".title"), text["artifact.reveal"]);
+    await click(".artifact-toolbar #artifact-reveal");
+    await until(() => revealed, "revealing a supported file directly from the preview toolbar");
+    assert.equal(fs.realpathSync(revealed), fs.realpathSync(path.join(workspace, "preview.html")));
+  } finally { shell.showItemInFolder = originalReveal; }
+
   // Leave before the new preview's IPC reply. The visible browser tab must still track layout changes.
-  await click("#artifact-info");
   await click('#artifact-modes [data-mode="source"]');
   await until(() => has("#artifact-body pre.source"), "HTML source loaded");
   await js(q('#artifact-modes [data-mode="preview"]') + ".click(); " + q(pageTab + " .tab-main") + ".click()");

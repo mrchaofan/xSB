@@ -269,6 +269,9 @@ body:not(.no-workspace) .welcome { display: none; }
 .history-more[hidden] { display: none; }
 .entries { max-width: 740px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--space-4); font-size: var(--text-lg); line-height: var(--leading); }
 .entry { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+/* Published entries use the source and body recorded in the conversation. */
+.publication { border-inline-start: 2px solid var(--line); padding-inline-start: var(--space-3); }
+.publication-source { margin-bottom: var(--space-1); font-size: var(--text-sm); color: var(--ink-3); }
 /* 上下文的边界：一条横线，中间写模型从哪里起看不到上面的内容。 */
 .entry.boundary { display: flex; align-items: center; gap: var(--space-3); color: var(--ink-3); font-size: var(--text-sm); white-space: normal; }
 .entry.boundary::before, .entry.boundary::after { content: ""; flex: 1 1 24px; min-width: 24px; border-top: 1px dashed var(--ink-3); opacity: .5; }
@@ -445,7 +448,7 @@ body:not(.no-workspace) .welcome { display: none; }
 .catalog-types button:hover { background: var(--hover); }
 .catalog-types button[aria-pressed="true"] { background: var(--selected); color: var(--ink); }
 .catalog-filters { display: flex; flex-direction: column; gap: var(--space-3); }
-.catalog-filters select, .artifact-navigation select, #flow-heading select { min-width: 0; height: var(--control-sm); padding: 0 var(--space-1); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); color: var(--ink-2); font: var(--text-xs) var(--sans); }
+.catalog-filters select, .artifact-version, #flow-heading select { min-width: 0; height: var(--control-sm); padding: 0 var(--space-1); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); color: var(--ink-2); font: var(--text-xs) var(--sans); }
 .catalog-filters select { width: 100%; }
 .catalog-summary { display: flex; justify-content: space-between; align-items: center; min-height: 18px; font-size: var(--text-xs); color: var(--ink-3); }
 .catalog-summary .link { font-size: var(--text-xs); }
@@ -565,6 +568,7 @@ body.page-hole {
 #pin[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 
 .artifact-body { flex: 1; min-height: 0; overflow: auto; }
+.artifact-body > .web-note { min-height: 100%; }
 .artifact-body .listing { padding: var(--space-2); }
 .artifact-body iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
 .artifact-body figure { container-type: size; margin: 0; height: 100%; padding: var(--space-3); display: flex; align-items: center; justify-content: center; }
@@ -793,25 +797,12 @@ td code + code, td .gap + code, td code + .gap { margin-left: var(--space-3); }
 .settings-content > .bar { height: auto; min-height: var(--bar); flex-wrap: wrap; padding-top: var(--space-2); padding-bottom: var(--space-2); }
 .settings-content > .bar .artifact-title { flex-basis: 180px; }
 
-/* 预览保持一层工具栏；路径和低频操作收进详情。 */
+/* 文件预览的显示模式、导航和文件夹操作共用一行。 */
 .artifact-toolbar { height: 48px; gap: var(--space-1); padding: 0 var(--space-2); }
-.artifact-toolbar #artifact-meta:empty { display: none; }
-.artifact-toolbar #artifact-meta { font-size: var(--text-xs); }
 .artifact-toolbar #artifact-navigation { flex: none; }
 .artifact-toolbar .artifact-title { padding: 0 var(--space-1); }
-.artifact-stage { flex: 1; min-height: 0; display: flex; position: relative; overflow: hidden; }
-.artifact-stage > .artifact-body { min-width: 0; }
-.artifact-details { position: absolute; z-index: 2; right: 0; inset-block: 0; width: min(300px, 100%); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-4); overflow: auto; background: var(--paper); border-left: 1px solid var(--line); box-shadow: var(--shadow); }
-.artifact-details[hidden] { display: none; }
-.artifact-details > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.artifact-details .segmented { flex: none; align-self: flex-start; }
-.artifact-details .segmented[hidden] { display: none; }
-.artifact-detail-fields { display: flex; flex-direction: column; gap: var(--space-4); }
-.artifact-detail-field { display: flex; flex-direction: column; gap: var(--space-1); overflow-wrap: anywhere; }
-.artifact-detail-field p { margin: 0; }
-.artifact-location { display: flex; align-items: flex-start; gap: var(--space-2); }
-.artifact-location code { flex: 1; min-width: 0; font: var(--text-xs) / var(--leading) var(--mono); user-select: text; }
-.artifact-detail-field select { width: 100%; height: var(--control-md); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); color: var(--ink); padding: 0 var(--space-2); }
+.artifact-toolbar .segmented button { padding: 0 var(--space-1h); }
+#artifact-reveal-error { margin: var(--space-2) var(--space-3); overflow-wrap: anywhere; }
 .catalog-summary { position: relative; gap: var(--space-2); flex-wrap: wrap; }
 .catalog-advanced { margin-left: auto; font-size: var(--text-xs); }
 .catalog-advanced > summary { display: flex; align-items: center; gap: var(--space-1); list-style: none; white-space: nowrap; height: var(--control-sm); padding: 0 var(--space-1h); border-radius: var(--radius-sm); color: var(--ink-2); }
@@ -834,9 +825,6 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 .table-dialog { width: min(1200px, calc(100vw - 32px)); max-width: none; max-height: calc(100vh - 32px); }
 .table-expanded { min-height: 0; overflow: auto; max-height: 70vh; }
 .table-expanded table { display: table; width: 100%; }
-@container (min-width: 680px) {
-  .artifact-details { position: relative; width: 280px; flex: none; box-shadow: none; }
-}
 @container (max-width: 380px) {
   .artifact-toolbar .artifact-position { display: none; }
   .catalog-types button { padding-inline: var(--space-1h); }

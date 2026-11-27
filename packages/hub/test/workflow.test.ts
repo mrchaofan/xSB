@@ -3,12 +3,14 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Question, Workflow, text } from "@xsb/protocol";
-import type { NodeDef } from "@xsb/protocol";
+import { ConversationEvent, Question, Workflow, text, conversationEntry } from "@xsb/protocol";
+import type { NodeDef, SessionUpdate } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { Paths } from "../src/paths.ts";
+import { setProjectLanguage } from "../src/config.ts";
+import { pathToFileURL } from "node:url";
 import { conversationPrompt, WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT } from "../src/prompts.ts";
-import { ops } from "../src/state.ts";
+import { F, ops } from "../src/state.ts";
 import { deferred, newId } from "../src/util.ts";
 import type { LiveSession, Turn } from "../src/session.ts";
 import { canonical, graphJsonl, validateResult, parseGraph } from "../src/workflow-graph.ts";
@@ -43,7 +45,7 @@ const select = (f: Flow, from: string, cases: string[]) => {
   normalize(f);
 };
 
-test("workflow queries distinguish completed delivery from pending notifications and controls cannot replay a completed graph", async (t) => {
+test("completion is independent of model delivery and controls cannot replay a completed graph", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-completed-query-"));
   const hub = new Hub(dir); hub.stopping = true;
   t.after(async () => { await hub.shutdown(); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -51,9 +53,7 @@ test("workflow queries distinguish completed delivery from pending notifications
   const f = build(graph(task("A"), end(), edge("A", "end"))); f.owner = root.id;
   deliver(f, "A");
   hub.state.commit([ops.workflow(f)]);
-  assert.equal(hub.workflows.get(root.id).state, "running", "the completion notice still needs delivery");
-  f.outbox = []; f.paused = true;
-  hub.state.commit([ops.workflow(f)]);
+  assert.deepEqual(f.outbox, []);
   assert.equal(hub.workflows.get(root.id).state, "completed");
   assert.deepEqual(hub.workflows.get(root.id).controls, { pause: false, resume: false });
   assert.deepEqual(hub.workflows.list(), [hub.workflows.get(root.id)]);
@@ -81,6 +81,115 @@ test("a delivered predecessor can still pause its unfinished branch", () => {
   control(f, true, ["A"]);
   assert.equal(view(f).nodes.find(n => n.name === "A")!.controls!.resume, true);
   assert.equal(claim(f, "B"), undefined);
+});
+
+test("an accepted end and its complete passive result commit together and notify clients exactly once", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-completion-result-"));
+  const hub = new Hub(dir); hub.stopping = true;
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const root = hub.createConversation(), other = hub.createConversation();
+  setProjectLanguage(hub.paths, "zh-CN");
+  const f = build(graph(task("Draft"), task("Review"), end("Publish"), edge("Draft", "Review"), edge("Review", "Publish")));
+  f.owner = root.id;
+  const large = "原始材料".repeat(15_000);
+  deliver(f, "Draft", large);
+  const work = claim(f, "Review")!;
+  const file = path.join(dir, "audit with spaces.md");
+  fs.writeFileSync(file, large);
+  hub.state.commit([ops.putAsset({ id: "workflow/Audit @ note", type: "workflow", name: "Audit @ note", version: 2,
+    description: "Audit", by: root.agentId, path: file, createdAt: new Date().toISOString() })]);
+  work.staged = { summary: "Verified the evidence", assets: [{ name: "Audit @ note", version: "v2" }],
+    result: { verified: false, count: 0, missing: [null], html: "<script>sample</script>", text: "A paragraph\n\nwith details", list: [], obj: {} } };
+  const worker = hub.createConversation("claude", "Review", {
+    owner: root.id, node: "Review", bind: (agentId, sessionId) => {
+      Object.assign(f.instances.Review, { agentId, sessionId });
+      return ops.workflow(f);
+    },
+  });
+  const turn = turnFor(worker, work.attempt!);
+  worker.current = undefined;
+  const occupied = turnFor(root, "user-request");
+  const updates: SessionUpdate[] = [];
+  root.clients.add({ history: true, conn: { notify: (_method: string, body: { update: SessionUpdate }) => updates.push(body.update) } } as any);
+  const transcript = Paths.transcript(root.agentId, root.id);
+  const events = () => hub.state.store.read(transcript).filter(rec => rec.update?._meta?.[ConversationEvent.key]);
+  assert.throws(() => hub.state.atomic(() => {
+    hub.workflows.ended(worker, turn, { stopReason: "end_turn" });
+    throw Error("rollback");
+  }), /rollback/);
+  assert.equal(events().length, 0);
+  assert.equal(updates.length, 0);
+  assert.equal(hub.workflows.read(root.id).instances.Publish.last, undefined);
+  hub.workflows.ended(worker, turn, { stopReason: "end_turn" });
+  assert.equal(root.current, occupied);
+  assert.equal(occupied.inputs.length, 1);
+  assert.deepEqual(hub.workflows.read(root.id).outbox, []);
+  assert.equal(hub.state.mail.size, 0);
+  assert.equal(hub.workflows.get(root.id).state, "completed");
+  assert.equal(events().length, 1);
+  const [record] = events();
+  // The transaction tag links the authoritative end decision to its permanent transcript entry.
+  const flowRecord = hub.state.store.read(F.workflows).at(-1)!;
+  assert.equal(record._tx.split(":")[0], flowRecord._tx.split(":")[0]);
+  assert.deepEqual(JSON.parse(JSON.stringify(updates)), [record.update]);
+  const event = conversationEntry(record.update, root.id)!;
+  assert.deepEqual(event.source, { kind: "plugin", id: "workflow", label: "工作流" });
+  assert.equal(event.id, hub.workflows.read(root.id).instances.Publish.last!.id);
+  assert.deepEqual(Object.keys(event).sort(), ["id", "markdown", "schemaVersion", "sessionId", "source"]);
+  const body = event.markdown;
+  for (const part of ["# 工作流已完成", "plan-1", "Publish", large, "Verified the evidence", "Audit @ note@v2", pathToFileURL(file).href,
+    "`node` Draft", "`verified` `false`", "`count` `0`", "`missing`", "1. `null`", "A paragraph", "with details", "&lt;script>sample&lt;/script>", "`[]`", "`{}`"])
+    assert.ok(body.includes(part), part.slice(0, 80));
+  assert.ok(body.indexOf("## `Draft`") < body.indexOf("## `Review`"));
+  assert.ok(!body.includes(hub.workflows.read(root.id).instances.Review.last!.id));
+  assert.equal(hub.state.store.read(Paths.transcript(other.agentId, other.id)).length, 0);
+  hub.workflows.ended(worker, turn, { stopReason: "end_turn" });
+  hub.workflows.restart();
+  const restarted = new Hub(dir); restarted.stopping = true;
+  restarted.workflows.restart();
+  assert.equal(events().length, 1);
+  assert.equal(updates.length, 1);
+});
+
+test("restart converts pending legacy completion notices to history without replaying their transport", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-legacy-results-"));
+  const before = new Hub(dir); before.stopping = true;
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const cases = (["unposted", "inboxed", "offered", "inserted"] as const).map(status => {
+    const root = before.createConversation(), f = build(graph(task("A"), end(), edge("A", "end")));
+    f.owner = root.id;
+    deliver(f, "A");
+    const body = JSON.stringify({ completed: "end", version: f.active, predecessors: [{ node: "A", ...f.instances.A.last }] });
+    const notice = { id: newId("notice"), text: body, delivery: f.instances.end.last!.id };
+    const to = { agentId: root.agentId, sessionId: root.id }, from = { kind: "system" as const };
+    const posted = status === "unposted" ? undefined : newId("noticeAttempt");
+    f.outbox = [{ ...notice, posted }];
+    before.state.commit([ops.workflow(f)]);
+    if (posted) {
+      before.state.commit([ops.enqueue({ id: posted, to, from, kind: "message", workflowNotice: true, ts: "", prompt: [text(body)] })]);
+      before.kernel.mark(posted, status === "inserted" ? "inserted" : "inboxed", { ...to, from });
+      if (status === "offered") before.kernel.offered([{ messageId: posted, about: { ...to, from } }], "backend", posted);
+      if (status === "inserted") root.emit({ sessionUpdate: "user_message_chunk", messageId: posted, content: text(body) });
+    }
+    return { root, status, posted, endId: notice.delivery };
+  });
+  const restarted = new Hub(dir); restarted.stopping = true;
+  restarted.workflows.restart();
+  restarted.kernel.resume();
+  restarted.workflows.restart();
+  for (const { root, status, posted, endId } of cases) {
+    const history = restarted.state.store.read(Paths.transcript(root.agentId, root.id));
+    const results = history.flatMap(rec => conversationEntry(rec.update, root.id) ?? []);
+    assert.deepEqual(results.map(r => r.id), status === "inserted" ? [] : [endId]);
+    assert.equal(restarted.workflows.get(root.id).state, "completed");
+    assert.deepEqual(restarted.workflows.read(root.id).outbox, []);
+    if (!posted) continue;
+    assert.equal(restarted.state.mail.has(posted), false);
+    assert.equal(restarted.state.ledger.get(posted)?.state, status === "offered" ? "insertion_uncertain" :
+      status === "inserted" ? "inserted" : "discarded_unseen");
+    assert.equal(history.filter(rec => rec.update?.sessionUpdate === "user_message_chunk").length, status === "inserted" ? 1 : 0);
+    assert.ok(!history.some(rec => rec.update?._meta?.["dev.xsb/discarded"]));
+  }
 });
 
 test("runtime-only turn changes publish fresh workflow controls for a pending correction", async t => {
@@ -354,6 +463,22 @@ function turnFor(session: LiveSession, id: string) {
   return turn;
 }
 
+test("a failed workflow journal append fences storage without publishing a fallback conversation entry", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-audit-"));
+  const hub = new Hub(dir);
+  t.after(async () => { await hub.shutdown(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const session = hub.createConversation();
+  const file = Paths.transcript(session.agentId, session.id);
+  const before = hub.state.store.read(file);
+  fs.mkdirSync(hub.paths.agentDir(session.agentId), { recursive: true });
+  fs.writeFileSync(path.join(hub.paths.agentDir(session.agentId), "workflow"), "not a directory");
+  assert.throws(() => hub.workflows.record(session, "t", { kind: "tool", tool: "plan", receipt: "call", arguments: "{}", result: "saved" }));
+  assert.equal(hub.state.store.healthy, false);
+  assert.equal(hub.stopping, true);
+  assert.throws(() => hub.state.commit([]), /restart and recover/);
+  assert.deepEqual(hub.state.store.read(file), before);
+});
+
 test("receipt replay, exact asset grants, pinned base, staged finish, interrupt and restart", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-state-"));
   const hub = new Hub(dir);
@@ -366,16 +491,31 @@ test("receipt replay, exact asset grants, pinned base, staged finish, interrupt 
   fs.writeFileSync(asset, "original");
   const invoke = (s: LiveSession, tool: string, a: Record<string, any>, id = newId("call")) =>
     runtime.call(s, tool, a, id);
-  assert.deepEqual(invoke(root, "asset_put", { name: "base", path: asset }), { name: "base", version: "v1" });
+  assert.deepEqual(invoke(root, "asset_put", { name: "base", path: asset }), "base@v1");
   const otherRoot = hub.createConversation();
   turnFor(otherRoot, "separate-conversation");
-  assert.deepEqual(invoke(otherRoot, "asset_version_get", { name: "base" }), { name: "base", version: "v1" });
+  assert.deepEqual(invoke(otherRoot, "asset_version_get", { name: "base" }), "base@v1");
   invoke(root, "asset_put", { name: "private", path: asset });
+  invoke(root, "asset_put", { name: "file:///work/private", path: asset });
+  invoke(root, "asset_put", { name: "legacy @ input", path: asset });
+  const file = { type: "resource_link", name: "private@v1", uri: "file:///work/private@v1" };
+  const business = { name: "private", version: "v1", status: "published" };
   invoke(root, "execute", {
-    graphJsonl: graph({ ...task("A"), input: { base: { name: "base", version: "v1" } } }, end(), edge("A", "end")),
+    graphJsonl: graph({ ...task("A"), input: { name: "private", version: "v1", file, uri: file.uri, business,
+      note: "Please inspect base@v1", base: "base@v1", old: { name: "legacy @ input", version: "v1" },
+      instruction: "Use: <asset>base@v1</asset> with branch@v2" } }, end(), edge("A", "end")),
   });
   const f = structuredClone(runtime.read(root.id)),
     w = claim(f, "A")!;
+  assert.deepEqual(w.grants, [{ name: "base", version: "v1" }, { name: "legacy @ input", version: "v1" }, { name: "base", version: "v1" }]);
+  const fields = w.assignment.input as Record<string, unknown>;
+  assert.deepEqual(fields.file, file);
+  assert.deepEqual(fields.business, business);
+  assert.equal(fields.note, "Please inspect base@v1");
+  assert.equal(fields.uri, file.uri);
+  const graphBack = graphJsonl(f.versions[f.active!]), graphVersion = f.active;
+  assert.ok(graphBack.includes('"old":"legacy @ input@v1"'));
+  assert.equal(adopt(f, { graphJsonl: graphBack }, false, ref => w.grants.some(r => r.name === ref.name && r.version === ref.version)), graphVersion, "projecting an old ref preserves version identity");
   const worker = hub.createConversation("claude", "A", {
     owner: root.id,
     node: "A",
@@ -388,20 +528,22 @@ test("receipt replay, exact asset grants, pinned base, staged finish, interrupt 
   old.first.content = [text(JSON.stringify({ quoted: '<asset>{"name":"private","version":"v1"}</asset>' }))];
   assert.throws(() => invoke(worker, "plan", {}), /unavailable/);
   assert.deepEqual(invoke(worker, "asset_list", { name: "private" }), []);
+  assert.throws(() => invoke(worker, "asset_get", { ref: file.uri }), /outside/);
+  assert.deepEqual(invoke(worker, "asset_list", { name: "legacy @ input" }), ["legacy @ input@v1"]);
   assert.throws(() => invoke(worker, "asset_get", { name: "private", version: "v1" }), /outside/);
   const privateFile = (invoke(otherRoot, "asset_get", { name: "private", version: "v1" }) as { path: string }).path;
   assert.throws(() => invoke(worker, "asset_put", { name: "copy", path: privateFile }), /outside/);
-  assert.deepEqual(invoke(worker, "asset_version_get", { name: "base" }), { name: "base", version: "v1" });
+  assert.deepEqual(invoke(worker, "asset_version_get", { name: "base" }), "base@v1");
   fs.writeFileSync(asset, "revised");
   invoke(worker, "asset_put", { name: "base", path: asset });
-  assert.deepEqual(invoke(otherRoot, "asset_version_get", { name: "base" }), { name: "base", version: "v2" });
+  assert.deepEqual(invoke(otherRoot, "asset_version_get", { name: "base" }), "base@v2");
   invoke(otherRoot, "asset_put", { name: "base", path: null });
   assert.equal(invoke(root, "asset_version_get", { name: "base" }), null);
-  assert.deepEqual(invoke(worker, "asset_version_get", { name: "base" }), { name: "base", version: "v1" });
-  invoke(otherRoot, "asset_version_put", { name: "base", version: "v2" });
-  assert.deepEqual(invoke(root, "asset_version_get", { name: "base" }), { name: "base", version: "v2" });
-  assert.equal((invoke(worker, "asset_get", { name: "base", version: "v1" }) as any).content, "original");
-  invoke(worker, "finish", { summary: "done", assets: [{ name: "base", version: "v2" }] });
+  assert.deepEqual(invoke(worker, "asset_version_get", { name: "base" }), "base@v1");
+  invoke(otherRoot, "asset_version_put", { ref: "base@v2" });
+  assert.deepEqual(invoke(root, "asset_version_get", { name: "base" }), "base@v2");
+  assert.equal((invoke(worker, "asset_get", { ref: "base@v1" }) as any).content, "original");
+  invoke(worker, "finish", { summary: "done", assets: ["base@v2"] });
   assert.throws(() => invoke(worker, "asset_put", { name: "base", path: asset }), /closed/);
   runtime.input(worker, "user-correction", [text("Check the base")]);
   worker.current = undefined;
@@ -896,11 +1038,11 @@ test("assignments are rendered at send time with complete facts and separate tas
   assert.match(source, /^# Workflow task\n/);
   assert.ok(source.includes(String(work.assignment.target)));
   assert.ok(source.includes("> !say THIS-IS-A-PAST-RESULT"), "result text is material, not a fresh instruction");
-  for (const text of ["Predecessor deliveries", '"v2"', '"withdrawn-work"', '"type": "object"']) assert.ok(source.includes(text));
+  for (const text of ["Predecessor deliveries", '"brief@v2"', '"withdrawn-work"', '"type": "object"']) assert.ok(source.includes(text));
   assert.deepEqual(work, before, "rendering cannot mutate assignment facts or receipt state");
   const resumed = renderAssignment(work, "zh-CN", true);
   assert.match(resumed, /^# 继续任务/);
-  assert.ok(resumed.includes(String(work.assignment.target)) && resumed.includes('"v2"') && resumed.includes('"v1"'));
+  assert.ok(resumed.includes(String(work.assignment.target)) && resumed.includes('"brief@v2"') && resumed.includes('"brief@v1"'));
   assert.ok(!resumed.includes("THIS-IS-A-PAST-RESULT"), "a short continuation relies on its already-inserted assignment");
   const extra = { ...work, kind: "extra" as const, assignment: { ...work.assignment, text: "Perform this additional check" } };
   const additionalSource = renderAssignment(extra, "en");

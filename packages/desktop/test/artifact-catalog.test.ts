@@ -4,16 +4,18 @@ import { artifactGroups, visibleArtifacts } from "../renderer/artifact-catalog.j
 
 const file = (id: string, extra = {}) => ({ id, path: id, name: id.split("/").at(-1), kind: "markdown", agentId: "writer", updatedAt: "2026-11-17T12:00:00Z", ...extra });
 
-test("asset versions collapse by identity while equally named working files remain separate", () => {
+test("only registered workflow versions share a catalog entry, including files with version-like paths", () => {
+  const asset = { assetId: "workflow/scene", registeredName: "scene", assetType: "workflow" };
   const items = [
-    file("/a", { path: ".xsb/assets/script/scene/v2.md", updatedAt: "2026-11-17T13:00:00Z" }),
-    file("/b", { path: ".xsb/assets/script/scene/v10.md", updatedAt: "2026-11-17T10:00:00Z" }),
-    file("/c", { path: ".xsb\\assets\\script\\scene\\v1.md" }),
-    file("/x/doc.md"), file("/y/doc.md"),
+    file("/a", { ...asset, assetVersion: 2, updatedAt: "2026-11-17T13:00:00Z" }),
+    file("/b", { ...asset, assetVersion: 10, updatedAt: "2026-11-17T10:00:00Z" }),
+    file("/c", { ...asset, assetVersion: 1 }),
+    file("/x/doc.md", { path: ".xsb/assets/script/scene/v1.md" }),
+    file("/y/doc.md", { path: ".xsb/assets/script/scene/v2.md" }),
   ];
   const groups = artifactGroups(items);
   assert.equal(groups.length, 3);
-  assert.equal(groups[0].assetId, "script/scene");
+  assert.equal(groups[0].assetId, "workflow/scene");
   assert.equal(groups[0].latest.id, "/b");
   assert.deepEqual(groups[0].versions.map((a) => a.id), ["/b", "/a", "/c"]);
   assert.equal(items[0].id, "/a");
@@ -21,7 +23,7 @@ test("asset versions collapse by identity while equally named working files rema
 
 test("catalog combines name, path, description, type, member and source filters", () => {
   const groups = artifactGroups([
-    file("image1", { kind: "image", assetId: "scene/snow", assetVersion: 1, name: "雪景.png", description: "场景参考", agentId: "art", updatedAt: "2026-11-17T14:00:00Z" }),
+    file("image1", { kind: "image", assetId: "workflow/snow", assetType: "workflow", registeredName: "snow", assetVersion: 1, name: "雪景.png", description: "场景参考", agentId: "art", updatedAt: "2026-11-17T14:00:00Z" }),
     file("script", { name: "剧本.md" }),
     file("clip", { kind: "video", path: "scratch/snow.mp4", agentId: "art" }),
   ]);

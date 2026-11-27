@@ -1,14 +1,18 @@
-import { accessAsset, findAsset } from "./workflow-assets.ts";
-import { Agents, Assets, Workflow, text } from "@xsb/protocol";
-import type { Asset, AssetRef, ContentBlock, NodeDef } from "@xsb/protocol";
+import { accessAsset, assetVersion, findAsset } from "./workflow-assets.ts";
+import { Agents, Assets, Workflow, assetRefsInText, canonicalAssetTags, parseAssetRef, text } from "@xsb/protocol";
+import type { Asset, ContentBlock, NodeDef } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import type { Hub } from "./hub.ts";
-import type { LiveSession, Turn, TurnEnd } from "./session.ts";
+import type { Input, LiveSession, Turn, TurnEnd } from "./session.ts";
 import { ops } from "./state.ts";
 import { newId, now } from "./util.ts";
 import { boundedText, contextRef, readContext } from "./context.ts";
 import { projectLanguage } from "./config.ts";
-import { renderAssignment } from "./workflow-assignment.ts";
+import { renderAssignment, renderCompletion } from "./workflow-assignment.ts";
+import { TAKEN_IN } from "./kernel.ts";
+import { assetReceipt, deliveryForModel, inputAssetRefs, materialFields } from "./workflow-materials.ts";
+import { workflowJournal, workflowAuditRecord } from "./workflow-journal.ts";
+import type { WorkflowAudit } from "./workflow-journal.ts";
 import { canonical, fingerprint, graphJsonl, validateResult, word } from "./workflow-graph.ts";
 import {
   additional,
@@ -23,13 +27,13 @@ import {
   nodeOf,
   normalize,
   notice,
-  refs,
+  pendingCompletion,
   settled,
   suspend,
   view,
 } from "./workflow-state.ts";
-import { checkArguments } from "./workflow-tools.ts";
-import type { Flow } from "./workflow-state.ts";
+import { checkedArguments } from "./workflow-tools.ts";
+import type { Completion, Flow } from "./workflow-state.ts";
 
 type Seen = { active?: string; invites: Record<string, string>; candidate?: string };
 /** While its work is under way, a main conversation is reminded of its workflow at least this often, in turns. */
@@ -42,12 +46,27 @@ export class Workflows {
   private scheduled = new Set<string>();
   private redirected = new WeakSet<Turn>();
   private seen = new WeakMap<Turn, Seen>();
+  private promptAudit = new WeakMap<Input, { turnId: string; context?: string; scope?: string }>();
   constructor(hub: Hub) {
     this.hub = hub;
   }
 
   read(owner: string) {
     return this.hub.state.workflows.get(owner) ?? empty(owner);
+  }
+  record(s: LiveSession, turnId: string, ...events: WorkflowAudit[]) {
+    const file = workflowJournal(s), ts = now();
+    this.hub.state.commit(events.map(event => ({ file, rec: workflowAuditRecord(s, turnId, ts, event) })));
+  }
+  /** Called in the actual ACP insertion transaction. A refused or replaced preparation leaves no audit record. */
+  auditInsertion(s: LiveSession, input: Input) {
+    const pending = this.promptAudit.get(input);
+    if (!pending || pending.turnId !== input.origin.turnId) return;
+    const events: WorkflowAudit[] = [];
+    if (pending.context) events.push({ kind: "context", context: pending.context });
+    if (pending.scope) events.push({ kind: "scope", messageId: input.messageId, scope: pending.scope });
+    this.record(s, pending.turnId, ...events);
+    this.hub.state.afterCommit(() => this.promptAudit.delete(input));
   }
   owner(s: LiveSession) {
     return this.hub.agent(s.agentId).workflowOwner ?? s.id;
@@ -81,8 +100,8 @@ export class Workflows {
   private publish(owner: string) {
     this.hub.broadcast(Workflow.update, { workflow: this.get(owner) });
   }
-  private save(f: Flow, extra: Op[] = [], userStops?: Set<LiveSession>) {
-    normalize(f);
+  private save(f: Flow, extra: Op[] = [], userStops?: Set<LiveSession>, recoveredResult?: Completion) {
+    const result = normalize(f) ?? recoveredResult;
     const instances = Object.values(f.instances);
     f.outbox = f.outbox.filter(
       (n) =>
@@ -97,9 +116,21 @@ export class Workflows {
         next.revoked = [...(next.revoked ?? []), old.work.id];
     }
     const operations = [...extra, ops.workflow(f)];
-    if (userStops) {
-      if (!this.hub.delivery.userStopMany([...userStops], operations)) return;
-    } else this.hub.state.commit(operations);
+    const persist = () => {
+      if (userStops) {
+        if (!this.hub.delivery.userStopMany([...userStops], operations)) return false;
+      } else this.hub.state.commit(operations);
+      if (result) {
+        const language = projectLanguage(this.hub.paths);
+        const markdown = renderCompletion(result, language, ref => assetVersion(this.hub, ref)?.path);
+        this.hub.session(f.owner).appendConversationEntry(result.id, {
+          kind: "plugin", id: "workflow", label: language === "zh-CN" ? "工作流" : "Workflow",
+        }, markdown);
+      }
+      return true;
+    };
+    // The accepted end and its passive conversation entry share a WAL transaction.
+    if (!(result ? this.hub.state.atomic(persist) : persist())) return;
     this.hub.state.afterCommit(() => {
       // All old completions and tool writes are already fenced by the committed snapshot.
       for (const [name, old] of Object.entries(prior.instances)) {
@@ -304,12 +335,11 @@ export class Workflows {
     for (const state of this.hub.state.workflows.values()) {
       const f = structuredClone(state);
       if (!f.active && !f.candidate) continue;
+      const legacy = f.outbox.filter(n => n.delivery);
+      f.outbox = f.outbox.filter(n => !n.delivery);
       f.paused = !completed(f);
-      // Notices acknowledged by ACP never become a second input after a crash.
-      const held = [...this.hub.state.mail.values()].filter((m) => m.workflowNotice && m.to.sessionId === f.owner);
       // Pre-restart transport attempts never become fresh prompts on resume.
       f.outbox = f.outbox.filter(n => !n.posted);
-      for (const n of f.outbox) delete n.posted;
       for (const i of Object.values(f.instances)) if (i.work?.state === "running") suspend(i.work);
       // Held until the workflow resumes: what its nodes were sent, and the main conversation's interruptions of it. The
       // main conversation's other mail is not the workflow's. What already got into a conversation, or was discarded,
@@ -321,7 +351,27 @@ export class Workflows {
           (this.hub.state.agents.get(m.to.agentId)?.workflowOwner === f.owner || (m.to.sessionId === f.owner && interruptions.has(m.id))) &&
           !["inserted", "seen", "inserted_unprocessed", "discarded_unseen", "insertion_uncertain"].includes(this.hub.state.ledger.get(m.id)?.state ?? ""),
       );
-      this.save(f, heldInputs.map((item) => ops.enqueue({ ...item, workflowHeld: true })));
+      const held = heldInputs.map(item => ops.enqueue({ ...item, workflowHeld: true }));
+      if (!legacy.length) { this.save(f, held); continue; }
+      this.hub.state.atomic(() => {
+        let recovered: Completion | undefined;
+        for (const n of legacy) {
+          const transport = n.posted && this.hub.state.ledger.get(n.posted);
+          // Already acknowledged inputs keep their original history and kernel restart settlement.
+          if (transport && TAKEN_IN.has(transport.state)) continue;
+          recovered ??= pendingCompletion(f, n);
+          if (!n.posted) continue;
+          const mail = this.hub.state.mail.get(n.posted);
+          if (mail?.workflowNotice && mail.to.sessionId === f.owner && mail.from.kind === "system") {
+            if (!transport || transport.state !== "insertion_uncertain") {
+              this.hub.kernel.mark(mail.id, transport && transport.offered ? "insertion_uncertain" : "discarded_unseen",
+                { ...mail.to, from: mail.from }, "interrupted");
+            }
+            this.hub.kernel.ack([mail.id]);
+          }
+        }
+        this.save(f, held, undefined, recovered);
+      });
     }
   }
   available(s: LiveSession) {
@@ -345,6 +395,15 @@ export class Workflows {
   acceptsNotice(s: LiveSession, id: string) {
     const f = this.read(s.id);
     return !f.paused && f.outbox.some((n) => n.posted === id);
+  }
+  /** Posted mail retains the frozen facts even after its outbox receipt has been settled. */
+  noticePrompt(prompt: ContentBlock[]): ContentBlock[] {
+    const block = prompt[0];
+    if (prompt.length !== 1 || block?.type !== "text" || !block.text) return prompt;
+    let report;
+    try { report = JSON.parse(block.text); } catch { return prompt; }
+    if (report?.choose && report.delivery) return [text(JSON.stringify({ ...report, delivery: deliveryForModel(report.delivery) }))];
+    return prompt;
   }
   acceptsAttempt(s: LiveSession, id: string) {
     const spec = this.hub.agent(s.agentId);
@@ -396,14 +455,8 @@ export class Workflows {
     this.accessible(s);
     const f = structuredClone(this.read(this.owner(s))),
       spec = this.hub.agent(s.agentId);
-    const named: AssetRef[] = [];
-    for (const b of blocks)
-      if (b.type === "text")
-        for (const match of (b.text ?? "").matchAll(/<asset>(.*?)<\/asset>/gs)) {
-          const ref = JSON.parse(match[1]);
-          findAsset(this.hub, ref);
-          named.push(ref);
-        }
+    const named = blocks.flatMap(b => b.type === "text" ? assetRefsInText(b.text ?? "") : []);
+    for (const ref of named) findAsset(this.hub, ref);
     if (spec.workflowOwner) {
       const i = instance(f, spec.workflowNode!);
       const current = (i.work?.kind === "graph" ? i.work.id : undefined) ?? (i.last?.valid ? i.last.id : undefined);
@@ -460,7 +513,28 @@ export class Workflows {
       ? "[xSB] This interruption addresses graph work or delivery " + target
       : "[xSB] Direct conversation about context or history. Answer this message independently.";
   }
+  /** Work only on the model's copy. The transcript and any spilled original retain the user's exact text. */
+  userPrompt(s: LiveSession, turn: Turn, input: Input, given: ContentBlock[]) {
+    // A task node's first message already gets its purpose in the context in front of this turn.
+    const scope = input !== turn.first || !this.hub.agent(s.agentId).workflowOwner ? this.interruptionContext(s, input.messageId) : undefined;
+    const pending = this.promptAudit.get(input);
+    const context = pending?.turnId === turn.id ? pending.context : undefined;
+    if (scope || context) this.promptAudit.set(input, { turnId: turn.id, context, scope });
+    else this.promptAudit.delete(input);
+    const content = given.map(block => {
+      if (block.type !== "text" || !block.text) return block;
+      const projected = canonicalAssetTags(block.text);
+      return projected === block.text ? block : { ...block, text: projected };
+    });
+    return { scope, content };
+  }
   context(s: LiveSession, turn: Turn) {
+    const context = this.describeContext(s, turn);
+    if (context) this.promptAudit.set(turn.first, { turnId: turn.id, context });
+    else this.promptAudit.delete(turn.first);
+    return context;
+  }
+  private describeContext(s: LiveSession, turn: Turn) {
     const spec = this.hub.agent(s.agentId);
     if (spec.workflowOwner) {
       const i = this.read(spec.workflowOwner).instances[spec.workflowNode!];
@@ -473,8 +547,8 @@ export class Workflows {
             ? "User interruption concerning current graph work or delivery"
             : "The user talks to you directly here. Sort it as your instructions say: your own assignment (handle it; escalate with pauseSelf if the assignment itself must change), the overall task (escalate to the main agent), or neither (just answer).",
           target: message?.target,
-          current: i.work?.assignment.target,
-          last: i.last?.valid ? i.last : undefined,
+          current: i.work && canonicalAssetTags(String(i.work.assignment.target)),
+          last: i.last?.valid ? deliveryForModel(i.last) : undefined,
         })
       );
     }
@@ -486,8 +560,8 @@ export class Workflows {
       prior = before?.epoch === epoch ? before : undefined;
     // When the model is told of its workflow (docs/WORKFLOWS.md): whole, in a context that does not have it (its first
     // turn, after a compaction or a renewal); at once, what it cannot learn otherwise (a pause, an error, work the user's
-    // stop dropped); and while work is under way, every WORKFLOW_REFRESH_TURNS turns. Completions, choices and
-    // escalations come as notices of their own, and changes it made it knows; a settled workflow it keeps in mind itself.
+    // stop dropped); and while work is under way, every WORKFLOW_REFRESH_TURNS turns. Choices and escalations
+    // have their own actionable notices. A completion publishes display text directly to the main conversation.
     const state = canonical({ paused: f.paused, error: f.error ?? null });
     if (prior && !f.cancelled?.length && prior.state === state && (settled(f) || prior.turns + 1 < WORKFLOW_REFRESH_TURNS)) {
       prior.turns++;
@@ -497,10 +571,10 @@ export class Workflows {
     const definitions = new Map(graph?.nodes.map((n) => [n.node, n]));
     const changed = graph?.nodes.flatMap((n) => {
       const old = prior?.definitions.get(n.node);
-      if (!old) return [n];
+      if (!old) return [{ ...n, ...(n.prompt && { prompt: canonicalAssetTags(n.prompt) }), input: materialFields(n.input, true) }];
       const entries = (["kind", "prompt", "input", "schema", "multi", "model", "agent"] as const)
         .filter((key) => canonical(old[key]) !== canonical(n[key]))
-        .map((key) => [key, n[key] ?? null]);
+        .map((key) => [key, key === "input" ? materialFields(n.input, true) : key === "prompt" && n.prompt ? canonicalAssetTags(n.prompt) : n[key] ?? null]);
       return entries.length ? [{ node: n.node, ...Object.fromEntries(entries) }] : [];
     });
     // A context that has not had them (a first turn, a compacted or renewed one) gets the graphs whole, in the JSONL the
@@ -520,7 +594,7 @@ export class Workflows {
       },
       choices: Object.entries(f.instances)
         .filter(([, i]) => i.invitation)
-        .map(([node, i]) => ({ node, delivery: i.last })),
+        .map(([node, i]) => ({ node, delivery: i.last && deliveryForModel(i.last) })),
       ...(f.cancelled?.length ? { cancelled: f.cancelled } : {}),
     };
     const told = f.cancelled;
@@ -591,10 +665,10 @@ export class Workflows {
       turn = s.current,
       f = structuredClone(this.read(this.owner(s)));
     const key = fingerprint([s.agentId, receipt]);
-    if (Object.hasOwn(f.receipts, key)) return f.receipts[key];
+    if (Object.hasOwn(f.receipts, key)) return assetReceipt(name, f.receipts[key]);
     if (spec.workflowOwner && ["execute", "choose", "prompt", "plan", "resume", "pause"].includes(name))
       throw Error("Tool unavailable for task agent");
-    checkArguments(name, a);
+    a = checkedArguments(name, a);
     if (name === "load_skill") {
       if (!spec.workflowOwner) throw Error("Tool unavailable for main agent");
       const skill = spec.workflowAgent?.skills?.find(skill => skill.name === a.name);
@@ -625,12 +699,12 @@ export class Workflows {
         // Adopting the candidate adopts the one this turn was shown: its name is xSB's to check, not the model's to quote.
         if (name === "execute" && a.graphJsonl === undefined && a.replaceNode === undefined && f.candidate && observed?.candidate !== f.candidate.version)
           throw Error("The candidate changed since this turn saw it");
-        const version = adopt(f, a, name === "plan");
-        for (const ref of f.versions[version].nodes.flatMap((n) => refs([n.input, n.prompt])))
+        const version = adopt(f, a, name === "plan", ref => !!assetVersion(this.hub, ref));
+        for (const ref of f.versions[version].nodes.flatMap((n) => [...inputAssetRefs(n.input), ...assetRefsInText(n.prompt ?? "")]))
           findAsset(this.hub, ref);
         result = { version };
       } else if (name === "prompt") {
-        for (const ref of refs(a.text)) findAsset(this.hub, ref);
+        for (const ref of assetRefsInText(a.text)) findAsset(this.hub, ref);
         additional(f, a.node, a.text);
         result = { queued: true, id: newId("extra") };
       } else if (name === "pause" || name === "resume") {
@@ -663,8 +737,8 @@ export class Workflows {
       } else throw Error("Unavailable main agent tool");
     } else if (name === "finish" && work && !work.staged) {
       word(a.summary, "summary");
-      if (!Array.isArray(a.assets)) throw Error("assets must be an array");
-      for (const ref of a.assets) {
+      const assets = (a.assets as string[]).map(value => parseAssetRef(value)!);
+      for (const ref of assets) {
         const v = findAsset(this.hub, ref);
         if (v.by !== s.agentId && !work.grants.some((r) => canonical(r) === canonical(ref)))
           throw Error("Unauthorized deliverable");
@@ -674,7 +748,7 @@ export class Workflows {
         if (!Object.hasOwn(a, "result")) throw Error("This task requires a result");
         validateResult(schema, a.result);
       }
-      work.staged = { summary: a.summary, assets: a.assets, result: a.result };
+      work.staged = { summary: a.summary, assets, result: a.result };
       result = { staged: true };
     } else if (name === "escalate" && i) {
       // To the main agent, which runs the whole workflow: the user's request about the whole task, or a need of this

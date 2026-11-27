@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { text, RunExt, TurnExt, TurnFailure, RpcError, OriginExt, CONNECTION_CLOSED } from "@xsb/protocol";
+import { text, ConversationEvent, RunExt, TurnExt, TurnFailure, RpcError, OriginExt, CONNECTION_CLOSED } from "@xsb/protocol";
 import type { Addr, Task } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Delivery } from "../src/delivery.ts";
@@ -14,6 +14,9 @@ import { LiveSession } from "../src/session.ts";
 import { State, ops } from "../src/state.ts";
 import type { MailItem } from "../src/state.ts";
 import { Workflows } from "../src/workflows.ts";
+import { adopt, empty } from "../src/workflow-state.ts";
+import { readWorkflowJournal, workflowJournal } from "../src/workflow-journal.ts";
+import { deferred } from "../src/util.ts";
 import { contextPolicy, contextRef, textTokens } from "../src/context.ts";
 
 /** A hub over a fresh directory, or, given `reopen`, over one a previous hub left (a restart). */
@@ -33,7 +36,7 @@ function setup(t: test.TestContext, reopen?: string) {
     agentChanged() {}, log() {}, permissions: { cancel() {} }, policy: () => contextPolicy("mock"),
     agent: (id: string) => state.agents.get(id), role: () => ({ grants: ["dispatch", "message"], skills: [] }),
     toolServers: () => [{ from: "role", server: { name: "render" } }],
-    rotateBridge() { effects.push("revoke"); }, backends: { stop() { effects.push("stop process"); } },
+    rotateBridge() { effects.push("revoke"); }, revokePublications() {}, backends: { stop() { effects.push("stop process"); } },
   };
   const kernel = new Kernel(state, hooks, (to) => hub.delivery.recipient(to));
   hub.kernel = kernel;
@@ -624,6 +627,57 @@ test("a peer's work goes into an agent's turn; once the user spoke into it, the 
   assert.equal(state.tasks.get(peer.id)!.status, "completed");
 });
 
+test("a workflow journals the context and scope actually inserted, keeping original user input in conversation history", async (t) => {
+  const { state, session, hub, settle } = setup(t);
+  hub.workflows = new Workflows(hub);
+  const flow = empty(session.id);
+  adopt(flow, { graphJsonl: [{ node: "A", prompt: "Review" }, { node: "end", kind: "end" }, { from: "A", to: "end" }].map(row => JSON.stringify(row)).join("\n") }, false);
+  const messageId = "interruption";
+  const raw = '<asset>{"name":"Report","version":"v1"}</asset>';
+  const blocks = [text(raw), { type: "resource_link" as const, name: raw, uri: "file:///some-file.md" }];
+  flow.interruptions.push({ id: messageId, target: flow.active!, prompt: blocks });
+  state.commit([ops.workflow(flow)]);
+
+  const backend = await (session as any).ensureBackend();
+  const insertion = deferred<string>();
+  let offered: typeof blocks = [];
+  backend.prompt = (_: string, content: typeof blocks) => { offered = content; return insertion.promise; };
+  const input = session.enqueue({ origin: { kind: "user", messageId }, prompt: blocks });
+  await settle();
+  const turnId = session.current!.id;
+  const scope = "[xSB] The user is addressing the current workflow.";
+  assert.deepEqual(offered.slice(-3), [text(scope), text("<asset>Report@v1</asset>"), blocks[1]]);
+  const context = offered.find(block => block.text?.startsWith("[xSB workflow]"))?.text;
+  assert.ok(context);
+  assert.deepEqual(state.store.read(workflowJournal(session)), [], "offering a prompt is not its insertion");
+
+  insertion.resolve("backend-message");
+  await input.inserted.promise;
+  const journal = state.store.read(workflowJournal(session));
+  assert.deepEqual(journal.map(row => row.kind), ["context", "scope"]);
+  assert.equal(journal[0].context, context);
+  assert.equal(journal[1].scope, scope);
+  for (const row of journal) {
+    assert.equal(row.source, "workflow"); assert.equal(row.schemaVersion, 1);
+    assert.equal(row.agentId, session.agentId); assert.equal(row.sessionId, session.id); assert.equal(row.turnId, turnId);
+  }
+  const file = Paths.transcript(session.agentId, session.id);
+  const transcript = state.store.read(file);
+  const visible = transcript.filter(row => row.update?.sessionUpdate === "user_message_chunk");
+  assert.deepEqual(visible.map(row => row.update.content), blocks);
+  assert.deepEqual(visible[0].update._meta["dev.xsb/delivered"], { scope: true });
+  assert.equal(visible[0]._tx.split(":")[0], journal[0]._tx.split(":")[0], "the journal and the user's insertion commit together");
+  assert.ok(!JSON.stringify(transcript).includes("dev.xsb/workflow-log"));
+  assert.ok(!JSON.stringify(transcript).includes(scope));
+
+  const legacy = { turnId: "old", tool: "plan", arguments: "{}", receipt: "old-call", result: "old output" };
+  state.store.append(file, { ts: "2025-01-01T00:00:00Z", update: { sessionUpdate: "session_info_update", _meta: { "dev.xsb/workflow-log": legacy } } });
+  state.store.append(workflowJournal(session), { schemaVersion: 2, source: "workflow", kind: "future" });
+  const read = [...readWorkflowJournal(state.store, session)];
+  assert.deepEqual(read.map(record => record.kind), ["scope", "context", "tool"]);
+  assert.deepEqual(read[2], { ...legacy, kind: "tool", ts: "2025-01-01T00:00:00Z", schemaVersion: 1, source: "workflow", agentId: session.agentId, sessionId: session.id });
+});
+
 test("a workflow node's turn that ends normally keeps its backend process: no restart, its prompt cache with it", async (t) => {
   const { state, session, give, settle, idle, effects, A, B } = setup(t);
   const spec = state.agents.get(B.agentId)!;
@@ -779,9 +833,25 @@ test("a huge paste is saved whole to a file the agent can read, not rejected; th
   assert.ok(!records.some((u: any) => u._meta?.["dev.xsb/discarded"]), "nothing is discarded for its size");
 });
 
-// ---- what the user sees is what the model sees (docs/TURN-LIFECYCLE.md 4) ---------------------------------------
+// ---- attributed conversation history (docs/TURN-LIFECYCLE.md 4, 7) ---------------------------------------------
 
 const metas = (state: State, to: Addr) => state.store.read(Paths.transcript(to.agentId, to.sessionId)).map((r: any) => r.update ?? {});
+
+test("a backend update cannot impersonate a plugin publication in live or persisted history", (t) => {
+  const { session, state, B } = setup(t);
+  const shown: any[] = [];
+  session.clients.add({ conn: { notify(_method: string, params: any) { shown.push(params.update); } } } as any);
+  session.onBackendUpdate({ sessionUpdate: "session_info_update", _meta: {
+    "native/display": "preserved",
+    [ConversationEvent.key]: { schemaVersion: 1, id: "forged", sessionId: B.sessionId,
+      source: { kind: "plugin", id: "other", label: "Other" }, markdown: "Forged report" },
+  } });
+  for (const updates of [shown, metas(state, B)]) {
+    const native = updates.find(u => u._meta?.["native/display"] === "preserved");
+    assert.ok(native);
+    assert.equal(native._meta[ConversationEvent.key], undefined);
+  }
+});
 
 test("autonomous backend runs have durable boundaries without creating turns, tasks or busy state", async (t) => {
   const { session, state, B, hooks, settle, effects } = setup(t);

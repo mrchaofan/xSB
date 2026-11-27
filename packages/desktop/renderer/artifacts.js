@@ -1,4 +1,5 @@
-import { artifactGroups, categoryOf, versionOf, visibleArtifacts } from "./artifact-catalog.js";
+import { formatAssetRef } from "@xsb/protocol";
+import { artifactGroups, categoryOf, visibleArtifacts } from "./artifact-catalog.js";
 import { fill, h, ICON } from "./dom.js";
 import { language, t } from "./i18n.js";
 
@@ -15,13 +16,15 @@ export const artifactLabel = (artifact) => artifact.name.replaceAll("\\", "/").s
 export function createArtifactBrowser(open, nameOf, assetName, reference, referenceTitle) {
   const filters = { query: "", category: "", agentId: "", scope: "", sort: "recent" };
   let artifacts = [], groups = [], selectedId = null;
+  const selectedVersions = new Map();
+  const selectedVersion = (group) => group.versions.find(a => a.id === selectedVersions.get(group.key)) ?? group.latest;
   const results = h("div", { class: "artifact-results" });
   const summary = h("span", { class: "catalog-count", role: "status", "aria-live": "polite" });
   const clear = h("button", { class: "link", type: "button", onclick: reset }, t("artifact.filter.clear"));
   const search = h("input", { type: "search", class: "artifact-search", placeholder: t("artifact.search"), "aria-label": t("artifact.search"), oninput: () => { filters.query = search.value; render(); } });
   search.onkeydown = (event) => {
     if (event.key === "Escape") { search.value = filters.query = ""; render(); }
-    if (event.key === "Enter") { const first = visible()[0]; if (first) open(first.latest.id); }
+    if (event.key === "Enter") { const first = visible()[0]; if (first) open(selectedVersion(first).id); }
   };
   const chips = h("div", { class: "catalog-types", role: "group", "aria-label": t("artifact.filter.type") },
     ...["", "image", "video", "document"].map((category) => h("button", { type: "button", "data-category": category, onclick: () => { filters.category = category; render(); } }, t(`artifact.type.${category || "all"}`))));
@@ -60,7 +63,7 @@ export function createArtifactBrowser(open, nameOf, assetName, reference, refere
     advanced.classList.toggle("filtered", !!filters.category || !!filters.agentId || !!filters.scope || filters.sort !== "recent");
     chips.querySelectorAll("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.category === filters.category)));
     fill(results, ...list.map((group) => {
-      const a = group.latest;
+      const a = selectedVersion(group);
       const category = categoryOf(a);
       const thumb = h("span", { class: `artifact-thumb ${category}`, html: category === "video" ? ICON.play : ICON.file });
       if (category === "image") {
@@ -74,10 +77,19 @@ export function createArtifactBrowser(open, nameOf, assetName, reference, refere
           h("strong", {}, artifactLabel(a)),
           h("span", { class: "artifact-card-meta" }, h("span", {}, nameOf(a.agentId)), h("time", { datetime: a.updatedAt }, dateLabel(a.updatedAt))),
           a.description && a.description !== a.registeredName && h("small", { class: "artifact-description" }, a.description),
-          h("span", { class: "artifact-badges" }, h("span", {}, group.assetId && a.assetType !== "workflow" ? assetName(a.assetType ?? group.assetId.split("/")[0]) : t(`artifact.type.${category}`)),
-            group.assetId && h("span", {}, versionOf(a) ? `v${versionOf(a)}` : t("artifact.latest")),
-            group.versions.length > 1 && h("span", {}, t("artifact.versions", { count: group.versions.length })))));
-      return h("div", { class: "artifact-row" }, preview, h("button", { class: "reference-action", "data-name": a.name, title: referenceTitle(), "aria-label": referenceTitle() + " · " + a.name, onclick: () => reference(a) }, t("artifact.reference")));
+          h("span", { class: "artifact-badges" }, h("span", {}, a.assetType && a.assetType !== "workflow" ? assetName(a.assetType) : t(`artifact.type.${category}`)),
+            group.assetId && group.versions.length === 1 && h("span", {}, `v${a.assetVersion}`))));
+      const version = group.versions.length > 1 && h("select", { class: "artifact-version", "data-group": group.key,
+        title: t("artifact.versions", { count: group.versions.length }), "aria-label": t("artifact.version"), onchange: (event) => {
+          selectedVersions.set(group.key, event.target.value);
+          render();
+          results.querySelector(`select[data-group="${CSS.escape(group.key)}"]`).focus();
+        } }, ...group.versions.map(item => h("option", { value: item.id, selected: item.id === a.id, title: dateLabel(item.updatedAt) }, `v${item.assetVersion}`)));
+      const asAsset = !!group.assetId;
+      const action = t(asAsset ? "artifact.referenceAsset" : "artifact.referenceFile");
+      const target = asAsset ? formatAssetRef({ name: a.registeredName, version: "v" + a.assetVersion }) : a.name;
+      return h("div", { class: "artifact-row" }, preview, version, h("button", { class: "reference-action", type: "button", "data-name": target,
+        title: referenceTitle(), "aria-label": [action, target, referenceTitle()].join(" · "), onclick: () => reference(a, asAsset) }, action));
     }));
     if (!list.length) fill(results, h("div", { class: "catalog-empty" }, !artifacts.length && h("span", { class: "empty-folder", html: ICON.folder }), h("strong", {}, t(artifacts.length ? "artifact.noResults" : "artifact.inSession")),
       !artifacts.length && h("small", {}, t("artifact.emptyHint")),
@@ -97,7 +109,7 @@ export function createArtifactBrowser(open, nameOf, assetName, reference, refere
     }, reset, restore };
 }
 
-/** 预览中的相邻制品和版本选择，遵循当前的搜索与筛选顺序。 */
+/** 预览中的相邻制品，遵循当前的搜索与筛选顺序。 */
 export function artifactNavigation(browser, artifact, open) {
   const group = browser.groups().find((g) => g.versions.some((a) => a.id === artifact.id));
   const list = browser.visible();
@@ -107,23 +119,4 @@ export function artifactNavigation(browser, artifact, open) {
   return h("div", { class: "artifact-navigation" }, move(previous, "artifact.previous", ICON.back),
     h("span", { class: "artifact-position", title: t("artifact.results", { count: index + 1, total: list.length }) }, index >= 0 ? `${index + 1}/${list.length}` : "–"),
     move(next, "artifact.next", ICON.forward));
-}
-
-/** 完整信息只在详情面板显示，路径可复制，版本与查看方式保持可访问。 */
-export function artifactDetails(browser, artifact, nameOf, open) {
-  const group = browser.groups().find((g) => g.versions.some((a) => a.id === artifact.id));
-  const path = h("code", {}, artifact.path);
-  const copy = h("button", { class: "icon-btn", title: t("artifact.copyPath"), "aria-label": t("artifact.copyPath"), html: ICON.copy, onclick: async () => {
-    try { await xsb.copyText(artifact.path); copy.title = t("content.copied"); }
-    catch { copy.title = t("content.copyFailed"); }
-  } });
-  const item = (label, value) => h("div", { class: "artifact-detail-field" }, h("small", {}, t(label)), value);
-  return h("div", { class: "artifact-detail-fields" },
-    item("artifact.fileName", h("strong", {}, artifact.name)),
-    artifact.description && item("artifact.description", h("p", {}, artifact.description)),
-    item("artifact.location", h("div", { class: "artifact-location" }, path, copy)),
-    item("artifact.createdBy", h("span", {}, nameOf(artifact.agentId))),
-    item("artifact.updated", h("time", { datetime: artifact.updatedAt }, new Date(artifact.updatedAt).toLocaleString(language))),
-    group?.versions.length > 1 && item("artifact.version", h("select", { "aria-label": t("artifact.version"), onchange: (event) => open(event.target.value) },
-      ...group.versions.map((a) => h("option", { value: a.id, selected: a.id === artifact.id }, `v${versionOf(a)} · ${dateLabel(a.updatedAt)}`)))));
 }

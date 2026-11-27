@@ -20,8 +20,10 @@ import { consultationSettings, projectLanguage } from "./config.ts";
 import { ASK_TOOL } from "./questions.ts";
 import { boundedText } from "./context.ts";
 import { newId, VERSION } from "./util.ts";
+import { servePublications } from "./publications.ts";
 import { serveToolContext } from "./tool-context.ts";
 import type { ContextOwner } from "./tool-context.ts";
+import type { Publisher } from "./publications.ts";
 
 const MCP_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const BRIDGE = path.join(shipped("bin"), "xsb-mcp-bridge");
@@ -61,8 +63,10 @@ export function serveMcp(
   conn: Connection,
   lookup: (token: string) => LiveSession | undefined,
   contextLookup: (token: string) => ContextOwner | undefined = () => undefined,
+  publisherLookup: (token: string) => Publisher | undefined = () => undefined,
 ): void {
   serveToolContext(hub, conn, contextLookup);
+  servePublications(hub, conn, publisherLookup);
   const connectionId = newId("mcp");
   let session: LiveSession | undefined;
   let token: string | undefined;
@@ -109,11 +113,13 @@ export function serveMcp(
     const step = hub.lifecycle.step(owner.source(), `mcp:${receipt}`, { tool: p.name, server });
     const args = p.arguments ?? {};
     const budget = hub.policy(owner.agentId).outputTokens;
-    const log = {
+    const log = server === WORKFLOW_SERVER ? {
+      kind: "tool" as const,
       tool: p.name,
       receipt,
       arguments: boundedText(hub.paths, owner.agentId, JSON.stringify(args), budget),
-    };
+    } : undefined;
+    let answer: string;
     try {
       let result: unknown;
       if (server === XSB_SERVER) {
@@ -123,21 +129,22 @@ export function serveMcp(
         if (attached() !== owner || owner.current?.id !== turnId || !owner.acceptsTools)
           throw RpcError.cancelled();
       } else result = owner.withStep(step.source, () => hub.workflows.call(owner, p.name, args, receipt));
-      const answer = boundedText(
+      answer = boundedText(
         hub.paths,
         owner.agentId,
         typeof result === "string" ? result : JSON.stringify(result, null, 2),
         budget,
       );
-      if (server === WORKFLOW_SERVER) owner.recordWorkflow(turnId, { ...log, result: answer });
-      owner.toolOutput(answer);
-      step.end({ status: "completed" });
-      return { content: [{ type: "text", text: answer }] };
     } catch (error) {
+      if (log && !hub.state.store.healthy) throw error;
       const message = (error as Error).message;
-      if (server === WORKFLOW_SERVER) owner.recordWorkflow(turnId, { ...log, error: message });
+      if (log) hub.workflows.record(owner, turnId, { ...log, error: message });
       step.end({ status: "failed" });
       return { content: [{ type: "text", text: message }], isError: true };
     }
+    if (log) hub.workflows.record(owner, turnId, { ...log, result: answer });
+    owner.toolOutput(answer);
+    step.end({ status: "completed" });
+    return { content: [{ type: "text", text: answer }] };
   });
 }

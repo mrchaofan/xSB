@@ -18,6 +18,8 @@ try {
     await build({ input: renderer(name), platform: "browser", output: { file: path.join(directory, name), format: "iife" } });
   }
   await build({ input: renderer("page-slot.js"), platform: "browser", output: { file: path.join(directory, "page-slot.js"), format: "esm" } });
+  await build({ input: Object.fromEntries(["content", "drafts", "web-annotation"].map(name => [name, renderer(name + ".js")])),
+    platform: "browser", output: { dir: directory, format: "esm", entryFileNames: "[name].js" } });
   // Exercise the real tab/focus routing with only unrelated app state and panels stubbed.
   const panelStubs = {
     "./app.js": `export const state = window.auditState; export const rootSession = () => 'sa'; export const rememberPosition = () => {}; export const renderArtifact = () => {}; export const revealArtifacts = () => {};`,
@@ -35,12 +37,18 @@ try {
   await build({ input: fileURLToPath(new URL("browser-native.electron.ts", import.meta.url)), platform: "node", external: ["electron"], output: { file, format: "cjs" } });
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require("electron"), [file, directory, ...(process.argv.includes("--tabs-only") ? ["--tabs-only"] : [])], { env, stdio: "inherit" });
-  const timer = setTimeout(() => child.kill("SIGKILL"), 90000);
-  const code = await new Promise((resolve) => child.on("exit", (code) => resolve(code)));
-  clearTimeout(timer);
-  if (code !== 0) throw new Error(`native browser smoke test failed (exit ${code})`);
-  if (!fs.existsSync(path.join(directory, "passed"))) throw new Error("native browser smoke test exited before completing its assertions");
+  // The user-only composer fixture runs without the agent driver's windows, page registry or debugger handles.
+  const args = process.argv.slice(2);
+  for (const flags of args.length ? [args] : [[], ["--annotations-only"]]) {
+    const passed = path.join(directory, "passed");
+    fs.rmSync(passed, { force: true });
+    const child = spawn(require("electron"), [file, directory, ...flags], { env, stdio: "inherit" });
+    const timer = setTimeout(() => child.kill("SIGKILL"), 90000);
+    const code = await new Promise((resolve) => child.on("exit", (code) => resolve(code)));
+    clearTimeout(timer);
+    if (code !== 0) throw new Error(`native browser smoke test failed (exit ${code})`);
+    if (!fs.existsSync(passed)) throw new Error("native browser smoke test exited before completing its assertions");
+  }
 } finally {
   fs.rmSync(directory, { recursive: true, force: true });
 }

@@ -1,4 +1,4 @@
-import type { ComposerState, WorkflowView } from "@xsb/protocol";
+import type { ComposerState, ConversationEntry, WorkflowView } from "@xsb/protocol";
 /**
  * What crosses between main and the renderer: the shapes `window.xsb` returns
  * and the events it delivers. The renderer is plain JavaScript, so this file
@@ -33,6 +33,8 @@ export type Entry = { id: string } & (
       /** It answers or skips a question: the question's card shows it. */
       reply?: boolean }
   | { kind: "output"; content: Content; streaming?: boolean; run?: BackendRun; stopReason?: string; runOrigin?: unknown }
+  /** A source published this readable entry directly to the conversation. */
+  | { kind: "publication"; source: ConversationEntry["source"]; markdown: string }
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string; name?: string; input?: unknown; output?: unknown; terminalOutput?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
   /** What the agent asked the user (the `ask` tool) and what became of it. Its reply's own message is not shown apart. */
@@ -50,7 +52,7 @@ export type Entry = { id: string } & (
 export type Activity = { kind: "waiting" | "thinking" | "writing" | "tool"; detail?: string; since: string };
 
 /** A file an agent wrote, as something the renderer can show. `assetType` is set for assets of the library. */
-export type Artifact = { sessionIds?: string[]; fileUri?: string; id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string; assetId?: string; assetVersion?: number; registeredName?: string; description?: string };
+export type Artifact = { sessionIds?: string[]; fileUri?: string; id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text" | "unsupported"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string; assetId?: string; assetVersion?: number; registeredName?: string; description?: string };
 
 /**
  * A web page of the side panel (pages.ts), shown where the window's document lays out a place for it (renderer/page-slot.js).

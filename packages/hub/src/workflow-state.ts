@@ -1,9 +1,12 @@
 import type { ContentBlock, AssetRef, NodeDef, WorkflowGraph, WorkflowHistory, WorkflowView } from "@xsb/protocol";
+import { assetRefsInText, canonicalAssetTags } from "@xsb/protocol";
 import { canonical, entrance, fingerprint, indexGraph, parseGraph, word } from "./workflow-graph.ts";
 import type { Signal } from "./workflow-graph.ts";
+import { inputAssetRefs, materialFields } from "./workflow-materials.ts";
 import { newId, now } from "./util.ts";
 
 export type Output = { summary: string; assets: AssetRef[]; result?: unknown };
+export type Completion = { id: string; version: string; end: string; deliveries: (Output & { node: string })[] };
 type Delivery = Output & { id: string; basis: string; valid: boolean; choice?: { id: string; cases: string[] } };
 export type Work = {
   id: string;
@@ -112,7 +115,7 @@ const definition = ({ kind, prompt, input, schema, model }: NodeDef) => ({ kind,
  * Plan saves `graphJsonl` as the candidate; execute adopts `graphJsonl`, `replaceNode`, or with neither the candidate.
  * Versions are named here, in order, and a graph already named keeps its name: a model never names or quotes one.
  */
-export function adopt(f: Flow, args: Record<string, any>, plan: boolean) {
+export function adopt(f: Flow, args: Record<string, any>, plan: boolean, knownAsset?: (ref: AssetRef) => boolean) {
   const given = ["graphJsonl", "replaceNode"].filter((k) => args[k] !== undefined);
   if (plan ? given.length !== 1 || given[0] !== "graphJsonl" : given.length > 1)
     throw Error("Specify a single adoption method");
@@ -138,8 +141,13 @@ export function adopt(f: Flow, args: Record<string, any>, plan: boolean) {
   graph = structuredClone(graph);
   const priorNodes = new Map(old?.nodes.map(n => [n.node, n]));
   for (const n of graph.nodes) {
+    if (args.graphJsonl !== undefined || args.replaceNode?.node === n.node) n.input = materialFields(n.input, false, knownAsset);
     const prior = priorNodes.get(n.node);
     if (!prior || prior.kind !== n.kind || n.kind !== "task") continue;
+    // Re-adopting a graph shown in the current wire format keeps the original delivery basis.
+    if (prior.prompt && n.prompt && canonicalAssetTags(prior.prompt) === canonicalAssetTags(n.prompt)) n.prompt = prior.prompt;
+    if (canonical(materialFields(n.input, true)) === canonical(materialFields(prior.input, true)) &&
+        canonical(inputAssetRefs(n.input)) === canonical(inputAssetRefs(prior.input))) n.input = prior.input;
     const agent = { ...prior.agent, ...n.agent };
     if (canonical({ systemPrompt: agent.systemPrompt ?? "", skills: agent.skills ?? [] }) !==
         canonical({ systemPrompt: prior.agent?.systemPrompt ?? "", skills: prior.agent?.skills ?? [] }))
@@ -283,20 +291,6 @@ function snapshot(f: Flow, graph: WorkflowGraph, gate: Gate) {
       return { node: n.node, id, summary, assets, ...(direct.has(n.node) && { result }) };
     });
 }
-export function refs(value: unknown): AssetRef[] {
-  if (typeof value === "string")
-    return [...value.matchAll(/<asset>(.*?)<\/asset>/gs)].flatMap((m) => {
-      const ref = JSON.parse(m[1]);
-      if (!ref || typeof ref.name !== "string" || typeof ref.version !== "string")
-        throw Error("Invalid asset reference");
-      return [{ name: ref.name, version: ref.version }];
-    });
-  if (Array.isArray(value)) return value.flatMap(refs);
-  if (!value || typeof value !== "object") return [];
-  const v = value as Record<string, unknown>;
-  if (typeof v.name === "string" && typeof v.version === "string") return [{ name: v.name, version: v.version }];
-  return Object.values(v).flatMap(refs);
-}
 export function additional(f: Flow, name: string, text: string) {
   const n = nodeOf(f, name),
     graph = graphOf(f)!;
@@ -313,8 +307,8 @@ function previous(f: Flow, name: string) {
   const last = f.instances[name].last;
   return last && { summary: last.summary, assets: last.assets };
 }
-export function notice(f: Flow, text: string, invitation?: string, delivery?: string) {
-  f.outbox.push({ id: newId("notice"), text, invitation, delivery });
+export function notice(f: Flow, text: string, invitation?: string) {
+  f.outbox.push({ id: newId("notice"), text, invitation });
 }
 export function suspend(w: Work, why: "pause" | "failure" = "pause") {
   w.suspendedBy = why;
@@ -323,9 +317,34 @@ export function suspend(w: Work, why: "pause" | "failure" = "pause") {
   delete w.asking;
   delete w.staged;
 }
-export function normalize(f: Flow) {
+/** Freeze the accepted path. Task assignments expose direct results only; the user gets every contributing delivery in full. */
+function completion(f: Flow, end: string, version: string, ancestors: Set<string>): Completion {
+  const deliveries = graphOf(f)!.nodes.filter(n => ancestors.has(n.node)).map(({ node }) => {
+    const { summary, assets, result } = f.instances[node].last!;
+    return { node, summary, assets, ...(result !== undefined && { result }) };
+  });
+  return { id: f.instances[end].last!.id, version, end, deliveries };
+}
+
+/** Only the old Hub put an end delivery ID in the notice outbox. Its transport envelope is not a new execution. */
+export function pendingCompletion(f: Flow, notice: Notice): Completion | undefined {
+  const graph = graphOf(f);
+  if (!graph || !notice.delivery) return;
+  const end = graph.nodes.find(n => n.kind === "end" && f.instances[n.node]?.last?.valid && f.instances[n.node].last!.id === notice.delivery);
+  if (!end) return;
+  // A later compatible revision can share the same end delivery. Keep the version at the time of completion.
+  let version = f.active!;
+  try {
+    const frozen = JSON.parse(notice.text);
+    if (frozen?.completed === end.node && typeof frozen.version === "string" && Object.hasOwn(f.versions, frozen.version)) version = frozen.version;
+  } catch { /* Old notice text is not needed to reconstruct a verified end from the workflow ledger. */ }
+  return completion(f, end.node, version, evaluate(f, graph).get(end.node)!.ancestors);
+}
+
+export function normalize(f: Flow): Completion | undefined {
   const graph = graphOf(f);
   if (!graph) return;
+  let result: Completion | undefined;
   // Accept an ended work and re-evaluate before deciding which end/branch may run.
   for (;;) {
     const gates = evaluate(f, graph, true);
@@ -344,12 +363,7 @@ export function normalize(f: Flow) {
           summary,
           assets: predecessors.flatMap((p) => p.assets),
         };
-        notice(
-          f,
-          JSON.stringify({ completed: end.node, version: f.active, predecessors }),
-          undefined,
-          f.instances[end.node].last!.id,
-        );
+        result = completion(f, end.node, f.active!, gate.ancestors);
         finished = true;
       }
     }
@@ -386,7 +400,7 @@ export function normalize(f: Flow) {
         }
       }
     }
-    return;
+    return result;
   }
 }
 export function claim(f: Flow, name: string): Work | undefined {
@@ -419,10 +433,10 @@ export function claim(f: Flow, name: string): Work | undefined {
       assignment,
       selected: {},
       grants: [
-        ...refs(assignment.input),
-        ...refs(assignment.target),
-        ...refs("text" in assignment ? assignment.text : undefined),
-        ...refs((assignment.previous as Output | undefined)?.assets),
+        ...inputAssetRefs(assignment.input as Record<string, unknown> | undefined),
+        ...assetRefsInText(String(assignment.target)),
+        ...assetRefsInText("text" in assignment ? String(assignment.text) : ""),
+        ...((assignment.previous as Output | undefined)?.assets ?? []),
         ...(assignment.predecessors as Output[]).flatMap((p) => p.assets),
       ],
     };

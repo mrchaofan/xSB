@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { draftKey, loadDraft, moveDraft, saveDraft } from "../renderer/drafts.js";
+import { assetReferenceParts } from "../src/content.ts";
+import { assetRefTag } from "@xsb/protocol";
 
 const values = new Map<string, string>();
 let failWrites = false;
@@ -37,6 +39,21 @@ test("a newly created session takes over the agent's provisional draft", () => {
   moveDraft(from, to);
   assert.deepEqual(loadDraft(to), content);
   assert.deepEqual(loadDraft(from), []);
+});
+
+test("drafts and history keep file links, surrounding text and exact current or legacy asset references", () => {
+  const old = '<asset>{"name":"draft @ dune","version":"v2"}</asset>';
+  const current = assetRefTag({ name: "ink & <paper>", version: "v3" });
+  const file = { type: "resource_link", uri: "file:///tmp/draft%20%40%20dune.md", name: "draft @ dune.md" };
+  saveDraft("refs", [{ type: "text", text: `edit ${old} / ${current} <asset>unfinished</asset>` }, file]);
+  assert.deepEqual(loadDraft("refs").flatMap(assetReferenceParts), [
+    { type: "text", text: "edit " },
+    { type: "asset_reference", name: "draft @ dune", version: "v2" },
+    { type: "text", text: " / " },
+    { type: "asset_reference", name: "ink & <paper>", version: "v3" },
+    { type: "text", text: " <asset>unfinished</asset>" },
+    file,
+  ]);
 });
 
 test("unavailable storage keeps switching and clearing usable in memory", () => {

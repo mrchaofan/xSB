@@ -2,20 +2,18 @@
 export function artifactGroups(artifacts) {
   const groups = new Map();
   for (const artifact of artifacts) {
-    const assetPath = artifact.path.replaceAll("\\", "/").match(/(?:^|\/)\.xsb\/assets\/([^/]+\/[^/]+)\/v(\d+)\.[^/]+$/);
-    const assetId = artifact.assetId ?? assetPath?.[1];
+    const assetId = artifact.assetType === "workflow" && artifact.registeredName && artifact.assetVersion > 0 ? artifact.assetId : undefined;
     const key = assetId ? `asset:${assetId}` : `file:${artifact.id}`;
     const group = groups.get(key) ?? { key, assetId, versions: [] };
     group.versions.push(artifact);
     groups.set(key, group);
   }
   return [...groups.values()].map((group) => {
-    group.versions.sort((a, b) => versionOf(b) - versionOf(a) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || a.id.localeCompare(b.id));
+    group.versions.sort((a, b) => b.assetVersion - a.assetVersion || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     return { ...group, latest: group.versions[0] };
   });
 }
 
-export const versionOf = (artifact) => artifact.assetVersion ?? Number(artifact.path.replaceAll("\\", "/").match(/\/v(\d+)\.[^/]+$/)?.[1] ?? 0);
 export const categoryOf = (artifact) => ["image", "video"].includes(artifact.kind) ? artifact.kind : "document";
 
 export function visibleArtifacts(groups, { query = "", category = "", agentId = "", scope = "", sort = "recent" } = {}, agentName = (id) => id) {

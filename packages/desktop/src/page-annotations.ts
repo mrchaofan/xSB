@@ -70,7 +70,6 @@ export type AnnotationTarget = { seq: number; rect: Rectangle | null; label: str
 /** Runs in the isolated world, once per document. Its API is `globalThis.xsbNotes`, which only this world sees. */
 const PAGE_SCRIPT = String.raw`(() => {
   if (globalThis.xsbNotes) return;
-  const report = globalThis.${BINDING};
   const host = document.createElement("xsb-annotations");
   const base = "all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647;contain:strict;";
   let colors = "";
@@ -122,7 +121,7 @@ const PAGE_SCRIPT = String.raw`(() => {
     if (shown) selected.style.cssText = "left:" + shown.x + "px;top:" + shown.y + "px;width:" + shown.width + "px;height:" + shown.height + "px";
     const now = JSON.stringify(shown);
     const position = devicePixelRatio + ":" + now;
-    if (pending && position !== reported) { reported = position; report(now); }
+    if (pending && position !== reported) { reported = position; globalThis.${BINDING}(now); }
   };
   // Next frame; a timer as well, since a page in a hidden or background window gets no frames.
   let queued = false;
@@ -187,6 +186,7 @@ export class Annotator {
   private changed: () => void;
   private letGo?: () => void;
   private world?: number;
+  private documentGeneration = 0;
   private seq = 0;
   private target?: AnnotationTarget;
   private toneOf: () => Tone;
@@ -241,6 +241,7 @@ export class Annotator {
     }
     const letGo = this.letGo;
     this.letGo = undefined;
+    this.world = undefined;
     letGo();
     this.changed();
   }
@@ -294,20 +295,34 @@ export class Annotator {
 
   /** Take these notes out of the page (sent, or removed from the composer). Notes of an earlier document are gone already. */
   async remove(ids: string[]): Promise<void> {
-    if (this.world === undefined || !ids.length) return;
-    this.count = await this.inWorld(`globalThis.xsbNotes.remove(${JSON.stringify(ids)})`);
-    this.changed();
+    if (!this.count || !ids.length || this.contents.isDestroyed()) return;
+    const generation = this.documentGeneration;
+    // The composer may outlive inspect mode. Reacquire the document's named world on a live debugger.
+    const release = holdDebugger(this.contents);
+    try {
+      const count = await this.inWorld(`globalThis.xsbNotes.remove(${JSON.stringify(ids)})`);
+      if (generation === this.documentGeneration && !this.contents.isDestroyed()) {
+        this.count = count;
+        this.changed();
+      }
+    } catch (error) {
+      if (generation === this.documentGeneration && !this.contents.isDestroyed()) throw error;
+    } finally {
+      if (!this.active && generation === this.documentGeneration) this.world = undefined;
+      release();
+    }
   }
 
   /** Take every note out of the page; returns their ids, for the composer to drop them too. */
   async clear(): Promise<string[]> {
-    const ids: unknown = this.world === undefined ? [] : await this.inWorld("globalThis.xsbNotes.clear()");
+    const ids: unknown = this.count ? await this.inWorld("globalThis.xsbNotes.clear()") : [];
     this.count = 0;
     this.changed();
     return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
   }
 
   dispose(): void {
+    this.documentGeneration++;
     this.stop();
     if (!this.contents.isDestroyed()) {
       this.contents.debugger.off("message", this.onMessage);
@@ -328,6 +343,7 @@ export class Annotator {
   }
 
   private onDocument = (): void => {
+    this.documentGeneration++;
     this.world = undefined;
     this.count = 0;
     if (this.target) { this.target = undefined; this.report(null); }
@@ -360,12 +376,14 @@ export class Annotator {
 
   private async ensureWorld(): Promise<number> {
     if (this.world !== undefined) return this.world;
+    const generation = this.documentGeneration;
     const { frameTree } = await this.send("Page.getFrameTree");
     const { executionContextId } = await this.send("Page.createIsolatedWorld", { frameId: frameTree.frame.id, worldName: WORLD, grantUniveralAccess: false });
     // Into the world that now exists, by its name: a binding for contexts yet to come would need Runtime.enable, which sites can detect.
     await this.send("Runtime.addBinding", { name: BINDING, executionContextName: WORLD });
     const installed = await this.send("Runtime.evaluate", { expression: PAGE_SCRIPT, contextId: executionContextId });
     if (installed.exceptionDetails) throw new Error("could not prepare the page for annotations");
+    if (generation !== this.documentGeneration) throw new Error("the annotated document was replaced");
     this.world = executionContextId;
     return executionContextId;
   }

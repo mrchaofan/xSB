@@ -94,6 +94,18 @@ Hub 内部按"谁拥有什么"分模块（[packages/hub/src](../packages/hub/src
 
 两个文件各有一个 `version`，只表示该文件自身的格式。后端只在全局定义，项目不能覆盖；Agent 用后端的**名称**引用它（`agents.jsonl` 的 `backend`）。两个文件都是每次使用时读取，修改后不必重启 Hub。
 
+#### 插件向主对话发布 Markdown
+
+绑定到会话的本地 stdio 插件可以把自己的结果转换为 Markdown，直接发布给用户。Hub 向已启用的插件进程提供 `XSB_TOOL_CONTEXT_SOCKET` 和专用的 `XSB_CONVERSATION_TOKEN`。插件连接该 socket，每行发送一个 JSON-RPC 消息，读取同一请求 ID 的响应。示例中的 token 取自进程环境。
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"_xsb/conversation/publish","params":{"token":"<XSB_CONVERSATION_TOKEN>","idempotencyKey":"inspection-42","markdown":"## 检查结果\n\n全部通过。"}}
+```
+
+成功时返回 `result.id`。同一主会话中的同一插件用原键和原文重试，会拿到同一 ID，重启后也有效。同键提交不同正文会报错。来源取自 Hub 已绑定的插件身份。主会话插件发布到本会话，任务节点的插件发布到该节点所属的主会话。发布凭据随绑定失效。只读的 `XSB_TOOL_CONTEXT_TOKEN` 只用于查询运行状态。
+
+请求参数限于上例三个字段。正文始终作为 Markdown 展示，即使其中有形似 JSON 事件的文本。Hub 生成带版本、稳定 ID 和来源的展示记录，持久提交后推送给客户端。该接口不授予代发用户或 Agent 消息、创建 turn、标记步骤起止或调用工具的能力。历史投影沿用提交时的正文，旧 ACP 对话记录沿用原格式读取。
+
 ### 2.2 优先用官方 ACP 封装，只说 ACP v2
 
 Hub 对后端和对客户端都只说 ACP v2（草案，claude-agent-acp 0.107、codex-acp 2.6 都已实现，见 [KERNEL.md](KERNEL.md) 2）。内置两个后端，都是各家自己的 ACP 入口：

@@ -1,14 +1,15 @@
-import { RpcError, ToolContext } from "@xsb/protocol";
+import { PluginPublication, RpcError, ToolContext } from "@xsb/protocol";
 import type { Connection, McpServer, ToolContextState } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
 import type { LiveSession } from "./session.ts";
 
 export type ContextOwner = { session: LiveSession; server: string };
+
 export function contextServer(server: McpServer, socket: string, token: string): McpServer {
   if (server.type !== "stdio") return server;
-  const reserved = new Set([ToolContext.socketEnv, ToolContext.tokenEnv]);
+  const reserved = new Set<string>([ToolContext.socketEnv, ToolContext.tokenEnv, PluginPublication.tokenEnv]);
   return { ...server, env: [
-    ...(server.env ?? []).filter((entry) => !reserved.has(entry.name)),
+    ...(server.env ?? []).filter((entry) => !reserved.has(entry.name.toUpperCase())),
     { name: ToolContext.socketEnv, value: socket }, { name: ToolContext.tokenEnv, value: token },
   ] };
 }

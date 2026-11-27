@@ -11,8 +11,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { F, State } from "../src/state.ts";
-import { Workflow, Agents, SessionControls, Assets, Backends, Boundaries, Connection, Discarded, History, Ledger, RunExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Tasks, explain, languageOf } from "@xsb/protocol";
-import type { AgentInfo, Language, Task } from "@xsb/protocol";
+import { Workflow, Agents, SessionControls, Assets, Backends, Boundaries, Connection, Discarded, History, Ledger, RunExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Tasks, conversationEntry, explain, languageOf } from "@xsb/protocol";
+import type { AgentInfo, ConversationEntry, Language, SessionUpdate, Task } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { isVeto } from "../src/hooks.ts";
 import { isTerminal as isTerminalStatus } from "@xsb/protocol";
@@ -57,6 +57,7 @@ fs.writeFileSync(
       "context-refusal": { command: node, args: [MOCK, "--context-refusal", "--context-refusal-file", path.join(project, "refused-once")] },
       "context-refusal-always": { command: node, args: [MOCK, "--context-refusal-always"] },
       unisolated: { command: node, args: [MOCK, "--no-turn-isolation"] },
+      publisher: { command: node, args: [MOCK, "--plugin", "audit-output"] },
     },
   }),
 );
@@ -64,6 +65,7 @@ fs.writeFileSync(
 /** What a client saw, per session. */
 const said = new Map<string, string>();
 const inputs = new Map<string, { text: string; origin: any }[]>();
+const publications = new Map<string, ConversationEntry[]>();
 let permissionAsked = 0;
 /** What the test's client answers to a permission request; the first option when unset. */
 let permissionChoice: string | undefined;
@@ -105,6 +107,12 @@ async function client(name: string, capabilities: object = {}): Promise<Client> 
 async function connect(): Promise<Client> {
   const conn = await client("test", { _meta: { [Agents.capability]: {} } });
   conn.updates.push((sessionId, update) => {
+    const publication = conversationEntry(update, sessionId);
+    if (publication) {
+      const list = publications.get(sessionId) ?? [];
+      list.push(publication);
+      publications.set(sessionId, list);
+    }
     if (update.sessionUpdate === "agent_message_chunk") said.set(sessionId, (said.get(sessionId) ?? "") + update.content.text);
     if (update.sessionUpdate === "user_message_chunk") {
       const list = inputs.get(sessionId) ?? [];
@@ -395,6 +403,13 @@ for (const backend of ["mock", "bare"]) {
   assert.match(answered(worker.agentId), /E2E portable skill procedure/);
   const source = received(worker.agentId).find(message => message.text.startsWith("# Workflow task") || message.text.startsWith("# 工作流任务"))!.text;
   assert.ok(source.includes(program));
+  const result = await until("main conversation displays the workflow publication", () => publications.get(main.id)?.[0]);
+  assert.equal(result.source.id, "workflow");
+  assert.match(result.markdown, /reviewer[\s\S]*profile tested/);
+  const page = await conn.request(History.page, { sessionId: main.id });
+  assert.deepEqual(page.updates.map((u: SessionUpdate) => conversationEntry(u, main.id)).filter(Boolean), [result]);
+  assert.equal(received(main.agentId).length, 1, "only the original execute request entered the main backend");
+  assert.equal(main.busy, false);
   if (backend === "mock") assert.ok(answered(worker.agentId).includes(JSON.stringify({ mode: "append", content: [{ type: "text", text: prefix }] })), "the exact prefix was applied as ACP systemPrompt");
   else assert.ok(answered(worker.agentId).includes("E2E stable reviewer role"), "fallback instructions are in the received prompt");
   hub.backends.stop(worker.agentId);
@@ -402,6 +417,27 @@ for (const backend of ["mock", "bare"]) {
   await idle(worker.agentId);
   assert.equal(worker.rec.workflowPrompt, prefix);
   if (backend === "mock") assert.ok(said.get(worker.id)!.includes(JSON.stringify({ mode: "append", content: [{ type: "text", text: prefix }] })), "resume receives the identical prefix");
+}
+
+// Exact workflow references reach the backend through both user-message and typed tool boundaries.
+{
+  const main = await create(), name = "Cover @ draft", ref = name + "@v1";
+  const file = path.join(project, "cover.txt");
+  fs.writeFileSync(file, "Original cover text");
+  await prompt(main.id, call("asset_put", { name, path: file }));
+  assert.ok(answered(main.agentId).includes("result(asset_put): " + ref));
+  const legacy = "<asset>" + JSON.stringify({ name, version: "v1" }) + "</asset>";
+  await prompt(main.id, "!echo\nUse " + legacy);
+  assert.ok(answered(main.agentId).includes("Use <asset>" + ref + "</asset>"));
+  assert.ok(received(main.agentId).some(m => m.text.includes(legacy)), "historical user text remains verbatim");
+  const worker = [call("asset_get", { ref }), call("finish", { summary: "Cover checked", assets: [ref] })].join("\n");
+  const graph = [{ node: "Check", prompt: worker, input: { cover: ref } }, { node: "End", kind: "end" }, { from: "Check", to: "End" }];
+  await prompt(main.id, call("execute", { graphJsonl: graph.map(n => JSON.stringify(n)).join("\n") }));
+  const report = await until("published Markdown identifies the delivered asset", () => publications.get(main.id)?.[0]);
+  assert.ok(report.markdown.includes("Cover checked") && report.markdown.includes(ref));
+  assert.equal(received(main.agentId).length, 3, "asset creation, the user's reference, and execute are the only inputs");
+  const { agentId } = hub.workflows.read(main.id).instances.Check;
+  assert.ok(answered(agentId!).includes('"ref": "' + ref + '"') && answered(agentId!).includes("Original cover text"));
 }
 
 // 14. An agent without ACP, wrapped with @xsb/adapter, goes through the same chain as the others.
@@ -612,6 +648,50 @@ const dispatch = (from: LiveSession, to: string, input: { title: string; topic: 
   await assert.rejects(watcher.request(ToolContext.current), /revoked/);
   watcher.close();
   console.log('ok 41 runtime turn identity is read-only, changes between turns, and never wakes the model');
+}
+
+// 41b. An installed stdio plugin publishes its own Markdown into the conversation that owns its node.
+{
+  const plugin = path.join(process.env.XSB_HOME!, "plugins", "audit-writer");
+  fs.mkdirSync(plugin, { recursive: true });
+  const fixture = fileURLToPath(new URL("./publication-plugin.ts", import.meta.url));
+  fs.writeFileSync(path.join(plugin, ".mcp.json"), JSON.stringify({ mcpServers: { "audit-output": { command: "node", args: [fixture] } } }));
+  try {
+    const main = await create("publisher");
+    const audit = { id: "inspection-12", project: "Station", checks: ["Lighting", "Signage"] };
+    const publish = (probe?: string) => "!plugin inspection " + JSON.stringify({ ...audit, probe });
+    const worker = [publish(), publish(), ...["role", "tool", "lifecycle", "readOnly"].map(publish),
+      call("finish", { summary: "Inspection filed.", assets: [] })].join("\n");
+    const graph = [{ node: "Inspection", prompt: worker }, { node: "Done", kind: "end" }, { from: "Inspection", to: "Done" }];
+    await prompt(main.id, call("execute", { graphJsonl: graph.map(row => JSON.stringify(row)).join("\n") }));
+    await until("external plugin and workflow both finish", () => publications.get(main.id)?.some(e => e.source.id === "workflow"));
+    const reports = (publications.get(main.id) ?? []).filter(e => e.source.id === "audit-writer");
+    assert.equal(reports.length, 1, "retrying the same plugin report does not duplicate it");
+    const [report] = reports;
+    assert.deepEqual(report.source, { kind: "plugin", id: "audit-writer", label: "audit-writer" }, "the host attributes the installed plugin");
+    assert.equal(report.markdown, "## Station inspection\n\n- Lighting\n- Signage");
+    const node = hub.workflows.read(main.id).instances.Inspection;
+    const output = answered(node.agentId!);
+    assert.equal(output.split("published " + report.id).length - 1, 2, "both attempts got the same host receipt");
+    for (const probe of ["role", "tool", "lifecycle"])
+      assert.ok(output.includes("rejected " + probe + ": Expected a publication credential"), probe);
+    assert.ok(output.includes("rejected readOnly: Unknown or revoked publication credential"));
+    assert.deepEqual(hub.state.store.read(Paths.transcript(node.agentId!, node.sessionId!)).flatMap(row =>
+      conversationEntry(row.update, node.sessionId!) ?? []), [], "the plugin's node is not the destination conversation");
+    assert.equal(received(main.agentId).length, 1, "only the user's execute request reached the main model");
+    const page = await conn.request(History.page, { sessionId: main.id });
+    assert.deepEqual(page.updates.flatMap((u: SessionUpdate) => conversationEntry(u, main.id) ?? []).filter((e: ConversationEntry) =>
+      e.source.id === "audit-writer"), reports, "the published entry is the same over ACP history and live updates");
+    const plain = await create("publisher");
+    await prompt(plain.id, publish());
+    const [standalone] = publications.get(plain.id)!;
+    assert.equal(standalone.markdown, report.markdown, "the same plugin also publishes from an ordinary conversation");
+    assert.notEqual(standalone.id, report.id, "the same idempotency key in another main conversation has its own receipt");
+    assert.equal(received(plain.agentId).length, 1);
+    console.log("ok 41b installed MCP plugin publishes Markdown from ordinary and workflow-node conversations without starting a main turn");
+  } finally {
+    fs.rmSync(plugin, { recursive: true, force: true });
+  }
 }
 
 let refusedId: string;

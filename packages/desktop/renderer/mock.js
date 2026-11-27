@@ -91,17 +91,19 @@
     id: "material",
     name: long ? "a-very-long-brief-file-name-for-checking-ellipsis-in-every-place.md" : "brief.md",
     registeredName: "brief",
-    assetId: main.mainSessionId + "/brief",
+    assetId: "workflow/brief",
+    assetType: "workflow",
     assetVersion: 1,
     kind: "markdown",
     agentId: main.id,
     path: workspace.path + "/brief.md",
+    fileUri: new URL("brief.md", `file://${workspace.path}/`).href,
     url: "data:text/plain,Film%20brief",
     updatedAt: now(),
   };
   // 不同类型的文件，预览标签上的文件图标。
   const file = (id, name, kind) => ({ id, name, kind, agentId: main.id, sessionIds: [main.mainSessionId], path: workspace.path + "/" + name,
-    url: "data:text/plain,preview", updatedAt: now() });
+    fileUri: new URL(name, `file://${workspace.path}/`).href, url: "data:text/plain,preview", updatedAt: now() });
   const data = {
     workspace,
     agents: [main, worker, dropped],

@@ -2,10 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { ensureDirectory, syncDirectory } from "@xsb/store";
 import type { Asset, AssetRef } from "@xsb/protocol";
+import { assetRefsInText, formatAssetRef, parseAssetRef } from "@xsb/protocol";
 import type { LiveSession, Turn } from "./session.ts";
 import type { Hub } from "./hub.ts";
 import type { Flow } from "./workflow-state.ts";
-import { refs } from "./workflow-state.ts";
 import { word, fingerprint } from "./workflow-graph.ts";
 import { newId, now } from "./util.ts";
 
@@ -17,8 +17,11 @@ function assetName(v: unknown) {
   return name;
 }
 
+export const assetVersion = (hub: Hub, ref: AssetRef) =>
+  hub.state.assets.get(assetKey(ref.name))?.find((a) => ref.version === "v" + a.version);
+
 export function findAsset(hub: Hub, ref: AssetRef) {
-  const asset = hub.state.assets.get(assetKey(ref.name))?.find((a) => ref.version === "v" + a.version);
+  const asset = assetVersion(hub, ref);
   if (!asset) throw Error("Unknown asset version");
   return asset;
 }
@@ -37,7 +40,9 @@ export function accessAsset(
   const i = spec.workflowNode ? f.instances[spec.workflowNode] : undefined;
   const work = i?.work?.attempt === turn.first.messageId ? i.work : undefined;
   let result: unknown, registered: Asset | undefined;
-  const asset = assetName(a.name);
+  const ref = (name === "asset_get" || name === "asset_version_put") ? parseAssetRef(a.ref) : undefined;
+  if (a.ref !== undefined && !ref) throw Error("Expected an asset reference name@vN");
+  const asset = assetName(ref ? ref.name : a.name);
   const granted = [
     ...(work?.grants ?? []),
     ...(!work && i?.last?.valid ? i.last.assets : []),
@@ -50,7 +55,7 @@ export function accessAsset(
           input.origin.kind === "user"
             ? input.content
             : (i?.interruptions.find((p) => p.id === input.interruptionId)?.prompt ?? []);
-        return blocks.flatMap((b) => (b.type === "text" ? refs(b.text) : []));
+        return blocks.flatMap((b) => (b.type === "text" ? assetRefsInText(b.text ?? "") : []));
       }),
   ];
   const allowed = (v: Asset) =>
@@ -61,26 +66,26 @@ export function accessAsset(
     return v;
   };
   const versions = hub.state.assets.get(assetKey(asset)) ?? [];
-  if (name === "asset_list") return { value: versions.filter(allowed).map(refOf) };
+  if (name === "asset_list") return { value: versions.filter(allowed).map(v => formatAssetRef(refOf(v))) };
   if (name === "asset_get") {
-    const v = exact(a.version);
-    result = { ...refOf(v), path: v.path, content: hub.assets.text(v) };
+    const v = exact(ref!.version);
+    result = { ref: formatAssetRef(ref!), path: v.path, content: hub.assets.text(v) };
     if (work && !work.staged) {
       const reads = (work.reads ??= []);
-      if (!reads.some((r) => r.name === asset && r.version === a.version)) reads.push(refOf(v));
+      if (!reads.some((r) => r.name === asset && r.version === ref!.version)) reads.push(refOf(v));
     }
   } else if (name === "asset_version_get") {
     const version = work?.selected[asset] ?? hub.state.assetPointers.get(assetKey(asset));
     if (!version) return { value: null };
-    result = refOf(exact(version));
+    result = formatAssetRef(refOf(exact(version)));
     if (work && !work.staged) work.selected[asset] = version;
   } else {
     if (i && (!work || work.staged)) throw Error("Artifact writes closed");
     if (name === "asset_version_put") {
       if (i && work?.kind !== "extra")
         throw Error("Only the main agent or additional work can select the current pointer");
-      result = refOf(exact(a.version));
-      return { value: result, pointer: { id: assetKey(asset), version: a.version } };
+      result = formatAssetRef(refOf(exact(ref!.version)));
+      return { value: result, pointer: { id: assetKey(asset), version: ref!.version } };
     } else if (name === "asset_put" && a.path === null) {
       if (work?.kind === "graph") throw Error("Graph work cannot clear assets");
       const current = hub.state.assetPointers.get(assetKey(asset));
@@ -120,7 +125,7 @@ export function accessAsset(
         sessionId: f.owner,
         createdAt: now(),
       };
-      result = refOf(registered);
+      result = formatAssetRef(refOf(registered));
     } else throw Error("Unknown asset tool");
   }
   return { value: result, registered };

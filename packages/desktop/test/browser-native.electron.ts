@@ -202,6 +202,118 @@ xsb.on(event => {
   assert.equal(pages.list().find((p) => p.id === blankId)!.background, false);
   console.log("PASS user tabs focus, new agent tabs and popups switch display without host focus, existing agent selection stays in the background");
   }
+  async function checkUserAnnotations() {
+    const composer = path.join(cwd, "composer.html");
+    fs.writeFileSync(composer, `<body><script type="module">
+import {createEditor} from "./content.js";
+import {dropPageAnnotations} from "./web-annotation.js";
+import {loadDraft, saveDraft} from "./drafts.js";
+const editor = createEditor(async () => {
+  try { await editor.ready(); window.sent = editor.read(); } catch (e) { window.sendError = e.message; }
+}, () => saveDraft("session", editor.snapshot()), dropPageAnnotations);
+document.body.append(editor.tray, editor.el, editor.error);
+window.restoreDraft = () => editor.restore(loadDraft("session"));
+window.draftNotes = () => loadDraft("session").map(block => block.note);
+window.draftIds = () => loadDraft("session").map(block => block.id);
+xsb.on(event => {
+  if (event.webAnnotation) editor.insert([event.webAnnotation.annotation], true);
+  if (event.webAnnotationsRemoved) editor.removeAnnotations(event.webAnnotationsRemoved.ids);
+});
+</script></body>`);
+    await host!.loadFile(composer);
+    const js = (expression: string) => host!.webContents.executeJavaScript(expression);
+    await until(async () => await js("typeof window.draftNotes === 'function'"));
+    const first = pages!.open(url, { sessionId: "sa" }), second = pages!.open(url, { sessionId: "sa" });
+    const annotate = async (id: string, notes: string[]) => {
+      const contents = pages!.contents(id)!;
+      await until(() => contents.getTitle() === "Opener" && !contents.isLoading());
+      pages!.present(id, host!.webContents, "bounds", { x: 0, y: 100, width: 600, height: 350 });
+      await pages!.annotate(id, host!.webContents, "annotate", true);
+      const { root } = await contents.debugger.sendCommand("DOM.getDocument");
+      const { nodeId } = await contents.debugger.sendCommand("DOM.querySelector", { nodeId: root.nodeId, selector: "#field" });
+      const { node } = await contents.debugger.sendCommand("DOM.describeNode", { nodeId });
+      for (const note of notes) {
+        // Chromium's node-pick event, at a known element; confirmation embeds a real note and notifies the real editor.
+        contents.debugger.emit("message", {}, "Overlay.inspectNodeRequested", { backendNodeId: node.backendNodeId });
+        await until(() => !!(pages as any).pages.get(id).annotator.pending);
+        await pages!.annotate(id, host!.webContents, "annotationSave", note);
+      }
+      await pages!.annotate(id, host!.webContents, "annotate", false);
+      assert.equal(contents.debugger.isAttached(), false, "a user-only page has no driver keeping the debugger connected");
+    };
+    host!.showInactive();
+    await annotate(first.id, ["note-one", "note-two"]);
+    await annotate(second.id, ["note-three"]);
+    await until(async () => (await js("window.draftNotes()")).length === 3);
+    const [firstNote] = await js("window.draftIds()");
+    await js("window.restoreDraft(); document.querySelector('.annotation-tray .remove-ref').click(); true");
+    const count = (id: string) => pages!.list().find(p => p.id === id)?.annotations;
+    await until(() => count(first.id) === 1);
+    await until(async () => (await js("window.draftNotes()")).length === 2);
+    assert.deepEqual(await js("window.draftNotes()"), ["note-two", "note-three"]);
+    await pages!.annotate(first.id, host!.webContents, "annotationsRemove", [firstNote]);
+    assert.equal(count(first.id), 1, "repeated cleanup of the same note preserves its neighbor");
+    assert.equal(count(second.id), 1);
+    const contents = pages!.contents(first.id)!;
+    assert.equal(contents.debugger.isAttached(), false, "removing a mark releases the transient debugger");
+    contents.debugger.attach();
+    const tree = JSON.stringify(await contents.debugger.sendCommand("DOM.getDocument", { depth: -1, pierce: true }));
+    contents.debugger.detach();
+    assert.ok(!tree.includes("note-one") && tree.includes("note-two"), "the matching annotation has left the page DOM");
+    // Delay the targeted CDP command to exercise page loss and independent composer cleanups deterministically.
+    function pauseRemoval(pageId: string) {
+      const annotator = (pages as any).pages.get(pageId).annotator;
+      const inWorld = annotator.inWorld;
+      let fail: (() => void) | undefined;
+      annotator.inWorld = function(expression: string) {
+        if (!expression.includes("xsbNotes.remove(")) return inWorld.call(this, expression);
+        this.inWorld = inWorld;
+        return new Promise((_resolve, reject) => { fail = () => reject(new Error("cleanup failed")); });
+      };
+      return { started: () => !!fail, fail: () => fail!() };
+    }
+    const clickRemove = "document.querySelector('.annotation-tray .remove-ref').click(); true";
+    const blocked = pauseRemoval(first.id);
+    await js(`document.querySelectorAll('.annotation-tray .remove-ref').forEach(b => b.click());
+      document.querySelector('.editor').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); true`);
+    await until(blocked.started);
+    await until(() => count(second.id) === 0);
+    blocked.fail();
+    await until(async () => (await js("window.sendError")) === "cleanup failed");
+    assert.equal(await js("window.sent"), undefined);
+    assert.deepEqual(await js("window.draftNotes()"), ["note-two"]);
+    assert.equal(count(first.id), 1);
+    await js(`const input = document.querySelector('.editor'); input.dispatchEvent(new Event('input'));
+      window.sendError = undefined; input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); true`);
+    await until(async () => !!await js("window.sendError && !document.querySelector('.content-error').hidden"));
+    assert.match(await js("document.querySelector('.content-error').textContent"), /批注 2.*移除按钮/);
+    await js(clickRemove);
+    await until(async () => (await js("window.draftNotes()")).length === 0);
+    assert.equal(count(first.id), 0, "retry removes the failed note");
+
+    await annotate(first.id, ["previous document"]);
+    await annotate(second.id, ["closing page"]);
+    const navigating = pauseRemoval(first.id);
+    await js(clickRemove);
+    await until(navigating.started);
+    await pages!.navigate(first.id, url + "/popup");
+    navigating.fail();
+    await until(async () => (await js("window.draftNotes()")).length === 1);
+    assert.deepEqual(await js("window.draftNotes()"), ["closing page"]);
+    const closing = pauseRemoval(second.id);
+    await js(clickRemove);
+    await until(closing.started);
+    pages!.call(second.id, "close");
+    await until(() => !pages!.contents(second.id));
+    closing.fail();
+    await until(async () => (await js("window.draftNotes()")).length === 0);
+    pages!.call(first.id, "close");
+    console.log("PASS removing a draft attachment removes its live mark after inspect mode, across pages and repeated removals");
+  }
+  if (process.argv.includes("--annotations-only")) {
+    await checkUserAnnotations();
+    return;
+  }
   if (process.argv.includes("--tabs-only")) {
     await checkTabPresentation();
     return;

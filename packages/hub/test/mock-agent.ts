@@ -10,6 +10,7 @@
  *                         "$task" the id of the <xsb-task> it stands in, or else of the one
  *                         the session was given last (left as it is without one: it may be
  *                         meant for the instructions of a task this session dispatches)
+ *   !plugin <tool> <json> call a real additional stdio MCP server selected with --plugin <name>
  *   !done <result>        report_result on that task
  *   !echo                 emit the whole prompt, as a prompt without directives is
  *   !await <json>         subscribe to every task dispatched since the last !await
@@ -39,6 +40,7 @@ type Session = {
   id: string;
   mcp?: Connection;
   xsb?: Connection;
+  plugin?: Connection;
   running: boolean;
   cancelled: boolean;
   lines: string[];
@@ -65,17 +67,20 @@ const conn = new Connection(process.stdin, process.stdout, "mock");
 const sessions = new Map<string, Session>();
 const flags = process.argv.slice(2);
 const steering = flags.includes("--steering");
+const plugin = flags.includes("--plugin") ? flags[flags.indexOf("--plugin") + 1] : undefined;
 let counter = 0;
 let formElicitation = false;
 let rejectedContext = false;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
   const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], images: [] };
-  for (const server of mcpServers.filter((s) => s.name === "workflow" || s.name === "xsb")) {
+  for (const server of mcpServers.filter((s) => s.name === "workflow" || s.name === "xsb" || s.name === plugin)) {
     const env = Object.fromEntries(server.env.map((e: any) => [e.name, e.value]));
     const proc = spawn(server.command, server.args, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "inherit"] });
     const bridge = new Connection(proc.stdout, proc.stdin, "mcp");
-    if (server.name === "xsb") session.xsb = bridge; else session.mcp = bridge;
+    if (server.name === plugin) session.plugin = bridge;
+    else if (server.name === "xsb") session.xsb = bridge;
+    else session.mcp = bridge;
     await bridge.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "mock", version: "0" } });
     bridge.notify("notifications/initialized");
   }
@@ -90,11 +95,12 @@ const say = (session: Session, text: string): void => {
   update(session, { sessionUpdate: "agent_message_chunk", messageId: session.message, content: { type: "text", text } });
 };
 
-async function tool(session: Session, name: string, args: unknown): Promise<string> {
+async function tool(session: Session, name: string, args: unknown, pluginTool = false): Promise<string> {
   const toolCallId = `call_${++counter}`;
   session.message = undefined;
-  update(session, { sessionUpdate: "tool_call_update", toolCallId, title: name, name: `mcp__workflow__${name}`, status: "in_progress" });
-  const result = await (name === "ask" ? session.xsb! : session.mcp!).request("tools/call", { name, arguments: args });
+  update(session, { sessionUpdate: "tool_call_update", toolCallId, title: name, name: `mcp__${pluginTool ? plugin : "workflow"}__${name}`, status: "in_progress" });
+  const server = pluginTool ? session.plugin : name === "ask" ? session.xsb : session.mcp;
+  const result = await server!.request("tools/call", { name, arguments: args });
   update(session, { sessionUpdate: "tool_call_update", toolCallId, status: result.isError ? "failed" : "completed" });
   return result.content[0].text;
 }
@@ -132,9 +138,10 @@ async function step(session: Session, line: string): Promise<void> {
       });
       session.wake = undefined;
       return;
+    case "plugin":
     case "call": {
       const [, name, json = "{}"] = /^(\w+)\s*(.*)$/.exec(rest)!;
-      const out = await tool(session, name, JSON.parse(json.replaceAll("$last", session.taskIds.at(-1) ?? "").replaceAll("$task", task || "$task")));
+      const out = await tool(session, name, JSON.parse(json.replaceAll("$last", session.taskIds.at(-1) ?? "").replaceAll("$task", task || "$task")), directive === "plugin");
       const id = /"task_id": "(t_\w+)"/.exec(out)?.[1];
       if ((name === "dispatch_task" || name === "start_job") && id) session.taskIds.push(id);
       return say(session, `result(${name}): ${out}\n`);
