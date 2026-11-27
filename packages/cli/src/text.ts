@@ -22,7 +22,7 @@ const en = {
   xsb chat [SESSION] [--backend NAME] [--history]
   xsb send SESSION MESSAGE [--history-only | --workflow-target]
   xsb workflow show|pause|resume SESSION [NODE ...]
-  xsb backends | status | assets [--history] | watch
+  xsb backends | status | watch
   xsb hub start|stop|log|status
   xsb acp
 
@@ -71,7 +71,7 @@ const zh: typeof en = {
   xsb chat [SESSION] [--backend NAME] [--history]
   xsb send SESSION MESSAGE [--history-only | --workflow-target]
   xsb workflow show|pause|resume SESSION [NODE ...]
-  xsb backends | status | assets [--history] | watch
+  xsb backends | status | watch
   xsb hub start|stop|log|status
   xsb acp
 

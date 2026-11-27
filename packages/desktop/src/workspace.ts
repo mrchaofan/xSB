@@ -16,8 +16,8 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { Question, RunExt, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry } from "@xsb/protocol";
-import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
+import { Question, RunExt, SessionControls, ToolServers, Workflow, Agents, fileChanges, fileEditPath, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry } from "@xsb/protocol";
+import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
 import type { Answer, ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
 import { append } from "./content.ts";
@@ -40,7 +40,7 @@ export type Notice = { agentId: string; name: string; kind: "done" | "failed" | 
 type Notify = (notice: Notice) => void;
 type Tool = Extract<Entry, { kind: "tool" }>;
 
-const TOOL_STATUS: Record<string, Tool["status"]> = { completed: "done", failed: "failed" };
+const TOOL_STATUS: Record<string, Tool["status"]> = { completed: "done", failed: "failed", cancelled: "failed" };
 
 export class Workspace {
   readonly paths: Paths;
@@ -141,12 +141,6 @@ export class Workspace {
     });
     conn.onNotification(Agents.update, (p) => this.onAgent(p.agent));
     conn.onNotification(Agents.removed, (p) => this.onAgentRemoved(p.id));
-    conn.onNotification(Assets.update, (p) => this.asset(p.asset));
-    conn.onNotification(Assets.removed, ({ ids }: { ids: string[] }) => {
-      const removed: string[] = [];
-      for (const [id, artifact] of this.artifacts) if (artifact.assetId && ids.includes(artifact.assetId)) { this.artifacts.delete(id); removed.push(id); }
-      this.emit({ artifactsRemoved: removed });
-    });
     conn.onNotification(Workflow.update, ({ workflow }: { workflow: WorkflowView }) => {
       this.workflows.set(workflow.sessionId,workflow);
       this.emit({workflow});
@@ -249,7 +243,7 @@ export class Workspace {
     const unchanged = (versions: Map<string, number>, before: Map<string, number>, id: string): boolean =>
       (versions.get(id) ?? 0) === (before.get(id) ?? 0);
     const priorFlows = new Map(this.workflows);
-    const [, , , { assets }] = await Promise.all([
+    await Promise.all([
       this.conn.request<{ workflows: WorkflowView[] }>(Workflow.list).then(({workflows}) => {
         for (const flow of workflows) if (priorFlows.get(flow.sessionId) === this.workflows.get(flow.sessionId)) this.workflows.set(flow.sessionId,flow);
       }),
@@ -263,9 +257,7 @@ export class Workspace {
         for (const [id, task] of this.tasks) if (!unchanged(this.taskVersions, taskVersions, id)) next.set(id, task);
         this.tasks = next;
       }),
-      this.conn.request<{ assets: Asset[] }>(Assets.list, { history:true }),
     ]);
-    assets.forEach((asset) => this.asset(asset));
     // Attaching to a session replays its history; the snapshot is complete once every replay is.
     await Promise.allSettled(this.mains.values());
     await this.restoreOutbox();
@@ -280,7 +272,7 @@ export class Workspace {
       agents: [...this.agents.values()],
       tasks: [...this.tasks.values()],
       artifacts: [...this.artifacts.values()],
-      assetNames: {}, workflows:Object.fromEntries(this.workflows),
+      workflows:Object.fromEntries(this.workflows),
       transcripts: Object.fromEntries(this.transcripts),
       activities: Object.fromEntries(this.activities),
       history: Object.fromEntries(this.historyCursors),
@@ -347,6 +339,9 @@ export class Workspace {
           this.historyCursors.set(agent.id, page.cursor);
           this.rebuildHistory(agent.id);
           if (this.agentVersions.get(agent.id) === version) this.onAgent(page.agent);
+          // The main chat may already show Files when a newly discovered task is attached.
+          // Its earlier edits arrived through history, where individual refreshes are suppressed.
+          this.emit({ filesChanged: agent.workflowOwner ?? agent.mainSessionId! });
           return agent.mainSessionId!;
         });
       } else {
@@ -627,15 +622,31 @@ export class Workspace {
       const id = `${sessionId}:${update.toolCallId}`;
       const prior = this.transcripts.get(agentId)!.find((e): e is Tool & { id: string } => e.id === id);
       const directory = this.agents.get(agentId)?.workspace ?? this.paths.project;
-      const files = (update.locations ?? []).flatMap((location: { path?: string }) => location.path ? [this.artifact(path.resolve(directory, location.path), agentId)] : []);
+      const fileUri = (target: string) => pathToFileURL(this.paths.resolveStored(path.resolve(directory, target))).href;
+      const changes = update.content === undefined ? prior?.changes : fileChanges(update.content).map(change => ({ ...change, uri: fileUri(change.path) }));
+      const name = update.name === undefined ? prior?.name : update.name ?? undefined;
+      const input = update.rawInput === undefined ? update.input ?? prior?.input : update.rawInput ?? undefined;
+      // History preserves Codex's saved image path and the target of Claude edits with no diff.
+      const imagePath = update.rawOutput === undefined ? prior?.imagePath : update.rawOutput?.savedPath;
+      const savedPath = imagePath ?? (changes?.length ? undefined : fileEditPath(name, input));
+      const savedFile = typeof savedPath === "string" && savedPath ? { path: savedPath, uri: fileUri(savedPath) } : undefined;
       const title = update.title ?? prior?.title ?? update.name ?? "";
-      const status = TOOL_STATUS[update.status ?? ""] ?? (update.status ? "running" : (prior?.status ?? "running"));
-      this.put(agentId, { id, kind: "tool", title, status, artifactId: files.find((a: Artifact | undefined) => a)?.id ?? prior?.artifactId,
-        name: update.name ?? prior?.name,
-        input: update.input ?? update.rawInput ?? prior?.input,
+      const status = update.status === undefined ? prior?.status ?? "running" : TOOL_STATUS[update.status] ?? "running";
+      const toolKind = update.kind ?? prior?.toolKind;
+      this.put(agentId, { id, kind: "tool", title, status, toolKind, changes, savedFile, imagePath, name, input,
         output: update.output ?? update.rawOutput ?? update.content ?? prior?.output,
         terminalOutput: this.terminalViews.attach(id, sessionId, update.content) ?? prior?.terminalOutput,
       });
+      const hasFiles = status === "done" && (!!changes?.length || !!savedFile);
+      const hadFiles = prior?.status === "done" && (!!prior.changes?.length || !!prior.savedFile);
+      // The starting diff can precede the oldest loaded page. A sparse completion then
+      // refreshes the authoritative list; it supplies no change to display in the chat.
+      const unseenDetails = update.status === "completed" && prior?.status !== "done" && toolKind !== "read" &&
+        this.historyCursors.get(agentId) != null && (changes === undefined || (update.rawOutput === undefined && !savedFile));
+      if (!this.replaying && (unseenDetails || hasFiles !== hadFiles || (hasFiles && (changes !== prior?.changes || savedFile?.path !== prior?.savedFile?.path)))) {
+        const owner = this.sessionOwner(agentId);
+        if (owner) this.emit({ filesChanged: owner });
+      }
       if (offTurn || run?.state === "idle") return;
       // While any tool call is open the agent is running tools; once the last one ends, its model reads the results.
       const open = this.tools.get(agentId) ?? new Set<string>();
@@ -924,40 +935,42 @@ export class Workspace {
     return artifact;
   }
 
-  /** A file a tool call names, made showable. Not every path a tool names is a file. */
-  private artifact(file: string, agentId: string, name = path.basename(file), assetType?: string, asset?: Asset): Artifact | undefined {
+  /** Recheck an already-open preview without admitting another path into the preview server. */
+  refreshArtifact(id: string): void {
+    const known = this.artifacts.get(id);
+    if (!known) return;
+    if (this.artifact(id, known.agentId) || known.missing) return;
+    const missing = { ...known, missing: true };
+    this.artifacts.set(id, missing);
+    this.emit({ artifact: missing });
+  }
+
+  /** The Hub projects the whole conversation's files from successful backend edits, including its task agents. */
+  async conversationFiles(sessionId: string): Promise<Artifact[]> {
+    const { files } = await this.conn.request<{ files: { path: string; agentId: string }[] }>(History.files, { sessionId });
+    return files.flatMap(file => {
+      const absolute = this.paths.resolveStored(path.resolve(this.agents.get(file.agentId)?.workspace ?? this.paths.project, file.path));
+      const preview = this.artifact(absolute, file.agentId, sessionId);
+      return preview ? [preview] : [];
+    });
+  }
+
+  private artifact(file: string, agentId: string, owner = this.sessionOwner(agentId)): Artifact | undefined {
     const stat = fs.statSync(file, { throwIfNoEntry: false });
     if (!stat?.isFile()) return undefined;
     const updatedAt = stat.mtime.toISOString();
     const known = this.artifacts.get(file);
-    const owner = asset?.sessionId ?? this.sessionOwner(agentId);
     const sessionIds = new Set(known?.sessionIds);
     if (owner) sessionIds.add(owner);
-    if (known?.updatedAt === updatedAt && (!asset || known.assetId === asset.id) && sessionIds.size === known.sessionIds?.length) return known;
+    const url = `${ARTIFACT_SCHEME}://file/${encodeURIComponent(file)}?v=${stat.mtimeMs}-${stat.ctimeMs}-${stat.size}`;
+    if (known?.url === url && !known.missing && sessionIds.size === known.sessionIds?.length && known.agentId === agentId) return known;
     const artifact: Artifact = {
-      id: file,
-      name: asset ? name : known?.name ?? name,
-      sessionIds: [...sessionIds],
-      fileUri: pathToFileURL(file).href,
-      kind: artifactKind(file),
-      agentId: asset ? agentId : known?.agentId ?? agentId,
-      path: path.relative(this.paths.project, file),
-      // The version in the URL makes the renderer read a changed file again.
-      url: `${ARTIFACT_SCHEME}://file/${encodeURIComponent(file)}?v=${stat.mtimeMs}`,
-      updatedAt,
-      assetType: assetType ?? known?.assetType,
-      ...(known?.assetId ? { assetId: known.assetId, assetVersion: known.assetVersion, registeredName: known.registeredName, description: known.description } : {}),
-      ...(asset ? { assetId: asset.id, assetVersion: asset.version, registeredName: asset.name, description: asset.description } : {}),
+      id: file, name: path.basename(file), sessionIds: [...sessionIds], fileUri: pathToFileURL(file).href,
+      kind: artifactKind(file), agentId, path: path.relative(this.paths.project, file),
+      url, updatedAt,
     };
     this.artifacts.set(file, artifact);
     this.emit({ artifact });
     return artifact;
-  }
-
-  /** A version of an asset of the library: what agents hand to each other. */
-  private asset(asset: Asset): void {
-    const ext = path.extname(asset.path);
-    const name = asset.name.toLowerCase().endsWith(ext.toLowerCase()) ? asset.name : asset.name + ext;
-    this.artifact(asset.path, asset.by, name, asset.type, asset);
   }
 }

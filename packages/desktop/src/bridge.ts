@@ -1,4 +1,4 @@
-import type { ComposerState, ConversationEntry, WorkflowView } from "@xsb/protocol";
+import type { ComposerState, ConversationEntry, FileChange, WorkflowView } from "@xsb/protocol";
 /**
  * What crosses between main and the renderer: the shapes `window.xsb` returns
  * and the events it delivers. The renderer is plain JavaScript, so this file
@@ -35,7 +35,7 @@ export type Entry = { id: string } & (
   | { kind: "output"; content: Content; streaming?: boolean; run?: BackendRun; stopReason?: string; runOrigin?: unknown }
   /** A source published this readable entry directly to the conversation. */
   | { kind: "publication"; source: ConversationEntry["source"]; markdown: string }
-  | { kind: "tool"; title: string; status: "running" | "done" | "failed"; artifactId?: string; name?: string; input?: unknown; output?: unknown; terminalOutput?: string }
+  | { kind: "tool"; title: string; status: "running" | "done" | "failed"; toolKind?: string; changes?: (FileChange & { uri: string })[]; imagePath?: string; savedFile?: { path: string; uri: string }; name?: string; input?: unknown; output?: unknown; terminalOutput?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
   /** Historical questions can be read. Only the client holding a live ACP request can submit an answer. */
   | { kind: "question"; questionId: string; questions: QuestionItem[]; state: QuestionState; answers?: QuestionAnswer[]; source?: "acp"; delivery?: "async"; answerable?: boolean }
@@ -51,8 +51,8 @@ export type Entry = { id: string } & (
  */
 export type Activity = { kind: "waiting" | "thinking" | "writing" | "tool"; detail?: string; since: string };
 
-/** A file an agent wrote, as something the renderer can show. `assetType` is set for assets of the library. */
-export type Artifact = { sessionIds?: string[]; fileUri?: string; id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text" | "unsupported"; agentId: string; path: string; url: string; updatedAt: string; assetType?: string; assetId?: string; assetVersion?: number; registeredName?: string; description?: string };
+/** Metadata used to preview a file that exists on disk. */
+export type Artifact = { missing?: boolean; sessionIds?: string[]; fileUri?: string; id: string; name: string; kind: "markdown" | "html" | "image" | "video" | "text" | "unsupported"; agentId: string; path: string; url: string; updatedAt: string };
 
 /**
  * A web page of the side panel (pages.ts), shown where the window's document lays out a place for it (renderer/page-slot.js).
@@ -85,8 +85,6 @@ export type Snapshot = {
   agents: AgentInfo[];
   tasks: Task[];
   artifacts: Artifact[];
-  /** What the asset types of the preset teams are called: type -> name. A type no team names is shown as it is. */
-  assetNames: Record<string, string>;
   transcripts: Record<string, Entry[]>;
   history: Record<string, number | null>;
   /** Agent id -> what it is doing, for those with a turn running. */
@@ -103,7 +101,7 @@ export type Event =
   | { removedAgent: string }
   | { task: Task }
   | { artifact: Artifact }
-  | { artifactsRemoved: string[] }
+  | { filesChanged: string }
   /** On a new page, keepTab preserves the current tab while one of the window's native views has focus. */
   | { page: PageView; keepTab?: boolean }
   | { removedPage: string }

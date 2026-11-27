@@ -184,7 +184,7 @@ test("a fresh oversized input fails once without sending or silently dropping th
 test("a task ended before deferred delivery never opens a turn", async (t) => {
   const { kernel, state, A, B, give, settle, prompts, session } = setup(t);
   const task = give(A, B, "completed before delivery");
-  kernel.complete(task, "completed", "already done", []);
+  kernel.complete(task, "completed", "already done");
   await settle();
   assert.equal(session.busy, false);
   assert.equal(prompts.length, 0);
@@ -197,7 +197,7 @@ test("a queued task completed by its executor is discarded at dequeue instead of
   // The user spoke into it: the turn is the user's, and an agent's task waits its turn.
   unread("the user", true);
   const task = give(A, B, "queued but already completed"); await settle();
-  kernel.complete(task, "completed", "done in the current work", []);
+  kernel.complete(task, "completed", "done in the current work");
   idle(); await settle();
   // A deferred standard prompt is still owned by its original turn until insertion is confirmed.
   acceptHeld("the user"); await settle();
@@ -452,8 +452,8 @@ test("stopping an ended root traverses ended intermediates and withdraws queued 
   const middle = give(B, C, "middle"); await settle();
   const child = give(C, A, "child"); await settle();
   const queued = give(C, A, "queued");
-  kernel.complete(state.tasks.get(middle.id)!, "completed", "middle done", []);
-  kernel.complete(state.tasks.get(root.id)!, "completed", "root done", []);
+  kernel.complete(state.tasks.get(middle.id)!, "completed", "middle done");
+  kernel.complete(state.tasks.get(root.id)!, "completed", "root done");
   const answer = stop(root);
   assert.deepEqual(new Set(answer.with.map((t) => t.id)), new Set([child.id, queued.id]));
   assert.equal(state.tasks.get(root.id)!.status, "completed");
@@ -647,7 +647,7 @@ test("a workflow journals the context and scope actually inserted, keeping origi
   await settle();
   const turnId = session.current!.id;
   const scope = "[xSB] The user is addressing the current workflow.";
-  assert.deepEqual(offered.slice(-3), [text(scope), text("<asset>Report@v1</asset>"), blocks[1]]);
+  assert.deepEqual(offered.slice(-3), [text(scope), ...blocks]);
   const context = offered.find(block => block.text?.startsWith("[xSB workflow]"))?.text;
   assert.ok(context);
   assert.deepEqual(state.store.read(workflowJournal(session)), [], "offering a prompt is not its insertion");

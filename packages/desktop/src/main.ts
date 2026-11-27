@@ -102,7 +102,7 @@ const TEXT: Record<Language, Words> = {
     }),
     menu: { settings: "Settings…", file: "File", newWindow: "New Window", openFolder: "Open Folder…", openRecent: "Open Recent", clearRecent: "Clear Recently Opened",
       noRecent: "No Recent Folders", closeWindow: "Close Window", edit: "Edit", view: "View", window: "Window", help: "Help", reload: "Reload", devTools: "Developer Tools" },
-    makeWorkspace: (folder) => ({ message: `Make ${path.basename(folder)} a workspace?`, detail: `xsb keeps its conversations, workflows and assets in a .xsb2 folder inside:\n${folder}`, create: "Make Workspace", cancel: "Cancel" }),
+    makeWorkspace: (folder) => ({ message: `Make ${path.basename(folder)} a workspace?`, detail: `xsb keeps its conversations and workflows in a .xsb2 folder inside:\n${folder}`, create: "Make Workspace", cancel: "Cancel" }),
   },
   "zh-CN": {
     locate: (command) => `选择 ${command} 程序`,
@@ -126,7 +126,7 @@ const TEXT: Record<Language, Words> = {
     }),
     menu: { settings: "设置…", file: "文件", newWindow: "新建窗口", openFolder: "打开文件夹…", openRecent: "打开最近的工作区", clearRecent: "清除最近打开记录",
       noRecent: "没有最近打开的工作区", closeWindow: "关闭窗口", edit: "编辑", view: "视图", window: "窗口", help: "帮助", reload: "重新加载", devTools: "开发者工具" },
-    makeWorkspace: (folder) => ({ message: `把“${path.basename(folder)}”设为工作区？`, detail: `xsb 会在这个文件夹里新建 .xsb2 目录，保存会话、工作流和资产：\n${folder}`, create: "设为工作区", cancel: "取消" }),
+    makeWorkspace: (folder) => ({ message: `把“${path.basename(folder)}”设为工作区？`, detail: `xsb 会在这个文件夹里新建 .xsb2 目录，保存会话和工作流：\n${folder}`, create: "设为工作区", cancel: "取消" }),
   },
 };
 
@@ -539,7 +539,7 @@ function answerOf(given: unknown): Answer {
   if (!Array.isArray(a.answers) || !a.answers.every((v) => v === null || text(v) || (Array.isArray(v) && v.every(text)))) throw Error("Invalid form answers");
   return { questionId: a.questionId, answers: a.answers };
 }
-const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","renameConversation","setAvatar","setBackend","workflowControl","history","send","resend","cancelMessage","sendMessageNow","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
+const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","renameConversation","setAvatar","setBackend","conversationFiles","refreshArtifact","workflowControl","history","send","resend","cancelMessage","sendMessageNow","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();

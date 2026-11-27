@@ -21,25 +21,7 @@
  *   content -> transcript  `contentView`                                (renderer/content.js)
  */
 import type { ContentBlock } from "@xsb/protocol";
-import { assetRefTags } from "@xsb/protocol";
-
 export type Content = ContentBlock[];
-
-/** Show exact workflow references as chips while keeping the surrounding message verbatim. */
-export function assetReferenceParts(block: ContentBlock): Content {
-  if (block.type !== "text" || !block.text?.includes("<asset>")) return [block];
-  const parts: Content = [];
-  let offset = 0;
-  for (const { index, raw, ref } of assetRefTags(block.text)) {
-    if (!ref) continue;
-    if (offset < index) parts.push({ ...block, text: block.text.slice(offset, index) });
-    parts.push({ type: "asset_reference", ...ref });
-    offset = index + raw.length;
-  }
-  if (!offset) return [block];
-  if (offset < block.text.length) parts.push({ ...block, text: block.text.slice(offset) });
-  return parts;
-}
 
 /**
  * `content` with one more block. Text that follows text continues it: a model

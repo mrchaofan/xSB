@@ -80,7 +80,7 @@ try {
   assert.equal(JSON.parse(ok("workflow","show",a)).nodes.length,0);
   const live = chat(a);
   await live.until(`talking to ${a}.`);
-  const graph = [ {node:"A",prompt:'!call finish {"summary":"done","assets":[]}'}, {node:"end",kind:"end"}, {from:"A",to:"end"} ].map(v=>JSON.stringify(v)).join("\n");
+  const graph = [ {node:"A",prompt:'!call finish {"summary":"done"}'}, {node:"end",kind:"end"}, {from:"A",to:"end"} ].map(v=>JSON.stringify(v)).join("\n");
   assert.match(ok("send",a,"!call execute "+JSON.stringify({graphJsonl:graph})),/version/);
   let result;
   for (let i=0;i<15;i++) {

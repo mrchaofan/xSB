@@ -1,7 +1,5 @@
 import { Ajv } from "ajv";
-import { formatAssetRef, parseAssetRef } from "@xsb/protocol";
 const string = { type: "string" };
-const assetRef = { type: "string", description: "An exact workflow asset reference, name@vN (for example Cover Art@v2)." };
 const strings = { type: "array", items: string };
 const obj = { type: "object" };
 function tool(name: string, description: string, properties: Record<string, unknown>, required: string[] = []) {
@@ -45,13 +43,12 @@ const task = [
   tool("load_skill", "Read a fixed skill from this task agent's assignment skill directory before applying it. This loads Hub-managed instructions, not a backend-native slash command. Long content is retained with a read_context reference.", { name: string }, ["name"]),
   tool(
     "finish",
-    "Stage this assignment's delivery. It is accepted only on a normal end.",
+    "Stage this assignment's summary and optional structured result. Link relevant working files in the summary using Markdown. The host accepts the delivery on a normal end.",
     {
       summary: string,
-      assets: { type: "array", items: assetRef },
       result: {},
     },
-    ["summary", "assets"],
+    ["summary"],
   ),
   tool(
     "escalate",
@@ -61,26 +58,6 @@ const task = [
   ),
 ];
 const common = [
-  tool("asset_list", "List accessible name@vN references in creation order.", { name: string }, ["name"]),
-  tool(
-    "asset_version_get",
-    "Read the currently registered version, pinned on first use in this work.",
-    { name: string },
-    ["name"],
-  ),
-  tool(
-    "asset_get",
-    "Read one precise immutable version by its name@vN reference. Returns its ref, path and available text content.",
-    { ref: assetRef },
-    ["ref"],
-  ),
-  tool(
-    "asset_put",
-    "Register a new immutable version from a file and return its name@vN reference. A null path clears its current pointer when authorized.",
-    { name: string, path: { type: ["string", "null"] } },
-    ["name", "path"],
-  ),
-  tool("asset_version_put", "Select an existing name@vN reference as current.", { ref: assetRef }, ["ref"]),
   tool(
     "read_context",
     "Read a page of your own quoted context by UTF-8 offset.",
@@ -93,20 +70,13 @@ export const workflowTools = (worker: boolean) => [...(worker ? task : main), ..
 const validator = new Ajv();
 const schemas = new Map([...main, ...task, ...common].map((t) => [t.name, validator.compile(t.inputSchema)]));
 export function checkedArguments(name: string, args: Record<string, any>) {
-  // Existing backend conversations may still use the tool schemas they were first shown.
-  if ((name === "asset_get" || name === "asset_version_put") && !("ref" in args) && Object.keys(args).length === 2) {
-    const ref = parseAssetRef(args);
-    if (ref) args = { ref: formatAssetRef(ref) };
-  }
+  // Already-bound task conversations can finish with the schema they received before the upgrade.
   if (name === "finish" && Array.isArray(args.assets)) {
-    const assets = args.assets.map((value: unknown) => {
-      const ref = parseAssetRef(value);
-      if (!ref || (typeof value === "object" && value && Object.keys(value).length !== 2)) throw Error("Expected an asset reference name@vN");
-      return formatAssetRef(ref);
-    });
-    args = { ...args, assets };
+    args = { ...args };
+    delete args.assets;
   }
   const check = schemas.get(name);
+  if (!check && name.startsWith("asset_")) throw Error("Unknown workflow tool. Use your backend's file tools and share working files with Markdown links.");
   if (!check) throw Error("Unknown workflow tool");
   if (!check(args)) throw Error(validator.errorsText(check.errors));
   return args;

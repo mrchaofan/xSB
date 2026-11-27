@@ -1,6 +1,5 @@
-import { accessAsset, assetVersion, findAsset } from "./workflow-assets.ts";
-import { Agents, Assets, Workflow, assetRefsInText, canonicalAssetTags, parseAssetRef, text } from "@xsb/protocol";
-import type { Asset, ContentBlock, NodeDef } from "@xsb/protocol";
+import { Agents, Workflow, text } from "@xsb/protocol";
+import type { ContentBlock, NodeDef } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import type { Hub } from "./hub.ts";
 import type { Input, LiveSession, Turn, TurnEnd } from "./session.ts";
@@ -10,7 +9,6 @@ import { boundedText, contextRef, readContext } from "./context.ts";
 import { projectLanguage } from "./config.ts";
 import { renderAssignment, renderCompletion } from "./workflow-assignment.ts";
 import { TAKEN_IN } from "./kernel.ts";
-import { assetReceipt, deliveryForModel, inputAssetRefs, materialFields } from "./workflow-materials.ts";
 import { workflowJournal, workflowAuditRecord } from "./workflow-journal.ts";
 import type { WorkflowAudit } from "./workflow-journal.ts";
 import { canonical, fingerprint, graphJsonl, validateResult, word } from "./workflow-graph.ts";
@@ -46,7 +44,7 @@ export class Workflows {
   private scheduled = new Set<string>();
   private redirected = new WeakSet<Turn>();
   private seen = new WeakMap<Turn, Seen>();
-  private promptAudit = new WeakMap<Input, { turnId: string; context?: string; scope?: string }>();
+  private promptAudit = new WeakMap<Input, { turnId: string; context?: string; scope?: string; fileGuidanceEpoch?: number }>();
   constructor(hub: Hub) {
     this.hub = hub;
   }
@@ -66,7 +64,11 @@ export class Workflows {
     if (pending.context) events.push({ kind: "context", context: pending.context });
     if (pending.scope) events.push({ kind: "scope", messageId: input.messageId, scope: pending.scope });
     this.record(s, pending.turnId, ...events);
-    this.hub.state.afterCommit(() => this.promptAudit.delete(input));
+    this.hub.state.afterCommit(() => {
+      if (pending.fileGuidanceEpoch !== undefined && pending.fileGuidanceEpoch === (s.rec.contextEpoch ?? 0))
+        s.given.workflow = { epoch: pending.fileGuidanceEpoch, taskFileGuidance: true };
+      this.promptAudit.delete(input);
+    });
   }
   owner(s: LiveSession) {
     return this.hub.agent(s.agentId).workflowOwner ?? s.id;
@@ -85,7 +87,7 @@ export class Workflows {
     return snapshot;
   }
   list() {
-    return [...this.hub.state.workflows.keys()].map((owner) => this.get(owner));
+    return [...this.hub.state.workflows.values()].filter(f => f.active || f.candidate).map(f => this.get(f.owner));
   }
   /** Controls depend on live execution as well as the persisted graph. */
   runtimeChanged(sessionId: string) {
@@ -122,7 +124,7 @@ export class Workflows {
       } else this.hub.state.commit(operations);
       if (result) {
         const language = projectLanguage(this.hub.paths);
-        const markdown = renderCompletion(result, language, ref => assetVersion(this.hub, ref)?.path);
+        const markdown = renderCompletion(result, language);
         this.hub.session(f.owner).appendConversationEntry(result.id, {
           kind: "plugin", id: "workflow", label: language === "zh-CN" ? "工作流" : "Workflow",
         }, markdown);
@@ -396,15 +398,6 @@ export class Workflows {
     const f = this.read(s.id);
     return !f.paused && f.outbox.some((n) => n.posted === id);
   }
-  /** Posted mail retains the frozen facts even after its outbox receipt has been settled. */
-  noticePrompt(prompt: ContentBlock[]): ContentBlock[] {
-    const block = prompt[0];
-    if (prompt.length !== 1 || block?.type !== "text" || !block.text) return prompt;
-    let report;
-    try { report = JSON.parse(block.text); } catch { return prompt; }
-    if (report?.choose && report.delivery) return [text(JSON.stringify({ ...report, delivery: deliveryForModel(report.delivery) }))];
-    return prompt;
-  }
   acceptsAttempt(s: LiveSession, id: string) {
     const spec = this.hub.agent(s.agentId);
     return !spec.workflowOwner || this.read(spec.workflowOwner).instances[spec.workflowNode!]?.work?.attempt === id;
@@ -455,8 +448,6 @@ export class Workflows {
     this.accessible(s);
     const f = structuredClone(this.read(this.owner(s))),
       spec = this.hub.agent(s.agentId);
-    const named = blocks.flatMap(b => b.type === "text" ? assetRefsInText(b.text ?? "") : []);
-    for (const ref of named) findAsset(this.hub, ref);
     if (spec.workflowOwner) {
       const i = instance(f, spec.workflowNode!);
       const current = (i.work?.kind === "graph" ? i.work.id : undefined) ?? (i.last?.valid ? i.last.id : undefined);
@@ -464,13 +455,12 @@ export class Workflows {
       // Form responses return through ACP. Only ordinary user input reaches here.
       if (target !== "history" && current && !i.interruptions.some((p) => p.id === id))
         i.interruptions.push({ id, target: current, prompt: blocks });
-      if (i.work && target !== "history") i.work.grants.push(...named);
     }
     // A settled workflow has nothing to interrupt: the message is the main conversation's own.
     if (!spec.workflowOwner && target === "workflow" && f.active && !settled(f))
       f.interruptions.push({ id, target: f.active, prompt: blocks });
     s.protect();
-    if (named.length || spec.workflowOwner || target === "workflow") this.save(f);
+    if (spec.workflowOwner || target === "workflow") this.save(f);
   }
 
   private observe(f: Flow, turn: Turn) {
@@ -503,24 +493,28 @@ export class Workflows {
       ? "[xSB] This interruption addresses graph work or delivery " + target
       : "[xSB] Direct conversation about context or history. Answer this message independently.";
   }
-  /** Work only on the model's copy. The transcript and any spilled original retain the user's exact text. */
+  /** The scope is a separate preface. The user's own content is passed through unchanged. */
   userPrompt(s: LiveSession, turn: Turn, input: Input, given: ContentBlock[]) {
     // A task node's first message already gets its purpose in the context in front of this turn.
     const scope = input !== turn.first || !this.hub.agent(s.agentId).workflowOwner ? this.interruptionContext(s, input.messageId) : undefined;
     const pending = this.promptAudit.get(input);
-    const context = pending?.turnId === turn.id ? pending.context : undefined;
-    if (scope || context) this.promptAudit.set(input, { turnId: turn.id, context, scope });
+    const current = pending?.turnId === turn.id ? pending : undefined;
+    if (scope || current?.context) this.promptAudit.set(input, { ...current, turnId: turn.id, scope });
     else this.promptAudit.delete(input);
-    const content = given.map(block => {
-      if (block.type !== "text" || !block.text) return block;
-      const projected = canonicalAssetTags(block.text);
-      return projected === block.text ? block : { ...block, text: projected };
-    });
-    return { scope, content };
+    return { scope, content: given };
   }
   context(s: LiveSession, turn: Turn) {
-    const context = this.describeContext(s, turn);
-    if (context) this.promptAudit.set(turn.first, { turnId: turn.id, context });
+    let context = this.describeContext(s, turn);
+    // Old nodes keep their original role and backend session. Correct the retired built-in tool
+    // instructions in the next actual prompt without waking an idle node or rewriting its prefix.
+    const epoch = s.rec.contextEpoch ?? 0;
+    const needsFileGuidance = s.rec.workflowPrompt?.includes("and the asset tools (asset_list, asset_get") &&
+      s.given.workflow?.epoch !== epoch;
+    if (needsFileGuidance) {
+      const guidance = "[xSB] Workflow file handling has changed. Use your backend's file tools. Link working files in your summary and call finish({summary,result?}). If an earlier reference has no usable path, ask for the file or clarify it with the main agent.";
+      context = context ? context + "\n" + guidance : guidance;
+    }
+    if (context) this.promptAudit.set(turn.first, { turnId: turn.id, context, ...(needsFileGuidance && { fileGuidanceEpoch: epoch }) });
     else this.promptAudit.delete(turn.first);
     return context;
   }
@@ -537,8 +531,8 @@ export class Workflows {
             ? "User interruption concerning current graph work or delivery"
             : "The user talks to you directly here. Sort it as your instructions say: your own assignment (handle it; escalate with pauseSelf if the assignment itself must change), the overall task (escalate to the main agent), or neither (just answer).",
           target: message?.target,
-          current: i.work && canonicalAssetTags(String(i.work.assignment.target)),
-          last: i.last?.valid ? deliveryForModel(i.last) : undefined,
+          current: i.work && i.work.assignment.target,
+          last: i.last?.valid ? i.last : undefined,
         })
       );
     }
@@ -547,7 +541,7 @@ export class Workflows {
     if (!f.active && !f.candidate) return;
     const epoch = s.rec.contextEpoch,
       before = s.given.workflow,
-      prior = before?.epoch === epoch ? before : undefined;
+      prior = before && "definitions" in before && before.epoch === epoch ? before : undefined;
     // When the model is told of its workflow (docs/WORKFLOWS.md): whole, in a context that does not have it (its first
     // turn, after a compaction or a renewal); at once, what it cannot learn otherwise (a pause, an error, work the user's
     // stop dropped); and while work is under way, every WORKFLOW_REFRESH_TURNS turns. Choices and escalations
@@ -561,10 +555,10 @@ export class Workflows {
     const definitions = new Map(graph?.nodes.map((n) => [n.node, n]));
     const changed = graph?.nodes.flatMap((n) => {
       const old = prior?.definitions.get(n.node);
-      if (!old) return [{ ...n, ...(n.prompt && { prompt: canonicalAssetTags(n.prompt) }), input: materialFields(n.input, true) }];
+      if (!old) return [n];
       const entries = (["kind", "prompt", "input", "schema", "multi", "model", "agent"] as const)
         .filter((key) => canonical(old[key]) !== canonical(n[key]))
-        .map((key) => [key, key === "input" ? materialFields(n.input, true) : key === "prompt" && n.prompt ? canonicalAssetTags(n.prompt) : n[key] ?? null]);
+        .map((key) => [key, n[key] ?? null]);
       return entries.length ? [{ node: n.node, ...Object.fromEntries(entries) }] : [];
     });
     // A context that has not had them (a first turn, a compacted or renewed one) gets the graphs whole, in the JSONL the
@@ -584,7 +578,7 @@ export class Workflows {
       },
       choices: Object.entries(f.instances)
         .filter(([, i]) => i.invitation)
-        .map(([node, i]) => ({ node, delivery: i.last && deliveryForModel(i.last) })),
+        .map(([node, i]) => ({ node, delivery: i.last })),
       ...(f.cancelled?.length ? { cancelled: f.cancelled } : {}),
     };
     const told = f.cancelled;
@@ -654,10 +648,10 @@ export class Workflows {
       turn = s.current,
       f = structuredClone(this.read(this.owner(s)));
     const key = fingerprint([s.agentId, receipt]);
-    if (Object.hasOwn(f.receipts, key)) return assetReceipt(name, f.receipts[key]);
     if (spec.workflowOwner && ["execute", "choose", "prompt", "plan", "resume", "pause"].includes(name))
       throw Error("Tool unavailable for task agent");
     a = checkedArguments(name, a);
+    if (Object.hasOwn(f.receipts, key)) return f.receipts[key];
     if (name === "load_skill") {
       if (!spec.workflowOwner) throw Error("Tool unavailable for main agent");
       const skill = spec.workflowAgent?.skills?.find(skill => skill.name === a.name);
@@ -673,27 +667,16 @@ export class Workflows {
     const node = spec.workflowNode,
       i = node ? instance(f, node) : undefined;
     const work = i?.work?.attempt === turn.first.messageId ? i.work : undefined;
-    const effects: Op[] = [];
-    let result: unknown, registered: Asset | undefined;
-    if (name.startsWith("asset_")) {
-      const asset = accessAsset(this.hub, f, s, turn, name, a);
-      result = asset.value;
-      registered = asset.registered;
-      if (asset.pointer) effects.push(ops.assetPointer(asset.pointer.id, asset.pointer.version));
-      if (registered) effects.push(ops.putAsset(registered));
-    } else if (!node) {
+    let result: unknown;
+    if (!node) {
       const observed = this.seen.get(turn);
       if (["plan", "execute"].includes(name)) {
         if (observed?.active !== f.active) throw Error("Active version changed");
         // Adopting the candidate adopts the one this turn was shown: its name is xSB's to check, not the model's to quote.
         if (name === "execute" && a.graphJsonl === undefined && a.replaceNode === undefined && f.candidate && observed?.candidate !== f.candidate.version)
           throw Error("The candidate changed since this turn saw it");
-        const version = adopt(f, a, name === "plan", ref => !!assetVersion(this.hub, ref));
-        for (const ref of f.versions[version].nodes.flatMap((n) => [...inputAssetRefs(n.input), ...assetRefsInText(n.prompt ?? "")]))
-          findAsset(this.hub, ref);
-        result = { version };
+        result = { version: adopt(f, a, name === "plan") };
       } else if (name === "prompt") {
-        for (const ref of assetRefsInText(a.text)) findAsset(this.hub, ref);
         additional(f, a.node, a.text);
         result = { queued: true, id: newId("extra") };
       } else if (name === "pause" || name === "resume") {
@@ -726,18 +709,12 @@ export class Workflows {
       } else throw Error("Unavailable main agent tool");
     } else if (name === "finish" && work && !work.staged) {
       word(a.summary, "summary");
-      const assets = (a.assets as string[]).map(value => parseAssetRef(value)!);
-      for (const ref of assets) {
-        const v = findAsset(this.hub, ref);
-        if (v.by !== s.agentId && !work.grants.some((r) => canonical(r) === canonical(ref)))
-          throw Error("Unauthorized deliverable");
-      }
       const schema = nodeOf(f, node).schema;
       if (work.kind === "graph" && schema) {
         if (!Object.hasOwn(a, "result")) throw Error("This task requires a result");
         validateResult(schema, a.result);
       }
-      work.staged = { summary: a.summary, assets, result: a.result };
+      work.staged = { summary: a.summary, result: a.result };
       result = { staged: true };
     } else if (name === "escalate" && i) {
       // To the main agent, which runs the whole workflow: the user's request about the whole task, or a need of this
@@ -772,8 +749,7 @@ export class Workflows {
       result = pause ? { forwarded: "main conversation", paused: node } : { forwarded: "main conversation" };
     } else throw Error("Tool unavailable for this execution");
     f.receipts[key] = result;
-    this.save(f, effects);
-    if (registered) this.hub.broadcast(Assets.update, { asset: registered });
+    this.save(f);
     if (!node && (name === "plan" || name === "execute")) {
       // Adoption updates the version this caller has seen. Choice invitations arrive with their own deliveries.
       const observed = this.seen.get(turn);

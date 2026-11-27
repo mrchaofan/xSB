@@ -42,47 +42,40 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
     '!document.querySelector("#tabs .tab button")?.innerText.includes("Workflow")',
     "simple task tabs",
   );
-  fs.writeFileSync(path.join(workspace, "brief.md"), "Red coat");
-  fs.writeFileSync(path.join(workspace, "revised.md"), "Blue coat");
-  await send(main, '!call asset_put {"name":"costume.md","path":"brief.md"}\n!call asset_put {"name":"costume.md","path":"revised.md"}');
+  const costume = path.join(fs.realpathSync(workspace), "costume.md");
+  const ignored = path.join(fs.realpathSync(workspace), "read-only.md");
+  fs.writeFileSync(costume, "Red coat");
+  fs.writeFileSync(ignored, "Input only");
+  const tool = (id, fields) => "!update " + JSON.stringify({ sessionUpdate: "tool_call_update", toolCallId: id, ...fields });
+  const report = (id, changes) => tool(id, { title: "Edit files", kind: "edit", status: "completed", content: [{ type: "diff", changes }] });
+  const add = { type: "diff", changes: [{ operation: "add", path: costume }], patch: { format: "git_patch", text: "" } };
+  await send(main, [
+    tool("read", { title: "Read", kind: "read", status: "completed", locations: [{ path: ignored }] }),
+    tool("failed", { title: "Edit", kind: "edit", status: "failed", content: [{ ...add, changes: [{ operation: "modify", path: ignored }] }] }),
+    tool("write", { title: "Edit", kind: "edit", status: "in_progress", content: [add] }),
+    tool("write", { status: "completed" }),
+  ].join("\n"));
+  await untilJS(q(main + " .changed-file") + "?.innerText.includes('costume.md')", "successful ACP edit appears in the conversation");
   await click("#side-launcher .launcher-item:nth-of-type(2)");
-  const versionSelect = ".artifact-row select.artifact-version";
-  await untilJS(q(versionSelect) + "?.options.length===2", "both asset versions in the catalog");
-  const registered = (await js("xsb.load()")).artifacts.find(a => a.registeredName === "costume.md" && a.assetVersion === 1);
-  const oldRef = "costume.md@v1";
-  assert.equal(registered.name, "costume.md");
-  await js(q(versionSelect) + ".value=" + JSON.stringify(registered.id) + ";" + q(versionSelect) + ".dispatchEvent(new Event('change'))");
-  assert.match(await js(q(".reference-action") + ".textContent"), /引用资产|Reference asset/);
-  await click(".reference-action");
-  assert.equal(await js(q(main + " .editor .asset-ref") + ".textContent"), oldRef);
-  await click(main + " .send");
-  await untilJS(q(main + " .entry.input .said .asset-ref") + "?.textContent===" + JSON.stringify(oldRef), "sent exact version");
-  const receipt = "<asset>" + oldRef + "</asset>";
-  const received = async (target, check) => {
-    const snapshot = await js("xsb.load()");
-    return snapshot.transcripts[target].some(e => e.kind === "output" && e.content.some(b => b.type === "text" && check(b.text)));
-  };
-  const rootAgent = await js(q(main) + ".dataset.agent");
-  await until(() => received(rootAgent, text => text.includes(receipt)), "backend received the asset reference");
+  await untilJS(q(".artifact-card") + "?.innerText.includes('costume.md')", "Files lists the edited file");
+  assert.equal(await js('document.querySelectorAll(".artifact-card").length'), 1);
   await click(".artifact-card");
-  await untilJS(q("#artifact-body .md") + "?.textContent.includes('Red coat')", "catalog previews the chosen version");
-  await send(main, "!say [Open the file](" + registered.fileUri + ")");
-  const registeredLink = main + " .output a[data-file-href=" + JSON.stringify(registered.fileUri) + "]";
-  await until(() => has(registeredLink), "Markdown link to a registered file");
-  await click(registeredLink);
-  assert.match(await js(q("#asset-reference") + ".textContent"), /引用文件|Reference file/);
-  await click("#asset-reference");
-  assert.equal(await js(q(main + " .editor .file-ref") + ".title"), registered.id);
+  await untilJS(q("#artifact-body .md") + "?.textContent.includes('Red coat')", "preview the written file");
+  fs.writeFileSync(costume, "Blue coat");
+  await send(main, report("edit-preview", [{ operation: "modify", path: costume }]));
+  await untilJS(q("#artifact-body .md") + "?.textContent.includes('Blue coat')", "editing a file refreshes the open preview");
+  await click("#file-reference");
+  assert.equal(await js(q(main + " .editor .file-ref") + ".title"), costume);
   await click(main + " .send");
-  await until(() => received(rootAgent, text => text.includes("<resource_link " + registered.fileUri + ">")), "backend received the backing file URI");
+  await until(() => has(main + " .said .file-ref"), "send a normal file attachment");
   await draft(main, "  line one\n\nline two  ");
-  await click("#asset-reference");
+  await click("#file-reference");
   await create();
   const first = "#agents .row:first-child", second = "#agents .row:nth-child(2)";
   assert.equal(await has(".artifact-card"), false);
-  assert.equal(await js(q(".catalog-controls") + ".hidden"), true);
+
   assert.equal(await js(q(main + " .editor") + ".textContent"), "");
-  fs.writeFileSync(path.join(workspace, "notes.md"), "Unregistered working notes");
+  fs.writeFileSync(path.join(workspace, "notes.md"), "Working notes");
   const zip = path.join(workspace, "bundle.zip");
   fs.writeFileSync(zip, Buffer.from([0x50, 0x4b, 3, 4, 0xff, 0]));
   await send(main, "!say [Archive](bundle.zip) [Notes](notes.md:12) [Drive](C:/docs/notes.md)");
@@ -108,10 +101,10 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   } finally { shell.showItemInFolder = showItem; }
   await click(main + ' .output a[data-file-href="notes.md:12"]');
   await untilJS(q("#artifact-name") + ".textContent==='notes.md'", "file preview");
-  await untilJS(q("#artifact-body .md") + "?.textContent.includes('Unregistered working notes')", "rendered Markdown in sidebar");
+  await untilJS(q("#artifact-body .md") + "?.textContent.includes('Working notes')", "rendered Markdown in sidebar");
   assert.equal(await has("#artifact-details"), false);
   assert.ok(await js(q("#artifact-reveal") + ".checkVisibility()"), "folder action is on the preview toolbar");
-  await click("#asset-reference");
+  await click("#file-reference");
   assert.equal(await js(q(main + " .editor .chip") + ".textContent"), "notes.md");
   await click(main + " .send");
   await until(() => has(main + " .said .chip"), "ordinary file sent");
@@ -143,7 +136,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await js("window.releaseDrop();void window.restoreFile()");
   await until(() => has(main + " .editor img"), "image restored to original draft");
   assert.equal(await js(q(main + " .editor") + ".textContent"), "typed while reading");
-  const finish = (s) => "!call finish " + JSON.stringify({ summary: s, assets: [] });
+  const finish = (s) => "!call finish " + JSON.stringify({ summary: s });
   const rows = [
     { node: "起草", prompt: "!sleep 9000\n" + finish("起草完成") },
     { node: "审阅", prompt: finish("审阅完成") },
@@ -200,15 +193,15 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await draft(panel, "task-only");
   await click('#tabs .tab[data-id="catalog"] .tab-main');
   await click(".artifact-card");
-  await untilJS("!" + q("#asset-reference") + ".hidden && !" + q("#reference-destination") + ".hidden", "reference controls together");
+  await untilJS("!" + q("#file-reference") + ".hidden && !" + q("#reference-destination") + ".hidden", "reference controls together");
   const referenceLayout = await js(`(() => {
-    const row = document.querySelector("#artifact-references"), button = document.querySelector("#asset-reference"), target = document.querySelector("#reference-destination");
+    const row = document.querySelector("#artifact-references"), button = document.querySelector("#file-reference"), target = document.querySelector("#reference-destination");
     const r = row.getBoundingClientRect(), b = button.getBoundingClientRect(), t = target.getBoundingClientRect();
     return { grouped: button.parentElement === row && target.parentElement === row, aligned: Math.abs(b.top + b.height / 2 - t.top - t.height / 2) < 1, fits: b.right <= r.right && t.left >= r.left, capture: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) } };
   })()`);
   assert.ok(referenceLayout.grouped && referenceLayout.aligned && referenceLayout.fits, "reference target and action share one row without overflow");
   if (process.env.XSB_SCREENSHOTS) fs.writeFileSync(path.join(process.env.XSB_SCREENSHOTS, "references.png"), (await win.capturePage(referenceLayout.capture)).toPNG());
-  await click("#asset-reference");
+  await click("#file-reference");
   await untilJS("!" + q("#side-workflow") + ".hidden", "reference opens task composer");
   assert.equal(await has(panel + " .editor .file-ref"), true);
   assert.equal(await has(main + " .editor .file-ref"), false);
@@ -228,32 +221,60 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   if (page) assert.equal(await js(q("#side-web") + ".hidden"), false);
   const result = { checked: false, evidence: ["<strong>plain data</strong>", null], count: 2 };
   const summary = "Evidence checked in [notes](notes.md).";
+  const nodeFile = path.join(fs.realpathSync(workspace), "review.md");
+  fs.writeFileSync(nodeFile, "Node review");
   const graph = [
-    { node: "Inspect", prompt: "!call finish " + JSON.stringify({ summary, assets: ["evidence@v1"], result }), input: { material: "evidence@v1" } },
+    { node: "Inspect", prompt: [report("task-write", [{ operation: "add", path: nodeFile }]),
+        "!call finish " + JSON.stringify({ summary, result })].join("\n"), input: { material: "notes.md" } },
     { node: "End", kind: "end" }, { from: "Inspect", to: "End" },
   ];
-  await send(main, '!call asset_put {"name":"evidence","path":"notes.md"}\n!call execute ' + JSON.stringify({ graphJsonl: graph.map(row => JSON.stringify(row)).join("\n") }));
+  await send(main, '!call execute ' + JSON.stringify({ graphJsonl: graph.map(row => JSON.stringify(row)).join("\n") }));
   const publication = main + ' .publication[data-origin="plugin"][data-source="workflow"]';
   await until(() => has(publication), "finished workflow publishes to the owner's transcript");
   assert.ok((await js(q(publication + " .publication-source") + ".textContent")).trim());
   const displayed = await js(q(publication + " .content") + ".innerText");
   assert.match(displayed, /Inspect/);
   assert.match(displayed, /Evidence checked/);
-  assert.match(displayed, /evidence@v1/);
   assert.ok(["checked", "false", "<strong>plain data</strong>", "null"].every(value => displayed.includes(value)), "nested structured values are fully readable");
   const follow = label => js(`[...document.querySelectorAll(${JSON.stringify(publication + " a")})].find(a => a.textContent === ${JSON.stringify(label)}).click()`);
-  await follow("evidence@v1");
-  await untilJS(q("#artifact-name") + ".textContent==='evidence.md'", "published deliverable opens the exact file");
   await follow("notes");
   await untilJS(q("#artifact-name") + ".textContent==='notes.md'", "published Markdown link selects the source file");
-  await untilJS(q("#artifact-body .md") + "?.textContent.includes('Unregistered working notes')", "published Markdown link opens file preview");
+  await untilJS(q("#artifact-body .md") + "?.textContent.includes('Working notes')", "published Markdown link opens file preview");
   const reloaded = new Promise(resolve => win.webContents.once("did-finish-load", resolve));
   win.webContents.reload();
   await reloaded;
   await until(() => has(publication), "published body survives a renderer reload");
   assert.equal(await js(q(publication + " .content") + ".innerText"), displayed);
   assert.equal(await js(`document.querySelectorAll(${JSON.stringify(publication)}).length`), 1);
+  await click("#artifact-list");
+  const listed = (name) => js('[...document.querySelectorAll(".artifact-card strong")].some(el => el.textContent === ' + JSON.stringify(name) + ')');
+  await until(() => listed("review.md"), "the Files panel reconstructs a task agent's edit after reload");
+  assert.equal(await listed("notes.md"), false, "file links opened from chat do not enter Files");
+  const renamed = path.join(path.dirname(nodeFile), "final review.md");
+  await js(`(() => {
+    const search = document.querySelector(".artifact-search");
+    search.value = "review";
+    search.dispatchEvent(new Event("input"));
+    search.focus();
+  })()`);
+  fs.renameSync(nodeFile, renamed);
+  const move = report("move", [{ operation: "move", oldPath: nodeFile, path: renamed }]);
+  await js('xsb.send(' + q(main) + '.dataset.agent,' + JSON.stringify([{ type: "text", text: move }]) + ')');
+  await until(() => listed("final review.md"), "move updates the open Files panel");
+  assert.equal(await js('document.activeElement === document.querySelector(".artifact-search")'), true);
+  assert.equal(await js(q(".artifact-search") + ".value"), "review");
+  assert.equal(await listed("review.md"), false);
+  await click(".artifact-card");
+  await untilJS(q("#artifact-body .md") + "?.textContent.includes('Node review')", "preview the moved file");
+  fs.unlinkSync(renamed);
+  await send(main, report("remove", [{ operation: "delete", path: renamed }]));
+  await until(() => has("#artifact-body .file-unavailable"), "deleting the open file clears the preview");
+  assert.equal(await has("#artifact-body .md"), false);
+  assert.ok(await js(q("#artifact-references") + ".hidden && " + q("#artifact-reveal") + ".disabled"));
+  await click("#artifact-list");
+  await until(() => has("#artifact-body .artifact-browser"), "file list restored");
+  await until(async () => !(await listed("final review.md")), "delete removes the file");
   console.log(
-    "Electron + real Hub/ACP: direct chat, DAG, task prompts, stop/resume, artifacts, web tabs, drafts, model/effort, usage and published Markdown results passed",
+    "Electron + real Hub/ACP: direct chat, DAG, task prompts, stop/resume, native file changes, web tabs, drafts, model/effort, usage and published Markdown results passed",
   );
 });

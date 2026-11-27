@@ -126,8 +126,7 @@ export const Agents = {
    */
   delete: `_${NS}/agents/delete`,
   /**
-   * Clean up the project: remove for good what deleted conversations left — their transcripts, drafts, the assets
-   * only they made, their records — and compact the logs.
+   * Clean up the project: remove for good what deleted conversations left — their transcripts, drafts and records — and compact the logs.
    *   request  _dev.xsb/agents/purge {} -> { conversations: number, bytes: number }
    */
   purge: `_${NS}/agents/purge`,
@@ -183,7 +182,7 @@ export type Addr = { agentId: string; sessionId: string };
 
 /** What an agent's id may be. It names a directory and is a word of a command line, so it starts with a letter or a digit. */
 export const AGENT_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
-/** What a role, a skill, an MCP server and an asset type may be called. */
+/** What a role, a skill or an MCP server may be called. */
 export const NAME = /^[\w-]+$/;
 
 /**
@@ -240,10 +239,6 @@ export type Task = {
    * is cancelled takes along what it alone was holding up (docs/TASK-GRAPH.md).
    */
   parents?: string[];
-  /** Type of the asset the task has to register before it ends. */
-  produces?: string;
-  /** Ids of the assets the task works from. */
-  inputs?: string[];
   /**
    * Set when the task is a job: not an agent's turn but one call of a tool of
    * the dispatcher's own MCP servers, run by the hub in the background.
@@ -264,8 +259,6 @@ export type Task = {
   /** Its remaining descendants were stopped after it ended; its recorded outcome stays intact. */
   cascadeStopped?: boolean;
   result?: string;
-  /** The assets the assignee named as what the task delivered (`id@version`), when it finished it. */
-  assets?: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -438,6 +431,7 @@ export const History = {
   capability: `${NS}/history`,
   page: `_${NS}/history/page`,
   image: `_${NS}/history/image`,
+  files: `_${NS}/history/files`,
   imageKey: `${NS}/history-image`,
 } as const;
 export type HistoryImage = { sessionId: string; offset: number; index: number };
@@ -447,37 +441,6 @@ export const Boundaries = {
   key: `${NS}/boundary`,
   clear: `_${NS}/sessions/clear`,
 } as const;
-
-/**
- * Assets: the one library every agent works from (characters, styles, scripts,
- * shots, ...). An asset is a file with an id; registering the same id again
- * adds a version, and earlier versions stay.
- *
- *   advertise  capabilities._meta["dev.xsb/assets"] = { version: 1 }
- *   request    _dev.xsb/assets/list { type? } -> { assets: Asset[] }   (latest versions)
- *   notify     _dev.xsb/assets/update { asset: Asset }                 (hub -> observers, each new version)
- */
-export const Assets = {
-  capability: `${NS}/assets`,
-  list: `_${NS}/assets/list`,
-  update: `_${NS}/assets/update`,
-  removed: `_${NS}/assets/removed`,
-} as const;
-
-export type Asset = {
-  /** `<type>/<name>`: what everyone refers to it by. */
-  id: string;
-  type: string;
-  name: string;
-  version: number;
-  description: string;
-  /** Absolute path of this version's file. Never rewritten. */
-  path: string;
-  /** Agent that registered it. */
-  by: string;
-  sessionId?: string;
-  createdAt: string;
-};
 
 /**
  * Language: which language the person at a client reads.

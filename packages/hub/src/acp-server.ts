@@ -2,9 +2,9 @@
  * The hub as an ACP v2 agent: what an editor, the CLI or the desktop app talks to.
  *
  * Each new ACP session starts an independent main conversation. Extensions expose
- * its workflow, active task conversations, workspace assets and installed backends.
+ * its workflow, active task conversations and installed backends.
  */
-import { SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, LANGUAGES, LanguageExt, MessageDelivery, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
+import { SessionControls, ToolServers, Workflow, Agents, Backends, History, Boundaries, LANGUAGES, LanguageExt, MessageDelivery, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
 import type { Connection, HistoryImage, OriginMeta } from "@xsb/protocol";
 import { describeBackends, loadProjectConfig, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
@@ -13,7 +13,7 @@ import { USER } from "./kernel.ts";
 import { Paths } from "./paths.ts";
 import { conversed, ops } from "./state.ts";
 import type { LiveSession } from "./session.ts";
-import { historyPage, historyImage } from "./history.ts";
+import { historyPage, historyImage, historyFiles } from "./history.ts";
 import { newId, VERSION } from "./util.ts";
 import { conversationTitle } from "./prompts.ts";
 
@@ -66,7 +66,6 @@ export class Client {
             ["dev.xsb/workflow"]: { version: 1 },
             [Backends.capability]: { version: 1 },
             [Tasks.capability]: { version: 1 },
-            [Assets.capability]: { version: 1 },
             [OriginExt.capability]: { version: 1 },
           },
         },
@@ -106,6 +105,13 @@ export class Client {
       const page = historyPage(hub.state.store, session.agentId, session.id, p.before);
       if (p.before === undefined) this.attach(session);
       return { ...page, state: session.busy ? "running" : "idle", agent: hub.agentInfo(hub.agent(session.agentId)) };
+    });
+    conn.onRequest(History.files, (p) => {
+      const session = hub.session(p.sessionId);
+      hub.workflows.readable(session);
+      if (hub.isDeleted(hub.agent(session.agentId)) || hub.workflows.owner(session) !== session.id)
+        throw RpcError.notFound("main conversation");
+      return historyFiles(hub, session.id);
     });
     conn.onRequest(History.image, (p: HistoryImage) => {
       const session = hub.session(p.sessionId);
@@ -259,18 +265,9 @@ export class Client {
     conn.onRequest(Workflow.list, () => ({ workflows: hub.workflows.list() }));
     for (const action of ["pause","resume"] as const) conn.onRequest(Workflow[action], p => hub.workflows.control(p.sessionId,action,p.nodes));
 
-    // ---- backends, assets and tasks ---------------------------------------
+    // ---- backends and tasks ---------------------------------------
 
     conn.onRequest(Backends.list, () => ({ backends: describeBackends() }));
-    conn.onRequest(Assets.list, (p) => {
-      const versions = [...hub.state.assets.values()];
-      const assets = p.history ? versions.flat() : versions.flatMap(list => {
-        const a = list[0];
-        const pointer = hub.state.assetPointers.get(a.id);
-        return list.filter(asset => pointer === "v"+asset.version);
-      });
-      return { assets:assets.filter(a => !p.type || a.type === p.type).map(a => ({ ...a, sessionId: a.sessionId ?? hub.state.agents.get(a.by)?.workflowOwner ?? hub.state.mainSession(a.by)?.id })) };
-    });
     conn.onRequest(Tasks.list, (p) => ({
       tasks: [...hub.state.tasks.values()].filter(
         (t) =>

@@ -100,15 +100,15 @@ test("snapshot publication restores an entire generation at every interruption p
 test("project relocation keeps identity and resolves managed paths while preserving external paths", async t => {
   const dir = scratch(t), first = path.join(dir, "old"), second = path.join(dir, "new"), h = new Hub(first); h.stopping = true;
   const s = h.createConversation(); s.save({ backendSessionId: "old-binding", conversed: true });
-  const asset = path.join(h.paths.assets, "test.txt"), external = path.join(dir, "external.txt");
-  fs.mkdirSync(h.paths.assets, { recursive: true }); fs.writeFileSync(asset, "value");
-  h.state.commit([ops.putAsset({ id: "workflow/a", name: "a", version: 1, type: "workflow", path: asset, by: s.agentId, description: "a", createdAt: "" }), ops.putAsset({ id: "workflow/b", name: "b", version: 1, type: "workflow", path: external, by: s.agentId, description: "b", createdAt: "" })]);
+  const external = path.join(dir, "external.txt");
+  const file = h.paths.reference(path.join(first, "report.txt"));
+  const outside = h.paths.reference(external);
   await h.kernel.hooks.settled(); fs.renameSync(first, second);
   const after = new Hub(second); after.stopping = true;
   assert.equal(after.paths.projectId, h.paths.projectId);
   assert.equal(after.agent(s.agentId).workspace, second);
-  assert.equal(after.state.assets.get("workflow/a")?.[0].path, path.join(second, ".xsb2", "assets", "test.txt"));
-  assert.equal(after.state.assets.get("workflow/b")?.[0].path, external);
+  assert.equal(after.paths.resolveStored(file), path.join(second, "report.txt"));
+  assert.equal(after.paths.resolveStored(outside), external);
   assert.equal(after.session(s.id).rec.renew, "project_moved");
   assert.equal(after.session(s.id).rec.backendSessionId, undefined);
 });
@@ -123,6 +123,21 @@ test("a cleanup interrupted before snapshot publication resumes on restart", asy
   assert.equal(restored.state.sessions.has(s.id), false);
   assert.equal(fs.existsSync(h.paths.agentDir(s.agentId)), false);
   assert.deepEqual(restored.purgeDeleted(), { conversations: 0, bytes: 0 });
+});
+
+test("a pre-upgrade cleanup journal leaves formerly registered files in place", async t => {
+  const h = hub(t), s = h.createConversation();
+  const dir = path.join(h.paths.dir, "assets", "workflow", "cover"), file = path.join(dir, "v1.png");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, "original");
+  h.state.store.append("conversations/assets.jsonl", { op: "put", asset: { id: "workflow/cover", path: file, by: s.agentId, version: 1 } });
+  await h.deleteConversation(s.agentId);
+  fs.writeFileSync(path.join(h.paths.dir, "conversations", "cleanup.json"), JSON.stringify({
+    agents: [s.agentId], files: [h.paths.agentDir(s.agentId), file],
+  }));
+  const after = new Hub(h.paths.project); after.stopping = true;
+  assert.equal(after.state.agents.has(s.agentId), false);
+  assert.equal(fs.readFileSync(file, "utf8"), "original");
 });
 
 test("workflow deltas omit unchanged version definitions and retain durable receipt replay", t => {

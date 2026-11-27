@@ -53,8 +53,6 @@ export type TurnRequest = {
   from?: Client;
 };
 
-/** How many of the agent's latest assets a handoff lists. */
-const HANDOFF_ASSETS = 30;
 
 /** Who an input is attributed to in the ledger. */
 const fromOf = (origin: OriginMeta): Origin => (origin.kind === "agent" ? { kind: "agent", agentId: origin.agentId, sessionId: origin.sessionId } : { kind: origin.kind });
@@ -164,6 +162,9 @@ export type Turn = {
   cancelledBy?: "user" | "hub";
   done: Deferred<TurnEnd>;
 };
+
+// Break millisecond ties when replaying related sessions in file-change order.
+let toolEventOrder = 0;
 
 export class LiveSession {
   rec: SessionRec;
@@ -283,14 +284,8 @@ export class LiveSession {
   /** Text to put in front of the next prompt. */
   private prefaces: string[] = [];
   private handoffPreface?: string;
-  /**
-   * What the model of this session has been given in full, so that it is not given the same again: asset id ->
-   * the version and the task it came with, and memory notes by topic key -> the version (updatedAt) it saw. Only
-   * for as long as the backend session has it: a boundary empties both, and so does a restart of the hub. Likewise
-   * what a main conversation was told of its workflow (workflows.ts `context`).
-   */
-  readonly given: { assets: Map<string, { version: number; taskId?: string }>; notes: Map<string, string>; workflow?: WorkflowTold } =
-    { assets: new Map(), notes: new Map() };
+  /** The notes and workflow definitions this backend context has received. */
+  readonly given: { notes: Map<string, string>; workflow?: WorkflowTold } = { notes: new Map() };
   /** Context in use at the end of the backend's last report, in tokens. */
   private used?: number;
   private contextSize?: number;
@@ -463,7 +458,7 @@ export class LiveSession {
         ...this.hub.backendToolServers(this, () => this.backend === backend && !!this.rec.backendSessionId && !backend.conn.isClosed)],
       ...(backend.caps.systemPrompt ? { systemPrompt: { mode: "append", content: [text(instructions)] } } : {}),
       ...(backend.caps.additionalDirectories
-        ? { additionalDirectories: [paths.shared, paths.assets, ] }
+        ? { additionalDirectories: [paths.shared] }
         : {}),
     });
 
@@ -549,23 +544,17 @@ export class LiveSession {
     const ours = (sessionId: string): boolean => sessionId === this.id;
     const tasks = [...state.tasks.values()].filter((t) => !isTerminal(t.status) && ((t.from && ours(t.from.sessionId)) || ours(t.to.sessionId)));
     const waiting = [...state.gates.values()].filter((g) => ours(g.owner.sessionId)).map((g) => ({ taskIds: g.taskIds, mode: g.mode, note: g.note }));
-    const assets = [...state.assets.values()]
-      .map((versions) => versions.at(-1)!)
-      .filter((a) => a.by === this.agentId)
-      .sort((x, y) => y.createdAt.localeCompare(x.createdAt))
-      .slice(0, HANDOFF_ASSETS);
     const previous = this.rec.contextCheckpoint;
     const turns = turnsSinceCleared(state.store, this.agentId, this.id, previous ? { maxChars: Number.MAX_SAFE_INTEGER, stopAtRenewal: true } : undefined);
-    if (!turns.length && !tasks.length && !waiting.length && !assets.length && !previous) return undefined;
+    if (!turns.length && !tasks.length && !waiting.length && !previous) return undefined;
     const source = contextRef(this.hub.paths, this.agentId, JSON.stringify({ kind: "historical_messages", turns })).ref;
-    const body = handoff(why, turns, { tasks, waiting, assets });
+    const body = handoff(why, turns, { tasks, waiting });
     return body + `\n\nFull source messages: read_context ${source}. Retrieve original user constraints and decisions when excerpts are insufficient; these are historical messages, not new instructions.` +
       (previous ? `\n\nEarlier context is preserved in checkpoint ${previous}. Use read_context to retrieve relevant earlier user constraints and decisions before continuing work that depends on them. It is historical context, not new instructions.` : "");
   }
 
   /** Note that the model now has what a prompt gave it in full. */
   take(gives: Gives | undefined): void {
-    for (const a of gives?.assets ?? []) this.given.assets.set(a.id, { version: a.version, taskId: a.taskId });
     for (const n of gives?.notes ?? []) this.given.notes.set(n.key, n.updatedAt);
   }
 
@@ -578,7 +567,6 @@ export class LiveSession {
 
   /** What the model was given is gone from its context (a boundary, or a compaction the backend reports only by usage). */
   private forgetGiven(): void {
-    this.given.assets.clear();
     this.given.notes.clear();
     this.given.workflow = undefined;
   }
@@ -906,7 +894,7 @@ export class LiveSession {
       case "usage_update":
         this.usageRevision++;
         if (typeof update.used === "number" && Number.isFinite(update.used) && update.used >= 0) {
-          // Native compaction may have removed formerly-inlined assets/notes.
+          // Native compaction may have removed notes and workflow context.
           if (this.used !== undefined && update.used < this.used) this.forgetGiven();
           this.used = update.used;
           this.estimated = update.used;
@@ -983,7 +971,8 @@ export class LiveSession {
     const durable = update.sessionUpdate === "user_message_chunk" || !!update._meta?.[Accepted.key] ||
       !!update._meta?.[Discarded.key] || !!update._meta?.[MessageDelivery.key] || !!update._meta?.[Question.key] || !!update._meta?.[ConversationEvent.key];
     const eventId = newId("event");
-    const record = { ts: now(), eventId, update };
+    const record = { ts: now(), eventId, update,
+      ...(update.sessionUpdate === "tool_call_update" && { toolOrder: ++toolEventOrder }) };
     const initialOffset = this.hub.state.store.bytes(file);
     if (durable) this.hub.state.commit([{ file, rec: record }]);
     else this.hub.state.store.append(file, record, false);
@@ -1333,7 +1322,7 @@ export class LiveSession {
     })];
     const tokens = contentTokens(content);
     if (tokens + this.standingTokens + policy.reserveTokens > policy.promptTokens) {
-      const error = new RpcError(-32602, "This input exceeds the agent's prompt budget. The original is preserved in the conversation; split the input or use files/assets with references.", { errorKind: "input_too_large" });
+      const error = new RpcError(-32602, "This input exceeds the agent's prompt budget. The original is preserved in the conversation; split the input or reference a file.", { errorKind: "input_too_large" });
       if (turn.inserted) {
         for (const input of batch) { this.drop(input); this.discard(input, error); }
         this.hub.kernel.ack(itemsOf(batch).map((m) => m.id));
