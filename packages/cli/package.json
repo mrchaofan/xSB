@@ -1,6 +1,6 @@
 {
   "name": "@xsb/cli",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "description": "The xsb command: an ACP client of the hub for the terminal",
   "type": "module",
   "private": true,
@@ -8,8 +8,8 @@
     "xsb": "bin/xsb"
   },
   "dependencies": {
-    "@xsb/hub": "1.0.23",
-    "@xsb/protocol": "1.0.23"
+    "@xsb/hub": "1.0.24",
+    "@xsb/protocol": "1.0.24"
   },
   "engines": {
     "node": ">=22.18"
