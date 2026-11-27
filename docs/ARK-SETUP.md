@@ -41,7 +41,7 @@
 
 1. 用 `<arkcli> profile apikey get --profile <P> --format json --transform api_key` 取得 Key，放进 `XSB_ARK_API_KEY`。取不到时打印原因并以 1 退出，Hub 会把它当作后端启动失败报告。
 2. **Claude**：`ANTHROPIC_BASE_URL=<base_url 去掉 /v3>`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`，各档默认模型和子智能体模型都设为所选模型，`API_TIMEOUT_MS=3000000`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`；并清除 `ANTHROPIC_API_KEY`、`CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY`。
-3. **Codex**：`CODEX_CONFIG={"model_provider":"xsb-ark","model":…,"model_providers":{"xsb-ark":{base_url, env_key:"XSB_ARK_API_KEY", wire_api:"responses"}}}`。codex-acp 会把它转成传给 `codex app-server` 的 `-c` 参数。Key 只放在环境变量里，因为 codex-acp 会把 `CODEX_CONFIG` 写进日志。同时清除 `MODEL_PROVIDER`、`OPENAI_BASE_URL`。
+3. **Codex** 启动时把 Ark 的模型和 `model_providers.xsb-ark` 合并进当前进程的 `CODEX_CONFIG`，保留其他供应商和功能设置。Hub 设置 `features.default_mode_request_user_input=true`，让默认执行模式可用原生同步提问。Ark 配置用 `env_key="XSB_ARK_API_KEY"` 指向实际密钥。codex-acp 会把 `CODEX_CONFIG` 写进日志。启动器同时清除 `MODEL_PROVIDER` 和 `OPENAI_BASE_URL`。
 
 **Claude 的用户设置优先于环境变量。** 真实应用中实测发现：用户 `~/.claude/settings.json` 的 `env` 里设置的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` 会盖过进程环境，请求仍然发往用户自己的服务。所以在 macOS/Linux 上，xSB 写入 `<userData>/backends/ark/claude`（一个转发脚本）和 `ark/claude-settings.json`（地址、模型，并把 `ANTHROPIC_API_KEY`、`CLAUDE_CODE_USE_*` 置空；不含 Key）。启动器把 `CLAUDE_CODE_EXECUTABLE` 指向这个转发脚本，由它运行 `claude --settings <文件> …`。命令行设置的优先级高于用户设置；Key 仍只通过 `ANTHROPIC_AUTH_TOKEN` 环境变量传递。Windows 上 Node 不能不经 shell 启动 `.cmd`，所以只设环境变量，确认框会列出会胜出的用户设置项。另一种做法——用 `apiKeyHelper` 取 Key——实测返回 401，没有采用。
 

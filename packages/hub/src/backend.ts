@@ -1,12 +1,11 @@
 import { AIR_COMPATIBILITY } from "./air-compat.ts";
+import { codexQuestionConfig } from "./codex-config.ts";
 import { skillPrompt } from "./prompt-capabilities.ts";
 /**
  * One backend agent process, driven as a plain ACP v2 client over stdio.
  *
  * This is the end of the chain, and the only place where backends differ.
- * There is no per-vendor code: an official ACP agent and a wrapped third-party
- * one (@xsb/adapter) differ only in the command that starts them and in the
- * capabilities they report. All input uses standard `session/prompt`. The pinned official
+ * All input uses standard `session/prompt`. The pinned official
  * adapters prioritize ordinary input into active work; input callbacks and control commands
  * may defer it. A response acknowledges insertion, independently of execution completion.
  */
@@ -108,15 +107,14 @@ export class Backend {
     if (!findCommand(spec.command)) {
       throw failure("backend_not_installed", { ...about, hint: INSTALL_HINT[spec.command] });
     }
-    // The process inherits the hub's environment as it is: credentials and
-    // permission modes are the backend's own settings, not xsb's.
-    const proc = spawn(spec.command, spec.args ?? [], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const codex = backendName === "codex" || /(^|[/\\])codex-acp(?:\.cmd|\.exe)?$/.test(spec.command);
+    // Let Codex ask blocking questions in its ordinary execution mode as well as Plan mode.
+    // Apply the override only to this agent process. Providers and credentials stay user-configured.
+    const env = codex ? { ...process.env, CODEX_CONFIG: codexQuestionConfig(process.env.CODEX_CONFIG) } : process.env;
+    const proc = spawn(spec.command, spec.args ?? [], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     let stderrTail: string[] = [];
     const conn = new Connection(proc.stdout!, proc.stdin!, `backend:${name}`);
     const backend = new Backend(proc, conn, name);
-    const codex = backendName === "codex" || /(^|[/\\])codex-acp(?:\.cmd|\.exe)?$/.test(spec.command);
-    // Codex's async native forms may auto-resolve; use xSB's blocking ask instead.
-    const nativeForms = !codex;
 
     let exited = false;
     let exitReason = "";
@@ -158,7 +156,6 @@ export class Backend {
     conn.onNotification("elicitation/complete", (p) => events.urlComplete?.(backend, p.elicitationId));
     conn.onRequest("elicitation/create", (p: ElicitationRequest, ctx) => {
       if (p.mode === "url") return events.url?.(backend, p, ctx.signal) ?? { action: "decline" };
-      if (!nativeForms) return { action: "cancel" };
       const session = backend.sessions.get(p.sessionId);
       if (!session) return { action: "cancel" };
       return session.onBackendElicitation(p, ctx.signal);
@@ -170,7 +167,7 @@ export class Backend {
         protocolVersion: PROTOCOL_VERSION,
         info: { name: "xsb", title: "xsb hub", version: VERSION },
         // v2 compaction reports are standard session updates and need no client capability.
-        capabilities: { elicitation: { url: {}, ...(nativeForms ? { form: {} } : {}) }, session: { promptSuggestions: {}, commands: { skill: {} } }, ...((spec.airCompatibility ?? codex) ? { _meta: AIR_COMPATIBILITY } : {}) },
+        capabilities: { elicitation: { url: {}, form: {} }, session: { promptSuggestions: {}, commands: { skill: {} } }, ...((spec.airCompatibility ?? codex) ? { _meta: AIR_COMPATIBILITY } : {}) },
       })
       .catch(async (e) => {
         // A process that died during startup is the real story, not the closed pipe.

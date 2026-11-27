@@ -20,8 +20,6 @@ export type Work = {
   /** The context epoch of the node's conversation when the assignment got into it: a renewed conversation may not have it. */
   epoch?: number;
   suspendedBy?: "pause" | "failure";
-  /** The question (questions.ts) this work asked the user: it waits for the reply, which continues it. */
-  asking?: string;
   selected: Record<string, string>;
   reads?: AssetRef[];
   grants: AssetRef[];
@@ -314,7 +312,6 @@ export function suspend(w: Work, why: "pause" | "failure" = "pause") {
   w.suspendedBy = why;
   w.state = "suspended";
   delete w.attempt;
-  delete w.asking;
   delete w.staged;
 }
 /** Freeze the accepted path. Task assignments expose direct results only; the user gets every contributing delivery in full. */

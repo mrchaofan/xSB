@@ -753,7 +753,7 @@ test("agents are told what their built-in workflow tools are, and a task agent s
   assert.match(main, /mcp__workflow__/, "and how an agent program shows them");
   assert.match(main, /workflow 技能/, "what a user calls them");
   assert.match(main, /escalate/, "and what a task agent's escalation is");
-  assert.match(main, /MCP server named "xsb"[^]*not a workflow tool/, "ask is xSB's own tool, not a workflow one");
+  assert.doesNotMatch(main, /mcp__xsb__ask|xsb\.ask/, "only native question tools are advertised");
   assert.doesNotMatch(WORKFLOW_MAIN_ABOUT + WORKFLOW_TASK_ABOUT, /\bask\b/, "and no workflow tool list names it");
   hub.workflows.call(root, "execute", { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, newId("call"));
   const f = structuredClone(hub.workflows.read(root.id)), w = claim(f, "A")!;
@@ -860,79 +860,35 @@ test("a settled workflow reached an end and has nothing left to do", () => {
   assert.equal(settled(f), false, "queued additional work is still to happen");
 });
 
-test("ask waits for a valid explicit reply; silence never resolves and stale targets cannot close a new question", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-ask-"));
-  const hub = new Hub(dir);
-  t.after(async () => { await hub.shutdown(); fs.rmSync(dir, { recursive: true, force: true }); });
-  const root = hub.createConversation();
-  const turn = turnFor(root, "trip");
-  const questions = (): any[] => fs.readFileSync(path.join(hub.paths.dir, Paths.transcript(root.agentId, root.id)), "utf8")
-    .trim().split("\n").map((line) => JSON.parse(line).update?._meta?.[Question.key]).filter(Boolean);
-  const budget = { question: "预算？", kind: "single", options: ["5000 以内", "不限"], other: true };
-  const scenery = { question: "想看哪些风景？", kind: "multi", options: ["海边", "雪山", "草原"] };
-  const city = { question: "出发城市？", kind: "text" };
-  for (const bad of [[], [budget, budget, budget, budget, budget], [{ question: "x", kind: "single", options: ["a"] }],
-    [{ question: "x", kind: "text", options: ["a", "b"] }], [{ question: "x", kind: "multi", options: ["a", "a"] }], [{ question: " ", kind: "text" }]])
-    assert.throws(() => hub.questions.ask(root, { questions: bad }), /ask takes|question \d|must/);
-  let resolved = false;
-  const result = hub.questions.ask(root, { questions: [budget, scenery, city] }).then(r => { resolved = true; return r; });
-  const open = questions().at(-1);
-  assert.equal(open.state, "open");
-  assert.deepEqual(open.questions.map((q: any) => q.kind), ["single", "multi", "text"]);
-  assert.equal(hub.agentInfo(hub.agent(root.agentId)).asking, true);
-  assert.equal(hub.agentInfo(hub.agent(root.agentId)).state, "requires_action");
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  t.mock.timers.tick(24 * 60 * 60 * 1000);
-  await Promise.resolve();
-  assert.equal(resolved, false, "even a day without selection must not return");
-  assert.throws(() => hub.questions.answer(root, { questionId: open.id, answers: ["不限"] }), /One answer/);
-  assert.throws(() => hub.questions.answer(root, { questionId: open.id, answers: ["不限", ["湖泊"], "杭州"] }), /Invalid answer/);
-  assert.equal(root.rec.question, open.id, "invalid input leaves the request waiting");
-  hub.questions.answer(root, { questionId: open.id, answers: ["不限", ["海边", "雪山"], "杭州"] });
-  assert.match(await result, /杭州/);
-  assert.deepEqual(questions().at(-1), { id: open.id, state: "answered", answers: ["不限", ["海边", "雪山"], "杭州"] });
-  assert.equal(root.current, turn);
-  assert.equal(turn.protected, true);
-  assert.equal(hub.agentInfo(hub.agent(root.agentId)).asking, undefined);
+test("upgrade closes a saved MCP question once and preserves its transcript", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-legacy-question-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const before = new Hub(dir);
+  const original = before.createConversation();
+  const id = "question_saved";
+  const open = { id, state: "open", questions: [{ question: "Which?", kind: "text" }] };
+  before.state.atomic(() => {
+    original.save({ question: id });
+    original.emit({ sessionUpdate: "session_info_update", _meta: { [Question.key]: open } });
+  });
+  await before.shutdown();
 
-  const first = hub.questions.ask(root, { questions: [city] });
-  const cancelled = assert.rejects(first, /cancelled/i);
-  const old = root.rec.question!;
-  const next = hub.questions.ask(root, { questions: [budget] });
-  await cancelled;
-  assert.throws(() => hub.questions.answer(root, { questionId: old, answers: ["杭州"] }), /expired/);
-  assert.ok(root.rec.question);
-  hub.questions.answer(root, { questionId: root.rec.question!, skipped: true });
-  assert.match(await next, /skipped/);
-  const superseded = hub.questions.ask(root, { questions: [city] });
-  hub.questions.reply(root, "instead");
-  assert.match(await superseded, /did not answer/);
-  assert.match(hub.questions.scope("instead")!, /did not answer/);
-  hub.questions.given("instead");
-  assert.equal(hub.questions.scope("instead"), undefined);
+  for (let restart = 0; restart < 2; restart++) {
+    const hub = new Hub(dir);
+    try {
+      await hub.start();
+      const session = hub.session(original.id);
+      assert.equal(session.rec.question, undefined);
+      const records = hub.state.store.read(Paths.transcript(session.agentId, session.id))
+        .map(row => row.update?._meta?.[Question.key]).filter(q => q?.id === id);
+      assert.deepEqual(records, [open, { id, state: "cancelled" }]);
+    } finally {
+      await hub.shutdown();
+    }
+  }
 });
 
-test("ask restart cancels durable open questions instead of reviving old tool calls", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-ask-restart-"));
-  const hub = new Hub(dir); hub.stopping = true;
-  t.after(async () => { await hub.shutdown(); fs.rmSync(dir, { recursive: true, force: true }); });
-  const root = hub.createConversation(); turnFor(root, "ask");
-  const waiting = hub.questions.ask(root, { questions: [{ question: "Choice?", kind: "text" }] });
-  const cancelled = assert.rejects(waiting, /cancelled/i);
-  const id = root.rec.question;
-  const recovered = new Hub(dir); recovered.stopping = true;
-  recovered.questions.restart();
-  const restored = recovered.session(root.id);
-  assert.equal(restored.rec.question, undefined);
-  assert.throws(() => recovered.questions.answer(restored, { questionId: id!, answers: ["A"] }), /expired/);
-  const record = recovered.state.store.read(Paths.transcript(root.agentId, root.id)).at(-1);
-  assert.ok(record);
-  assert.equal(record.update._meta[Question.key].state, "cancelled");
-  hub.questions.cancel(root);
-  await cancelled;
-});
-
-test("ask in a task returns answers within the same work attempt, without a workflow interruption", async (t) => {
+test("an ACP form in a task resumes the same attempt without a workflow interruption", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-ask-task-"));
   const hub = new Hub(dir);
   hub.stopping = true;
@@ -947,17 +903,25 @@ test("ask in a task returns answers within the same work attempt, without a work
   } });
   const turn = turnFor(worker, w.attempt!);
   hub.stopping = false;
-  const answer = hub.questions.ask(worker, { questions: [{ question: "横版还是竖版？", kind: "single", options: ["横版", "竖版"] }] });
-  assert.ok(runtime.read(root.id).instances.A.work!.asking);
-  hub.questions.answer(worker, { questionId: worker.rec.question!, answers: ["竖版"] });
-  assert.match(await answer, /竖版/);
+  worker.save({ backendSessionId: "backend-worker" });
+  worker.onBackendUpdate({ sessionUpdate: "state_update", state: "running" }, "backend-worker");
+  const response = deferred<{ action: "accept"; content: { orientation: string } }>();
+  worker.clients.add({ forms: true, conn: { notify() {}, request: () => response.promise } } as any);
+  const answer = worker.onBackendElicitation({ mode: "form", sessionId: "backend-worker", message: "横版还是竖版？",
+    requestedSchema: { type: "object", properties: { orientation: { type: "string", enum: ["横版", "竖版"] } }, required: ["orientation"] },
+  }, new AbortController().signal);
+  assert.ok(hub.agentInfo(hub.agent(worker.agentId)).asking);
+  response.resolve({ action: "accept", content: { orientation: "竖版" } });
+  assert.deepEqual(await answer, { action: "accept", content: { orientation: "竖版" } });
+  assert.equal(turn.protected, true);
+  worker.clients.clear();
   const continued = runtime.read(root.id).instances.A;
   assert.equal(continued.work!.attempt, w.attempt);
   assert.equal(continued.interruptions.length, 0);
   assert.equal(worker.current, turn);
-  hub.stopping = true;
   runtime.call(worker, "finish", { summary: "竖版海报", assets: [] }, newId("call"));
-  runtime.ended(worker, turn, { stopReason: "end_turn" });
+  worker.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" }, "backend-worker");
+  hub.stopping = true;
   assert.equal(runtime.read(root.id).instances.A.last?.summary, "竖版海报");
 });
 

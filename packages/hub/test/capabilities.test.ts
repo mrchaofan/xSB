@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Connection, SessionControls, TurnFailure } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
+import { codexQuestionConfig } from "../src/codex-config.ts";
 
 const agent = fileURLToPath(new URL("./capability-agent.ts", import.meta.url));
 const project = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-capabilities-"));
@@ -33,6 +34,18 @@ async function client(backend = "capabilities") {
   return { conn, session, updates, completions };
 }
 async function until(predicate: () => boolean) { for (let i = 0; i < 200; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 10)); } assert.fail("condition did not arrive"); }
+
+test("Codex enables its synchronous question tool in Default mode with the existing provider and feature settings", () => {
+  const features = { default_mode_request_user_input: true };
+  assert.deepEqual(JSON.parse(codexQuestionConfig(undefined)), { features });
+  const configured = { model_provider: "custom", model_providers: { custom: { name: "Custom", env_key: "MY_KEY" } },
+    features: { fast_mode: false, default_mode_request_user_input: false } };
+  assert.deepEqual(JSON.parse(codexQuestionConfig(JSON.stringify({ ...configured, "features.default_mode_request_user_input": false }))), {
+    ...configured, features: { fast_mode: false, ...features },
+  });
+  assert.throws(() => codexQuestionConfig("invalid"), /CODEX_CONFIG must contain a JSON object/);
+  assert.throws(() => codexQuestionConfig('{"features":[]}'), /CODEX_CONFIG.features must be an object/);
+});
 
 test("agent sign-in extensions are unavailable even when an agent offers auth methods", async () => {
   const { conn, session } = await client();
@@ -81,7 +94,7 @@ test("session URL survives foreground idle and standard suggestions override AIR
   const payload = JSON.parse(updates.find(u => u.sessionUpdate === "agent_message_chunk").content.text);
   assert.equal(payload.blocks[0].type, "skill");
   assert.equal(typeof payload.idempotencyKey, "string", "standard prompt uses a stable Hub message identity");
-  assert.equal(payload.capabilities.elicitation.form, undefined, "Codex questions keep xSB ask");
+  assert.deepEqual(payload.capabilities.elicitation.form, {});
   assert.deepEqual(payload.capabilities.elicitation.url, {});
   assert.deepEqual(payload.capabilities._meta.jetbrains.air.capabilities, []);
   resolve({ action: "accept" }); await until(() => completions.length > 0);

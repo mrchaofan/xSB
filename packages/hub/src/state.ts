@@ -55,7 +55,7 @@ export type SessionRec = {
   contextSize?: number;
   contextRenewAt?: number;
   contextEpoch?: number;
-  /** The question the agent asked the user and waits a reply to (questions.ts). */
+  /** Historical MCP question ID, cleared on startup after upgrade. */
   question?: string;
   /** Written before replacing a refused backend. Unacknowledged mail supplies the durable input. */
   contextRecovery?: { messageId: string; attempts: number };

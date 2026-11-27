@@ -46,12 +46,11 @@ import type { Publisher } from "./publications.ts";
 import { randomBytes } from "node:crypto";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
-import { Questions } from "./questions.ts";
 import { Elicitations } from "./elicitations.ts";
 import { conversationPrompt, conversationRecord, isXsbText } from "./prompts.ts";
 import { contextRef } from "./context.ts";
 import { turnsSinceCleared } from "./transcript.ts";
-import { Boundaries } from "@xsb/protocol";
+import { Boundaries, Question } from "@xsb/protocol";
 import type { SessionUpdate } from "@xsb/protocol";
 import path from "node:path";
 import type { ToolOrigin } from "./prompts.ts";
@@ -75,7 +74,6 @@ export class Hub {
   readonly delivery: Delivery;
   readonly jobs: Jobs;
   readonly permissions: Permissions;
-  readonly questions: Questions;
   readonly elicitations: Elicitations;
   readonly lifecycle: Lifecycle;
   readonly urlElicitations: UrlElicitations;
@@ -123,7 +121,6 @@ export class Hub {
       if (this.toolsPending.has(agentId)) setImmediate(() => this.retool(agentId));
     });
     this.permissions = new Permissions(this);
-    this.questions = new Questions(this);
     this.elicitations = new Elicitations(this);
     this.assets = new Assets(this);
     this.workflows = new Workflows(this);
@@ -153,7 +150,14 @@ export class Hub {
     fs.mkdirSync(this.paths.run, { recursive: true });
     fs.mkdirSync(this.paths.shared, { recursive: true });
     fs.mkdirSync(this.paths.assets, { recursive: true });
-    this.questions.restart();
+    // A saved question ID belongs to the retired MCP call. Close its historical card once.
+    for (const session of this.live.values()) {
+      const id = session.rec.question;
+      if (id) this.state.atomic(() => {
+        session.save({ question: undefined });
+        session.emit({ sessionUpdate: "session_info_update", _meta: { [Question.key]: { id, state: "cancelled" } } });
+      });
+    }
     this.elicitations.restart();
     this.workflows.restart();
     await this.listen(this.paths.socket("acp"), (socket) => {
@@ -204,7 +208,7 @@ export class Hub {
     this.stopping = true;
     this.urlElicitations.close();
     this.jobs.close();
-    for (const session of this.live.values()) { this.questions.cancel(session); this.elicitations.cancel(session); }
+    for (const session of this.live.values()) this.elicitations.cancel(session);
     this.contextTokens.clear();
     this.publicationTokens.clear();
     for (const conn of this.mcpClients) conn.close();
@@ -241,7 +245,8 @@ export class Hub {
   agentInfo(agent: AgentSpec): AgentInfo {
     const rec = this.state.mainSession(agent.id);
     const session = rec && this.live.get(rec.id);
-    const state = this.permissions.waitingOn(agent.id) || this.questions.waitingOn(agent.id) || this.elicitations.waitingOn(agent.id) ? "requires_action" : session?.busy ? "running" : "idle";
+    const asking = this.elicitations.waitingOn(agent.id);
+    const state = this.permissions.waitingOn(agent.id) || asking ? "requires_action" : session?.busy ? "running" : "idle";
     const turn = session?.current;
     return {
       ...agent,
@@ -249,7 +254,7 @@ export class Hub {
       state,
       mainSessionId: rec?.id,
       ...(rec && conversed(rec) ? { conversed: true } : {}),
-      ...(rec?.question ? { asking: true } : {}),
+      ...(asking ? { asking: true } : {}),
       ...(turn ? { currentTurnId: turn.id, turnProtected: turn.protected } : {}),
       ...(agent.workflowOwner && this.workflows.retired(agent.id) ? { retired: true } : {}),
     };
@@ -319,6 +324,7 @@ export class Hub {
     if (session.busy) return;
     this.toolsPending.delete(agentId);
     this.revokePublications(session.id);
+    this.elicitations.cancel(session);
     this.backends.stop(agentId);
   }
 
@@ -477,7 +483,11 @@ export class Hub {
     const sessions = new Set([...this.state.sessions.values()].filter((s) => members.some((a) => a.id === s.agentId)).map((s) => s.id));
     const queued = [...this.state.mail.values()].filter((m) => sessions.has(m.to.sessionId)).map((m) => ops.ack(m.id));
     this.state.commit([...queued, ops.putAgent({ ...this.agent(agentId), deleted: now() })]);
-    for (const id of sessions) this.revokePublications(id);
+    for (const id of sessions) {
+      const session = this.live.get(id);
+      if (session) this.elicitations.cancel(session);
+      this.revokePublications(id);
+    }
     for (const a of members) {
       this.backends.stop(a.id);
       this.broadcast(Agents.removed, { id: a.id });
@@ -551,7 +561,7 @@ export class Hub {
 
   /** Revoke an unresponsive backend's existing tool bridges before accepting a new run. */
   rotateBridge(session: LiveSession): void {
-    this.questions.cancel(session);
+    this.elicitations.cancel(session);
     this.revokePublications(session.id);
     for (const [token, owner] of this.contextTokens)
       if (owner.session === session) this.contextTokens.delete(token);

@@ -408,8 +408,8 @@ export type DeliveredAs = {
 };
 
 /**
- * A question the agent asks with `ask`. The tool waits for an explicit answer or skip, then resumes the same turn.
- * Targeted replies use Answer.submit; a new ordinary user message supersedes the question. Recorded in the transcript:
+ * A question recorded in the transcript. Live forms are answered by their ACP elicitation/create request.
+ * Async questions can remain open when the originating foreground work ends.
  *   session/update { sessionUpdate: "session_info_update", _meta: { "dev.xsb/question": Question } }
  * first with `state: "open"` and the questions, then with the id and how it closed.
  */
@@ -430,8 +430,7 @@ export type QuestionState = "open" | "answered" | "skipped" | "superseded" | "ca
 export type Question = { id: string; state: QuestionState; questions?: QuestionItem[]; answers?: QuestionAnswer[]; reply?: string; source?: "acp"; delivery?: "async" };
 /** One answer per question, in order: an option or text for single and text, a list for multi. */
 export type QuestionAnswer = string | string[] | null;
-/** A targeted user response: `{ sessionId, answer: Answer }` -> `{}`. Stale targets fail without a new prompt. */
-export const Answer = { key: `${NS}/answer`, submit: `_${NS}/questions/answer` } as const;
+/** A desktop submission for an open form. The id selects the original live callback. */
 export type Answer = { questionId: string; answers?: QuestionAnswer[]; skipped?: boolean };
 
 /** Desktop history pages use byte cursors and image references, leaving ACP replay unchanged. */

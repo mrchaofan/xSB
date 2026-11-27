@@ -76,7 +76,7 @@ export default defineConfig([
   program("xsb-hub", "../hub/bin/xsb-hub"),
   program("xsb-mcp-bridge", "../hub/bin/xsb-mcp-bridge"),
   program("claude-agent-acp", wrapper("claude-agent-acp")),
-  program("codex-acp", wrapper("codex-acp")),
+  program("codex-acp", "src/codex-acp.mjs"),
   plugin("browser", "src/browser-mcp.ts"),
   { platform: "browser", input: "renderer/main.js", output: { dir: "dist/renderer", format: "iife", entryFileNames: "main.js" }, plugins: [pages] },
   // The page of a web page's own window.

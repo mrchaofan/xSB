@@ -18,7 +18,7 @@ ACP tool_call 按 backend binding + toolCallId 关联 step；Hub MCP 按请求 r
 
 ## ACP 能力接入
 
-1. URL elicitation 与 form 分开路由：Codex 仍使用 xSB ask，Claude 可使用原生 form；两者可请求 URL 授权。URL 请求支持 session 或 request 作用域，保留 opaque elicitationId，跨连接转换 requestId，覆盖首次 prompt 建立后端以及设置发现期间的请求作用域；同意打开 URL不代表 OAuth 已完成。取消与连接关闭由原请求管理，不能套用 form 的 turn 结束取消规则。凭据不进入对话。
+1. Claude、Codex 都通过 ACP v2 原生 form 提问，提交、跳过与取消通过原请求回传。Codex 主会话的异步表单可跨正常的前台结束边界保留。两个后端也可请求 URL 授权。URL 请求支持 session 或 request 作用域，保留不透明的 elicitationId，并在不同连接之间转换 requestId。用户同意打开页面后，外部授权仍由相应服务完成。凭据不进入对话。[表单生命周期](ASK.md)
 2. xSB 不发起后端登录，不消费 authMethods、不声明 terminal auth、不提供登录扩展或终端。用户自行完成后端与服务配置；ACP 返回的错误码、消息与数据保留原样，界面展示错误。
 3. promptSuggestions 缓存为会话 UI 状态，点击只填入草稿。新输入/绑定变化清理旧建议；历史重放不复活建议。
 4. commands.skill 保留协议输入兼容；桌面端不提供“命令与技能”下拉。只有后端声明 session.prompt.skill 才发送 skill block。无 inline 能力时只能一个 skill 且位于首位，Hub 动态上下文置于其后；技能发现与加载仍由 Agent 负责。命令目录、登录状态和事件 ID 不进入常驻 systemPrompt。
@@ -34,7 +34,7 @@ ACP tool_call 按 backend binding + toolCallId 关联 step；Hub MCP 按请求 r
 | 能力 | 标准替代与处理 |
 | --- | --- |
 | 后续建议 | Claude 已实现标准 prompt_suggestions_update；Codex 仍以 AIR 客户端标记启用生成，并发送 _meta.promptSuggestions。保留 Codex AIR 握手与解析，转换为统一 PromptSuggestion；收到标准格式后优先标准，避免重复。 |
-| Ask 单选、多选、自定义输入 | form schema 可承载。标准没有 companion 字段关系，当前 Claude 字段命名可识别；也保留 AIR customAnswer 元数据识别。Codex 继续 xSB ask。 |
+| 单选、多选、自定义输入 | 桌面端根据原生 form schema 展示题目和选项。支持 Claude 的自定义答案字段、Codex 的附注字段以及 AIR customAnswer 元数据。 |
 | 运行状态、标题、用量、压缩 | 使用标准 state_update、session_info_update、usage_update、compaction_update；未知 AIR 元数据继续透传。 |
 | 技能命令 | 标准 commands.skill + prompt.skill；Agent 未声明时不伪造支持。原生普通 command 仍可用。 |
 | 执行中插入 | 已核对官方 Claude ACP 0.112.0 与 Codex ACP 2.12.0：标准 session/prompt 优先尝试插入普通输入。Hub 删除 _session/steering 调用；权限/提问回调及控制命令仍可能延后。 |

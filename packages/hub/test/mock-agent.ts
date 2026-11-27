@@ -3,6 +3,7 @@
  *
  *   !say <text>           emit text (one agent message, until the next tool call)
  *   !sleep <ms>           wait (a cancel ends the work here)
+ *   !waitForInput         wait at this step until a prompt is queued or work is cancelled
  *   !busy <ms>            wait, and finish waiting even if cancelled (a tool call that has to run out)
  *   !background <delay> <ms> schedule native background notification work after this execution
  *   !call <tool> <json>   call a tool of the "workflow" MCP server and emit its result;
@@ -39,12 +40,12 @@ type Held = { prompt: any[]; resolve: (r: { messageId: string }) => void; reject
 type Session = {
   id: string;
   mcp?: Connection;
-  xsb?: Connection;
   plugin?: Connection;
   running: boolean;
   cancelled: boolean;
   lines: string[];
   wake?: () => void;
+  onInput?: () => void;
   taskIds: string[];
   /** The <xsb-task> the session was given last. */
   task?: string;
@@ -74,12 +75,11 @@ let rejectedContext = false;
 
 async function open(id: string, mcpServers: any[]): Promise<Session> {
   const session: Session = { id, running: false, cancelled: false, lines: [], taskIds: [], prompt: "", servers: mcpServers.map((s) => s.name), held: [], images: [] };
-  for (const server of mcpServers.filter((s) => s.name === "workflow" || s.name === "xsb" || s.name === plugin)) {
+  for (const server of mcpServers.filter((s) => s.name === "workflow" || s.name === plugin)) {
     const env = Object.fromEntries(server.env.map((e: any) => [e.name, e.value]));
     const proc = spawn(server.command, server.args, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "inherit"] });
     const bridge = new Connection(proc.stdout, proc.stdin, "mcp");
     if (server.name === plugin) session.plugin = bridge;
-    else if (server.name === "xsb") session.xsb = bridge;
     else session.mcp = bridge;
     await bridge.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "mock", version: "0" } });
     bridge.notify("notifications/initialized");
@@ -99,7 +99,7 @@ async function tool(session: Session, name: string, args: unknown, pluginTool = 
   const toolCallId = `call_${++counter}`;
   session.message = undefined;
   update(session, { sessionUpdate: "tool_call_update", toolCallId, title: name, name: `mcp__${pluginTool ? plugin : "workflow"}__${name}`, status: "in_progress" });
-  const server = pluginTool ? session.plugin : name === "ask" ? session.xsb : session.mcp;
+  const server = pluginTool ? session.plugin : session.mcp;
   const result = await server!.request("tools/call", { name, arguments: args });
   update(session, { sessionUpdate: "tool_call_update", toolCallId, status: result.isError ? "failed" : "completed" });
   return result.content[0].text;
@@ -120,6 +120,10 @@ async function step(session: Session, line: string): Promise<void> {
     }
     case "busy":
       return void (await new Promise((resolve) => setTimeout(resolve, Number(rest))));
+    case "waitForInput":
+      if (!session.held.length) await new Promise<void>(resolve => { session.onInput = resolve; });
+      session.onInput = undefined;
+      return;
     case "background": {
       const [delay, duration] = rest.split(" ").map(Number);
       setTimeout(() => {
@@ -184,6 +188,18 @@ async function step(session: Session, line: string): Promise<void> {
         ],
       });
       return say(session, `perm: ${answer.outcome.outcome} ${answer.outcome.optionId ?? ""}\n`);
+    }
+    case "elicitAsync": {
+      if (!formElicitation) return say(session, "native forms disabled\n");
+      const form = JSON.parse(rest);
+      const params = { ...form, mode: "form", sessionId: session.id, _meta: { ...form._meta, codex: { delivery: "async" } } };
+      void conn.request("elicitation/create", params).then(answer => {
+        if (answer.action !== "accept") return;
+        const text = `native answer: ${JSON.stringify(answer)}`;
+        if (session.running) say(session, text + "\n");
+        else { session.lines = ["!say " + text]; void work(session); }
+      }, () => {});
+      return;
     }
     case "elicit": {
       if (!formElicitation) return say(session, "native forms disabled\n");
@@ -313,6 +329,7 @@ conn.onRequest("session/prompt", (p) => {
     } else {
       // Standard prompt: priority mode takes it at the next safe step; generic queued mode waits.
       session.held.push({ prompt: p.prompt, resolve, reject });
+      session.onInput?.();
     }
   });
 });
@@ -323,4 +340,5 @@ conn.onNotification("session/cancel", (p) => {
   if (!session.running) return;
   session.cancelled = true;
   session.wake?.();
+  session.onInput?.();
 });

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { codexQuestionConfig } from "@xsb/hub/codex-config";
 import type { Runner } from "../src/agent-cli.ts";
 import { Ark, arkAnswer, arkLaunch, readArkBindings, shippedArkcli } from "../src/ark.ts";
 import { Clis } from "../src/clis.ts";
@@ -138,11 +139,18 @@ test("a launcher reads the key from arkcli each start and points the agent at th
     const codex = script("codex", arkcli);
     const codexEnv = Object.fromEntries(codex.stdout.trim().split("\n").map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
     assert.equal(codexEnv.XSB_ARK_API_KEY, "ark-secret-123");
-    const config = JSON.parse(codexEnv.CODEX_CONFIG);
+    const inherited = { model: "previous", model_providers: { local: { name: "Local" } },
+      "model_providers.xsb-ark.base_url": "https://old.example", features: { fast_mode: false } };
+    const merged = codexQuestionConfig(JSON.stringify(inherited), JSON.parse(codexEnv.XSB_ARK_CODEX_CONFIG));
+    const config = JSON.parse(merged);
     assert.equal(config.model_provider, "xsb-ark");
+    assert.equal(config.model, binding.model);
+    assert.deepEqual(config.model_providers.local, inherited.model_providers.local);
+    assert.equal(config["model_providers.xsb-ark.base_url"], undefined);
+    assert.deepEqual(config.features, { fast_mode: false, default_mode_request_user_input: true });
     assert.deepEqual(config.model_providers["xsb-ark"], { name: "Volcengine Ark", base_url: binding.baseUrl, env_key: "XSB_ARK_API_KEY", wire_api: "responses" });
     // The key is never in the configuration codex-acp logs.
-    assert.ok(!codexEnv.CODEX_CONFIG.includes("ark-secret"));
+    assert.ok(!merged.includes("ark-secret"));
     for (const missing of [script("claude", null), script("claude", path.join(dir, "nothing"))]) {
       assert.equal(missing.status, 1);
       assert.match(missing.stderr, /could not be read from arkcli/);

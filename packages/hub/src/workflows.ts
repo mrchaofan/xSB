@@ -461,7 +461,7 @@ export class Workflows {
       const i = instance(f, spec.workflowNode!);
       const current = (i.work?.kind === "graph" ? i.work.id : undefined) ?? (i.last?.valid ? i.last.id : undefined);
       if (target && target !== "history" && target !== current) throw Error("This workflow target has expired");
-      // Targeted ask answers return through the pending tool; only ordinary user input reaches here.
+      // Form responses return through ACP. Only ordinary user input reaches here.
       if (target !== "history" && current && !i.interruptions.some((p) => p.id === id))
         i.interruptions.push({ id, target: current, prompt: blocks });
       if (i.work && target !== "history") i.work.grants.push(...named);
@@ -471,16 +471,6 @@ export class Workflows {
       f.interruptions.push({ id, target: f.active, prompt: blocks });
     s.protect();
     if (named.length || spec.workflowOwner || target === "workflow") this.save(f);
-  }
-  /** Track the open question within this executing attempt; the tool waits for its reply. */
-  asking(s: LiveSession, question: string) {
-    const spec = this.hub.agent(s.agentId);
-    if (!spec.workflowOwner) return;
-    const f = structuredClone(this.read(spec.workflowOwner)),
-      w = f.instances[spec.workflowNode!]?.work;
-    if (!w || w.state !== "running" || w.attempt !== s.current?.first.messageId) return;
-    w.asking = question;
-    this.save(f);
   }
 
   private observe(f: Flow, turn: Turn) {
@@ -641,7 +631,6 @@ export class Workflows {
       if (normal && i.work.staged) {
         i.work.state = "ended";
         delete i.work.attempt;
-        delete i.work.asking;
       } else {
         suspend(i.work, "failure");
         notice(

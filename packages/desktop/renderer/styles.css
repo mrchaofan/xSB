@@ -316,6 +316,7 @@ body:not(.no-workspace) .welcome { display: none; }
 .permission[data-outcome] { border-color: var(--line); color: var(--ink-3); background: none; }
 /* 智能体的提问（ask.js），仿 Codex：贴在输入框上方、同宽同对齐的面板，一题一页；选项是带编号的竖向列表，
    选中的行用选中底色、编号换成强调色。对话里只留一条问答记录。 */
+.ask-stack { flex: 0 1 auto; min-height: 0; max-height: 45%; overflow-y: auto; display: flex; flex-direction: column; }
 .ask-panel { flex: none; display: flex; flex-direction: column; gap: var(--space-2); margin: 0 var(--space-5) var(--space-2); padding: var(--space-3) var(--space-3) var(--space-2) var(--space-4); max-width: 760px; width: calc(100% - 40px); align-self: center; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow); font-size: var(--text-md); line-height: var(--leading-tight); outline: 0; }
 .ask-head { display: flex; align-items: baseline; gap: var(--space-2); }
 .ask-head strong { flex: 1; min-width: 0; font-size: var(--text-lg); font-weight: 600; }

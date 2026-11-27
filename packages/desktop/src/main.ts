@@ -530,13 +530,13 @@ function boundsOf(given: unknown): Electron.Rectangle | null {
   return [r.x, r.y, r.width, r.height].every((n) => typeof n === "number" && Number.isFinite(n)) ? { x: r.x, y: r.y, width: r.width, height: r.height } : null;
 }
 
-/** The renderer's answer to an agent's question (ask.js), as the hub takes it. */
-function answerOf(given: unknown): Answer | undefined {
+/** Read a targeted renderer submission. Malformed or obsolete replies must never turn into chat input. */
+function answerOf(given: unknown): Answer {
   const a = given as Answer | undefined;
-  if (!a || typeof a !== "object" || typeof a.questionId !== "string") return undefined;
+  if (!a || typeof a !== "object" || typeof a.questionId !== "string" || !a.questionId) throw Error("Missing question identity");
   if (a.skipped === true) return { questionId: a.questionId, skipped: true };
-  const text = (v: unknown) => typeof v === "string" && v.length <= 4000;
-  if (!Array.isArray(a.answers) || a.answers.length > 4 || !a.answers.every((v) => text(v) || (Array.isArray(v) && v.length <= 9 && v.every(text)))) return undefined;
+  const text = (v: unknown) => typeof v === "string";
+  if (!Array.isArray(a.answers) || !a.answers.every((v) => v === null || text(v) || (Array.isArray(v) && v.every(text)))) throw Error("Invalid form answers");
   return { questionId: a.questionId, answers: a.answers };
 }
 const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","renameConversation","setAvatar","setBackend","workflowControl","history","send","resend","cancelMessage","sendMessageNow","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
@@ -701,7 +701,8 @@ async function call(event: Electron.IpcMainInvokeEvent, method: string, args: an
   }
   if (!workspace) throw new Error("this window has no workspace open");
   // A message's id is the workspace's to choose: the renderer sends content, or names an entry to send again.
-  if (method === "send") return workspace.send(args[0], args[1], typeof args[2] === "string" ? args[2] : undefined, undefined, answerOf(args[4]));
+  if (method === "answerQuestion" || method === "send" && args[4] !== undefined) return workspace.answerQuestion(args[0], answerOf(method === "send" ? args[4] : args[1]));
+  if (method === "send") return workspace.send(args[0], args[1], typeof args[2] === "string" ? args[2] : undefined);
   if (["resend", "cancelMessage", "sendMessageNow"].includes(method) && (typeof args[0] !== "string" || typeof args[1] !== "string")) throw new Error("resend takes an agent and an entry");
   if (WORKSPACE_CALLS.has(method)) return (workspace as any)[method](...args);
   throw new Error(`unknown method ${method}`);

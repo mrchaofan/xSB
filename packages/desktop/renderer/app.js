@@ -485,10 +485,10 @@ function upsertEntry(agentId, entry) {
   if (pinned) scroller.scrollTop = scroller.scrollHeight;
 }
 
-/** 输入框上方的提问面板（ask.js）：跟着这个智能体最后一个还没结束的提问。回答是发给它的下一条消息。 */
+/** 输入框上方的表单分别绑定各自的 ACP 请求。 */
 function syncAsk(agentId) {
   const lane = laneOf(agentId);
-  if (lane && !lane.dataset.readonly) syncAskPanel(lane, state.transcripts[agentId] ?? [], (content, answer) => xsb.send(agentId, content, undefined, undefined, answer));
+  if (lane && !lane.dataset.readonly) syncAskPanel(lane, state.transcripts[agentId] ?? [], (answer) => xsb.answerQuestion(agentId, answer));
 }
 
 function entryNode(agentId, entry) {

@@ -7,6 +7,7 @@ import { text, ConversationEvent, RunExt, TurnExt, TurnFailure, RpcError, Origin
 import type { Addr, Task } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Delivery } from "../src/delivery.ts";
+import { Elicitations } from "../src/elicitations.ts";
 import { Hooks, isVeto } from "../src/hooks.ts";
 import { Kernel, USER } from "../src/kernel.ts";
 import { Paths } from "../src/paths.ts";
@@ -884,14 +885,18 @@ test("autonomous backend runs have durable boundaries without creating turns, ta
   assert.equal(output[1]._meta[RunExt.key].state, "idle");
 });
 
-test("an unowned run ending while a new prompt waits cannot finish or execute that turn", async (t) => {
+for (const afterAnswer of [false, true]) test(afterAnswer
+  ? "a native async reply racing a submitted prompt cannot claim its turn without insertion"
+  : "an unowned run ending while a new prompt waits cannot finish or execute that turn", async (t) => {
   const { session, state, hub, B, settle } = setup(t);
   const backend = await session.ensureBackend();
-  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  if (afterAnswer) session.expectAsyncReplyRun("earlier-turn");
+  else session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
   let receipt!: () => void;
   (backend as any).prompt = () => new Promise<void>(resolve => { receipt = resolve; });
   const sent = hub.delivery.fromUser(session, [text("new work")], { kind: "user", messageId: "pending-run" });
   await settle();
+  if (afterAnswer) session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
   const turn = session.current!;
   assert.equal(session.acceptsTools, false, "an unowned run has no right to use the pending turn's tools");
   session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("earlier background work") });
@@ -918,6 +923,110 @@ test("an unowned run ending while a new prompt waits cannot finish or execute th
   assert.notEqual(output[0]._meta[RunExt.key].id, output.at(-1)._meta[RunExt.key].id);
 });
 
+test("only the original live main conversation accepts an async answer between normal idle and its insertion receipt", async t => {
+  for (const scope of ["main", "node", "stopping"]) {
+    const { session, state, hub, A, B, give, settle } = setup(t);
+    if (scope === "node") state.commit([ops.putAgent({ ...state.agents.get(B.agentId)!, workflowOwner: A.sessionId, workflowNode: "n" })]);
+    hub.elicitations = new Elicitations(hub);
+    const answer = deferred<{ action: "accept"; content: { choice: string } }>();
+    session.clients.add({ forms: true, conn: { notify() {}, request: () => answer.promise } } as any);
+    const backend = await session.ensureBackend(), receipt = deferred<string>();
+    backend.prompt = () => {
+      session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+      return receipt.promise;
+    };
+    give(A, B, "work"); await settle();
+    const turn = session.current!;
+    const response = session.onBackendElicitation({ mode: "form", sessionId: session.rec.backendSessionId!,
+      message: "Choose", requestedSchema: { type: "object", properties: { choice: { type: "string" } }, required: ["choice"] },
+      _meta: { codex: { delivery: "async" } } }, new AbortController().signal);
+    session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+    assert.equal(session.current, turn);
+    assert.equal(session.acceptsTools, false);
+    assert.equal(session.canAnswerForm("other-turn", true), false);
+    assert.equal(session.canAnswerForm(turn.id, false), false);
+    if (scope === "stopping") session.beginUserStop();
+    const choice = { action: "accept" as const, content: { choice: "continue" } };
+    answer.resolve(choice);
+    assert.deepEqual(await response, scope === "main" ? choice : { action: "cancel" }, scope);
+    assert.equal(turn.protected, scope === "main");
+    if (scope === "stopping") session.cancelUserWork();
+    receipt.resolve("native-input"); await settle();
+    assert.equal(session.current, undefined);
+  }
+});
+
+test("completed standalone async follow-ups do not hold the next prompt open when its receipt follows idle", async t => {
+  const { session, state, A, B, give, idle, settle } = setup(t);
+  give(A, B, "ask two questions"); await settle();
+  const origin = session.current!.id;
+  session.expectAsyncReplyRun(origin);
+  session.expectAsyncReplyRun(origin);
+  idle(); await settle();
+  idle(); idle(); // Both follow-ups ran with no submitted Hub input.
+  const backend = await session.ensureBackend();
+  (backend as any).prompt = async () => {
+    session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+    assert.equal(session.acceptsTools, true);
+    session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("finished new task") });
+    session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+    return "new-receipt";
+  };
+  const task = give(A, B, "new task"); await settle();
+  assert.equal(session.busy, false);
+  assert.equal(state.tasks.get(task.id)?.status, "completed");
+  const output = metas(state, B).find(u => u.content?.text === "finished new task");
+  assert.ok(output._meta[RunExt.key].turnId);
+});
+
+test("each async answer can start a separate follow-up, including while the next Hub prompt awaits insertion", async t => {
+  const { session, hub, idle, settle } = setup(t);
+  const backend = await session.ensureBackend();
+  session.expectAsyncReplyRun("prior-turn");
+  session.expectAsyncReplyRun("prior-turn");
+  idle();
+  let receipt!: (id: string) => void;
+  (backend as any).prompt = () => new Promise<string>(resolve => receipt = resolve);
+  const input = hub.delivery.fromUser(session, [text("new input")], { kind: "user", messageId: "waiting-input" });
+  await settle();
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  assert.equal(session.acceptsTools, false);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  receipt("new-native-input"); await input; await settle();
+  assert.ok(session.current, "an earlier idle cannot complete an uncorrelated prompt");
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  assert.equal(session.acceptsTools, true);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  await settle();
+  assert.equal(session.busy, false);
+});
+
+test("an exact native echo preceding running keeps that execution's end until its response, even across another run", async t => {
+  const { session, hub, state, B, settle } = setup(t);
+  const backend = await session.ensureBackend();
+  session.expectAsyncReplyRun("prior-turn");
+  let receipt!: (id: string) => void;
+  (backend as any).prompt = () => new Promise<string>(resolve => receipt = resolve);
+  const input = hub.delivery.fromUser(session, [text("new input")], { kind: "user", messageId: "echo-before-running" });
+  await settle();
+  session.onBackendUpdate({ sessionUpdate: "user_message", messageId: "new-native-input", content: [text("new input")] });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  assert.equal(session.acceptsTools, false, "a native ID alone cannot authorize the Hub input");
+  session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("before correlation") });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  assert.equal(session.acceptsTools, false);
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error", error: { code: -32603, message: "unrelated failure" } });
+  assert.ok(session.current);
+  receipt("new-native-input"); await input; await settle();
+  assert.equal(session.busy, false);
+  const task = [...state.tasks.values()].find(task => task.to.sessionId === B.sessionId)!;
+  assert.equal(task.status, "completed", "the matched window supplies its own end");
+  const output = metas(state, B).find(u => u.content?.text === "before correlation");
+  assert.equal(output._meta[RunExt.key].turnId, null);
+  assert.equal(state.ledger.get("echo-before-running")?.state, "inserted");
+});
+
 test("an insertion receipt claims an unowned run from that point, preserving earlier output attribution", async (t) => {
   const { session, state, hub, B, settle, hooks } = setup(t);
   const backend = await session.ensureBackend();
@@ -930,7 +1039,9 @@ test("an insertion receipt claims an unowned run from that point, preserving ear
   const sent = hub.delivery.fromUser(session, [text("join this execution")], { kind: "user", messageId: "claim-run" });
   await settle();
   const turn = session.current!;
-  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "echo-claim", content: text("join this execution"), _meta: { [OriginExt.key]: { messageId: "claim-run" } } });
+  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "echo-claim", content: text("join ") });
+  assert.equal(turn.inserted, false);
+  session.onBackendUpdate({ sessionUpdate: "user_message_chunk", messageId: "echo-claim", content: text("this execution"), _meta: { [OriginExt.key]: { messageId: "claim-run" } } });
   assert.equal(turn.inserted, true);
   assert.equal(session.acceptsTools, true);
   session.onBackendUpdate({ sessionUpdate: "agent_message_chunk", content: text("after insertion") });
