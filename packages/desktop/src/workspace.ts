@@ -16,7 +16,7 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { Question, RunExt, SessionControls, ToolServers, Workflow, Agents, fileChanges, fileEditPath, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry } from "@xsb/protocol";
+import { Question, RunExt, SessionControls, ToolServers, Workflow, Agents, fileChanges, fileEditPath, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry, userVisibleUpdate } from "@xsb/protocol";
 import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
 import type { Answer, ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
@@ -464,9 +464,11 @@ export class Workspace {
     }
   }
 
-  private onUpdate(sessionId: string, update: SessionUpdate): void {
+  private onUpdate(sessionId: string, event: SessionUpdate): void {
     const agentId = this.sessionAgent.get(sessionId);
     if (!agentId) return;
+    let update = userVisibleUpdate(event);
+    if (!update) return;
     if (!this.replaying) this.historyUpdates.get(agentId)?.push(update);
     if (update.sessionUpdate === "state_update") {
       if (this.replaying) return;
@@ -508,10 +510,12 @@ export class Workspace {
     const publication = info && conversationEntry(update, sessionId);
     if (publication) {
       const id = `publication:${JSON.stringify([sessionId, publication.source.id, publication.id])}`;
-      if (this.transcripts.get(agentId)?.some(entry => entry.id === id)) return;
-      // Preserve the event's position if an unrelated model reply is streaming across it.
-      this.settle(agentId);
-      return this.put(agentId, { id, kind: "publication", source: publication.source, markdown: publication.markdown });
+      const prior = this.transcripts.get(agentId)?.find(entry => entry.id === id);
+      if (prior && (!publication.withdrawn || prior.kind !== "publication" || prior.withdrawn)) return;
+      // New publications split a streaming reply. A rollback replaces the existing entry in place.
+      if (!prior) this.settle(agentId);
+      return this.put(agentId, { id, kind: "publication", source: publication.source, markdown: publication.markdown,
+        ...(publication.withdrawn && { withdrawn: true }) });
     }
     // Transcript records also replay legacy questions. Only a live request makes a card answerable.
     const question = info?.[Question.key] as Question | undefined;
@@ -915,8 +919,10 @@ export class Workspace {
     return this.conn.request<ComposerState>(SessionControls.get, { sessionId });
   }
 
-  workflowControl(id: string, pause: boolean, nodes?: string[]) {
-    return this.conn.request(pause ? Workflow.pause : Workflow.resume,{sessionId:id,nodes});
+  workflowControl(id: string, action: boolean | "pause" | "resume" | "rollback", nodes?: string[]) {
+    const operation = typeof action === "boolean" ? (action ? "pause" : "resume") : action;
+    if (!["pause", "resume", "rollback"].includes(operation)) throw Error("Unknown workflow action");
+    return this.conn.request(Workflow[operation], { sessionId: id, nodes });
   }
 
   // ---- artifacts --------------------------------------------------------------

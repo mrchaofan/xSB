@@ -227,7 +227,7 @@ export class Kernel {
 
   /** Mail of a session that waits in its inbox for its next turn. */
   inbox(sessionId: string): MailItem[] {
-    return [...this.state.mail.values()].filter((m) => !m.workflowHeld && m.to.sessionId === sessionId && this.state.ledger.get(m.id)?.state === "inboxed");
+    return [...this.state.mail.values()].filter((m) => !m.heldBy && m.to.sessionId === sessionId && this.state.ledger.get(m.id)?.state === "inboxed");
   }
 
   private finished(taskId: string): boolean {
@@ -503,7 +503,7 @@ export class Kernel {
       const sent = new Set(scopes.flatMap(s => s.sent)), inserted = new Set(scopes.flatMap(s => s.inserted));
       const mail = [...this.state.mail.values()].filter((m) => scope.has(m.to.sessionId) && !inserted.has(m.id) && (this.withdrawable(m) || this.state.ledger.get(m.id)?.state === "submitted" || ids.has(m.id)));
       // Keep facts, but give them a fresh, passive delivery. Withdrawn instructions are never digested again.
-      const kept = mail.filter((m) => !sent.has(m.id) && !m.workflowNotice && (m.kind === "results" || (m.kind === "message" && m.from.kind === "system" && !m.steer)))
+      const kept = mail.filter((m) => !sent.has(m.id) && !m.provider && (m.kind === "results" || (m.kind === "message" && m.from.kind === "system" && !m.steer)))
         .map((m) => ({ ...m, id: newId("m"), pref: "lazy" as const, steer: false }));
       const gates = [...this.state.gates.values()].filter((g) => scope.has(g.owner.sessionId));
       // Retire waits belonging to the stopped work. Shared children still return their facts individually, passively.

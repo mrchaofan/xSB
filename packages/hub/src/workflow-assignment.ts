@@ -52,6 +52,7 @@ function resultMarkdown(value: unknown, field = false): string {
 
 /** The workflow publishes final Markdown using ordinary file links. Consumers only need the conversation entry format. */
 export function renderCompletion(report: Completion, language: Language): string {
+  if (report.output !== undefined) return report.output;
   const zh = language === "zh-CN";
   const title = zh ? "# 工作流已完成" : "# Workflow completed";
   const overview = (zh ? "工作流版本 " : "Workflow version ") + codeSpan(report.version) +
@@ -68,9 +69,50 @@ export function renderCompletion(report: Completion, language: Language): string
   return [title, overview, ...nodes].join("\n\n");
 }
 
-/** The exact same readable assignment is recorded for the user and sent to ACP. No UI parsing. */
+function markdownAssignment(work: Work, language: Language, resume: boolean, withdrawn: string[]): string {
+  const zh = language === "zh-CN", t = labels[language], a = work.assignment;
+  const saved = work.staged?.output ?? (work.routing ? String(a.output) : undefined);
+  const candidates = (a.candidates ?? []) as { node: string; case: string }[];
+  const heading = work.routing ? (zh ? "选择下一节点" : "Choose the next node") : resume ? t.resume : t[work.kind];
+  const sections = ["# " + heading];
+  const section = (name: string, body: string) => sections.push("## " + name + "\n\n" + body);
+  if (withdrawn.length) sections.push(t.withdrawn);
+  if (resume) sections.push(t.continuing);
+  if (!work.routing && saved === undefined) {
+    section(t.instructions, String(a.text ?? a.requirements));
+    if (a.text !== undefined) section(t.target, String(a.requirements));
+    if (typeof a.input === "string" && a.input.length) section(zh ? "本次输入" : "Input", a.input);
+    sections.push(zh ? "完成后调用 `finish({output})` 提交完整 Markdown 产物。" : "Submit the complete Markdown delivery with `finish({output})`.");
+  } else {
+    section(zh ? "已保存的交付" : "Saved delivery", saved!);
+  }
+  if (work.staged?.selected !== undefined) {
+    section(zh ? "已选下一节点" : "Selected next node", codeSpan(work.staged.selected));
+    sections.push(zh ? "交付与选路已保存，核对后正常结束本轮。" : "The delivery and choice are saved. Verify them and complete this turn normally.");
+  } else if (candidates.length) {
+    section(zh ? "候选节点" : "Candidate nodes", candidates.map(c => "- " + codeSpan(c.node) + " — " + c.case).join("\n"));
+    sections.push(saved !== undefined
+      ? (zh ? "对照已保存的交付与文字条件，直接调用 `choose({node})` 完成选路。" : "Compare the saved delivery with the cases and call `choose({node})` to finish routing.")
+      : (zh ? "提交产物后，对照交付与文字条件，调用 `choose({node})` 选择一个目标节点。" : "After finish, compare the delivery with the cases and select one destination with `choose({node})`."));
+  } else if (saved !== undefined) {
+    sections.push(zh ? "交付已保存，核对后正常结束本轮。" : "The delivery is saved. Verify it and complete this turn normally.");
+  }
+  return sections.join("\n\n");
+}
+
+/** Public ACP input text paired with the assistant-only assignment. */
+export function assignmentTitle(node: string, work: Work, language: Language): string {
+  const zh = language === "zh-CN";
+  if (work.routing) return zh ? `选择 ${node} 的下一节点` : `Choose the next node for ${node}`;
+  if (work.inserted) return (zh ? "继续 " : "Continue ") + node;
+  if (work.kind === "extra") return (zh ? "追加 " : "Additional task for ") + node;
+  return (zh ? "开始 " : "Start ") + node;
+}
+
+/** The model's assignment, including its full instructions and actual input. */
 export function renderAssignment(work: Work, language: Language, resume = false, withdrawn: string[] = []): string {
   const t = labels[language], a = work.assignment;
+  if (a.format === "markdown") return markdownAssignment(work, language, resume, withdrawn);
   const sections: string[] = [`# ${resume ? t.resume : t[work.kind]}`];
   const section = (title: string, body: string) => sections.push(`## ${title}\n\n${body}`);
   const delivery = (value: Record<string, unknown>): string => {
@@ -118,6 +160,15 @@ export function renderAssignment(work: Work, language: Language, resume = false,
     }
     // Preserve future fields as well as identifiers/model/reason without repeating the task body.
     for (const [key, value] of Object.entries(a)) if (!["target", "text", "input", "inputSchema", "inputSources", "schema", "revisions", "predecessors", "previous"].includes(key)) details[key] = value;
+  }
+  if (work.kind === "graph" && a.schema !== undefined) {
+    sections.push(language === "zh-CN"
+      ? "调用 `finish({summary,result})` 提交摘要和符合本次输出格式要求的实际结果。"
+      : "Call `finish({summary,result})` with a summary and the actual result matching the assignment's output schema.");
+  } else {
+    sections.push(language === "zh-CN"
+      ? "调用 `finish({summary})` 提交完整交付摘要。需要结构化结果时可同时传入 `result`。"
+      : "Call `finish({summary})` with the complete delivery summary. Include the optional `result` when delivering structured data.");
   }
   sections.push(`<details>\n<summary>${t.details}</summary>\n\n${json(details)}\n\n</details>`);
   return sections.join("\n\n");

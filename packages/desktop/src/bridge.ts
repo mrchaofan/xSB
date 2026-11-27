@@ -34,7 +34,7 @@ export type Entry = { id: string } & (
       reply?: boolean }
   | { kind: "output"; content: Content; streaming?: boolean; run?: BackendRun; stopReason?: string; runOrigin?: unknown }
   /** A source published this readable entry directly to the conversation. */
-  | { kind: "publication"; source: ConversationEntry["source"]; markdown: string }
+  | { kind: "publication"; source: ConversationEntry["source"]; markdown: string; withdrawn?: true }
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; toolKind?: string; changes?: (FileChange & { uri: string })[]; imagePath?: string; savedFile?: { path: string; uri: string }; name?: string; input?: unknown; output?: unknown; terminalOutput?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
   /** Historical questions can be read. Only the client holding a live ACP request can submit an answer. */

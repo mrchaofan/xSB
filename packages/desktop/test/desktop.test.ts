@@ -49,8 +49,11 @@ test("node controls carry the workflow session and selected node names", async (
   const peer = new Peer(), ws = workspace(peer);
   const calls = [];
   peer.requests.set(Workflow.pause, params => calls.push(params));
+  peer.requests.set(Workflow.rollback, params => calls.push(params));
   await ws.workflowControl("main",true,["A"]);
-  assert.deepEqual(calls,[{sessionId:"main",nodes:["A"]}]);
+  await ws.workflowControl("main","rollback",["B"]);
+  await ws.workflowControl("main","rollback");
+  assert.deepEqual(calls,[{sessionId:"main",nodes:["A"]}, {sessionId:"main",nodes:["B"]}, {sessionId:"main",nodes:undefined}]);
   ws.close();
 });
 
@@ -429,14 +432,16 @@ test("published entries project by source and stable ID in ledger order without 
   emit(info(second));
   emit(output("after"));
   emit(info(second));
+  const withdrawal = { ...event, withdrawn: true, markdown: "Result withdrawn\n\n" + event.markdown };
+  emit(info(withdrawal));
+  emit(info(event));
   emit(output("!"));
   const page = await ws.history("a");
   assert.deepEqual(page.entries.map(e => e.kind === "publication" ? e.source.id : e.content[0].text),
-    [legacy.content.text, "historical answer", event.source.id, "before", second.source.id, "after!"]);
-  assert.equal(page.entries[0].kind, "input");
-  assert.equal(page.entries[0].origin.kind, "system");
-  assert.equal(page.entries[2].markdown, event.markdown);
-  assert.deepEqual(page.entries[2].source, event.source);
+    ["historical answer", event.source.id, "before", second.source.id, "after!"]);
+  assert.equal(page.entries[1].markdown, withdrawal.markdown, "withdrawal replaces the original in place and survives replay");
+  assert.equal(page.entries[1].withdrawn, true);
+  assert.deepEqual(page.entries[1].source, event.source);
   ws.close();
 });
 
@@ -574,6 +579,33 @@ function sending(t: any) {
   return { dir, peer, open };
 }
 const inputs = (snap: any) => snap.transcripts.a.filter((e: any) => e.kind === "input");
+
+test("assistant-only input stays out of the task chat while queued, inserted, or discarded", async (t) => {
+  const { peer, open } = sending(t);
+  const ws = open();
+  await ws.load();
+  const update = (change: object) => peer.emit("session/update", { sessionId: "s", update: change });
+  const info = (key: string, value: object) => update({ sessionUpdate: "session_info_update", _meta: { [key]: value } });
+  const internal = { type: "text", text: "resume the saved assignment", annotations: { audience: ["assistant"] } };
+  const visible = { type: "text", text: "Use the earlier date." };
+  const system = { kind: "system" }, user = { kind: "user" };
+  const chunk = (messageId: string, origin: object, content: object) =>
+    update({ sessionUpdate: "user_message_chunk", messageId, content, _meta: { [OriginExt.key]: origin } });
+  info(Accepted.key, { messageId: "task", origin: system, content: [internal] });
+  info(MessageDelivery.key, { messageId: "task", state: "queued", isHead: true, canSendNow: true });
+  chunk("task", system, internal);
+  info(Discarded.key, { messageId: "cancelled", origin: system, content: [internal], reason: "expired" });
+  assert.deepEqual(inputs(await ws.load()), []);
+
+  info(Accepted.key, { messageId: "correction", origin: user, content: [internal, visible] });
+  assert.deepEqual(inputs(await ws.load()).map(entry => entry.content), [[visible]]);
+  chunk("correction", user, internal);
+  chunk("correction", user, visible);
+  const [received] = inputs(await ws.load());
+  assert.deepEqual(received.content, [visible]);
+  assert.ok(!received.pending);
+  ws.close();
+});
 
 test("a message xsb did not take stays in the transcript, marked, and after a restart is still there to send again under its id", async (t) => {
   const { peer, open } = sending(t);

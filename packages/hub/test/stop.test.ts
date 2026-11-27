@@ -176,7 +176,7 @@ test("cancelled idle waits for an in-flight prompt's real insertion receipt", as
   const { deferred } = await import("../src/util.ts");
   const { state, hooks, kernel, B, dir } = setup(t);
   const hub = {
-    state, kernel, paths: { dir }, stopping: false,
+    state, kernel, paths: { dir }, stopping: false, sessionProviders: new Map(),
     agentChanged() {}, log() {}, permissions: { cancel() {} }, policy: () => contextPolicy("mock"),
     delivery: { turnEnded() {} }, rotateBridge() {},
   };
@@ -208,7 +208,7 @@ test("stop timeout revokes the old tools and closes the backend before unfreezin
   const { state, kernel, B, dir } = setup(t);
   const effects: string[] = [];
   const hub = {
-    state, kernel, paths: { dir }, stopping: false,
+    state, kernel, paths: { dir }, stopping: false, sessionProviders: new Map(),
     agentChanged() {}, log() {}, permissions: { cancel() {} }, policy: () => contextPolicy("mock"),
     delivery: { turnEnded() {} }, rotateBridge() { effects.push("revoke"); },
     backends: { stop() { effects.push("remove process"); } },

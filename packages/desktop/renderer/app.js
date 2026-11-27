@@ -528,7 +528,7 @@ function entryNode(agentId, entry) {
     return h("div", { ...base, "data-origin": o.kind, "data-discarded": terminated, "data-pending": entry.pending || entry.unsent, title },
       o.kind === "agent" && h("div", { class: "from" }, avatarImage(agentOf(o.agentId)),
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
-      o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),
+      o.kind === "system" && h("div", { class: "from" }, t(o.role === "task_result" ? "entry.from.systemResult" : "entry.from.system")),
       h("div", { class: "said" }, contentView(entry.content, openLink)),
       entry.deliveredAs && h("div", { class: "delivered-as" }, deliveredNote(entry.deliveredAs)),
       tag && h("span", { class: "tag" }, tag),

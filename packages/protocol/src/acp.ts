@@ -14,7 +14,17 @@ export const PROTOCOL_VERSION = 2;
 
 export type Meta = Record<string, unknown>;
 
-export type ContentBlock = { type: string; text?: string; uri?: string; name?: string; _meta?: Meta; [k: string]: unknown };
+export type ContentBlock = { type: string; text?: string; uri?: string; name?: string; annotations?: { audience?: string[] | null; [k: string]: unknown } | null; _meta?: Meta; [k: string]: unknown };
+
+/** ACP v2 content intended for the model alone, including within a mixed user prompt. */
+export function assistantOnly(block: ContentBlock): ContentBlock {
+  return { ...block, annotations: { ...block.annotations, audience: ["assistant"] } };
+}
+
+export function isAssistantOnly(block: ContentBlock): boolean {
+  const audience = block.annotations?.audience;
+  return Array.isArray(audience) && audience.includes("assistant") && !audience.includes("user");
+}
 
 export type McpServer =
   | { type: "stdio"; name: string; command: string; args?: string[]; env?: { name: string; value: string }[]; _meta?: Meta }

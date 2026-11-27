@@ -112,6 +112,11 @@ export type Gate = {
 };
 
 export type MailItem = {
+  /** Internal sender that owns the validity of this delivery, independent of its printable ID. */
+  provider?: string;
+  /** The service holding this mail until it explicitly releases it. */
+  heldBy?: string;
+  /** Pre-provider mailbox records. Normalized on read. */
   workflowNotice?: boolean;
   workflowHeld?: boolean;
   invitation?: string;
@@ -387,8 +392,13 @@ export class State {
         return;
       case F.mailbox:
         if (rec.op === "enqueue") {
-          this.mail.set(rec.item.id, rec.item);
-          if (!rec.topicCounted) this.recordTopic(rec.item);
+          let item: MailItem = rec.item;
+          if ("workflowNotice" in item || "workflowHeld" in item) {
+            const { workflowNotice, workflowHeld, ...rest } = item;
+            item = { ...rest, ...(workflowNotice && { provider: "workflow" }), ...(workflowHeld && { heldBy: "workflow" }) };
+          }
+          this.mail.set(item.id, item);
+          if (!rec.topicCounted) this.recordTopic(item);
         } else this.mail.delete(rec.id);
         return;
       case F.ledger:

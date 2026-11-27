@@ -1,6 +1,6 @@
 /** Turns `session/update` notifications into terminal output. */
 import { stripVTControlCharacters } from "node:util";
-import { Discarded, OriginExt, conversationEntry, textOf } from "@xsb/protocol";
+import { Discarded, OriginExt, conversationEntry, textOf, userVisibleUpdate } from "@xsb/protocol";
 import type { OriginMeta, SessionUpdate } from "@xsb/protocol";
 import { t } from "./text.ts";
 
@@ -16,7 +16,7 @@ export class Printer {
   readonly labels = new Map<string, string>();
   /** Tool calls by id, and what each is called. */
   private tools = new Map<string, string>();
-  private publications = new Set<string>();
+  private publications = new Map<string, "published" | "withdrawn">();
   showLabels = false;
   /** The stream that owns the current, unfinished line. */
   private open: string | null = null;
@@ -40,7 +40,9 @@ export class Printer {
     process.stdout.write(style(text));
   }
 
-  update(sessionId: string, update: SessionUpdate): void {
+  update(sessionId: string, event: SessionUpdate): void {
+    const update = userVisibleUpdate(event);
+    if (!update) return;
     const who = this.labels.get(sessionId) ?? sessionId;
     const label = this.showLabels ? bold(`[${who}] `) : "";
     const body = update.content?.type === "text" ? (update.content.text as string) : `[${update.content?.type}]`;
@@ -67,8 +69,10 @@ export class Printer {
         const entry = conversationEntry(update, sessionId);
         if (entry) {
           const key = JSON.stringify([sessionId, entry.source.id, entry.id]);
-          if (this.publications.has(key)) return;
-          this.publications.add(key);
+          const state = entry.withdrawn ? "withdrawn" : "published";
+          const prior = this.publications.get(key);
+          if (prior === state || prior === "withdrawn") return;
+          this.publications.set(key, state);
           const source = terminalText(entry.source.label).replace(/\s+/g, " ").trim();
           const markdown = terminalText(entry.markdown).replace(/\n$/, "");
           return this.line(`${label}${bold(`[${source}]`)}\n${markdown}`);

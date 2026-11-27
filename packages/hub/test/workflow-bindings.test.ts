@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Edge } from "@xsb/protocol";
-import { graphJsonl, nodeDefinition, parseGraph, resolveInputs, validateResult } from "../src/workflow-graph.ts";
+import { branchCandidates, graphJsonl, nodeDefinition, parseGraph, resolveInputs, validateResult } from "../src/workflow-graph.ts";
 
 const closed = (properties: Record<string, unknown> = {}, required = Object.keys(properties)) =>
   ({ type: "object", properties, required, additionalProperties: false });
@@ -12,6 +12,43 @@ const end = (inputSchema: object = closed()) => ({ node: "end", kind: "end", inp
 const edge = (from: string, to: string, bind?: Record<string, string>, branch?: string): Edge =>
   ({ from, to, ...(bind && { bind }), ...(branch && { case: branch }) });
 const graph = (...rows: object[]) => rows.map(row => JSON.stringify(row)).join("\n");
+
+test("Markdown plans serialize only entry inputs and reject legacy or runtime fields", () => {
+  const task = { node: "root", requirements: "Provide a location and dates.", input: "" };
+  const next = { node: "route", requirements: "Write an itinerary." };
+  const end = { node: "done", kind: "end" };
+  const links = [edge("root", "route"), edge("route", "done")];
+  const plan = (a: object = task, b: object = next, c: object = end) => graph(c, ...links, b, a);
+  const parsed = parseGraph(plan());
+  assert.equal(parsed.format, "markdown");
+  assert.deepEqual(parsed.nodes.map(n => n.entryInput), ["", undefined, undefined]);
+  const [root, child] = graphJsonl(parsed).split("\n").map(row => JSON.parse(row));
+  assert.deepEqual(root, task);
+  assert.deepEqual(child, next);
+  assert.deepEqual(parseGraph(graphJsonl(parsed)), parsed);
+  assert.deepEqual(parseGraph(plan({ ...task, input: "杭州\n5 月 2 日" })).nodes[0].entryInput, "杭州\n5 月 2 日");
+  const empty = parseGraph(plan({ node: "root", requirements: "Use the workspace." }));
+  assert.deepEqual(parseGraph(graphJsonl(empty)), empty);
+  assert.throws(() => parseGraph(plan(task, { ...next, input: "" })), /route.*entry task.*input/);
+  assert.throws(() => parseGraph(plan({ ...task, input: {} })), /root.*Markdown text.*input/);
+  assert.throws(() => parseGraph(plan(task, { node: "route", prompt: "legacy" })), /prompt.*route/);
+  assert.throws(() => parseGraph(plan(task, next, { ...end, input: "" })), /input.*done/);
+  for (const extra of [{ schema: integer }, { inputSchema: closed() }, { output: "" }, { choice: "route" }, { multi: true }])
+    assert.throws(() => parseGraph(plan({ ...task, ...extra })), /Unknown node field/);
+  assert.throws(() => parseGraph(graph(task, next, end, ...links, edge("route", "done", {}))), /Markdown.*bind/);
+  assert.equal(parseGraph(graph({ node: "legacy", prompt: "old" }, end, edge("legacy", "done"))).format, undefined);
+});
+
+test("Markdown branch validation and invitations both select by target", () => {
+  const source = { node: "source", requirements: "Choose a route." };
+  const ends = [{ node: "city", kind: "end" }, { node: "region", kind: "end" }];
+  const edges = [edge("source", "city", undefined, "near"), edge("source", "city", undefined, "nearby"),
+    edge("source", "region", undefined, "near")];
+  const parsed = parseGraph(graph(source, ...ends, ...edges));
+  assert.deepEqual(branchCandidates(parsed.edges, "source"), [{ node: "city", case: "near\nnearby" }, { node: "region", case: "near" }]);
+  assert.throws(() => parseGraph(graph({ node: "source", prompt: "old" }, ...ends, ...edges)), /reaches 2 ends/);
+  assert.throws(() => parseGraph(graph(source, ...ends, ...edges, { node: "disconnected", kind: "end" })), /disconnected.*predecessor/);
+});
 
 test("typed plans declare every endpoint, round trip bindings, and keep legacy graphs working", () => {
   const rows = [task("extract", closed({ lines: { type: "array", items: string } })), task("count", integer, closed({ items: { type: "array" } })),

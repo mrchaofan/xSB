@@ -23,6 +23,7 @@ export function restoreWorkflowPanel(flow, saved) {
 
 /** 节点能不能打开对话：有会话、智能体还在列表里（当前的，或已被新版本删掉、只能查看的）。 */
 const openable = (n) => !!(n.sessionId && n.agentId && agentOf(n.agentId));
+const inspectable = (n) => !!(n?.contract || n?.markdown);
 
 /** 选中一个节点的对话。正在看历史版本时，只认那个版本里的节点。 */
 export function showTask(id) {
@@ -45,14 +46,15 @@ export function showTask(id) {
 function versionOf(flow) {
   const want = viewing.get(flow.sessionId) ?? (!flow.version && flow.candidate ? flow.candidate.version : null);
   if (want && flow.candidate?.version === want) {
-    const { nodes, edges } = flow.candidate.graph;
+    const { nodes, edges, format } = flow.candidate.graph;
     return { kind: "candidate", version: want, edges, nodes: nodes.map(n => ({
       name: n.node, kind: n.kind, status: "proposed",
+      markdown: format === "markdown" && { requirements: n.requirements, entryInput: n.entryInput },
       contract: n.inputSchema && { goal: n.prompt, inputSchema: n.inputSchema, fixedInput: n.input, schema: n.schema },
     })) };
   }
-  const old = want && want !== flow.version && flow.history?.find((v) => v.version === want);
-  if (old) return { kind: "history", version: old.version, at: old.retiredAt, nodes: old.nodes, edges: old.edges };
+  const old = want && want !== flow.version && flow.history?.find((v) => (v.snapshot ?? v.version) === want);
+  if (old) return { kind: "history", version: old.version, key: want, at: old.retiredAt, nodes: old.nodes, edges: old.edges };
   if (want) viewing.delete(flow.sessionId);
   return { kind: "active", version: flow.version, nodes: flow.nodes, edges: flow.edges };
 }
@@ -69,7 +71,7 @@ function diagram(nodes, edges, active, choose) {
     levels.set(n.name, level);
     const column = widths[level] ?? 0;
     widths[level] = column + 1;
-    positions.set(n.name, { x: 16 + column * 154, y: 12 + level * 90 });
+    positions.set(n.name, { x: 16 + column * 154, y: 12 + level * 90, choice: n.markdown?.choice });
   }
   const width = 18 + Math.max(1, ...widths) * 154,
     height = 12 + widths.length * 90;
@@ -89,6 +91,7 @@ function diagram(nodes, edges, active, choose) {
       mid = (y + b.y) / 2;
     const line = document.createElementNS(ns, "path");
     line.setAttribute("d", `M${x} ${y} C${x} ${mid} ${endX} ${mid} ${endX} ${b.y} m-3 -5 l3 5 3 -5`);
+    if (e.case !== undefined && a.choice === e.to) line.classList.add("chosen");
     lines.append(line);
     if (e.case) {
       const label = document.createElementNS(ns, "text");
@@ -101,7 +104,7 @@ function diagram(nodes, edges, active, choose) {
   surface.append(lines);
   for (const n of nodes) {
     const { x, y } = positions.get(n.name),
-      disabled = !openable(n) && !n.contract;
+      disabled = !openable(n) && !inspectable(n);
     const deps = incoming
       .get(n.name)
       .map((e) => [e.from, e.case].filter(Boolean).join(" · "))
@@ -152,24 +155,27 @@ export function renderWorkflow(flow) {
   const shown = versionOf(flow);
   const folded = !!collapsed.get(flow.sessionId);
   const choice = selected.get(flow.sessionId);
-  const focused = typeof choice === "object" && choice?.version === shown.version && shown.nodes.find(n => n.name === choice.name);
+  const versionKey = shown.key ?? shown.version;
+  const focused = typeof choice === "object" && choice?.version === versionKey && shown.nodes.find(n => n.name === choice.name);
   const fallback = typeof choice === "string" ? choice : state.referenceAgent;
   const node = focused || shown.nodes.find(n => openable(n) && n.agentId === fallback) ||
-    (shown.kind === "candidate" && shown.nodes.find(n => n.contract));
+    (shown.kind === "candidate" && shown.nodes.find(inspectable));
   const id = node ? node.agentId : fallback;
   const error = h("small", { class: "error", role: "alert" }, flow.error);
   const held = flow.controls?.resume;
-  const button = (pause, names, label) => h("button", { class: "btn sm",
-    onclick: () => xsb.workflowControl(flow.sessionId, pause, names).catch((e) => (error.textContent = e.message)) }, label);
+  const control = (action, names) => xsb.workflowControl(flow.sessionId, action, names)
+    .catch((e) => ($("#flow-heading [role='alert']").textContent = e.message));
+  const button = (action, label) => h("button", { class: "btn sm", "data-action": action, onclick: () => control(action) }, label);
   const look = (version) => { viewing.set(flow.sessionId, version === flow.version ? null : version); renderWorkflow(flow); };
   // 活动方案和候选方案并排切换；历史版本（最新的在前）收在下拉里。
   const plans = flow.version && flow.candidate && h("div", { class: "segmented flow-plans", role: "group", "aria-label": t("flow.version.label") },
     ...[["active", flow.version], ["candidate", flow.candidate.version]].map(([kind, version]) =>
       h("button", { "aria-pressed": String(shown.kind === kind), title: version, onclick: () => shown.kind !== kind && look(version) }, t("flow." + kind))));
   const history = !!flow.history?.length && h("select", { "aria-label": t("flow.history"),
-    onchange: (e) => look(e.target.value || flow.version) },
+    onchange: (e) => { viewing.set(flow.sessionId, e.target.value || null); renderWorkflow(flow); } },
     h("option", { value: "", selected: shown.kind !== "history" }, t("flow.history")),
-    ...flow.history.map((v) => h("option", { value: v.version, selected: v.version === shown.version }, t("flow.version.history", { version: v.version, time: when(v.retiredAt) }))));
+    ...flow.history.map((v) => h("option", { value: v.snapshot ?? v.version, selected: shown.kind === "history" && (v.snapshot ?? v.version) === versionKey },
+      t(v.rollback ? "flow.version.beforeRollback" : "flow.version.history", { version: v.version, time: when(v.retiredAt) }))));
   $("#flow-heading").hidden = false;
   fill($("#flow-heading"),
     h("button", { class: "icon-btn flow-fold", "aria-expanded": String(!folded), title: t(folded ? "flow.expand" : "flow.collapse"), "aria-label": t(folded ? "flow.expand" : "flow.collapse"),
@@ -181,7 +187,8 @@ export function renderWorkflow(flow) {
     shown.kind === "history" && h("span", { class: "flow-badge" }, t("flow.version.readonly")),
     // 主会话的插话挡住了整张图（它那一轮失败或被停了）：和暂停一样，给"继续"。
     shown.kind === "active" && flow.state === "completed" && h("span", { class: "flow-badge" }, t("flow.finished")),
-    shown.kind === "active" && (held ? flow.controls?.resume : flow.controls?.pause) && button(!held, undefined, t(held ? "flow.resume" : "flow.pause")),
+    shown.kind === "active" && (held ? flow.controls?.resume : flow.controls?.pause) && button(held ? "resume" : "pause", t(held ? "flow.resume" : "flow.pause")),
+    shown.kind === "active" && flow.controls?.rollback && button("rollback", t("flow.rollback")),
     error);
   document.querySelector("#side-workflow").classList.toggle("flow-folded", folded);
   const map = $("#flow-map");
@@ -191,14 +198,15 @@ export function renderWorkflow(flow) {
   if (folded) fill(map); else fill(map, diagram(shown.nodes, shown.edges, node?.name, n => {
     if (openable(n)) showTask(n.agentId);
     else {
-      selected.set(flow.sessionId, { version: shown.version, name: n.name });
+      selected.set(flow.sessionId, { version: versionKey, name: n.name });
       renderWorkflow(flow);
     }
   }));
   if (focusedNode)
     map.querySelector(`button[data-node="${CSS.escape(focusedNode)}"]:enabled`)?.focus({ preventScroll: true });
 
-  renderContract(flow, shown.version, node, shown.edges, (href, container) => followContentLink(href, container, id ?? state.open[0]));
+  renderContract(flow, versionKey, node, shown.edges, (href, container) => followContentLink(href, container, id ?? state.open[0]),
+    shown.kind === "active" && node?.controls?.rollback && (() => control("rollback", [node.name])));
 
   // 下方的对话：当前版本里的节点可以对话；已被删掉的节点、历史版本里的节点只能查看。
   const chat = node && openable(node);
@@ -210,12 +218,12 @@ export function renderWorkflow(flow) {
   const readonly = shown.kind === "history" ? "flow.readonly.history" : dropped || agentOf(id)?.retired ? "flow.readonly.dropped" : null;
   const lane = panel.firstElementChild;
   const same = (chat || dropped) && lane?.dataset.agent === id && (lane.dataset.readonly ?? null) === (readonly && t(readonly));
-  panel.hidden = !!node?.contract && !chat;
+  panel.hidden = inspectable(node) && !chat;
   if (!same) {
     lane?.saveDraft?.();
     fill(panel);
     if (chat || dropped) openTaskLane(id, panel, readonly && t(readonly));
-    else if (!panel.hidden) fill(panel, h("p", { class: "empty" }, t(shown.nodes.some(n => n.contract) ? "flow.inspect" : shown.kind === "candidate" ? "flow.preview" : "flow.pick")));
+    else if (!panel.hidden) fill(panel, h("p", { class: "empty" }, t(shown.nodes.some(inspectable) ? "flow.inspect" : shown.kind === "candidate" ? "flow.preview" : "flow.pick")));
   }
   placeAgents(panel, shown.nodes.filter(openable), id);
 }

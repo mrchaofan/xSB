@@ -20,7 +20,7 @@ import { Lifecycle } from "./lifecycle.ts";
 import fs from "node:fs";
 import net from "node:net";
 import { Agents, Connection, Ledger, PluginPublication, RpcError, Tasks, failure, errorMessage } from "@xsb/protocol";
-import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
+import type { AgentInfo, AgentSpec, ContentBlock, Language, McpServer, OriginMeta } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import { Workflows } from "./workflows.ts";
 import { nodeAgent } from "./workflow-agent.ts";
@@ -36,7 +36,7 @@ import { Hooks } from "./hooks.ts";
 import { Jobs } from "./jobs.ts";
 import { Kernel } from "./kernel.ts";
 import type { KernelHooks } from "./kernel.ts";
-import { serveMcp } from "./mcp.ts";
+import { serveMcp, WORKFLOW_SERVER } from "./mcp.ts";
 import { activePlugins, toolsKey } from "./plugins.ts";
 import { contextServer } from "./tool-context.ts";
 import type { ContextOwner } from "./tool-context.ts";
@@ -53,12 +53,35 @@ import type { SessionUpdate } from "@xsb/protocol";
 import path from "node:path";
 import type { ToolOrigin } from "./prompts.ts";
 import { LiveSession } from "./session.ts";
+import type { Input, Turn, TurnEnd } from "./session.ts";
 import type { MailItem, SessionRec } from "./state.ts";
 import { State, conversed, ops, topicKey } from "./state.ts";
 import { newId, now } from "./util.ts";
 
 /** How long deleting a conversation waits for its stopped turns to end: past a session's own 10 s stop timeout. */
 const DELETE_STOP_WAIT_MS = 15_000;
+
+/** Trusted Hub services that own session inputs. Input IDs are opaque to the queue. */
+export interface SessionProvider {
+  /** Identify host-supplied inputs intended for the model in this conversation. */
+  supplementalInput?(session: LiveSession, origin: OriginMeta, block?: ContentBlock, provider?: string): boolean;
+  /** The registration name is also the reserved MCP server name. */
+  toolServer?(session: LiveSession): McpServer;
+  /** Synchronously read committed state when an input owned by this provider is about to run. */
+  acceptsInput?(session: LiveSession, messageId: string): boolean;
+  inserted?(session: LiveSession, messageId: string): void;
+  /** Release any scope the provider attached to a user message that never reached the model. */
+  userInputDiscarded?(session: LiveSession, messageId: string): void;
+  /** Settle the provider's work in the same transaction as the turn's consumed mail and tasks. */
+  ended?(session: LiveSession, turn: Turn, end: TurnEnd): void;
+  available?(session: LiveSession): boolean;
+  instructions?(agent: AgentSpec, language: Language): string;
+  context?(session: LiveSession, turn: Turn): string | undefined;
+  userScope?(session: LiveSession, turn: Turn, input: Input): string | undefined;
+  /** Commit the context and scope this provider supplied, together with the input's real receipt. */
+  auditInsertion?(session: LiveSession, input: Input): void;
+  inheritSeen?(previous: Turn, next: Turn): void;
+}
 
 type PublicationGrant = { publisher: Publisher; origin: LiveSession; toolKey: string; bound: () => boolean };
 
@@ -67,6 +90,7 @@ export class Hub {
   readonly state: State;
   readonly live = new Map<string, LiveSession>();
   readonly clients = new Set<Client>();
+  readonly sessionProviders = new Map<string, SessionProvider>();
   readonly backends: BackendPool;
   readonly kernel: Kernel;
   readonly delivery: Delivery;
@@ -120,6 +144,7 @@ export class Hub {
     this.permissions = new Permissions(this);
     this.elicitations = new Elicitations(this);
     this.workflows = new Workflows(this);
+    this.sessionProviders.set(WORKFLOW_SERVER, this.workflows);
     hooks.on("acp.turn_changed", ({ sessionId }) => this.workflows.runtimeChanged(sessionId));
     // One conversation per agent (docs/DESIGN.md): sessions a client once opened besides it are history, not live.
     for (const rec of this.state.sessions.values()) if (rec.main) this.track(new LiveSession(this, this.titled(rec)));
@@ -167,7 +192,7 @@ export class Hub {
       serveMcp(
         this,
         conn,
-        (token) => this.bridgeTokens.get(token),
+        (token) => this.sessionProviders.get(WORKFLOW_SERVER) === this.workflows ? this.bridgeTokens.get(token) : undefined,
         (token) => this.contextTokens.get(token),
         (token) => this.publisher(token),
       );
@@ -273,7 +298,7 @@ export class Hub {
       ...activePlugins(this.paths).map((t) => ({ ...t, from: "plugin" as const })),
       ...clientMcp.map((server) => ({ server, from: "client" as const })),
     ];
-    const seen = new Set<string>();
+    const seen = new Set([...this.sessionProviders].filter(([, provider]) => provider.toolServer).map(([name]) => name));
     return all.filter((t) => !seen.has(t.server.name) && seen.add(t.server.name));
   }
 
@@ -328,12 +353,14 @@ export class Hub {
     if (frozen !== undefined) return frozen;
     // Task tool catalogs are supplied by MCP, not volatile names in the standing prefix.
     const tools = agent.workflowOwner ? "" : this.toolServers(agent, clientMcp).map((t) => t.server.name).join("\n");
-    return conversationPrompt(
-      agent,
-      projectLanguage(this.paths),
-      [this.instructions(agent.id), tools].filter(Boolean).join("\n"),
-      consultationSettings(this.paths).effective,
-    );
+    const language = projectLanguage(this.paths);
+    const instructions = [
+      !agent.workflowOwner && `Working directory: ${agent.workspace}.`,
+      this.instructions(agent.id),
+      tools,
+      ...Array.from(this.sessionProviders.values(), provider => provider.instructions?.(agent, language)),
+    ].filter(Boolean).join("\n\n");
+    return conversationPrompt(agent.name, language, instructions, consultationSettings(this.paths).effective);
   }
 
   createConversation(
@@ -580,13 +607,18 @@ export class Hub {
   backendToolServers(origin: LiveSession, bound: () => boolean): McpServer[] {
     this.revokePublications(origin.id);
     const session = this.publicationDestination(origin);
-    return this.toolServers(this.agent(origin.agentId), origin.clientMcp).map(tool => {
+    const provided: McpServer[] = [];
+    for (const [name, provider] of this.sessionProviders) {
+      if (provider.toolServer) provided.push({ ...provider.toolServer(origin), name });
+    }
+    const others = this.toolServers(this.agent(origin.agentId), origin.clientMcp).map(tool => {
       const server = this.withToolContext(tool.server, origin);
       if (server.type !== "stdio" || !tool.pluginId || !session) return server;
       const token = randomBytes(32).toString("hex");
       this.publicationTokens.set(token, { publisher: { session, pluginId: tool.pluginId }, origin, bound, toolKey: toolsKey([tool]) });
       return { ...server, env: [...(server.env ?? []), { name: PluginPublication.tokenEnv, value: token }] };
     });
+    return [...provided, ...others];
   }
 
   revokePublications(originId: string): void {
@@ -597,7 +629,7 @@ export class Hub {
   /** Route only from a current session to its live, undeleted main conversation. */
   private publicationDestination(origin: LiveSession): LiveSession | undefined {
     const source = this.state.agents.get(origin.agentId);
-    if (!source || this.live.get(origin.id) !== origin || this.isDeleted(source) || !this.workflows.available(origin)) return;
+    if (!source || this.live.get(origin.id) !== origin || this.isDeleted(source) || !origin.available) return;
     const session = this.live.get(this.workflows.owner(origin));
     if (!session?.rec.main) return;
     const target = this.state.agents.get(session.agentId);

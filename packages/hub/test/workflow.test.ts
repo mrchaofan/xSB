@@ -9,12 +9,11 @@ import { Hub } from "../src/hub.ts";
 import { Paths } from "../src/paths.ts";
 import { setProjectLanguage } from "../src/config.ts";
 import { pathToFileURL } from "node:url";
-import { conversationPrompt, WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT } from "../src/prompts.ts";
 import { F, ops } from "../src/state.ts";
 import { deferred, newId } from "../src/util.ts";
 import type { LiveSession, Turn } from "../src/session.ts";
 import { canonical, fingerprint, graphJsonl, validateResult, parseGraph } from "../src/workflow-graph.ts";
-import { additional, adopt, claim, control, empty, normalize, settled, view } from "../src/workflow-state.ts";
+import { additional, adopt, chooseMarkdown, claim, control, empty, finishMarkdown, normalize, settled, view } from "../src/workflow-state.ts";
 import { WORKFLOW_REFRESH_TURNS } from "../src/workflows.ts";
 import { workflowTools } from "../src/workflow-tools.ts";
 import type { Flow } from "../src/workflow-state.ts";
@@ -106,7 +105,7 @@ test("an accepted end and its complete passive result commit together and notify
       return ops.workflow(f);
     },
   });
-  const turn = turnFor(worker, work.attempt!);
+  const turn = turnFor(worker, work.attempt!, "workflow");
   worker.current = undefined;
   const occupied = turnFor(root, "user-request");
   const updates: SessionUpdate[] = [];
@@ -212,38 +211,56 @@ test("runtime-only turn changes publish fresh workflow controls for a pending co
   assert.equal(hub.workflows.read(root.id).interruptions[0].id, "correction", "query publication does not consume input");
 });
 
-test("workflow examples run with named inputs and typed results in the system prompt's conversation language", (t) => {
+test("the localized read-only guide supplies a runnable Markdown example on demand", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-language-"));
   const hub = new Hub(dir); hub.stopping = true;
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const root = hub.createConversation();
+  const { renderAssignment, renderCompletion } = await import("../src/workflow-assignment.ts");
   for (const language of ["zh-CN", "en"] as const) {
-    const prompt = conversationPrompt(hub.agent(root.agentId), language, "");
-    assert.match(prompt, language === "zh-CN" ? /Name every task and end node in Simplified Chinese/ : /Name every task and end node in English/);
-    const example = prompt.split("Graph JSONL example:\n")[1].split("\nUse case")[0];
+    setProjectLanguage(hub.paths, language);
+    const turn = turnFor(root, "request");
+    assert.equal(hub.workflows.context(root, turn), undefined, "ordinary work gets no graph preface");
+    const prompt = hub.systemPromptFor(hub.agent(root.agentId));
+    assert.match(prompt, /workflow\.plan/);
+    assert.match(prompt, /workflow\.guide/);
+    assert.match(prompt, language === "zh-CN" ? /即使用户未提工作流，也主动/ : /proactively use.*even when the user does not mention workflows/);
+    assert.doesNotMatch(prompt, /graphJsonl|整理需求|Read request/);
+    assert.ok(workflowTools(false).some(t => t.name === "guide"));
+    assert.ok(!workflowTools(true).some(t => t.name === "guide"));
+    assert.doesNotMatch(JSON.stringify(workflowTools(false)), /整理需求|Read request/);
+    const guide = hub.workflows.call(root, "guide", {}, newId("call"));
+    assert.ok(typeof guide === "string");
+    const example = /```jsonl\n([^]*?)\n```/.exec(guide)![1];
+    assert.throws(() => hub.workflows.call(root, "guide", {graphJsonl: example}, newId("call")), /additional properties/);
+    assert.equal(hub.state.workflows.has(root.id), false, "reading the guide creates no draft, version or receipt");
     const parsed = parseGraph(example);
-    const zh = language === "zh-CN";
-    const expected = zh ? ["提取明细", "核算总额", "完成"] : ["Extract items", "Calculate total", "Done"];
-    assert.deepEqual(new Set(parsed.nodes.map(n => n.node)), new Set(expected));
+    const [first, travel, local, end] = language === "zh-CN"
+      ? ["整理需求", "跨城路线", "市内路线", "交付行程"] : ["Read request", "Intercity route", "City route", "Deliver itinerary"];
+    assert.equal(parsed.format, "markdown");
+    assert.deepEqual(new Set(parsed.nodes.map(n => n.node)), new Set([first, travel, local, end]));
     const f = build(example);
-    const rows = zh
-      ? [{ 品名: "铅笔", 数量: 2, "单价（分）": 300 }, { 品名: "橡皮", 数量: 1, "单价（分）": 400 }]
-      : [{ product: "pencil", quantity: 2, unitPriceCents: 300 }, { product: "eraser", quantity: 1, unitPriceCents: 400 }];
-    const extraction = claim(f, expected[0])!;
-    const lines = zh ? { 订单行: rows } : { orderLines: rows };
-    validateResult(parsed.nodes[0].schema!, lines);
-    extraction.staged = { summary: "OK", result: lines };
-    extraction.state = "ended";
+    const request = claim(f, first)!;
+    const body = renderAssignment(request, language);
+    assert.ok(body.includes(String(request.assignment.input)) && body.includes("finish({output})"));
+    const needs = "May 2–4\n- Hangzhou\n- Suzhou";
+    finishMarkdown(f, first, request, needs);
+    assert.ok(renderAssignment(request, language, true).includes(needs), "resume presents the saved output for selection");
+    chooseMarkdown(f, first, request, travel);
+    assert.ok(renderAssignment(request, language, true).includes(travel), "resume presents the saved choice");
+    request.state = "ended";
     normalize(f);
-    const calculation = claim(f, expected[1])!;
-    assert.deepEqual(calculation.assignment.input, zh ? { 明细: rows } : { items: rows });
-    validateResult(parsed.nodes[1].schema!, 1000);
-    calculation.staged = { summary: "OK", result: 1000 };
-    calculation.state = "ended";
-    assert.deepEqual(normalize(f)?.result, zh ? { "总额（分）": 1000 } : { totalCents: 1000 });
+    const route = claim(f, travel)!;
+    assert.equal(route.assignment.input, needs);
+    assert.ok(renderAssignment(route, language).includes(needs), "the multiline input reaches the model intact");
+    assert.equal(claim(f, local), undefined);
+    const itinerary = "# Itinerary\n\nDay 1 – Hangzhou\n\nDay 2 – Suzhou";
+    finishMarkdown(f, travel, route, itinerary);
+    route.state = "ended";
+    assert.equal(renderCompletion(normalize(f)!, language), itinerary);
     assert.ok(settled(f));
-    const taskPrompt = conversationPrompt({ ...hub.agent(root.agentId), workflowOwner: root.id, workflowNode: expected[0] }, language, "");
-    assert.ok(taskPrompt.includes(`node "${expected[0]}"`), "task conversations retain the localized node name");
+    const taskPrompt = hub.systemPromptFor({ ...hub.agent(root.agentId), workflowOwner: root.id, workflowNode: first });
+    assert.ok(taskPrompt.includes(`node "${first}"`), "task conversations retain the localized node name");
   }
 });
 
@@ -571,8 +588,9 @@ test("incoming edge change reuses a node, candidate adoption and version names a
   assert.ok(claim(f, "D"));
 });
 
-function turnFor(session: LiveSession, id: string) {
+function turnFor(session: LiveSession, id: string, provider?: string) {
   const first = {
+    provider,
     origin: { kind: "system" },
     messageId: id,
     prompt: [],
@@ -622,7 +640,7 @@ test("working files pass through assignments unchanged and staged finishes survi
   const invoke = (s: LiveSession, tool: string, a: Record<string, any>, id = newId("call")) =>
     runtime.call(s, tool, a, id);
   for (const task of [false, true]) assert.ok(workflowTools(task).every(tool => !tool.name.startsWith("asset_")));
-  const finish = workflowTools(true).find(tool => tool.name === "finish")!;
+  const finish = workflowTools(true, false).find(tool => tool.name === "finish")!;
   assert.deepEqual(Object.keys(finish.inputSchema.properties), ["summary", "result"]);
   assert.throws(() => invoke(root, "asset_list", { name: "draft" }), /Unknown workflow tool/);
   assert.equal(hub.state.workflows.has(root.id), false);
@@ -648,7 +666,7 @@ test("working files pass through assignments unchanged and staged finishes survi
       return ops.workflow(f);
     },
   });
-  const old = turnFor(worker, w.attempt!);
+  const old = turnFor(worker, w.attempt!, "workflow");
   assert.throws(() => invoke(worker, "plan", { graphJsonl: "" }), /unavailable/);
   const output = { summary: "See [draft](./artwork@v2/draft.png)", result: { ready: true } };
   invoke(worker, "finish", { ...output, assets: ["retired@v1"] }); // An old task can still finish.
@@ -703,20 +721,20 @@ test("legacy tool receipts stay hidden and old task prefixes receive current fil
     return ops.workflow(flow);
   } });
   assert.equal(runtime.list().length, 1);
-  assert.equal(runtime.context(worker, turnFor(worker, work.attempt!)), undefined, "new task guidance is already current");
+  assert.equal(runtime.context(worker, turnFor(worker, work.attempt!, "workflow")), undefined, "new task guidance is already current");
   const prefix = "and the asset tools (asset_list, asset_get, asset_version_get, asset_put, asset_version_put)";
   worker.save({ workflowPrompt: prefix });
-  const failed = turnFor(worker, work.attempt!);
+  const failed = turnFor(worker, work.attempt!, "workflow");
   failed.first.origin.turnId = failed.id;
   assert.match(runtime.context(worker, failed)!, /Link working files/);
   assert.throws(() => hub.state.atomic(() => { runtime.auditInsertion(worker, failed.first); throw Error("rollback"); }));
-  const retry = turnFor(worker, work.attempt!);
+  const retry = turnFor(worker, work.attempt!, "workflow");
   retry.first.origin.turnId = retry.id;
   assert.match(runtime.context(worker, retry)!, /Link working files/);
   runtime.auditInsertion(worker, retry.first);
-  assert.equal(runtime.context(worker, turnFor(worker, work.attempt!)), undefined);
+  assert.equal(runtime.context(worker, turnFor(worker, work.attempt!, "workflow")), undefined);
   worker.onBackendUpdate({ sessionUpdate: "compaction_update", status: "completed" });
-  assert.match(runtime.context(worker, turnFor(worker, work.attempt!))!, /Link working files/);
+  assert.match(runtime.context(worker, turnFor(worker, work.attempt!, "workflow"))!, /Link working files/);
   assert.equal(worker.rec.workflowPrompt, prefix);
   assert.equal(runtime.read(root.id).instances.A.work?.id, work.id);
 });
@@ -743,7 +761,7 @@ test("stale choices and a removed instance's old callbacks cannot act on their r
       return ops.workflow(f);
     },
   });
-  const old = turnFor(worker, w.attempt!);
+  const old = turnFor(worker, w.attempt!, "workflow");
   runtime.call(worker, "finish", { summary: "original" }, "first-finish");
   worker.current = undefined;
   runtime.ended(worker, old, { stopReason: "end_turn" });
@@ -753,7 +771,7 @@ test("stale choices and a removed instance's old callbacks cannot act on their r
   f = state();
   w = claim(f, "R")!;
   hub.state.commit([ops.workflow(f)]);
-  const current = turnFor(worker, w.attempt!);
+  const current = turnFor(worker, w.attempt!, "workflow");
   runtime.call(worker, "finish", { summary: "same conclusion" }, "second-finish");
   worker.current = undefined;
   runtime.ended(worker, current, { stopReason: "end_turn" });
@@ -867,9 +885,40 @@ test("on restart only the workflow's own input is held; what got into a conversa
   restarted.stopping = true;
   restarted.workflows.restart();
   const { mail: inbox } = restarted.state;
-  assert.equal(inbox.get("interrupt")?.workflowHeld, true, "the workflow's interruption waits for it to resume");
-  assert.ok(!inbox.get("unrelated")?.workflowHeld, "the main conversation's other mail is not the workflow's");
-  assert.ok(inbox.has("in-already") && !inbox.get("in-already")?.workflowHeld, "left to kernel.resume, which notes its outcome is unknown");
+  assert.equal(inbox.get("interrupt")?.heldBy, "workflow", "the workflow's interruption waits for it to resume");
+  assert.ok(!inbox.get("unrelated")?.heldBy, "the main conversation's other mail is not the workflow's");
+  assert.ok(inbox.has("in-already") && !inbox.get("in-already")?.heldBy, "left to kernel.resume, which notes its outcome is unknown");
+});
+
+test("a resumed interruption gets a provider-owned reminder scoped to that delivery and session", async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-flow-reminder-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  const root = hub.createConversation(), other = hub.createConversation(), runtime = hub.workflows;
+  const f = build(graph(task("A"), end(), edge("A", "end")));
+  f.owner = root.id;
+  f.paused = true;
+  f.interruptions.push({ id: "original", target: f.active!, prompt: [text("correction")] });
+  hub.state.commit([ops.workflow(f)]);
+  const queued = deferred<ReturnType<LiveSession["enqueue"]>>(), enqueue = root.enqueue.bind(root);
+  root.enqueue = (req, first) => {
+    hub.stopping = true; // Keep this real dispatch queued without opening a backend.
+    const input = enqueue(req, first);
+    queued.resolve(input);
+    return input;
+  };
+  hub.stopping = false;
+  runtime.control(root.id, "resume");
+  const input = await queued.promise, reminder = input.messageId;
+  assert.equal(input.provider, "workflow");
+  assert.equal(runtime.read(root.id).interruptions[0].reminder, reminder);
+  assert.equal(runtime.acceptsInput(root, reminder), true);
+  assert.equal(runtime.acceptsInput(other, reminder), false);
+  runtime.control(root.id, "pause");
+  assert.equal(runtime.acceptsInput(root, reminder), false);
+  runtime.control(root.id, "resume");
+  assert.equal(runtime.acceptsInput(root, reminder), false, "resuming cannot revive the old reminder");
 });
 
 test("an interruption that never got to the model holds nothing", (t) => {
@@ -882,7 +931,7 @@ test("an interruption that never got to the model holds nothing", (t) => {
   hub.workflows.call(root, "execute", { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, newId("call"));
   hub.workflows.input(root, "lost", [text("about the graph")], "workflow");
   assert.equal(view(hub.workflows.read(root.id)).interrupted, true);
-  hub.workflows.discarded(root, "lost");
+  root.userInputDiscarded("lost");
   assert.equal(hub.workflows.read(root.id).interruptions.length, 0);
   assert.equal(view(hub.workflows.read(root.id)).interrupted, false);
 });
@@ -895,12 +944,14 @@ test("agents are told what their built-in workflow tools are, and a task agent s
   const root = hub.createConversation();
   turnFor(root, "request");
   const main = hub.systemPromptFor(hub.agent(root.agentId));
-  assert.match(main, /MCP server named "workflow"/, "where the tools come from");
-  assert.match(main, /mcp__workflow__/, "and how an agent program shows them");
-  assert.match(main, /workflow 技能/, "what a user calls them");
-  assert.match(main, /escalate/, "and what a task agent's escalation is");
+  assert.match(main, /MCP tool workflow\.plan/);
+  assert.match(main, /workflow\.execute/);
+  assert.match(main, /workflow\.guide/);
+  assert.doesNotMatch(main, /finish\(\{|choose\(\{|graphJsonl/);
   assert.doesNotMatch(main, /mcp__xsb__ask|xsb\.ask/, "only native question tools are advertised");
-  assert.doesNotMatch(WORKFLOW_MAIN_ABOUT + WORKFLOW_TASK_ABOUT, /\bask\b/, "and no workflow tool list names it");
+  hub.sessionProviders.delete("workflow");
+  assert.doesNotMatch(hub.systemPromptFor(hub.agent(root.agentId)), /workflow\.plan|workflow\.guide/, "the host has no built-in workflow prompt");
+  hub.sessionProviders.set("workflow", hub.workflows);
   hub.workflows.call(root, "execute", { graphJsonl: graph(task("A"), end(), edge("A", "end")) }, newId("call"));
   const f = structuredClone(hub.workflows.read(root.id)), w = claim(f, "A")!;
   const worker = hub.createConversation("claude", "A", { owner: root.id, node: "A", bind: (agentId, sessionId) => {
@@ -911,7 +962,7 @@ test("agents are told what their built-in workflow tools are, and a task agent s
   for (const part of [/own assignment/, /overall task/, /escalate\(\{message\}\)/, /escalate\(\{message, pauseSelf: true\}\)/, /answer it directly/]) assert.match(prompt, part);
   assert.doesNotMatch(prompt, /replan|coordinate/, "one tool, not two");
   // The user asks the task agent about the whole task: it goes to the main conversation, with the user's words.
-  const turn = turnFor(worker, w.attempt!);
+  const turn = turnFor(worker, w.attempt!, "workflow");
   const asked = { ...turn.first, origin: { kind: "user" }, messageId: "q", content: [text("Should the ending change too?")], in: true } as Turn["first"];
   turn.inputs.push(asked);
   assert.deepEqual(hub.workflows.call(worker, "escalate", { message: "The user asks whether the ending should change." }, newId("call")), { forwarded: "main conversation" });
@@ -921,7 +972,7 @@ test("agents are told what their built-in workflow tools are, and a task agent s
   assert.throws(() => hub.workflows.call(worker, "escalate", { message: "x", invalidateSelf: true }, newId("call")), /needs pauseSelf/);
   assert.throws(() => hub.workflows.call(root, "escalate", { message: "x" }, newId("call")), /Unavailable|unavailable/);
   // Its own assignment must change (here its own work finds so): it stops and waits for the main agent, which is told so.
-  turnFor(worker, w.attempt!);
+  turnFor(worker, w.attempt!, "workflow");
   hub.workflows.call(worker, "escalate", { message: "Use the night version of the base.", pauseSelf: true }, newId("call"));
   assert.equal(hub.workflows.read(root.id).instances.A.replan, "Use the night version of the base.");
   assert.equal(view(hub.workflows.read(root.id)).nodes.find((n) => n.name === "A")!.paused, true);
@@ -941,6 +992,8 @@ test("versions are xSB's: the model plans and executes by graph, and a fresh con
   const shown = async (id: string) => {
     const turn = turnFor(root, id);
     const context = runtime.context(root, turn);
+    turn.first.origin.turnId = turn.id;
+    runtime.auditInsertion(root, turn.first);
     turn.first.inserted.resolve();
     await new Promise((r) => setImmediate(r));
     return context && JSON.parse(context.slice(context.indexOf("\n") + 1));
@@ -977,6 +1030,9 @@ test("versions are xSB's: the model plans and executes by graph, and a fresh con
   root.onBackendUpdate({ sessionUpdate: "compaction_update", status: "completed" } as never);
   assert.equal((await shown("compacted")).graphJsonl, graphJsonl(parseGraph(jsonl)), "a compacted context is shown the graph whole");
   assert.equal(await shown("after-compaction"), undefined);
+  root.onBackendUpdate({ sessionUpdate: "usage_update", used: 1000, size: 10000 });
+  root.onBackendUpdate({ sessionUpdate: "usage_update", used: 500, size: 10000 });
+  assert.equal((await shown("usage-dropped")).graphJsonl, graphJsonl(parseGraph(jsonl)), "a usage-only compaction refreshes the full graph");
   root.rec.contextEpoch = (root.rec.contextEpoch ?? 0) + 1;
   const renewed = await shown("renewed");
   assert.equal(renewed.graphJsonl, graphJsonl(parseGraph(jsonl)), "a renewed context is shown the graph whole");
@@ -1047,7 +1103,7 @@ test("an ACP form in a task resumes the same attempt without a workflow interrup
     Object.assign(f.instances.A, { agentId, sessionId });
     return ops.workflow(f);
   } });
-  const turn = turnFor(worker, w.attempt!);
+  const turn = turnFor(worker, w.attempt!, "workflow");
   hub.stopping = false;
   worker.save({ backendSessionId: "backend-worker" });
   worker.onBackendUpdate({ sessionUpdate: "state_update", state: "running" }, "backend-worker");
@@ -1116,9 +1172,8 @@ test("task prefixes share common instructions and freeze role, catalog and prefe
   assert.match(prefix, /Evidence checks/);
   assert.doesNotMatch(prefix, /SKILL BODY MUST BE LOADED/);
   assert.doesNotMatch(prefix, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "no changing physical cwd in the task prefix");
-  const other = conversationPrompt({ ...spec, id: "other", name: "B", workflowNode: "B" }, "en", "", true);
-  const same = conversationPrompt(spec, "en", "", true);
-  assert.equal(same.slice(0, same.indexOf('You are "')), other.slice(0, other.indexOf('You are "')), "common rules precede node-specific text");
+  const other = hub.systemPromptFor({ ...spec, id: "other", name: "B", workflowNode: "B" });
+  assert.equal(prefix.slice(0, prefix.indexOf('You are "')), other.slice(0, other.indexOf('You are "')), "common rules precede node-specific text");
   fs.mkdirSync(path.dirname(hub.paths.instructions(spec.id)), { recursive: true });
   fs.writeFileSync(hub.paths.instructions(spec.id), "An edit that must not rewrite a live task role");
   assert.equal(hub.systemPromptFor({ ...spec, workspace: "/moved", name: "renamed" }), prefix);
@@ -1143,6 +1198,7 @@ test("assignments are rendered at send time with complete facts and separate tas
   work.assignment.schema = { type: "object" };
   const before = structuredClone(work);
   const source = renderAssignment(work, "en", false, ["withdrawn-work"]);
+  assert.ok(source.includes("finish({summary,result})"), "the frozen schema assignment declares its legacy delivery parameters");
   assert.match(source, /^# Workflow task\n/);
   assert.ok(source.includes(String(work.assignment.target)));
   assert.ok(source.includes("> !say THIS-IS-A-PAST-RESULT"), "result text is material, not a fresh instruction");
@@ -1155,5 +1211,93 @@ test("assignments are rendered at send time with complete facts and separate tas
   const extra = { ...work, kind: "extra" as const, assignment: { ...work.assignment, text: "Perform this additional check" } };
   const additionalSource = renderAssignment(extra, "en");
   assert.match(additionalSource, /^# Additional task/);
+  assert.ok(additionalSource.includes("finish({summary})"));
   assert.ok(additionalSource.includes("Original task goal") && additionalSource.includes("Perform this additional check"));
 });
+
+for (const other of ["peer task", "user protection", "none"] as const) {
+  test(`rolling back a delivered node assignment respects other work in its turn (${other})`, { timeout: 5000 }, async t => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-withdraw-assignment-"));
+    const hub = new Hub(dir);
+    t.after(async () => {
+      for (const session of hub.live.values()) session.releaseUserStop(false);
+      await hub.shutdown();
+      await hub.kernel.hooks.settled();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    setProjectLanguage(hub.paths, "en");
+    const owner = hub.createConversation();
+    const flow = build(graph({ node: "W", requirements: "Produce a route" }, end("left"), end("right"),
+      edge("W", "left", "one"), edge("W", "right", "two")));
+    flow.owner = owner.id;
+    const worker = hub.createConversation("claude", "W", { owner: owner.id, node: "W", bind(agentId, sessionId) {
+      Object.assign(flow.instances.W, { agentId, sessionId });
+      return ops.workflow(flow);
+    } });
+    const firstPrompt = deferred<void>();
+    const prompts: { content: string; turnId?: string }[] = [];
+    let cancellations = 0;
+    const backend = {
+      caps: { orderedCancellation: true },
+      async prompt(sessionId: string, blocks: { text?: string }[], origin: { turnId?: string }) {
+        prompts.push({ content: blocks.map(b => b.text).join("\n"), turnId: origin.turnId });
+        worker.onBackendUpdate({ sessionUpdate: "state_update", state: "running" }, sessionId);
+        firstPrompt.resolve();
+        return `backend-receipt-${prompts.length}`;
+      },
+      cancel() { cancellations++; },
+    };
+    Object.assign(worker, { backend, ensureBackend: async () => backend });
+    worker.save({ backendSessionId: "backend-worker" });
+    hub.workflows.control(owner.id, "resume");
+    await firstPrompt.promise;
+    const turn = worker.current!;
+    await turn.first.inserted.promise;
+    assert.equal(turn.first.provider, "workflow");
+    assert.equal(turn.first.backendMessageId, "backend-receipt-1");
+    assert.equal(hub.workflows.read(owner.id).instances.W.work?.inserted, true);
+    hub.workflows.call(worker, "finish", { output: "First route" }, newId("call"));
+
+    let peerTask: string | undefined;
+    if (other === "peer task") {
+      const peer = hub.createConversation();
+      const task = hub.kernel.dispatch({ agentId: peer.agentId, sessionId: peer.id }, { agentId: worker.agentId, sessionId: worker.id },
+        { title: "Independent check", topic: "check", instructions: "Check the independent request", after: [] });
+      assert.ok("id" in task);
+      peerTask = task.id;
+      await hub.kernel.hooks.settled();
+      const joined = turn.inputs.find(i => i.item?.taskId === peerTask)!;
+      await joined.inserted.promise;
+      assert.equal(joined.backendMessageId, "backend-receipt-2");
+      assert.equal(hub.state.tasks.get(peerTask)?.status, "running");
+    } else if (other === "user protection") {
+      // A user action such as a form response protects the turn without adding a second prompt.
+      worker.protect();
+      assert.equal(turn.inputs.length, 1);
+      assert.equal(turn.protected, true);
+    }
+
+    hub.workflows.control(owner.id, "rollback", ["W"]);
+    hub.workflows.control(owner.id, "pause"); // Keep the next assignment pending while we inspect this turn's settlement.
+    assert.equal(cancellations, other === "none" ? 1 : 0);
+    assert.equal(worker.current, turn);
+    for (const [tool, args] of [["finish", { output: "late" }], ["choose", { node: "right" }]] as const)
+      assert.throws(() => hub.workflows.call(worker, tool, args, newId("call")), /unavailable|no active turn/i);
+    if (other !== "none") {
+      assert.equal(turn.cancelledBy, undefined);
+      const notice = turn.inputs.find(i => i.content.some(b => b.text?.includes("withdrew the assignment")))!;
+      assert.equal(notice.targetTurnId, turn.id);
+      await notice.inserted.promise;
+    }
+    worker.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: other === "none" ? "cancelled" : "end_turn" }, "backend-worker");
+    await turn.done.promise;
+    assert.equal(worker.current, undefined);
+    if (peerTask) assert.equal(hub.state.tasks.get(peerTask)?.status, "completed");
+    const next = worker.enqueue({ origin: { kind: "system" }, prompt: [text("An independent later turn")] });
+    await next.inserted.promise;
+    assert.ok(next.origin.turnId && next.origin.turnId !== turn.id);
+    assert.deepEqual(prompts.filter(p => p.content.includes("withdrew the assignment")).map(p => p.turnId),
+      other === "none" ? [] : [turn.id]);
+    worker.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" }, "backend-worker");
+  });
+}

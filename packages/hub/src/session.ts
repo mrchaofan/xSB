@@ -25,23 +25,25 @@ import type { ExecutionSource, BackendRun, RunUpdate, Boundary, ContentBlock, Co
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
-import type { Hub } from "./hub.ts";
-import { bridgeServer } from "./mcp.ts";
+import type { Hub, SessionProvider } from "./hub.ts";
 import { boundedText, contentTokens, contextOverflow, contextRef, textTokens } from "./context.ts";
 import { historyUpdate } from "./history.ts";
 import { Paths } from "./paths.ts";
 import { asPreface, conversationTitle, handoff, isXsbText, questionToolNotice } from "./prompts.ts";
 import type { Gives, Renewal } from "./prompts.ts";
 import { turnsSinceCleared } from "./transcript.ts";
-import { MessageDelivery } from "@xsb/protocol";
+import { MessageDelivery, assistantOnly, userVisibleUpdate } from "@xsb/protocol";
 import type { MailItem, SessionRec } from "./state.ts";
-import type { WorkflowTold } from "./workflow-state.ts";
 import { ops } from "./state.ts";
 import type { Deferred } from "./util.ts";
 import { deferred, newId, now } from "./util.ts";
 import { isVeto } from "./hooks.ts";
 
 export type TurnRequest = {
+  /** An explicit append or host notification expires with the addressed turn. */
+  targetTurnId?: string;
+  /** Supplied by a trusted Hub service for inputs that it can withdraw. */
+  provider?: string;
   interruptionId?: string;
   origin: OriginMeta;
   prompt: ContentBlock[];
@@ -81,8 +83,10 @@ export type Input = Discarded &
     backendMessageId?: string;
     /** The inputs it was given with, in one prompt. */
     batch?: Input[];
-    /** What went in front of that prompt (instructions, a handoff, workflow context): owed again if it is refused. */
+    /** Standing instructions and handoffs are owed again if this prompt is refused. */
     prefaces?: string[];
+    /** Providers whose context or scope accompanied this particular ACP offer. */
+    promptProviders?: Set<SessionProvider>;
     /** It is in the conversation. */
     in?: boolean;
     /** The insertion receipt was already published before safe context recovery. */
@@ -95,7 +99,8 @@ export type Input = Discarded &
 const inputOf = (req: TurnRequest): Input => {
   const messageId = req.origin.messageId ?? newId("m");
   const inserted = deferred<void>();
-  return { ...req, messageId, origin: { ...req.origin, messageId }, content: req.prompt, inserted };
+  return { ...req, provider: req.provider ?? req.item?.provider, targetTurnId: req.targetTurnId ?? req.item?.targetTurnId,
+    messageId, origin: { ...req.origin, messageId }, content: req.prompt, inserted };
 };
 /** Input given anew, as the first of a turn of its own; it is answered when this one is. */
 const again = (input: Input): Input => {
@@ -132,8 +137,8 @@ type InsertionWindow = { runId?: string; end?: TurnEnd };
 export type Turn = {
   id: string;
   protected: boolean;
-  /** The workflow context put in front of this turn's first prompt; a later turn gets its own. */
-  workflowPreface?: string;
+  /** Assemble this turn's first prompt at submission. A recovery already has its inbox inputs. */
+  openingPrompt?: "withInbox" | "context";
   /** Unread inputs are moved together when the turn ends. */
   recovered?: Input[];
   order?: Input[];
@@ -195,18 +200,58 @@ export class LiveSession {
   private sendingBatch?: Input[];
   private deliveryViews = new Map<string, string>();
 
+  get available(): boolean {
+    for (const provider of this.hub.sessionProviders.values()) if (provider.available?.(this) === false) return false;
+    return true;
+  }
+
+  readonly supplementalInput = (origin: OriginMeta, block?: ContentBlock, source?: string): boolean => {
+    for (const provider of this.hub.sessionProviders.values()) if (provider.supplementalInput?.(this, origin, block, source)) return true;
+    return false;
+  };
+
+  userInputDiscarded(messageId: string): void {
+    for (const provider of this.hub.sessionProviders.values()) provider.userInputDiscarded?.(this, messageId);
+  }
+
+  acceptsInput(provider: string | undefined, messageId: string): boolean {
+    return provider === undefined || this.hub.sessionProviders.get(provider)?.acceptsInput?.(this, messageId) === true;
+  }
+
+  /** Only called for inputs the backend has not been offered in this execution. */
+  private expireInput(input: Input): void {
+    this.drop(input);
+    this.hub.state.atomic(() => {
+      const why = "The input's provider withdrew this delivery.";
+      if (input.item && !input.receipted) this.hub.kernel.reject(input.item, why);
+      this.discard(input, new Error(why), "expired");
+    });
+  }
+
+  /** Revocation can race backend binding or a held insertion. Remove just the expired inputs. */
+  private currentBatch(turn: Turn, batch: Input[]): Input[] {
+    const remaining = batch.filter(i => {
+      if (this.acceptsInput(i.provider, i.messageId)) return true;
+      this.expireInput(i);
+      return false;
+    });
+    if (batch.includes(turn.first) && !remaining.includes(turn.first) && turn.inputs.length)
+      turn.first = this.users(turn.inputs[0]);
+    return remaining;
+  }
+
   private queueEligible(input: Input): boolean {
     const item = input.item;
     const task = item?.taskId ? this.hub.state.tasks.get(item.taskId) : undefined;
-    return !input.cancelling && !!item && this.hub.state.mail.has(item.id) && !item.targetTurnId && !item.workflowHeld &&
+    return !input.cancelling && !!item && this.hub.state.mail.has(item.id) && !input.targetTurnId && !item.heldBy &&
       (!task || !task.stopping && !task.cascadeStopped && !["completed", "failed", "cancelled", "interrupted"].includes(task.status) &&
         task.after.every(id => ["completed", "failed", "cancelled", "interrupted"].includes(this.hub.state.tasks.get(id)?.status ?? "")));
   }
 
   private canSendQueued(input: Input): boolean {
-    return !this.sendingHead && !this.sendingBatch && this.queue[0] === input && this.queueEligible(input) && !!this.current?.started &&
+    return !this.sendingHead && !this.sendingBatch && this.queue[0] === input && this.queueEligible(input) && this.acceptsInput(input.provider, input.messageId) && !!this.current?.started &&
       !this.current.cancelledBy && !this.current.recovering && !!this.backend && !this.userStopping && !this.hub.stopping &&
-      !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id }) && this.hub.workflows?.available(this) !== false;
+      !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id }) && this.available;
   }
 
   private deliveryView(input: Input, state: MessageDelivery["state"]): void {
@@ -284,8 +329,8 @@ export class LiveSession {
   /** Text to put in front of the next prompt. */
   private prefaces: string[] = [];
   private handoffPreface?: string;
-  /** The notes and workflow definitions this backend context has received. */
-  readonly given: { notes: Map<string, string>; workflow?: WorkflowTold } = { notes: new Map() };
+  /** Replaced when context is lost. Providers can key their own delivery caches by this object. */
+  given = { notes: new Map<string, string>() };
   /** Context in use at the end of the backend's last report, in tokens. */
   private used?: number;
   private contextSize?: number;
@@ -453,9 +498,7 @@ export class LiveSession {
     this.toolsKey = this.hub.toolsKeyFor(this);
     const params = () => ({
       cwd: agent.workspace,
-      // The hub's own tools, then the others the agent has (Hub.toolServers): the system prompt says where each comes from.
-      mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken),
-        ...this.hub.backendToolServers(this, () => this.backend === backend && !!this.rec.backendSessionId && !backend.conn.isClosed)],
+      mcpServers: this.hub.backendToolServers(this, () => this.backend === backend && !!this.rec.backendSessionId && !backend.conn.isClosed),
       ...(backend.caps.systemPrompt ? { systemPrompt: { mode: "append", content: [text(instructions)] } } : {}),
       ...(backend.caps.additionalDirectories
         ? { additionalDirectories: [paths.shared] }
@@ -567,8 +610,7 @@ export class LiveSession {
 
   /** What the model was given is gone from its context (a boundary, or a compaction the backend reports only by usage). */
   private forgetGiven(): void {
-    this.given.notes.clear();
-    this.given.workflow = undefined;
+    this.given = { notes: new Map() };
   }
 
   /** Text to put in front of the next prompt of this session, whichever turn that is. */
@@ -894,7 +936,7 @@ export class LiveSession {
       case "usage_update":
         this.usageRevision++;
         if (typeof update.used === "number" && Number.isFinite(update.used) && update.used >= 0) {
-          // Native compaction may have removed notes and workflow context.
+          // Native compaction may have removed previously delivered context.
           if (this.used !== undefined && update.used < this.used) this.forgetGiven();
           this.used = update.used;
           this.estimated = update.used;
@@ -982,15 +1024,16 @@ export class LiveSession {
         (update._meta?.[Discarded.key] as import("@xsb/protocol").Discarded | undefined)?.content.some(block => block.type === "image");
       const offset = durable && needsOffset ? [...this.recordOffset(file, eventId)][0] ?? initialOffset : initialOffset;
       for (const client of this.clients) if (client !== except) {
-        const view = client.history ? historyUpdate(update, this.id, offset) : update;
+        const view = client.history ? historyUpdate(update, this.id, offset, this.supplementalInput)
+          : userVisibleUpdate(update, this.supplementalInput);
         if (view) client.conn.notify("session/update", { sessionId: this.id, update: view });
       }
     });
   }
 
   /** A host-authorized source publishes prepared Markdown into this conversation, atomically with its caller's state. */
-  appendConversationEntry(id: string, source: ConversationEntry["source"], markdown: string): void {
-    const entry: ConversationEntry = { schemaVersion: 1, sessionId: this.id, id, source, markdown };
+  appendConversationEntry(id: string, source: ConversationEntry["source"], markdown: string, withdrawn?: true): void {
+    const entry: ConversationEntry = { schemaVersion: 1, sessionId: this.id, id, source, markdown, ...(withdrawn && { withdrawn }) };
     this.emit({ sessionUpdate: "session_info_update", _meta: { [ConversationEvent.key]: entry } });
   }
 
@@ -1100,7 +1143,7 @@ export class LiveSession {
   /** The receipt of an input: it is in the conversation, or it never will be. Its sender learns which. */
   private receipt(input: Input, inserted: boolean, why: unknown = RpcError.cancelled()): void {
     if (inserted && input.receipted) {
-      this.hub.workflows?.auditInsertion(this, input);
+      for (const provider of input.promptProviders ?? []) provider.auditInsertion?.(this, input);
       return;
     }
     const about = { agentId: this.agentId, sessionId: this.id, from: fromOf(input.origin), ...(input.origin.taskId ? { taskId: input.origin.taskId } : {}) };
@@ -1108,17 +1151,17 @@ export class LiveSession {
     this.hub.state.atomic(() => {
       this.hub.kernel.mark(input.messageId, inserted ? "inserted" : unknown ? "insertion_uncertain" : "discarded_unseen", about);
       if (inserted) {
-        this.hub.workflows?.auditInsertion(this, input);
+        for (const provider of input.promptProviders ?? []) provider.auditInsertion?.(this, input);
         this.show(input);
       }
       this.hub.state.afterCommit(() => {
         this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: input.messageId, about, inserted, outcome: inserted ? "inserted" : unknown ? "unknown" : "not_inserted" });
         if (inserted) {
           input.receipted = true;
-          if (this.current?.inputs.includes(input)) this.hub.workflows?.inserted(this, input.messageId);
+          if (input.provider && this.current?.inputs.includes(input)) this.hub.sessionProviders.get(input.provider)?.inserted?.(this, input.messageId);
           input.inserted.resolve();
         } else {
-          if (users(input)) this.hub.workflows?.discarded(this, input.messageId);
+          if (users(input)) this.userInputDiscarded(input.messageId);
           input.inserted.reject(why);
         }
         if (this.sendingHead === input) { this.sendingHead = undefined; this.publishQueue(); }
@@ -1161,19 +1204,16 @@ export class LiveSession {
   pump(): void {
     // While the hub stops, nothing starts: what waits is in the inbox, and runs on the next start.
     if (this.userStopping || this.current || this.hub.stopping || this.sendingHead || this.queue[0]?.cancelling) return;
-    if (this.hub.workflows?.available(this) === false) {
+    if (!this.available) {
       for (const input of [...this.queue.splice(0), ...this.carried.splice(0)]) this.discard(input);
       return;
     }
-    // Recheck queued workflow effects after the preceding turn has released this session.
+    // The provider can revoke a queued input while the preceding turn occupies this session.
     while (this.queue.length) {
       const input = this.queue[0];
-      const staleAttempt = input.origin.kind === "system" && input.messageId.startsWith("attempt_") &&
-        this.hub.workflows?.acceptsAttempt(this,input.messageId) === false;
-      const staleNotice = input.item?.workflowNotice && !this.hub.workflows.acceptsNotice(this,input.messageId);
-      if (!staleAttempt && !staleNotice && !(input.item && this.hub.kernel.settleTerminalInput(input.item))) break;
-      if (staleNotice) this.hub.kernel.ack([input.messageId]);
-      this.discard(this.queue.shift()!);
+      if (!this.acceptsInput(input.provider, input.messageId)) this.expireInput(this.queue.shift()!);
+      else if (input.item && this.hub.kernel.settleTerminalInput(input.item)) this.discard(this.queue.shift()!);
+      else break;
     }
     if (!this.queue.length) return;
     if (this.priorityTaskId) {
@@ -1259,27 +1299,12 @@ export class LiveSession {
     // Stopped meanwhile: it ended already, or ends now.
     if (this.current !== turn) return;
     if (turn.cancelledBy) return this.end({ stopReason: "cancelled" });
-    if (first.item?.workflowNotice && !this.hub.workflows.acceptsNotice(this, first.messageId)) {
-      turn.cancelledBy = "hub";
-      return this.end({ stopReason: "cancelled" });
-    }
-    this.workflowContext(turn);
+    if (!this.currentBatch(turn, turn.inputs).length) return this.end({ stopReason: "cancelled" });
+    first = turn.first;
+    turn.held = turn.held.filter(i => i !== first);
+    turn.openingPrompt = "withInbox";
     turn.started = true;
-    // What waited in the inbox comes with this turn, in its first prompt.
-    const digest = this.hub.delivery.digest(this, Math.max(0, this.hub.policy(this.agentId).promptTokens - this.standingTokens - this.hub.policy(this.agentId).reserveTokens - contentTokens(first.content) - contentTokens(turn.held.flatMap(i => i.content)) - contentTokens(this.prefaces.map(text)))).map((d) => inputOf(d));
-    turn.inputs.splice(1, 0, ...digest);
-    turn.order!.splice(1, 0, ...digest);
-    turn.items.push(...itemsOf(digest));
-    this.send([first, ...digest, ...turn.held.splice(0)]);
-  }
-
-  private workflowContext(turn:Turn): void {
-    const workflowContext = this.hub.workflows?.context(this,turn);
-    if (workflowContext) {
-      // Of this turn only: a later turn is given its own, up to date (`refused` does not put it back).
-      turn.workflowPreface = workflowContext;
-      this.preface(workflowContext);
-    }
+    this.send([first, ...turn.held.splice(0)]);
   }
 
   /**
@@ -1288,7 +1313,19 @@ export class LiveSession {
    */
   private send(batch: Input[]): void {
     const turn = this.current!;
-    if (turn.cancelledBy) return;
+    // A synchronous control transaction can revoke an input after preparing a steer.
+    // Render, record the offer, and call ACP against the committed state.
+    this.hub.state.afterCommit(() => {
+      if (this.current === turn && !turn.cancelledBy) this.submit(turn, batch);
+    });
+  }
+
+  private submit(turn: Turn, batch: Input[]): void {
+    batch = this.currentBatch(turn, batch.filter(i => turn.inputs.includes(i)));
+    if (!batch.length) {
+      if (!turn.inputs.length && !turn.inserted) this.end({ stopReason: "cancelled" });
+      return;
+    }
     if (this.sendingBatch) {
       for (const input of batch) {
         if (!turn.held.includes(input)) turn.held.push(input);
@@ -1300,10 +1337,33 @@ export class LiveSession {
     if (!backend) return this.end({ stopReason: "error", failure: new Error("the agent program is gone") });
     const sessionId = this.rec.backendSessionId!;
     const policy = this.hub.policy(this.agentId);
+    const opening = turn.openingPrompt && batch.includes(turn.first);
+    const providers = [...this.hub.sessionProviders];
+    const context: ContentBlock[] = [];
+    for (const input of batch) input.promptProviders = undefined;
+    if (opening) {
+      for (const [, provider] of providers) {
+        const body = provider.context?.(this, turn);
+        if (body) {
+          context.push(assistantOnly(text(body)));
+          (turn.first.promptProviders ??= new Set()).add(provider);
+        }
+      }
+      if (turn.openingPrompt === "withInbox") {
+        const reserved = this.standingTokens + policy.reserveTokens + contentTokens(batch.flatMap(i => i.content)) +
+          contentTokens(this.prefaces.map(text)) + contentTokens(context);
+        const digest = this.hub.delivery.digest(this, Math.max(0, policy.promptTokens - reserved)).map(inputOf);
+        turn.inputs.splice(1, 0, ...digest);
+        turn.order!.splice(1, 0, ...digest);
+        turn.items.push(...itemsOf(digest));
+        batch.splice(1, 0, ...digest);
+        turn.openingPrompt = "context";
+      }
+    }
     for (const input of batch) this.deliveryView(input, "sending");
     if (this.handoffPreface && this.prefaces.includes(this.handoffPreface)) {
       const left = policy.promptTokens - policy.reserveTokens - this.standingTokens - contentTokens(batch.flatMap((i) => i.content)) -
-        contentTokens(this.prefaces.filter((p) => p !== this.handoffPreface).map(text));
+        contentTokens(this.prefaces.filter((p) => p !== this.handoffPreface).map(text)) - contentTokens(context);
       if (textTokens(this.handoffPreface) > left && this.rec.contextCheckpoint) {
         const ref = this.rec.contextCheckpoint;
         const shorter = left >= 512 ? boundedText(this.hub.paths, this.agentId,
@@ -1313,13 +1373,24 @@ export class LiveSession {
         this.handoffPreface = shorter;
       }
     }
-    const content = [...this.prefaces.map((p) => text(p)), ...batch.flatMap(i => {
+    const content = [...this.prefaces.map(p => assistantOnly(text(p))), ...context, ...batch.flatMap(i => {
       if (!users(i)) return i.content;
       const given = this.spill(i.content, policy);
-      const prompt = this.hub.workflows?.userPrompt(this, turn, i, given);
-      i.deliveredAs = deliveredAs(i.content, given, !!prompt?.scope, backend.caps.image);
-      return prompt?.scope ? [text(prompt.scope), ...prompt.content] : prompt?.content ?? given;
+      const scopes: ContentBlock[] = [];
+      for (const [, provider] of providers) {
+        const scope = provider.userScope?.(this, turn, i);
+        if (scope) {
+          scopes.push(assistantOnly(text(scope)));
+          (i.promptProviders ??= new Set()).add(provider);
+        }
+      }
+      i.deliveredAs = deliveredAs(i.content, given, scopes.length > 0, backend.caps.image);
+      return [...scopes, ...given];
     })];
+    // Preparation can emit updates that revoke an input or unregister a contributor.
+    const current = this.currentBatch(turn, batch);
+    if (current.length !== batch.length || providers.some(([name, provider]) => this.hub.sessionProviders.get(name) !== provider))
+      return this.submit(turn, current);
     const tokens = contentTokens(content);
     if (tokens + this.standingTokens + policy.reserveTokens > policy.promptTokens) {
       const error = new RpcError(-32602, "This input exceeds the agent's prompt budget. The original is preserved in the conversation; split the input or reference a file.", { errorKind: "input_too_large" });
@@ -1331,51 +1402,50 @@ export class LiveSession {
       turn.started = false;
       return this.end({ stopReason: "error", failure: error });
     }
-    if (!turn.inserted && !turn.recovering && !this.prefaces.length && (this.used ?? 0) > 0 && this.estimated + tokens + policy.reserveTokens > this.contextLimit()) {
+    if (!turn.inserted && !turn.recovering && !this.prefaces.length && !context.length && (this.used ?? 0) > 0 && this.estimated + tokens + policy.reserveTokens > this.contextLimit()) {
       return void this.recover(turn, new Error("Context window exceeded before submission"), false);
     }
     // They go with this batch; they are spent once it is in (`landed`), and come back if it is not (`refused`).
     const carried = this.prefaces;
     this.prefaces = [];
+    if (opening) turn.openingPrompt = undefined;
     for (const input of batch) input.prefaces = carried;
     this.estimated += tokens;
     if (this.rec.backendFresh || !this.rec.conversed) this.save({ backendFresh: undefined, conversed: true });
     for (const input of batch) {
       input.batch = batch; input.sent = "prompt"; input.backendSessionId = sessionId;
       input.origin = { ...input.origin, turnId: turn.id };
-      if (input.item?.targetTurnId && this.currentRun?.turnId === turn.id) input.runId = this.currentRun.id;
+      if (input.targetTurnId && this.currentRun?.turnId === turn.id) input.runId = this.currentRun.id;
     }
     // The tasks are the executor's before tools or output can arrive.
     this.hub.state.atomic(() => {
       this.hub.delivery.given(itemsOf(batch));
       this.hub.kernel.offered(batch.map(input => ({ messageId: input.messageId, about: { agentId: this.agentId, sessionId: this.id, from: fromOf(input.origin), ...(input.origin.taskId ? { taskId: input.origin.taskId } : {}) } })), sessionId, batch[0].messageId);
     });
-    this.hub.state.afterCommit(() => {
-      this.sendingBatch = batch;
-      this.insertionRuns.clear();
-      this.publishQueue();
-      const given = this.current === turn && !turn.cancelledBy && !this.hub.stopping && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })
-        ? backend.prompt(sessionId, content, { ...batch[0].origin, turnId: turn.id })
-        : Promise.reject(RpcError.cancelled());
-      given.then(
-        (messageId) => {
-          if (this.backend === backend && this.rec.backendSessionId === sessionId) {
-            const run = this.sendingBatch === batch ? this.insertionRuns.get(messageId) : undefined;
-            this.landed(batch, run, messageId);
+    this.sendingBatch = batch;
+    this.insertionRuns.clear();
+    const given = this.current === turn && !turn.cancelledBy && !this.hub.stopping && !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })
+      ? backend.prompt(sessionId, content, { ...batch[0].origin, turnId: turn.id })
+      : Promise.reject(RpcError.cancelled());
+    given.then(
+      (messageId) => {
+        if (this.backend === backend && this.rec.backendSessionId === sessionId) {
+          const run = this.sendingBatch === batch ? this.insertionRuns.get(messageId) : undefined;
+          this.landed(batch, run, messageId);
+        }
+      },
+      (e) => {
+        if (this.backend === backend && this.rec.backendSessionId === sessionId) {
+          if (this.sendingBatch === batch) this.sendingBatch = undefined;
+          this.refused(batch, e);
+          if (this.current === turn && !turn.cancelledBy && !turn.recovering) {
+            for (const input of turn.held.splice(0)) this.send([input]);
+            this.publishQueue();
           }
-        },
-        (e) => {
-          if (this.backend === backend && this.rec.backendSessionId === sessionId) {
-            if (this.sendingBatch === batch) this.sendingBatch = undefined;
-            this.refused(batch, e);
-            if (this.current === turn && !turn.cancelledBy && !turn.recovering) {
-              for (const input of turn.held.splice(0)) this.send([input]);
-              this.publishQueue();
-            }
-          }
-        },
-      );
-    });
+        }
+      },
+    );
+    this.publishQueue();
   }
 
   /**
@@ -1435,7 +1505,7 @@ export class LiveSession {
     if (!turn || !batch.every((i) => turn.inputs.includes(i) && i.sent && !i.in)) return;
     if (e instanceof RpcError && e.code === RpcError.CANCELLED) {
       this.hub.kernel.declined(batch.map((i) => i.messageId));
-      this.restorePrefaces(batch, turn);
+      this.restorePrefaces(batch);
       for (const input of batch) this.leave(input);
       return this.settle();
     }
@@ -1444,7 +1514,7 @@ export class LiveSession {
     if (contextOverflow(e) && this.canRecover(turn)) return void this.recover(turn, e);
     const failure = e;
     // What came in front of it (instructions, a handoff) was not given: it goes in front of the next prompt.
-    this.restorePrefaces(batch, turn);
+    this.restorePrefaces(batch);
     if (!turn.inserted) {
       // The turn could not begin: what it was to begin with fails with it, its tasks too (kept in `items`).
       for (const input of batch) {
@@ -1478,15 +1548,15 @@ export class LiveSession {
       const whole = out[i].text ?? "";
       const { file } = contextRef(this.hub.paths, this.agentId, whole);
       const head = Buffer.from(whole, "utf8").subarray(0, PASTE_EXCERPT_BYTES).toString("utf8").replace(/\uFFFD$/, "");
-      out[i] = text(`[xsb] The user's input was too large to give in full (${whole.length.toLocaleString("en")} characters). ` +
-        `It is saved whole at ${file}; read that file for all of it. It begins:\n\n${head}\n\n[… continues in ${file}]`);
+      out[i] = { ...out[i], text: `[xsb] The user's input was too large to give in full (${whole.length.toLocaleString("en")} characters). ` +
+        `It is saved whole at ${file}; read that file for all of it. It begins:\n\n${head}\n\n[… continues in ${file}]` };
     }
     return out;
   }
 
-  /** A batch was not taken in: the prefaces it carried are owed still, except this turn's workflow context. */
-  private restorePrefaces(batch: Input[], turn: Turn): void {
-    const owed = (batch[0]?.prefaces ?? []).filter((p) => p !== turn.workflowPreface && !this.prefaces.includes(p));
+  /** Standing instructions and handoffs from an unaccepted offer carry over to the next prompt. */
+  private restorePrefaces(batch: Input[]): void {
+    const owed = (batch[0]?.prefaces ?? []).filter(p => !this.prefaces.includes(p));
     this.prefaces = [...owed, ...this.prefaces];
     for (const input of batch) input.prefaces = undefined;
   }
@@ -1500,13 +1570,13 @@ export class LiveSession {
     // A prompt receipt can follow idle. Wait for it on normal completion and stop; a failed execution instead
     // cancels and fences the unanswered requests in end(), so a broken backend cannot hold the turn forever.
     if (!turn.runEnd?.failure && turn.inputs.some((i) => i.sent === "prompt" && !i.in)) {
-      if (turn.inputs.some(i => i.sent === "prompt" && !i.in && !i.item?.targetTurnId)) return;
+      if (turn.inputs.some(i => i.sent === "prompt" && !i.in && !i.targetTurnId)) return;
       const end = turn.runEnd;
       // Drain responses already received with idle. A targeted append cannot hold its turn open
       // solely to become a later execution; if still unconfirmed, end() fences the old binding.
       setImmediate(() => {
         if (this.current === turn && turn.runEnd === end && this.runEndedFor(turn) &&
-          !turn.inputs.some(i => i.sent === "prompt" && !i.in && !i.item?.targetTurnId)) this.end(end ?? { stopReason: "cancelled" });
+          !turn.inputs.some(i => i.sent === "prompt" && !i.in && !i.targetTurnId)) this.end(end ?? { stopReason: "cancelled" });
       });
       return;
     }
@@ -1547,8 +1617,8 @@ export class LiveSession {
     this.drop(input);
     input.sent = undefined;
     if (this.userStopping) return this.discard(input);
-    if (input.item?.targetTurnId) {
-      this.hub.kernel.ack([input.item.id]);
+    if (input.targetTurnId) {
+      if (input.item) this.hub.kernel.ack([input.item.id]);
       return this.discard(input, new Error("Target turn has ended or changed."));
     }
     if (carry && users(input)) return void this.carried.push(input);
@@ -1580,16 +1650,16 @@ export class LiveSession {
     // What is not in the conversation: on its way, or held by the hub.
     const out = turn.inputs.filter((i) => !i.in);
     const order = turn.order ?? [...turn.inputs];
-    const expiredAppend = out.some((i) => i.item?.targetTurnId);
+    const expiredAppend = out.some((i) => i.targetTurnId);
     // Only an append the backend was given can still surface in a later turn; one the hub held never reached it.
-    const expiredAppendSent = out.some((i) => i.item?.targetTurnId && i.sent);
+    const expiredAppendSent = out.some((i) => i.targetTurnId && i.sent);
     // Failed with input given and not answered: the backend may still have it, and run it. It is given again (`again`),
     // so the old backend is fenced first, as after a stop: one copy only ever reaches the model. (Read before `leave`
     // forgets what was sent.)
     const unanswered = !!end.failure && turn.started && out.some((i) => i.sent);
     // A prompt the turn ends without having in the conversation took prefaces along: they are owed still.
     const unsent = out.find((i) => i.sent && i.prefaces);
-    if (unsent) this.restorePrefaces(unsent.batch ?? [unsent], turn);
+    if (unsent) this.restorePrefaces(unsent.batch ?? [unsent]);
     let next: Input[] = [];
     if (!turn.started && end.failure && !this.hub.stopping) {
       // It never reached the backend: nothing else will run what it brought (its tasks fail with it).
@@ -1650,7 +1720,7 @@ export class LiveSession {
       this.hub.state.atomic(() => {
         this.hub.state.afterCommit(() => this.lifecycle.emit("turn.ended", source, { stopReason: end.stopReason, failed: !!end.failure }));
         this.hub.state.afterCommit(() => this.hub.kernel.hooks.emit("acp.turn_ended", { agentId: this.agentId, sessionId: this.id, turnId: turn.id, stopReason: end.stopReason, failed: !!end.failure }));
-        this.hub.workflows?.ended(this,turn,end);
+        for (const provider of this.hub.sessionProviders.values()) provider.ended?.(this, turn, end);
         this.hub.delivery.turnEnded(this, turn, end);
         this.hub.state.afterCommit(() => this.hub.agentChanged(this.agentId));
       });
@@ -1669,7 +1739,7 @@ export class LiveSession {
   private canRecover(turn: Turn): boolean {
     return !turn.cancelledBy && !turn.recovering && !turn.executed && !this.hub.stopping && !this.userStopping &&
       !this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id }) &&
-      !turn.inputs.some((i) => i.item?.targetTurnId) && (turn.recoveryAttempts ?? 0) < this.hub.policy(this.agentId).recoveryAttempts;
+      !turn.inputs.some((i) => i.targetTurnId) && (turn.recoveryAttempts ?? 0) < this.hub.policy(this.agentId).recoveryAttempts;
   }
 
   private async recover(turn: Turn, error: unknown, failed = true): Promise<void> {
@@ -1710,6 +1780,7 @@ export class LiveSession {
       turn.recovering = false;
       if (turn.cancelledBy || this.userStopping || this.hub.kernel.sourceStopped({ agentId: this.agentId, sessionId: this.id })) return this.end({ stopReason: "cancelled" });
       // Existing receipts stay valid; only the new backend's insertion is reset. Keep original order and tasks.
+      if (!this.currentBatch(turn, turn.inputs).length) return this.end({ stopReason: "cancelled" });
       for (const input of turn.inputs) {
         if (input.item) {
           const rendered = this.hub.delivery.render(input.item, this);
@@ -1722,7 +1793,7 @@ export class LiveSession {
       turn.runEnd = undefined;
       this.lastRun = undefined;
       turn.held = [];
-      this.workflowContext(turn);
+      turn.openingPrompt = "context";
       this.send([...turn.inputs]);
     } catch (failure) {
       if (this.current !== turn) return;
@@ -1744,7 +1815,7 @@ export class LiveSession {
     this.current = turn;
     this.lifecycle.emit("turn.started", this.source(), { protected: turn.protected, taskIds: turn.taskIds });
     this.turnChanged();
-    this.hub.workflows?.inheritSeen(previous,turn);
+    for (const provider of this.hub.sessionProviders.values()) provider.inheritSeen?.(previous, turn);
     this.users(inputs[0]);
     this.hub.agentChanged(this.agentId);
     this.state("running");
@@ -1770,7 +1841,7 @@ export class LiveSession {
    * Put input into the running turn: once the backend has the turn's first input, it goes to the backend at once, on
    * its own (docs/DESIGN.md 3.1, 2-3). Returns undefined when no turn runs, or the running one is being stopped.
    */
-  steer(req: TurnRequest, targetTurnId?: string): Input | undefined {
+  steer(req: TurnRequest, targetTurnId = req.targetTurnId ?? req.item?.targetTurnId): Input | undefined {
     const turn = this.current;
     // Accepting input does not grant execution permissions to an unowned run. Users still join and protect the
     // logical turn while its first prompt waits for insertion, as they do during context recovery.
@@ -1779,7 +1850,7 @@ export class LiveSession {
     // An agent's word goes into an agent's turn only; once the user's (protected), it waits its turn (`enqueue`).
     if (req.origin.kind === "agent" && !targetTurnId && turn.protected) return undefined;
     if (req.origin.kind === "user") { turn.protected = true; this.suggestions = []; this.notifyControls(); }
-    const input = inputOf({ ...req, origin: { ...req.origin, steered: true } });
+    const input = inputOf({ ...req, targetTurnId, origin: { ...req.origin, steered: true } });
     turn.order ??= [...turn.inputs];
     turn.order.push(input);
     turn.inputs.push(input);
@@ -1856,6 +1927,17 @@ export class LiveSession {
     turn.cancelledBy = "user";
     if (turn.started && this.backend) this.backend.cancel(this.rec.backendSessionId!);
     this.settle();
+  }
+
+  /** A provider has withdrawn its input. Only stop a turn that still belongs exclusively to it. */
+  revokeProviderInput(provider: string, messageId: string, notice: string): void {
+    const turn = this.current;
+    if (!turn || turn.cancelledBy || turn.first.provider !== provider || turn.first.messageId !== messageId ||
+        this.acceptsInput(provider, messageId)) return;
+    const shared = turn.protected || turn.inputs.some(input => input !== turn.first) || this.hub.kernel.openTasks(this.id).some(task => !task.stopping);
+    if (!shared) return this.halt(turn.id);
+    // An unsubmitted assignment will be filtered by the admission check. Once offered, its real receipt still owns it.
+    if (turn.first.in || turn.first.sent) this.steer({ origin: { kind: "system" }, prompt: [assistantOnly(text(notice))] }, turn.id);
   }
 
   /** The hub stops the running turn, for the work it ran for was stopped. */

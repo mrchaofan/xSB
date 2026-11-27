@@ -15,7 +15,8 @@ import { shipped } from "./paths.ts";
 
 import type { LiveSession } from "./session.ts";
 import { workflowTools } from "./workflow-tools.ts";
-import { WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT } from "./prompts.ts";
+import { projectLanguage } from "./config.ts";
+import { workflowToolHint } from "./workflow-guide.ts";
 import { boundedText } from "./context.ts";
 import { newId, VERSION } from "./util.ts";
 import { servePublications } from "./publications.ts";
@@ -84,14 +85,15 @@ export function serveMcp(
     serverInfo: { name: WORKFLOW_SERVER, version: VERSION },
     // Shown to the model by agent programs that pass server instructions on: what these tools are, before it guesses.
     instructions: (() => {
-      try { return hub.agent(attached().agentId).workflowOwner ? WORKFLOW_TASK_ABOUT : WORKFLOW_MAIN_ABOUT; }
-      catch { return WORKFLOW_MAIN_ABOUT; }
+      try { return workflowToolHint(!!hub.agent(attached().agentId).workflowOwner, projectLanguage(hub.paths)); }
+      catch { return workflowToolHint(false, "en"); }
     })(),
   }));
   conn.onRequest("ping", () => ({}));
   conn.onRequest("tools/list", () => {
     const session = attached();
-    return { tools: workflowTools(!!hub.agent(session.agentId).workflowOwner) };
+    const owner = hub.agent(session.agentId).workflowOwner;
+    return { tools: workflowTools(!!owner, owner ? hub.workflows.isMarkdownTask(session) : true) };
   });
   conn.onRequest("tools/call", async (p, ctx) => {
     const owner = attached();

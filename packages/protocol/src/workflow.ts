@@ -4,6 +4,7 @@ export const Workflow = {
   update: "_dev.xsb/workflow/update",
   pause: "_dev.xsb/workflow/pause",
   resume: "_dev.xsb/workflow/resume",
+  rollback: "_dev.xsb/workflow/rollback",
   backend: "dev.xsb/backend",
   target: "dev.xsb/workflow-target",
 } as const;
@@ -17,6 +18,10 @@ export type NodeDef = {
   kind: "task" | "end";
   prompt?: string;
   input: Record<string, unknown>;
+  /** Markdown task and delivery requirements. Legacy nodes use prompt. */
+  requirements?: string;
+  /** The optional Markdown JSONL input on an entry task, before any assignment runs. */
+  entryInput?: string;
   /** Schema for the assembled named inputs (fixed values and active edge bindings). */
   inputSchema?: object;
   model?: string;
@@ -25,7 +30,7 @@ export type NodeDef = {
   multi: boolean;
 };
 export type Edge = { from: string; to: string; case?: string; bind?: Record<string, string> };
-export type WorkflowGraph = { nodes: NodeDef[]; edges: Edge[] };
+export type WorkflowGraph = { format?: "markdown"; nodes: NodeDef[]; edges: Edge[] };
 /** A node as a view shows it: its definition's name and kind, where its work stands, and who did it. */
 export type WorkflowNodeView = {
   name: string;
@@ -38,6 +43,15 @@ export type WorkflowNodeView = {
   sessionId?: string;
   target?: string;
   summary?: string;
+  /** Markdown definition and the currently valid assignment/delivery, including its direct sources. */
+  markdown?: {
+    requirements?: string;
+    entryInput?: string;
+    input?: string;
+    sources?: { node: string; delivery: string }[];
+    output?: string;
+    choice?: string;
+  };
   /** Declared inputs and output, with the values and provenance of this version's assignment. */
   contract?: {
     goal?: string;
@@ -50,23 +64,33 @@ export type WorkflowNodeView = {
     error?: string;
   };
   additionalResults?: { id: string; summary: string }[];
-  controls?: { pause: boolean; resume: boolean };
+  controls?: { pause: boolean; resume: boolean; rollback?: boolean };
 };
 
 /**
  * A version that was active and was replaced: its graph and its nodes as they stood then. Kept to be looked at;
  * the conversations of its nodes can be read, not continued.
  */
-export type WorkflowHistory = { version: string; retiredAt: string; nodes: WorkflowNodeView[]; edges: Edge[] };
+export type WorkflowHistory = {
+  version: string;
+  retiredAt: string;
+  format?: "markdown";
+  /** Distinguishes historical executions of the same plan after rollback. */
+  snapshot?: string;
+  rollback?: boolean;
+  nodes: WorkflowNodeView[];
+  edges: Edge[];
+};
 
 export type WorkflowView = {
   /** Authoritative runtime state and actions; clients need not infer them from node labels. */
   state?: "empty" | "proposed" | "running" | "paused" | "completed";
-  controls?: { pause: boolean; resume: boolean };
+  controls?: { pause: boolean; resume: boolean; rollback?: boolean };
   /** Earlier active versions, the latest first. */
   history?: WorkflowHistory[];
   sessionId: string;
   version?: string;
+  format?: "markdown";
   candidate?: { version: string; graph: WorkflowGraph };
   edges: Edge[];
   paused: boolean;

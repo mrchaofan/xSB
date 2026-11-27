@@ -1,14 +1,11 @@
 /**
- * Everything the hub says to a model, in one file: the standing instructions an
- * agent gets, and how mail from peers is framed inside a prompt.
+ * Host instructions shared by all conversations and the framing of mail from peers.
  */
 import { isTerminal } from "@xsb/protocol";
-import type { AgentSpec, Language, OriginMeta, Task } from "@xsb/protocol";
+import type { Language, OriginMeta, Task } from "@xsb/protocol";
 import type { MailItem, Note, Results, State } from "./state.ts";
 import type { PastTurn } from "./transcript.ts";
 import { topicKey } from "./state.ts";
-import { agentInstructions } from "./workflow-agent.ts";
-import { graphContractGuidance, deliveryGuidance } from "./workflow-tools.ts";
 
 /** Who started a task, as a model is told: an agent's id, or the user. */
 export const initiatorName = (t: Task): string => (t.initiator.kind === "agent" ? t.initiator.agentId : "the user");
@@ -34,22 +31,8 @@ const WORKING_RULES = `
 /** Enforced lifecycle contract; keep aligned with docs/TURN-LIFECYCLE.md and the runtime regression tests. */
 export const TASK_LIFECYCLE_RULES = `
 Storage failure invalidates execution: do not initiate more effects or blindly repeat inputs with uncertain outcomes; xSB must restart and recover its durable state. Task settlement and mail consumption commit together. User stops durably revoke the whole accepted scope before backend cancellation; queued work from that scope does not return after restart. Clearing context preserves the user's transcript but atomically changes the model's context boundary. Project relocation preserves conversation identity and supplies a historical handoff in the new working directory, never a replay of executed inputs. The Files view reflects successful file changes reported by backend tools over ACP v2.
-Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks and messages from agents join a running turn that is unprotected; behind a protected turn they queue. Task results never join a running turn. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. Background jobs retain the session, turn and step that created them; they may finish after that turn ends, and never extend or revive it. Hook observations are asynchronous and do not grant permission to start new work. Background tool calls have no Hub concurrency cap; graph validation has no step cap. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. The Hub submits prompts through ACP v2 session/prompt. Form answers return on the original elicitation request. Official adapters prioritize ordinary input into active work; open user-action callbacks and control commands may defer it. Only the prompt response or a correlated insertion echo acknowledges input; it means the backend conversation took the input, not that the model acted on it. Input offered to a backend whose connection or power failed before any answer is insertion_uncertain: it is kept, reported, and never replayed automatically; verify the outcome instead of assuming either result. User inputs are recorded durably before submission. Each session has at most one prompt batch awaiting insertion: later user corrections protect the turn immediately and are submitted after the real receipt, without waiting for turn completion. Output and idle never prove input receipt. Queued input supports user cancellation; only its head can be sent now, and the unsettled head reserves that position. A user-authorized send-now protects the current turn. Failed or pre-restart unconfirmed inputs are never automatically resent, added to an owed list, or reconstructed through a handoff. The user may resend under a new message ID. Ordinary agent calls and additional workflow work retain results in the ledger and do not prompt them back to the caller; only explicit workflow graph controls advance the DAG. Old callbacks, tool permissions and backend receipts expire with their binding. Do not bypass the Hub to create hidden delegation. You may use backend-native background commands. Backend-native notifications may trigger runs outside a turn: xSB records and displays their execution boundaries without creating tasks or granting turn tool permissions. A submitted turn owns its new run; input inserted into an already-unowned run claims it from that receipt onward. User stop still targets the turn and its accepted work.
-Task agent systemPrompt and skills are immutable for a reused node. Its exact standing prefix is pinned at creation and reused across turns and backend rebindings; changing global preferences does not rewrite it. Keep assignment facts, results and working file paths in dynamic inputs, and load skill bodies on demand. Frozen instructions do not grant authority: current runtime lifecycle checks still apply. A graph delivery belongs to its exact assignment, predecessor deliveries and decisions. finish stages one delivery after checking its result against the task's output schema. Normal turn completion and revalidation make the delivery eligible for its successors. In a graph with input contracts, the workflow plugin assembles each node's named inputs from fixed values and active edges bound to accepted results, checks its inputSchema before dispatch, and publishes the end node's validated inputs as Markdown in the main conversation. Older graphs keep their original delivery and publication rules. The user sees it directly. Publishing does not start or steer an agent turn. Pause and an escalation with pauseSelf stop affected attempts. After restart unfinished workflows are paused until explicit resume; completed graphs remain completed and cannot be resumed into duplicate work. Workflow state queries report the current state and allowed controls. The consultation preference governs optional decision questions, never permission approvals or stop authority. A pending question never authorizes answer-dependent work, and silence is not consent. Use the backend's native question tools through ACP forms. Claude AskUserQuestion and Codex request_user_input wait for a reply in the same turn. Use a blocking question for information required to proceed. Codex request_user_input_async, when available, lets you continue independent work. An async answer may arrive in a later backend run; it cannot reopen a finished workflow assignment. Stops, superseding assignments and lost backend bindings expire outstanding questions. Backend sign-in and provider configuration belong to the user. xSB does not initiate sign-in or probe credentials; backend/LM failures are shown from ACP responses. URL elicitation is a separate ACP interaction, and opening its URL does not prove authorization succeeded. A workflow context may list work a user stop cancelled; it will not come back. An assignment may say earlier assignments were withdrawn; do not continue those. Answer status and unrelated questions directly.`;
-
-/**
- * What the built-in tools are, said where a model looks first: the system prompt, and the MCP server's own instructions
- * (mcp.ts). Without it a model asked about "the workflow skill" searches skill files on disk and misses its own tools.
- */
-const WORKFLOW_TOOLS_NAMED =
-  'They come from xSB itself through the MCP server named "workflow" (an agent program may show them as mcp__workflow__<tool> or workflow.<tool>); they are not files on disk and need no setup. ' +
-  'When the user asks about workflows, DAGs, orchestration, splitting work into tasks, or "the workflow skill/tool" (工作流、编排、拆分任务、workflow 技能), these tools are what they mean: say you have them, and use them.';
-export const WORKFLOW_MAIN_ABOUT =
-  "xSB's built-in workflow tools for this conversation: plan, execute, choose, prompt, pause, resume (a workflow is a DAG of task nodes, each run by a task agent of its own), " +
-  "read_context and previous_conversation. " + WORKFLOW_TOOLS_NAMED + " " + graphContractGuidance;
-export const WORKFLOW_TASK_ABOUT =
-  "xSB's built-in workflow tools for this task agent: finish (stage your delivery), escalate (hand something to the main agent; pauseSelf when your own assignment must change), " +
-  "and read_context, plus load_skill for your fixed assignment skills. " + WORKFLOW_TOOLS_NAMED + " " + deliveryGuidance;
+Each conversation has one effective execution turn. Accepted user input immediately protects its target, making the turn the user's. Tasks and messages from agents join a running turn that is unprotected; behind a protected turn they queue. Task results never join a running turn. A targeted append expires with its turn. Preemption rechecks the target turn ID, protection and full stop authority at commit. Cancellation follows causal parents through ended tasks and preserves descendants needed by independent active tasks. Ordering-only edges do not confer cancellation authority. A committed stop rejects new child tasks and jobs. Background jobs retain the session, turn and step that created them; they may finish after that turn ends, and never extend or revive it. Hook observations are asynchronous and do not grant permission to start new work. Background tool calls have no Hub concurrency cap. User stop withdraws old pending input. Other stops preserve ordinary unread input in order, with the accepted preemptor first. The Hub submits prompts through ACP v2 session/prompt. An input can pair a public title with model-only supplemental text. Use the supplemental text to carry out the task and describe progress and results in your own words. Form answers return on the original elicitation request. Official adapters prioritize ordinary input into active work; open user-action callbacks and control commands may defer it. Only the prompt response or a correlated insertion echo acknowledges input; it means the backend conversation took the input, not that the model acted on it. Input offered to a backend whose connection or power failed before any answer is insertion_uncertain: it is kept, reported, and never replayed automatically; verify the outcome instead of assuming either result. User inputs are recorded durably before submission. Each session has at most one prompt batch awaiting insertion: later user corrections protect the turn immediately and are submitted after the real receipt, without waiting for turn completion. Output and idle never prove input receipt. Queued input supports user cancellation; only its head can be sent now, and the unsettled head reserves that position. A user-authorized send-now protects the current turn. Failed or pre-restart unconfirmed inputs are never automatically resent, added to an owed list, or reconstructed through a handoff. The user may resend under a new message ID. Ordinary agent calls retain their results in the ledger. The Hub rechecks provider-owned inputs at dequeue and before ACP submission, including when the same turn retries a context refusal before execution. Withdrawing an assignment revokes its execution authority. If a turn also owns independent work, continue that work and leave the withdrawn assignment alone. Old callbacks, tool permissions and backend receipts expire with their binding. Do not bypass the Hub to create hidden delegation. You may use backend-native background commands. Backend-native notifications may trigger runs outside a turn: xSB records and displays their execution boundaries without creating tasks or granting turn tool permissions. A submitted turn owns its new run; input inserted into an already-unowned run claims it from that receipt onward. User stop still targets the turn and its accepted work.
+The consultation preference governs optional decision questions, never permission approvals or stop authority. A pending question never authorizes answer-dependent work, and silence is not consent. Use the backend's native question tools through ACP forms. Claude AskUserQuestion and Codex request_user_input wait for a reply in the same turn. Use a blocking question for information required to proceed. Codex request_user_input_async, when available, lets you continue independent work. An async answer may arrive in a later backend run; it cannot reopen a finished assignment. Stops, superseding assignments and lost backend bindings expire outstanding questions. Backend sign-in and provider configuration belong to the user. xSB does not initiate sign-in or probe credentials; backend/LM failures are shown from ACP responses. URL elicitation is a separate ACP interaction, and opening its URL does not prove authorization succeeded. Answer status and unrelated questions directly.`;
 
 /** An existing task keeps its pinned prefix across upgrades. Correct its retired tool catalog on bind. */
 export function questionToolNotice(prefix?: string): string | undefined {
@@ -65,7 +48,7 @@ ${enabled
     ? "处理复杂或多阶段任务时，在用户意见会实质影响结果的决策点主动征询：明确目标与验收标准、选择差异显著的方案，或权衡范围、成本、时间与质量。先利用已有指令和材料形成判断，给出推荐方案及简短理由，再在投入大量实施工作之前询问；执行中出现新的重要取舍时，也应及时征询。"
     : "优先依据已有指令和合理判断自主推进。不要仅因任务复杂而增加可选的意见征询；对会影响结果的合理假设作简短说明。"}
 围绕当前决策提出少量具体、易回答的问题；将相关问题合并，选项说明实际差异，并允许用户表达其他意见。使用对话语言和专业、清晰的产品用语，避免内部术语。常规实现细节、已有明确答案的问题和已授权的步骤无需重复确认。
-用户明确要求被询问，或缺少不可替代的信息时，仍应询问；本偏好不改变权限审批、身份验证或任务停止规则。任务 Agent 仅征询自己职责内的问题，涉及整体计划或职责变化时按既有规则升级给主会话。
+用户明确要求被询问，或缺少不可替代的信息时，仍应询问；本偏好不改变权限审批、身份验证或任务停止规则。
 通过 ACP 原生表单征询。必需信息用同步提问，在本轮等待答复。Codex 提供异步提问时，可在等待期间继续与答案无关的工作。不可将沉默视为同意。用户跳过可选问题时采用合理默认并说明；必需的信息或授权仍须取得。`;
   return `# Decision consultation
 Current preference: ${enabled ? "enabled" : "disabled"}.
@@ -73,84 +56,20 @@ ${enabled
     ? "For complex or multi-stage work, proactively invite input where the user's judgment materially changes the outcome: goals and acceptance criteria, meaningfully different approaches, or tradeoffs in scope, cost, schedule and quality. Review existing instructions and materials first, offer a recommendation with a brief rationale, and ask before substantial implementation. Consult again when new consequential tradeoffs arise during execution."
     : "Prefer independent progress using existing instructions and sound judgment. Do not add optional consultation merely because a task is complex; briefly state reasonable assumptions that affect the result."}
 Ask a small number of specific, easy-to-answer questions about the current decision. Group related questions, explain practical differences between options, and allow the user to express another preference. Use the conversation language and clear, professional product wording without internal terminology. Routine implementation details, questions already answered, and authorized steps need no repeated confirmation.
-Still ask when the user explicitly requests consultation or essential information cannot be inferred. This preference does not change permission approvals, authentication or stop rules. Task agents consult only within their assignment; escalate decisions about the overall plan or assignment changes to the main conversation under the existing rules.
+Still ask when the user explicitly requests consultation or essential information cannot be inferred. This preference does not change permission approvals, authentication or stop rules.
 Ask through a native ACP form. Use a blocking question when the answer is needed to proceed. If Codex offers async questions, continue independent work while waiting. Never treat silence as consent. If the user skips an optional question, explain any default you use. Required information or authorization must still be obtained.`;
 }
 
-/**
- * A task agent's part, and how it sorts what the user says to it directly: its own assignment is its own to handle
- * (escalating with pauseSelf where the assignment itself must change); the whole task is the main agent's (escalate);
- * anything else it simply answers. One tool for both: the only difference is whether the node stops and waits.
- */
-const taskGuidance = (node: string): string => `# Your part
-You are the task agent for node "${node}" of the user's workflow. The main agent runs the whole workflow from the main conversation and gives you your assignment; the user sees your conversation and may talk to you here at any time.
-
-Follow the latest goal and its named inputs. The output schema in a graph assignment describes the value you must pass in finish({summary,result}). Read predecessor summaries for context. If an essential input is missing, identify it in an escalation to the main agent. Additional assignments keep their original goal and save their deliveries on the node.
-
-# When the user talks to you
-Sort each message before you act, and say briefly which it is when that is not obvious:
-1. About your own assignment (its goal, input, materials, progress, your delivery): handle it yourself. Answer, explain, or do the work your assignment covers. If it changes what your assignment must deliver, or needs input or scope your assignment does not give you, do not quietly change course: call escalate({message, pauseSelf: true}) with what the user wants and why (add invalidateSelf if your current delivery must be withdrawn); you stop until the main agent decides.
-2. Not about your assignment but about the overall task (other nodes, the plan, ordering, priorities, the final result): do not act on it yourself, and do not answer for the main agent. Call escalate({message}) with the user's request in their own words and anything you know that helps; your own work goes on.
-3. About neither (a general question, an explanation, something unrelated): answer it directly and briefly, and change no work.
-After an escalation, tell the user the main agent takes it up in the main conversation. When unsure between 1 and 2, escalate; pause yourself only when your own assignment must change. Questions about earlier versions of your delivery are your own to answer.`;
-
-/** Both examples run from a user's order through typed line items to an integer total. */
-function workflowExample(language: Language): string {
-  const zh = language === "zh-CN";
-  const [extract, calculate, done] = zh ? ["提取明细", "核算总额", "完成"] : ["Extract items", "Calculate total", "Done"];
-  const [order, rows, items] = zh ? ["原始订单", "订单行", "明细"] : ["orderText", "orderLines", "items"];
-  const [name, quantity, price, total] = zh
-    ? ["品名", "数量", "单价（分）", "总额（分）"]
-    : ["product", "quantity", "unitPriceCents", "totalCents"];
-  const record = (properties: Record<string, object>) => ({
-    type: "object", properties, required: Object.keys(properties), additionalProperties: false,
-  });
-  const cents = { type: "integer", minimum: 0 };
-  const lines = { type: "array", items: record({ [name]: { type: "string" }, [quantity]: { type: "integer", minimum: 1 }, [price]: cents }) };
+/** Provider-supplied instructions follow the common prefix and the conversation identity. */
+export function conversationPrompt(name: string, language: Language, instructions: string, consultUser = false) {
   return [
-    {
-      node: extract, prompt: zh ? "提取商品、数量和以分为单位的单价。" : "Extract products, quantities and unit prices in cents.",
-      inputSchema: record({ [order]: { type: "string" } }),
-      input: { [order]: zh ? "铅笔 2 支，每支 3 元，橡皮 1 块，4 元。" : "Two pencils at $3 each and one eraser at $4." },
-      schema: record({ [rows]: lines }),
-    },
-    {
-      node: calculate, prompt: zh ? "按数量和单价核算订单总额，以分为单位交付。" : "Sum quantity times unit price for each item. Deliver the total in cents.",
-      inputSchema: record({ [items]: lines }), schema: cents,
-    },
-    { node: done, kind: "end", inputSchema: record({ [total]: cents }) },
-    { from: extract, to: calculate, bind: { [items]: "/" + rows } },
-    { from: calculate, to: done, bind: { [total]: "" } },
-  ].map(row => JSON.stringify(row)).join("\n");
-}
-
-export function conversationPrompt(agent: AgentSpec, language: Language, instructions: string, consultUser = false) {
-  const guidance = agent.workflowOwner
-    ? `${taskGuidance(agent.workflowNode!)}\n\n# Your tools\n${WORKFLOW_TASK_ABOUT}`
-    : `# Your tools\n${WORKFLOW_MAIN_ABOUT}\n\n` + 'Handle ordinary requests directly in this conversation. Only create a workflow for complex tasks that require coordinating several steps. Use plan to save a candidate for the user to review, and execute with no arguments to adopt the candidate you were shown; execute({graphJsonl}) adopts a graph directly. xSB names versions. An [xSB workflow] context shows the active and candidate graphs in JSONL whole when your context lacks them (its start, a compaction), at once a pause, an error or work the user’s stop dropped, and what changed every few turns while work is under way; choices and escalations come as their own notices. Once the workflow has settled it is not repeated: keep it in mind, or read it with read_context and its graphRef. ' + `Name every task and end node in ${LANGUAGE_NAME[language]}, the conversation language declared above. Node names appear in the DAG and task conversations: use short descriptive names the user can read. Use the exact same names in edges and tool arguments. Graph JSONL example:\n${workflowExample(language)}\n` + 'Use case on conditional edges and multi:true on a multi-select source. Every leaf must be an end, and each legal choice must reach exactly one end. Use choose for a fresh invitation. If the reviewed candidate is stale, show the updated plan before adopting it. Use execute({replaceNode}) for changed requirements, keeping the full definition and stable node name for the same responsibility. Use a new name when replacing its responsibility. New task nodes may have agent:{systemPrompt,skills:[{name,description,content}]}. Generate concise stable role instructions and reusable skills; put changing task details in prompt/input. Reused nodes inherit omitted agent fields and reject changes to systemPrompt or skills; a different role or skill set requires a new node name. Keep systemPrompt within 2048 estimated tokens, the skill directory within 1024, at most 8 skills, and each skill body within 8192. Skill bodies are loaded on demand with load_skill, not repeated in the system prefix. Use prompt for separate additional work. Preserve user-provided values, source text and relevant working file links in the named inputs. Use pause/resume for explicit stops and continuations. Use the workflow ledger and node conversations to inspect additional results; they are not prompted back to you. The Hub displays the final workflow result directly in the main conversation. ' +
-      'A task agent may escalate something to you (a notice {escalate, message, userSaid?, paused, invalidateSelf?}): the user asked it about the whole task, or its own assignment needs a change or a decision. Decide it here and answer the user in this conversation; change the workflow (execute with replaceNode, prompt, pause/resume) where that is what they asked for. When paused is true that node waits for you: adopt a revised definition with execute({replaceNode}), or resume({nodes:[it]}) to keep its assignment.';
-  if (agent.workflowOwner) return [
-    // Common instructions precede node-specific text so different task agents can share a cache prefix too.
     `Reply in ${LANGUAGE_NAME[language]}. Your working directory is the backend session's cwd.`,
     TASK_LIFECYCLE_RULES,
     WORKING_RULES,
-    `# Your tools\n${WORKFLOW_TASK_ABOUT}`,
     consultationGuidance(consultUser, language),
-    `You are "${agent.name}".`,
+    `You are "${name}".`,
     instructions,
-    taskGuidance(agent.workflowNode!),
-    agentInstructions(agent.workflowAgent),
   ].filter(Boolean).join("\n\n");
-  return [
-    `You are "${agent.name}". Reply in ${LANGUAGE_NAME[language]}. Working directory: ${agent.workspace}.`,
-    instructions,
-    guidance,
-    consultationGuidance(consultUser, language),
-    TASK_LIFECYCLE_RULES,
-    WORKING_RULES,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
 }
 
 /** What a model is to call each language. */
