@@ -161,9 +161,6 @@ function renderRail() {
 
 // ---------- 对话栏 ----------
 
-/** 节点停在那里等用户：暂停了、挂起了，或者被一条还没处理完的插话挡住（它那一轮失败或被停了）。 */
-const resumable = (node) => !!node.controls?.resume;
-
 /** 一条输入在模型那边的状态：标签和说明（原因写进说明）。 */
 function inputState(entry) {
   const why = entry.reason ? t(`entry.reason.${entry.reason}`) + (entry.detail ? `：${entry.detail}` : "") : "";
@@ -343,14 +340,6 @@ function openLane(agentId, panel, readonly) {
   }
   (panel ?? $("#lanes")).append(lane);
   if (!panel) state.open.push(agentId);
-  else {
-    lane.querySelector(".lane-head").append(h("button",{class:"btn task-control",onclick:() => {
-      const flow = currentFlow(), node = flow?.nodes.find(n => n.agentId === agentId);
-      if (!node) return;
-      if (resumable(node)) xsb.workflowControl(flow.sessionId,false,[node.name]);
-      else xsb.cancel(agentId);
-    }},t("flow.stop")));
-  }
   lane.querySelector(".entries").append(...state.transcripts[agentId].map((entry) => entryNode(agentId, entry)));
   syncAsk(agentId);
   syncLane(agentId);
@@ -435,13 +424,6 @@ function syncLane(agentId) {
   fill(lane.querySelector(".lane-backend"), backendMark(backend));
   lane.querySelector(".lane-state .state").dataset.state = shownState(agentOf(agentId));
   lane.querySelector(".lane-state span").textContent = STATE_TEXT[shownState(agentOf(agentId))];
-  const control = lane.querySelector(".task-control");
-  if (control) {
-    const node = currentFlow()?.nodes.find(n => n.agentId === agentId);
-    control.textContent = t(node && resumable(node) ? "flow.resume" : "flow.stop");
-    control.hidden = s === "idle" && !(node && resumable(node));
-  }
-
   const action = s !== "idle" && !lane.editor.read().length && !lane.editor.isReading() ? "stop" : "send";
   const label = t(action === "stop" ? "lane.stop" : s === "idle" ? "lane.send" : "lane.send.queue");
   const button = lane.querySelector(".send");

@@ -919,10 +919,8 @@ export class Workspace {
     return this.conn.request<ComposerState>(SessionControls.get, { sessionId });
   }
 
-  workflowControl(id: string, action: boolean | "pause" | "resume" | "rollback", nodes?: string[]) {
-    const operation = typeof action === "boolean" ? (action ? "pause" : "resume") : action;
-    if (!["pause", "resume", "rollback"].includes(operation)) throw Error("Unknown workflow action");
-    return this.conn.request(Workflow[operation], { sessionId: id, nodes });
+  stopWorkflow(sessionId: string, version: string, node?: string) {
+    return this.conn.request(Workflow.stop, { sessionId, version, node });
   }
 
   // ---- artifacts --------------------------------------------------------------

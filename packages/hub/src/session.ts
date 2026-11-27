@@ -318,7 +318,7 @@ export class LiveSession {
   }
   private priorityTaskId?: string;
   /** A user stop freezes dispatch until the old turn is confirmed idle. */
-  private userStopping = false;
+  private userStopping: false | "preparing" | "cancelling" = false;
   private stopTimer?: NodeJS.Timeout;
   /** The id of the input the backend showed last. */
   private echoed?: string;
@@ -1862,12 +1862,16 @@ export class LiveSession {
   }
 
   /** Snapshot before committing cancellation; incoming work after this point is a new request. */
-  beginUserStop(): { pending: string[]; sent: string[]; inserted: string[] } | undefined {
-    if (this.userStopping) return undefined;
-    this.userStopping = true;
-    this.hub.kernel.hooks.emit("acp.turn_changed", { agentId: this.agentId, sessionId: this.id });
+  beginUserStop() {
+    // A wider stop can include a session already waiting for backend cancellation.
+    // Take fresh queue IDs without releasing the existing stop if this request is vetoed.
+    if (this.userStopping === "preparing") return undefined;
+    const cancelling = this.userStopping === "cancelling";
+    this.userStopping = "preparing";
+    if (!cancelling) this.hub.kernel.hooks.emit("acp.turn_changed", { agentId: this.agentId, sessionId: this.id });
     const inputs = [...this.queue, ...this.carried, ...(this.current?.inputs ?? [])];
     return {
+      cancelling,
       pending: inputs.filter((i) => !i.in && !i.receipted).map((i) => i.messageId),
       sent: inputs.filter((i) => !i.in && !i.receipted && i.sent).map((i) => i.messageId),
       inserted: inputs.filter((i) => i.in || i.receipted).map((i) => i.messageId),
@@ -1881,13 +1885,20 @@ export class LiveSession {
     if (pump) this.pump();
   }
 
+  abortUserStop(cancelling: boolean): void {
+    if (cancelling) this.userStopping = "cancelling";
+    else this.releaseUserStop();
+  }
+
   /** Persistent mail/tasks were withdrawn already. Retire local copies and stop the backend last. */
   cancelUserWork(): void {
+    this.userStopping = "cancelling";
     this.hub.elicitations?.cancel(this);
     this.priorityTaskId = undefined;
     for (const input of [...this.queue.splice(0), ...this.carried.splice(0)]) this.discard(input);
     const turn = this.current;
     if (!turn) return this.releaseUserStop();
+    if (turn.cancelledBy === "user" && this.stopTimer) return;
     turn.cancelledBy = "user";
     for (const input of turn.inputs.filter((i) => !i.in && !i.sent)) {
       this.drop(input);

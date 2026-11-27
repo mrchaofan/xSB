@@ -1,28 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { View } from "electron";
-import { ViewStack, restack } from "../src/view-stack.ts";
+import { ViewStack } from "../src/view-stack.ts";
 
-test("restack keeps the longest ordered start and re-adds the rest", () => {
-  assert.deepEqual(restack([], ["a", "b"]), { remove: [], add: ["a", "b"] });
-  assert.deepEqual(restack(["a", "b", "c"], ["a", "b", "c"]), { remove: [], add: [] });
-  // c out of place: re-adding c alone puts it on top.
-  assert.deepEqual(restack(["a", "c", "b"], ["a", "b", "c"]), { remove: [], add: ["c"] });
-  assert.deepEqual(restack(["b", "a"], ["a", "b"]), { remove: [], add: ["b"] });
-  assert.deepEqual(restack(["x", "a", "y"], ["a", "z"]), { remove: ["x", "y"], add: ["z"] });
-  assert.deepEqual(restack(["c", "b", "a"], ["a", "b", "c"]), { remove: [], add: ["b", "c"] });
-});
-
-/** A view's children, as Electron keeps them: re-adding a child moves it on top. */
+/** Electron inserts or reorders the child at the given index. */
 function fakeRoot() {
   const children: View[] = [];
   const moves: string[] = [];
   const root = {
     get children() { return [...children]; },
-    addChildView(view: View) {
+    addChildView(view: View, index: number) {
       const at = children.indexOf(view);
       if (at >= 0) children.splice(at, 1);
-      children.push(view);
+      children.splice(index, 0, view);
       moves.push(`+${(view as any).name}`);
     },
     removeChildView(view: View) {
@@ -44,8 +34,8 @@ test("a stack orders views by layer with the fewest moves", () => {
   stack.put(overlay, "overlay");
   stack.put(shield, "control");
   assert.deepEqual(names(), ["page", "shield", "overlay"]);
-  // The shield goes between: page stays, shield and overlay are added on top in order.
-  assert.deepEqual(moves.splice(0), ["+page", "+overlay", "+shield", "+overlay"]);
+  // The open menu retains keyboard focus even as the shield is added below it.
+  assert.deepEqual(moves.splice(0), ["+page", "+overlay", "+shield"]);
   // Putting a view again in the layer it is in changes nothing.
   stack.put(page, "page");
   assert.deepEqual(moves.splice(0), []);
@@ -56,7 +46,7 @@ test("a stack orders views by layer with the fewest moves", () => {
   moves.splice(0);
   stack.put(editor, "annotation");
   assert.deepEqual(names(), ["other", "shield", "editor", "overlay"]);
-  assert.deepEqual(moves.splice(0), ["+editor", "+overlay"]);
+  assert.deepEqual(moves.splice(0), ["+editor"]);
   stack.take(overlay);
   assert.deepEqual(moves.splice(0), ["-overlay"]);
   assert.equal(stack.has(overlay), false);

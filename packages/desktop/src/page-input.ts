@@ -8,13 +8,13 @@
  * and leaves only scrolling to the page.
  */
 import type { WebContents } from "electron";
-const states = new WeakMap<WebContents, { controlled: boolean; annotating: boolean; injected: number; pressed: number }>();
+const states = new WeakMap<WebContents, { browserTab: boolean; controlled: boolean; annotating: boolean; injected: number; pressed: number }>();
 /** How recent a press of the user's counts as what gave a page the keyboard. */
 const PRESS_MS = 500;
 const FROM_DEBUGGER = 1 << 23; // Blink flag exposed as _modifiers by the pinned private Electron.
 
-export function installInputGuard(contents: WebContents): void {
-  const state = { controlled: false, annotating: false, injected: 0, pressed: 0 };
+export function installInputGuard(contents: WebContents, browserTab: boolean): void {
+  const state = { browserTab, controlled: false, annotating: false, injected: 0, pressed: 0 };
   states.set(contents, state);
   contents.on("before-input-event", (event, input) => {
     if ((state.controlled || state.annotating) && !(((input as unknown as { _modifiers?: number })._modifiers ?? 0) & FROM_DEBUGGER)) event.preventDefault();
@@ -36,10 +36,11 @@ export function annotateInput(contents: WebContents, annotating: boolean): void 
 }
 export async function injectedCommand(contents: WebContents, method: string, params: object): Promise<any> {
   const state = states.get(contents);
+  if (!state?.browserTab) throw new Error("Browser commands require a registered web tab");
   const mouse = method === "Input.dispatchMouseEvent";
-  if (mouse && state) state.injected++;
+  if (mouse) state.injected++;
   try { return await contents.debugger.sendCommand(method, params); }
-  finally { if (mouse && state) state.injected--; }
+  finally { if (mouse) state.injected--; }
 }
 
 /**
@@ -49,8 +50,9 @@ export async function injectedCommand(contents: WebContents, method: string, par
  */
 const holders = new WeakMap<WebContents, number>();
 export function holdDebugger(contents: WebContents): () => void {
+  if (!states.get(contents)?.browserTab) throw new Error("The debugger can only attach to a registered web tab");
   const count = holders.get(contents) ?? 0;
-  if (!count && !contents.debugger.isAttached()) contents.debugger.attach("1.3");
+  if (!contents.debugger.isAttached()) contents.debugger.attach("1.3");
   holders.set(contents, count + 1);
   let held = true;
   return () => {

@@ -138,20 +138,21 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.equal(await js(q(main + " .editor") + ".textContent"), "typed while reading");
   const finish = (s) => "!call finish " + JSON.stringify({ summary: s });
   const rows = [
-    { node: "起草", prompt: "!say DRAFT-STARTED\n!sleep 9000\n" + finish("起草完成") },
+    { node: "起草", prompt: "!say DRAFT-STARTED\n!waitForInput\n" + finish("起草完成") },
     { node: "审阅", prompt: finish("审阅完成") },
+    { node: "核实资料", prompt: "!waitForInput\n" + finish("核实完成") },
     { node: "完成", kind: "end" },
     { from: "起草", to: "审阅" },
     { from: "审阅", to: "完成" },
+    { from: "核实资料", to: "完成" },
   ];
   await send(
     main,
     "!call execute " + JSON.stringify({ graphJsonl: rows.map((v) => JSON.stringify(v)).join("\n") }),
   );
-  await untilJS(
-    'document.querySelectorAll(".dag-node").length===3 && !!document.querySelector(".dag-node:not(:disabled)")',
-    "DAG",
-  );
+  const node = name => '.dag-node[data-node="' + name + '"]';
+  await until(() => has(node("起草") + '[data-state="running"]'), "DAG");
+  await until(() => has(node("核实资料") + '[data-state="running"]'), "parallel task running");
   // The global icon size must not clip the DAG's curved edges to a 16 × 16 viewport.
   const drawing = await js(`(() => {
     const surface = document.querySelector(".dag-surface"), svg = surface.querySelector("svg");
@@ -166,31 +167,51 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
     };
   })()`);
   assert.deepEqual(drawing.viewport, drawing.surface);
-  assert.equal(drawing.edges.length, 2);
+  assert.equal(drawing.edges.length, 3);
   for (const edge of drawing.edges) {
     assert.ok(edge.curved && edge.stroke !== "none" && edge.width > 0);
     assert.ok(edge.right <= drawing.viewport[0] && edge.bottom <= drawing.viewport[1], "edge is inside the SVG viewport");
   }
-  assert.equal(await js('document.querySelectorAll(".dag-node")[1].disabled'), true);
-  await click(".dag-node:disabled");
+  const nodeStop = panel + ' .task-control[data-action="stop-node"]';
+  const pendingStop = '#flow-contract [data-action="stop-node"]';
+  const flowStop = '#flow-heading [data-action="stop"]';
+  const visible = selector => js(q(selector) + "?.checkVisibility() ?? false");
+  await click(node("审阅"));
   assert.equal(await has(panel), false);
-  await click(".dag-node:not(:disabled)");
+  assert.ok(await visible(pendingStop), "a task can be stopped before it has an agent");
+  await click(pendingStop);
+  await until(() => has(node("审阅") + '[data-state="paused"]'), "undispatched task is paused");
+  assert.ok(await has(node("起草") + '[data-state="running"]'), "its predecessor keeps working");
+  assert.equal(await visible(pendingStop), false);
+  await click(node("起草"));
   await until(() => has(panel), "task chat");
   await untilJS(q(panel + " .output") + '?.textContent.includes("DRAFT-STARTED")', "the task agent received its assignment");
   const taskEntries = () => js(q(panel + " .entries") + ".textContent");
   const startLines = () => js(`[...document.querySelectorAll(${JSON.stringify(panel + " .input .said")})].map(node=>node.textContent.trim()).filter(text=>/^(开始|Start) 起草$/.test(text))`);
   assert.equal((await startLines()).length, 1, "the node assignment is shown as one start message");
-  assert.doesNotMatch(await taskEntries(), /!sleep 9000|!call finish|# Workflow task|# 工作流任务/);
-  await click(panel + " .task-control");
-  await untilJS(q(panel + " .task-control") + ".innerText.match(/Resume|继续/)!=null", "task stop");
+  assert.doesNotMatch(await taskEntries(), /!waitForInput|!call finish|# Workflow task|# 工作流任务/);
+  assert.equal(await visible(pendingStop), false, "the open task conversation owns its stop button");
+  await click(nodeStop);
+  await until(() => has(node("起草") + '[data-state="suspended"]'), "selected task stopped");
+  assert.ok(await has(node("核实资料") + '[data-state="running"]'), "stopping a node leaves the independent task running");
+  await until(async () => !(await visible(panel + " .task-control")), "stopped task has no visible control");
   await send(panel, "!say SIDE-ONLY");
   await untilJS(q(panel + " .entries") + '.innerText.includes("SIDE-ONLY")', "task conversation");
   await untilJS(q(panel + " .input[data-origin=user]") + '?.textContent.includes("!say SIDE-ONLY")', "direct user input stays in task chat");
   assert.equal(await js(q(main + " .entries") + '.innerText.includes("SIDE-ONLY")'), false);
-  await click(panel + " .task-control");
-  await untilJS(q(panel + " .task-control") + ".innerText.match(/Stop|停止/)!=null", "task resume");
-  // 空闲又无可继续时 syncLane 把按钮设成 hidden；.btn 的 display 不能盖过 [hidden]，否则“空闲”旁边还挂着“停止任务”。
-  assert.equal(await js(`(b => { const was = b.hidden; b.hidden = true; const shown = getComputedStyle(b).display; b.hidden = was; return shown; })(${q(panel + " .task-control")})`), "none", "hidden task control is not displayed");
+  await send(main, '!call resume {"nodes":["起草","审阅"]}');
+  await until(() => has(node("起草") + '[data-state="running"]'), "main agent resumes the stopped task");
+  await until(() => has(node("审阅") + '[data-state="waiting"]'), "main agent releases the undispatched task");
+  await send(main, "!say MAIN-WORKING\n!sleep 2500\n!say MAIN-COMPLETED");
+  const mainSays = marker => js(`[...document.querySelectorAll(${JSON.stringify(main + " .output")})].some(el => el.textContent.includes(${JSON.stringify(marker)}))`);
+  await until(() => mainSays("MAIN-WORKING"), "main conversation is busy");
+  await click(flowStop);
+  await untilJS('document.querySelectorAll(\'.dag-node[data-state="suspended"]\').length === 2', "whole workflow stops both running tasks");
+  assert.equal(await visible(flowStop), false);
+  assert.equal(await has('#flow-heading [data-action="resume"]'), false);
+  await until(() => mainSays("MAIN-COMPLETED"), "stopping the workflow preserves the main conversation's turn");
+  await send(main, "!call resume {}");
+  await untilJS('document.querySelectorAll(\'.dag-node[data-state="running"]\').length === 2', "main agent resumes the whole workflow");
   await draft(main, "main-only");
   await draft(panel, "task-only");
   await click('#tabs .tab[data-id="catalog"] .tab-main');
@@ -219,7 +240,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await loaded;
   await until(() => has(panel + " .editor .file-ref"), "window reload restores task and file reference draft");
   assert.deepEqual(await startLines(), startsBeforeReload, "reloading the transcript preserves start messages once each");
-  assert.doesNotMatch(await taskEntries(), /!sleep 9000|!call finish|# Workflow task|# 工作流任务/);
+  assert.doesNotMatch(await taskEntries(), /!waitForInput|!call finish|# Workflow task|# 工作流任务/);
   assert.equal(await js(q(main + " .editor") + ".textContent"), "main-only");
   await click(second);
   assert.equal(await js(q(main + " .editor") + ".textContent"), "second session draft");
@@ -348,6 +369,8 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await click('.dag-node[data-node="Plan trip"]');
   assert.equal(await has(detail("entryInput")), false);
   assert.equal(await has(detail("assignedInput")), false);
+  assert.equal(await visible(flowStop), false);
+  assert.equal(await visible(pendingStop), false);
   await send(main, "!call execute {}");
   await until(() => has('.dag-node[data-node="End of trip"][data-state="completed"]'), "Markdown result published");
   await click('.dag-node[data-node="Read"]');
@@ -357,14 +380,20 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.match(await js(q(detail("assignedInput")) + ".innerText"), /Travel brief/);
   assert.match(await js(q(".input-sources") + ".textContent"), /Read/);
   assert.equal(await js(q(detail("result") + " h1") + ".textContent"), "Travel route");
-  await click("#flow-contract [data-action=rollback-node]");
-  await untilJS('[...document.querySelectorAll("#flow-heading option")].some(o=>o.value.startsWith("rollback"))', "node rollback snapshot");
+  assert.equal(await visible(flowStop), false);
+  assert.equal(await visible(nodeStop), false);
+  assert.equal(await has("#flow-contract [data-action=rollback-node]"), false);
+  assert.equal(await has("#flow-heading [data-action=rollback]"), false);
+  await send(main, '!call rollback {"nodes":["Plan trip"]}');
+  await untilJS('[...document.querySelectorAll("#flow-heading option")].some(o=>o.value.startsWith("rollback"))', "main agent rollback creates a history snapshot");
   await js('(() => {const el = document.querySelector("#flow-heading select"); el.value = [...el.options].find(o=>o.value.startsWith("rollback")).value; el.dispatchEvent(new Event("change"));})()');
   await click('.dag-node[data-node="Plan trip"]');
   assert.match(await js(q(detail("result")) + ".innerText"), /Take the train/);
+  assert.equal(await visible(flowStop), false);
+  assert.equal(await visible(nodeStop), false);
   assert.equal(await has("#flow-contract [data-action=rollback-node]"), false);
   assert.equal(await has("#flow-heading [data-action=rollback]"), false);
   console.log(
-    "Electron + real Hub/ACP: direct chat, DAG, task prompts, stop/resume, native files, web tabs, drafts, model/effort, usage, publication, node contracts and Markdown routing/rollback passed",
+    "Electron + real Hub/ACP: direct chat, DAG, task prompts, node and workflow stop, native files, web tabs, drafts, model/effort, usage, publication, node contracts, Markdown routing and agent-controlled resume/rollback passed",
   );
 });

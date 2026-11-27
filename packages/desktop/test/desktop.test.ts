@@ -5,6 +5,7 @@ import { Paths } from "@xsb/hub";
 import { Workflow, Agents, Connection, ConversationEvent, History, Question, RunExt, Tasks } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
+import { holdDebugger, injectedCommand, installInputGuard } from "../src/page-input.ts";
 import { Workspace } from "../src/workspace.ts";
 import type { Notice } from "../src/workspace.ts";
 
@@ -45,15 +46,13 @@ function snapshot(peer: Peer, agents = []) {
   peer.requests.set(Tasks.list, () => ({ tasks: [] }));
 }
 
-test("node controls carry the workflow session and selected node names", async () => {
+test("desktop stop targets the displayed workflow version and optional selected node", async () => {
   const peer = new Peer(), ws = workspace(peer);
   const calls = [];
-  peer.requests.set(Workflow.pause, params => calls.push(params));
-  peer.requests.set(Workflow.rollback, params => calls.push(params));
-  await ws.workflowControl("main",true,["A"]);
-  await ws.workflowControl("main","rollback",["B"]);
-  await ws.workflowControl("main","rollback");
-  assert.deepEqual(calls,[{sessionId:"main",nodes:["A"]}, {sessionId:"main",nodes:["B"]}, {sessionId:"main",nodes:undefined}]);
+  peer.requests.set(Workflow.stop, params => calls.push(params));
+  await ws.stopWorkflow("main", "plan-1", "A");
+  await ws.stopWorkflow("main", "plan-2");
+  assert.deepEqual(calls, [{ sessionId: "main", version: "plan-1", node: "A" }, { sessionId: "main", version: "plan-2", node: undefined }]);
   ws.close();
 });
 
@@ -461,13 +460,25 @@ test("live work arriving with the first page wins over that page's idle snapshot
   ws.close();
 });
 
+test("browser debugger rejects application views and embedded previews before accessing their debugger", async () => {
+  const contents = { on() {}, get debugger() { throw new Error("application debugger was touched"); } };
+  assert.throws(() => holdDebugger(contents), /registered web tab/);
+  installInputGuard(contents, false);
+  assert.throws(() => holdDebugger(contents), /registered web tab/);
+  await assert.rejects(injectedCommand(contents, "Page.navigate", { url: "about:blank" }), /registered web tab/);
+});
+
 test("long snapshot parts retain their content and all element refs despite page changes", async () => {
   let captures = 0;
   const clicked = [];
+  let attached = false;
   const contents = {
+    on() {},
+    isDestroyed: () => false,
     debugger: {
-      attach() {},
-      isAttached: () => false,
+      attach() { attached = true; },
+      detach() { attached = false; },
+      isAttached: () => attached,
       async sendCommand(method, params) {
         if (method === "Accessibility.getFullAXTree") {
           captures++;
@@ -489,16 +500,19 @@ test("long snapshot parts retain their content and all element refs despite page
     getURL: () => "https://example.com/",
     isLoading: () => false,
   };
+  installInputGuard(contents, true);
   const driven = new Driven(contents, () => {});
-  assert.match(await driven.snapshot(), /"from": 20000/);
-  assert.match(await driven.snapshot(20000), /\[2\] button "Last"/);
+  const signal = new AbortController().signal;
+  assert.match(await driven.snapshot(signal), /"from": 20000/);
+  assert.match(await driven.snapshot(signal, 20000), /\[2\] button "Last"/);
   assert.equal(captures, 1);
   await driven.click(1);
   await driven.click(2);
   assert.deepEqual(clicked, [10, 20]);
-  assert.match(await driven.snapshot(0), /Changed/);
+  assert.match(await driven.snapshot(signal), /Changed/);
   assert.equal(captures, 2);
-  await assert.rejects(driven.snapshot(-1), /non-negative/);
+  await assert.rejects(driven.snapshot(signal, -1), /non-negative/);
+  await driven.release();
 });
 
 test("awaited jobs count as work even between idle agent turns", async () => {

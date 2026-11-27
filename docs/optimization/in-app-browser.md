@@ -22,17 +22,19 @@
 | annotation | 批注编辑框（`annotation.html`），只有编辑框那么大，按选中元素摆在其下方/上方/底部 | 保存、取消、Esc，或退出批注 |
 | overlay | 覆盖层（`overlay.html`）：盖住网页的菜单，和窗口一样大 | 自己关：点外面（自带的底）、Esc、失焦 |
 
-每次变化计算目标顺序，保留当前子视图里已按序存在的最长前缀，其余按序重新 `addChildView`（重新添加即置顶），视图不动就不碰。覆盖层按 `kind` 注册渲染器（目前是 `menu`），主进程只转交请求和答复（`overlay` / `overlayDone`，带序号，过期答复忽略）；新增一种覆盖内容只在 `renderer/overlay.js` 加一项。右栏标签的右键菜单走覆盖层；会话行仍用系统原生菜单。
+新增视图用 `addChildView(view, index)` 直接插入对应层。显示和撤下控制蒙层时，原来的菜单、编辑器和网页都保持挂载。覆盖层按 `kind` 注册渲染器，主进程转交请求和答复。右栏标签的右键菜单走覆盖层，会话行使用系统原生菜单。
 
 网站弹出的页面：`setWindowOpenHandler` 允许弹出并用 `createWindow` 接管 Chromium 已创建的 WebContents，包进新的 `WebContentsView` 作为标签。保留 `window.opener`、POST 数据和先开 about:blank 再写内容的弹窗；不创建 BrowserWindow。模型只看到自身连接关联的页面；用户和其他 Agent 的页面不进入工具清单。HTML 制品预览继续使用独立分区，不把制品访问权限传给外部网站。
 
-蒙层接住用户的鼠标；用户点到蒙层时键盘焦点立即还给窗口页面。批注时节点由调试器的节点选择在网页里选出，选中的元素由网页里隔离世界的脚本框住；用户选中元素后编辑框拿到焦点，关闭后焦点回到网页。提示条（提示、清除、完成）在窗口页面里、网页上方。
+蒙层在主进程截住鼠标事件。批注时，网页调试器选中元素，网页内隔离世界的脚本框住它。用户选中元素后，批注编辑框获得键盘焦点。编辑框打开期间，Agent 操作该网页会收到正在编辑的提示，用户可以继续输入。
 
 Debugger 截图统一由 `Pages.drawn` 提供渲染承载。显示在可见窗口里的网页在原处截图；没有显示的网页，以及显示在隐藏或最小化窗口里的网页（这样的窗口不出帧），临时放进独立的 800×600 小窗口，创建时 `show: false`，放入后仅调用 `showInactive()`。小窗口不可聚焦、忽略鼠标输入、不进入任务栏，截图成功或失败都销毁承载窗口；从窗口借出的网页截完按最新布局归还。期间切换或关闭标签时，以用户当前选择为准。主窗口的当前标签和输入焦点不参与截图。窗口无需成为前台窗口，宿主主窗口隐藏时也可截图。
 
 用户打开或选中网页标签后，视图摆好即调用 `Pages.focus(id)`，默认把键盘交给对应的 WebContentsView。新建空白标签时，光标停在地址栏。
 
-Agent 打开标签、接管弹窗或使用 `browser_select` 选页时，固定调用 `Pages.focus(id, false)`。新标签通常会展示在右栏。用户正在网页、批注编辑框或地址栏输入时，新标签留在后台。选择已有标签只更新该 Agent 的操作目标。Agent 通过 debugger 在工具调用期间启用 `Emulation.setFocusEmulationEnabled`，让目标网页接收 CDP 点击、文本和按键，调用结束后关闭模拟。
+调试器只可连接由 `Pages` 登记的网页标签。Agent 用目标网页的 CDP `Page.navigate` 导航，用 `Page.navigateToHistoryEntry` 后退。主进程把网页提交导航、重定向和同文档导航产生的实际 URL 发给地址栏。地址栏保留正在编辑的文字，结束编辑时同步当前 URL。
+
+Agent 打开网页、接管弹窗或用 `browser_select` 选页时，调用 `Pages.focus(id, false)`。用户正在侧栏输入时，Agent 的新标签留在后台。对已有标签的选择只更新 Agent 的操作目标。Agent 注入点击、文字和按键前，等待目标网页确认 `Emulation.setFocusEmulationEnabled` 已开启。工具调用结束后关闭模拟，再撤下蒙层。
 
 还安装主进程输入保护：用户键盘事件被阻止，可信 CDP 输入按 Chromium 的 debugger 来源标志放行；CDP 鼠标命令在受控注入窗口内放行，物理用户输入由网页之上的蒙层视图截住。没有使用 `Input.setIgnoreInputEvents`，因为它也会阻止 Agent 的 CDP 输入。页面地址栏的导航、后退、前进、刷新等操作在控制中同样被拒绝，关闭标签、停止任务等应用控制仍可用。
 
@@ -139,6 +141,7 @@ turn 结束不删除下载文件；已经开始的下载可继续完成。应用
 - `npm test -w @xsb/desktop`
 - `npm test -w @xsb/hub`
 - `npm run test:browser-native -w @xsb/desktop`：项目私有 Electron，独立临时目录/profile，仅访问 localhost。焦点相关断言需要窗口能到前台（屏幕未锁定）。
+- `npm run test:browser-tabs -w @xsb/desktop` 聚焦标签、地址栏和键盘。测试先聚焦宿主输入框，再让 Agent 点击网页按钮、输入并按回车。它检查网页实际响应，并在操作全程监听窗口、宿主 WebContents 和输入框的 `blur` 事件，最后核对草稿及 `activeElement`。
 - `npm run test:menus-ui -w @xsb/desktop`：验证右栏标签菜单、模态窗口让位和 HTML 制品预览往返切换。
 
 覆盖：默认名与并发 `(1)` 后缀、预留不交付半成品、查询实时字节及未知进度、新 turn 空清单、旧 id 拒绝、旧 transfer 晚完成不串入、只读凭据不发模型消息、真实 Hub turn id 改变。

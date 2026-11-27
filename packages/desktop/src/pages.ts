@@ -33,11 +33,11 @@ const WEB_PARTITION = "persist:xsb-web";
 export const PREVIEW_PARTITION = "xsb-preview";
 /** A page no window shows is drawn in a small, non-activating window for its screenshot. */
 const SCREENSHOT_SIZE = { width: 800, height: 600 };
-const WEB_PREFERENCES = { sandbox: true, contextIsolation: true, nodeIntegration: false };
+const WEB_PREFERENCES = { sandbox: true, contextIsolation: true, nodeIntegration: false, focusOnNavigation: false };
 
 /** `background`: an agent opened it, or its page did while the agent was driving it; its tab is shown without taking the user's focus. */
 export type PageOptions = { sessionId?: string; embedded?: boolean; agent?: boolean; background?: boolean; downloads?: BrowserDownloads; onPopup?: (id: string, openerId: string) => void };
-type Page = { id: string; view: WebContentsView; contents: WebContents; embedded: boolean; agent: boolean; background: boolean; userFocused?: boolean; controlling?: boolean; window?: PageHost; error?: string; favicon?: string; releaseDownloads?: () => void; annotator?: Annotator; options: PageOptions };
+type Page = { id: string; view: WebContentsView; contents: WebContents; embedded: boolean; agent: boolean; background: boolean; initialDocument?: Promise<void>; userFocused?: boolean; controlling?: boolean; window?: PageHost; error?: string; favicon?: string; releaseDownloads?: () => void; annotator?: Annotator; options: PageOptions };
 /** `pageWindowUrl`: the document of a page's own window. `toneOf`: the style of annotations on a page of this session (page-annotations.ts), after its agent's backend. */
 type Shell = HostShell & { pageWindowUrl: string; toneOf?: (sessionId?: string) => Tone };
 
@@ -72,9 +72,18 @@ export class Pages {
     if (url !== "about:blank" && !(embedded && url.startsWith("xsb-artifact:"))) url = address(url);
     const view = new WebContentsView({ webPreferences: { ...WEB_PREFERENCES, partition: url.startsWith("xsb-artifact:") ? PREVIEW_PARTITION : WEB_PARTITION } });
     const page = this.register(view, options);
-    void page.contents.loadURL(url).catch(() => {});
+    const loading = page.contents.loadURL(url);
+    // A new agent tab needs a renderer before its debugger can drive the first real navigation.
+    if (options.agent && url === "about:blank") page.initialDocument = loading;
+    void loading.catch(() => {});
     this.changed(page);
     return this.view(page);
+  }
+
+  async waitForInitialDocument(id: string): Promise<void> {
+    const page = this.pages.get(id);
+    if (!page) throw new Error("this page was closed");
+    await page.initialDocument;
   }
 
   private register(view: WebContentsView, options: PageOptions): Page {
@@ -83,7 +92,7 @@ export class Pages {
     const page: Page = { id: `p${++this.seq}`, view, contents, embedded, agent, background, options };
     view.setBackgroundColor("#ffffff");
     this.pages.set(page.id, page);
-    installInputGuard(contents);
+    installInputGuard(contents, !embedded);
     if (downloads) page.releaseDownloads = ownDownloads(contents, page.id, downloads, () => { page.error = undefined; this.changed(page); });
     contents.once("destroyed", () => this.close(page));
     // Chromium can give a background page focus when it loads or opens a popup. A user's tab selection
@@ -144,6 +153,8 @@ export class Pages {
     const page = this.pages.get(id);
     if (!page) throw new Error("this page was closed");
     const { contents, window } = page;
+    if (arg === "background" && page.annotator?.pending && ["detach", "restore", "close"].includes(op))
+      throw Error("The user is editing a page annotation. Retry after they finish.");
     if (page.controlling && ["navigate", "back", "forward", "reload", "external"].includes(op)) throw new Error(this.shell.controlText);
     if (op === "navigate") void this.navigate(id, String(arg)).catch(() => {});
     else if (op === "back") contents.navigationHistory.goBack();
@@ -271,6 +282,7 @@ export class Pages {
   setAgentControl(id: string, controlling: boolean): void {
     const page = this.pages.get(id);
     if (!page || page.controlling === controlling) return;
+    if (controlling && page.annotator?.pending) throw Error("The user is editing a page annotation. Retry after they finish.");
     page.controlling = controlling;
     // An agent taking the page ends the user's annotating; the notes stay.
     if (controlling) page.annotator?.stop();
@@ -354,7 +366,7 @@ export class Pages {
       titleBarStyle: "hiddenInset",
       trafficLightPosition: { x: 18, y: 20 },
       title: page.contents.getTitle(),
-      webPreferences: { preload: this.shell.preload },
+      webPreferences: { preload: this.shell.preload, focusOnNavigation: false },
     });
     const host = new PageHost(window, this.shell);
     // The window shows the page and nothing else.

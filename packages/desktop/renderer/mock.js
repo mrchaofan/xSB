@@ -45,17 +45,20 @@
     }],
     version: "film-1",
     paused: false,
+    state: "running",
+    controls: { stop: true },
     nodes: [
       {
         name: "A",
         kind: "task",
         status: "running",
         paused: false,
+        controls: { stop: true },
         agentId: worker.id,
         sessionId: worker.mainSessionId,
         target: "work-a",
       },
-      { name: "review", kind: "task", status: "waiting", paused: false },
+      { name: "review", kind: "task", status: "waiting", paused: false, controls: { stop: true } },
       { name: "final", kind: "end", status: "waiting", paused: false },
     ],
     edges: [
@@ -260,26 +263,28 @@
     },
     async cancel(id) {
       const a = get(id);
-      if (a.workflowOwner || data.workflows[a.mainSessionId])
-        await this.workflowControl(
-          a.workflowOwner ?? a.mainSessionId,
-          true,
-          a.workflowNode ? [a.workflowNode] : undefined,
-        );
+      const f = data.workflows[a.workflowOwner ?? a.mainSessionId];
+      if (f) await this.stopWorkflow(f.sessionId, f.version, a.workflowNode);
     },
-    async workflowControl(id, action, names) {
+    async stopWorkflow(id, version, node) {
       const f = data.workflows[id];
-      if (action === "rollback") throw Error("This preview uses a legacy workflow.");
-      const pause = action === true || action === "pause";
-      if (!names) f.paused = pause;
-      for (const n of f.nodes)
-        if (n.agentId && (!names || names.includes(n.name))) {
-          if (names) n.paused = pause;
-          n.status = n.paused || f.paused ? "suspended" : "running";
+      if (!f || f.version !== version) throw Error("The active workflow has changed.");
+      if (node === undefined) {
+        f.paused = true;
+        f.state = "paused";
+        f.controls.stop = false;
+      }
+      for (const n of f.nodes) {
+        if (n.kind !== "task" || (node !== undefined && node !== n.name)) continue;
+        n.controls.stop = false;
+        if (node !== undefined) n.paused = true;
+        n.status = n.agentId ? "suspended" : "paused";
+        if (n.agentId) {
           const a = get(n.agentId);
-          a.state = n.status === "running" ? "running" : "idle";
+          a.state = "idle";
           emit({ agent: a });
         }
+      }
       emit({ workflow: f });
       return structuredClone(f);
     },

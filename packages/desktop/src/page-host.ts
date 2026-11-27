@@ -161,7 +161,7 @@ export class PageHost {
     if (this.win.isDestroyed()) return;
     const focused = view.webContents && !view.webContents.isDestroyed() && view.webContents.isFocused();
     this.stack.take(view);
-    if (focused) this.document.focus();
+    if (focused && this.win.isFocused()) this.document.focus();
   }
 
   private decorate(): void {
@@ -209,14 +209,16 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent
 @media(prefers-reduced-motion:reduce){.frame{animation:none}}
 </style></head><body><div class="frame"><div class="label" role="status">${escapeHtml(this.shell.controlText)}</div></div></body></html>`;
     const view = this.createView(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    // The shield has no input controls. Consume the pointer before it can focus its document.
+    view.webContents.on("before-mouse-event", event => event.preventDefault());
     view.webContents.on("focus", () => {
-      if (!this.win.isDestroyed()) this.win.webContents.focus();
+      if (!this.win.isDestroyed() && this.win.isFocused()) this.document.focus();
     });
     return view;
   }
 
   private createView(url: string, preload?: string): WebContentsView {
-    const view = new WebContentsView({ webPreferences: { ...(preload && { preload, zoomFactor: this.document.getZoomFactor() }), sandbox: true, contextIsolation: true, nodeIntegration: false } });
+    const view = new WebContentsView({ webPreferences: { ...(preload && { preload, zoomFactor: this.document.getZoomFactor() }), sandbox: true, contextIsolation: true, nodeIntegration: false, focusOnNavigation: false } });
     view.setBackgroundColor("#00000000");
     view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     view.webContents.on("will-navigate", (event) => event.preventDefault());
