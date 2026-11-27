@@ -6,9 +6,10 @@ import { onArkLoginUrl } from "./ark.js";
 import { avatarImage, avatarPicker } from "./avatars.js";
 import { AVATARS } from "./avatar-catalog.js";
 import { backendIcon, backendKind, backendMark } from "./backend-icons.js";
-import { createArtifactBrowser, artifactDetails, artifactLabel, artifactNavigation } from "./artifacts.js";
+import { createArtifactBrowser, artifactLabel, artifactNavigation } from "./artifacts.js";
 import { currentFlow, renderWorkflow, showTask, workflowPanelState, restoreWorkflowPanel } from "./workflow.js";
 import { contentView, createEditor, markdownView } from "./content.js";
+import { dropPageAnnotations } from "./web-annotation.js";
 import { draftKey, loadDraft, moveDraft, saveDraft } from "./drafts.js";
 import { $, ICON, fill, h } from "./dom.js";
 import { composerSettings } from "./composer-settings.js";
@@ -274,8 +275,6 @@ function openLane(agentId, panel, readonly) {
     if (content.length === 1 && content[0].type === "text" && content[0].text.trim() === "/clear") return xsb.clear(agentId);
     try {
       await xsb.send(agentId, content, target);
-      // 批注随这条消息交给了智能体：网页里的那几条也撤下。
-      dropPageAnnotations(sent.filter((b) => b.type === "web_annotation"));
     }
     catch (e) {
       const current = laneOf(agentId)?.editor ?? editor;
@@ -284,7 +283,12 @@ function openLane(agentId, panel, readonly) {
       current.error.textContent = e.message;
       current.error.hidden = false;
       syncLane(agentId);
+      return;
     }
+    // 已发送的消息不因网页清理失败而重新进入草稿。
+    dropPageAnnotations(sent.filter((b) => b.type === "web_annotation")).catch((e) => {
+      editor.error.textContent = e.message; editor.error.hidden = false;
+    });
   };
   // 一个按钮管两件事：输入框里有内容就是发送；没有内容而智能体在工作，就是停止。
   const press = () => (readonly ? undefined : lane.dataset.action === "stop" ? xsb.cancel(agentId) : send());
@@ -473,7 +477,7 @@ function upsertEntry(agentId, entry) {
   if (!lane) return;
   const scroller = lane.querySelector(".transcript");
   const pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
-  const old = lane.querySelector(`.entry[data-id="${entry.id}"]`);
+  const old = lane.querySelector(`.entry[data-id="${CSS.escape(entry.id)}"]`);
   const node = entryNode(agentId, entry);
   if (entry.kind === "tool" && old?.tagName === "DETAILS") node.open = old.open;
   if (old) old.replaceWith(node); else lane.querySelector(".entries").append(node);
@@ -491,6 +495,11 @@ function entryNode(agentId, entry) {
   const base = { class: `entry ${entry.kind}`, "data-id": entry.id };
 
   const openLink = (href, container) => followContentLink(href, container, agentId);
+  if (entry.kind === "publication") {
+    return h("article", { ...base, "data-origin": entry.source.kind, "data-source": entry.source.id },
+      h("header", { class: "publication-source", title: entry.source.id }, entry.source.label),
+      contentView([{ type: "text", text: entry.markdown }], openLink));
+  }
   if (entry.kind === "output") {
     const offTurn = entry.run?.turnId === null;
     const notification = entry.runOrigin === "task-notification" || entry.runOrigin?.kind === "task-notification";
@@ -520,7 +529,7 @@ function entryNode(agentId, entry) {
         t({ task: "entry.from.task", task_result: "entry.from.result" }[o.role] ?? "entry.from.message", { name: nameOf(o.agentId), task: o.taskId })),
       o.kind === "system" && h("div", { class: "from" }, t("entry.from.system")),
       h("div", { class: "said" }, contentView(entry.content, openLink, { lookupAsset: o.kind === "user" && (ref => {
-        const a = state.artifacts.find(a => a.registeredName === ref.name && "v" + a.assetVersion === ref.version);
+        const a = state.artifacts.find(a => a.assetType === "workflow" && a.registeredName === ref.name && "v" + a.assetVersion === ref.version);
         return a && (() => followContentLink(a.url, laneOf(agentId), agentId));
       }) })),
       entry.deliveredAs && h("div", { class: "delivered-as" }, deliveredNote(entry.deliveredAs)),
@@ -625,8 +634,29 @@ function embed(url) {
   return embedded.page;
 }
 function closeEmbedded() {
-  embedded?.page.then((page) => xsb.page(page.id, "close"));
+  embedded?.page.then((page) => xsb.page(page.id, "close")).catch(() => {});
   embedded = null;
+}
+
+async function revealFile(id) {
+  const error = $("#artifact-reveal-error");
+  error.hidden = true;
+  try {
+    await xsb.revealArtifact(id);
+  } catch (e) {
+    if (id !== state.artifactId) return;
+    error.dataset.file = id;
+    error.textContent = t("content.openFailed", { error: e.message });
+    error.hidden = false;
+  }
+}
+
+function unavailablePreview(artifact, failure) {
+  return h("div", { class: "web-note" },
+    h("p", { role: "status" }, failure ? t("content.openFailed", { error: failure.message }) : t("artifact.noPreview")),
+    h("div", { class: "actions" },
+      h("button", { type: "button", class: "btn primary", onclick: () => revealFile(artifact.id) }, t("artifact.reveal")),
+      failure && h("button", { type: "button", class: "btn", onclick: () => renderArtifact(true) }, t("artifact.retry"))));
 }
 
 export async function renderArtifact(force = false) {
@@ -634,16 +664,14 @@ export async function renderArtifact(force = false) {
   document.querySelectorAll(".chip[data-artifact]").forEach((chip) => chip.setAttribute("aria-pressed", String(chip.dataset.artifact === artifact?.id)));
   $("#asset-reference").hidden = !artifact || !state.open.length;
   $("#asset-reference").title = referenceTitle();
-  $("#asset-reference").textContent = t(artifact?.registeredName ? "flow.reference" : "artifact.reference");
   $(".artifact-toolbar").hidden = !artifact;
   const body = $("#artifact-body");
   const modes = $("#artifact-modes");
   const navigation = $("#artifact-navigation");
   $("#artifact-list").hidden = !artifact;
   navigation.hidden = !artifact;
-  $("#artifact-info").hidden = !artifact;
-  $("#artifact-details").hidden = !artifact || !state.artifactDetails;
-  $("#artifact-info").setAttribute("aria-expanded", String(!!artifact && !!state.artifactDetails));
+  const revealError = $("#artifact-reveal-error");
+  if (!artifact || revealError.dataset.file !== artifact.id) revealError.hidden = true;
   const items = state.artifacts.filter(belongsHere);
   artifactBrowser.update(items, state.artifactId);
   const tasks = (currentFlow()?.nodes ?? []).filter(n => n.sessionId && agentOf(n.agentId));
@@ -663,7 +691,6 @@ export async function renderArtifact(force = false) {
     artifactView = null;
     ++artifactRender;
     $("#artifact-name").textContent = t("artifact.list.title");
-    $("#artifact-meta").textContent = "";
     modes.hidden = true;
     if (artifactBrowser.el.parentElement !== body) {
       fill(body, artifactBrowser.el);
@@ -672,19 +699,18 @@ export async function renderArtifact(force = false) {
     return;
   }
 
-  fill($("#artifact-detail-content"), artifactDetails(artifactBrowser, artifact, nameOf, showArtifact));
   fill(navigation, artifactNavigation(artifactBrowser, artifact, showArtifact));
 
-  // 文本只有源码，图片和视频只有预览，markdown 和 html 两者都有
+  // Markdown 和 HTML 能切换预览与源码。
   const media = artifact.kind === "image" || artifact.kind === "video";
-  const preview = media || (artifact.kind !== "text" && state.mode === "preview");
-  modes.hidden = media || artifact.kind === "text";
+  const switchable = artifact.kind === "markdown" || artifact.kind === "html";
+  const preview = media || (switchable && state.mode === "preview");
+  modes.hidden = !switchable;
   modes.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String((b.dataset.mode === "preview") === preview)));
   $("#artifact-name").textContent = artifactLabel(artifact);
   $("#artifact-name").title = artifact.name;
-  $("#artifact-meta").textContent = "";
 
-  // 改详情、放大或调整窗口不重建同一预览：视频播放位置和图片节点保持原样。
+  // 放大或调整窗口不重建同一预览，保留视频播放位置和图片节点。
   const view = JSON.stringify([artifact.id, artifact.url, artifact.kind, artifact.updatedAt, preview]);
   // 原生网页和浏览器标签共用窗口的位置，切回同一个 HTML 预览时也要重新摆好它。
   const htmlPreview = preview && artifact.kind === "html";
@@ -692,6 +718,7 @@ export async function renderArtifact(force = false) {
   artifactView = view;
   const request = ++artifactRender;
 
+  if (artifact.kind === "unsupported") return fill(body, unavailablePreview(artifact));
   if (media) {
     const node = h(artifact.kind === "image" ? "img" : "video", { src: artifact.url, alt: artifact.name, controls: artifact.kind === "video" });
     const fit = () => {
@@ -699,17 +726,16 @@ export async function renderArtifact(force = false) {
       if (width && height) node.style.setProperty("--media-ratio", String(width / height));
     };
     node.onload = node.onloadedmetadata = fit;
-    node.onerror = () => { if (request === artifactRender) fill(body, h("div", { class: "catalog-empty", role: "status" }, t("artifact.unavailable"))); };
+    node.onerror = () => { if (request === artifactRender) fill(body, unavailablePreview(artifact)); };
     return fill(body, h("figure", {}, node));
   }
-  if (htmlPreview) {
-    const page = await embed(artifact.url);
-    if (request === artifactRender && !$("#side-artifacts").hidden) showWeb(body, page);
-    return;
-  }
-
-  fill(body, h("div", { class: "catalog-empty", role: "status" }, t("artifact.loading")));
   try {
+    if (htmlPreview) {
+      const page = await embed(artifact.url);
+      if (request === artifactRender && !$("#side-artifacts").hidden) showWeb(body, page);
+      return;
+    }
+    fill(body, h("div", { class: "catalog-empty", role: "status" }, t("artifact.loading")));
     const response = await fetch(artifact.url);
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     const text = await response.text();
@@ -719,8 +745,8 @@ export async function renderArtifact(force = false) {
       : h("pre", { class: "source" }, ...text.split("\n").map((line) => h("span", {}, line + "\n"))));
   } catch (error) {
     if (request !== artifactRender) return;
-    fill(body, h("div", { class: "catalog-empty", role: "status" }, t("content.openFailed", { error: error.message }),
-      h("button", { class: "btn", onclick: () => renderArtifact(true) }, t("artifact.retry"))));
+    if (htmlPreview) closeEmbedded();
+    fill(body, unavailablePreview(artifact, error));
   }
   body.scrollTop = state.artifactTabs.find(t => t.id === state.tab)?.scroll ?? 0;
 }
@@ -770,15 +796,15 @@ function setReferenceTarget(id) {
   $("#reference-destination select").value = referenceTarget();
   const title = referenceTitle();
   $("#asset-reference").title = title;
-  document.querySelectorAll(".reference-action").forEach(b => { b.title = title; b.setAttribute("aria-label", title + " · " + b.dataset.name); });
+  document.querySelectorAll(".reference-action").forEach(b => { b.title = title; b.setAttribute("aria-label", [b.textContent, b.dataset.name, title].join(" · ")); });
 }
 function referenceTitle() { return t("artifact.referenceTo", { name: nameOf(referenceTarget()) ?? "" }); }
-function referenceArtifact(artifact) {
+function referenceArtifact(artifact, asAsset = false) {
   if (!artifact || !belongsHere(artifact)) return;
   const id = referenceTarget();
   if (id !== state.open[0]) { selectTab("workflow"); showTask(id); }
   else { document.body.classList.remove("artifact-focused", "artifact-expanded"); }
-  laneOf(id)?.editor.insert([artifact.registeredName
+  laneOf(id)?.editor.insert([asAsset
     ? { type: "asset_reference", name: artifact.registeredName, version: "v" + artifact.assetVersion }
     : { type: "resource_link", name: artifact.name, uri: artifact.fileUri }]);
 }
@@ -789,7 +815,7 @@ function rememberSide() {
   if (!rootSession()) return;
   rememberPosition();
   remember(sideKey(), {
-    tab: state.tab, tabs: state.artifactTabs, workflowTab: state.workflowTab, catalogTab: state.catalogTab, tabOrder: state.tabOrder, details: state.artifactDetails, filters: artifactBrowser.filters,
+    tab: state.tab, tabs: state.artifactTabs, workflowTab: state.workflowTab, catalogTab: state.catalogTab, tabOrder: state.tabOrder, filters: artifactBrowser.filters,
     scroll: catalogScroll, target: state.referenceAgent, flow: workflowPanelState(currentFlow()),
   });
 }
@@ -797,7 +823,6 @@ function restoreSide() {
   closeEmbedded(); artifactRender++; artifactView = null;
   const saved = recall(sideKey()) ?? {};
   state.artifactTabs = (saved.tabs ?? []).filter(tab => { const a = artifactOf(tab.artifactId); return a && belongsHere(a); });
-  state.artifactDetails = !!saved.details;
   state.referenceAgent = agentOf(saved.target) ? saved.target : state.open[0];
   restoreWorkflowPanel(currentFlow(), saved.flow);
   state.artifactId = null; state.listing = true;
@@ -828,21 +853,7 @@ $("#toggle-artifact").onclick = () => {
   } else { document.body.classList.remove("artifact-focused"); document.body.classList.toggle("no-artifact"); }
 };
 $("#artifact-list").onclick = browseArtifacts;
-const showArtifactDetails = (open) => {
-  state.artifactDetails = open;
-  $("#artifact-details").hidden = !open;
-  $("#artifact-info").setAttribute("aria-expanded", String(open));
-  if (open) $("#artifact-details-close").focus(); else $("#artifact-info").focus();
-};
-$("#artifact-info").onclick = () => showArtifactDetails(!state.artifactDetails);
-$("#artifact-details-close").onclick = () => showArtifactDetails(false);
-$("#artifact-reveal").onclick = async () => {
-  const error = $("#artifact-detail-error");
-  error.hidden = true;
-  try {
-    await xsb.revealArtifact(state.artifactId);
-  } catch (e) { error.textContent = t("content.openFailed", { error: e.message }); error.hidden = false; }
-};
+$("#artifact-reveal").onclick = () => revealFile(state.artifactId);
 $("#artifact-modes").onclick = (e) => {
   if (!e.target.dataset.mode) return;
   state.mode = e.target.dataset.mode;
@@ -857,7 +868,6 @@ bindArtifactResize($("#divider"));
 window.onkeydown = (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === ",") { e.preventDefault(); showSettings(); return; }
   if (document.querySelector("dialog[open]")) return;
-  if (e.key === "Escape" && state.artifactDetails) { showArtifactDetails(false); return; }
   if (e.key === "Escape" && document.body.classList.contains("artifact-focused")) { document.body.classList.remove("artifact-focused"); renderSide(); return; }
   if (e.key === "Escape" && document.body.classList.contains("artifact-expanded")) { document.body.classList.remove("artifact-expanded"); return; }
   const agent = (e.metaKey || e.ctrlKey) && state.agents.filter(a => !a.workflowOwner)[Number(e.key) - 1];
@@ -888,23 +898,18 @@ export function onAgent(agent) {
 function addAnnotation({ sessionId, annotation }) {
   const agent = state.agents.find((a) => a.mainSessionId === sessionId);
   if (!agent || annotation?.type !== "web_annotation") return;
-  const lane = laneOf(agent.id);
-  if (lane) return lane.editor.insert([annotation], true);
   const key = draftKey(state.workspace.id ?? state.workspace.path, agent);
+  const editor = laneOf(agent.id)?.editor ?? pendingEditors.get(key);
+  if (editor) return editor.insert([annotation], true);
   saveDraft(key, [...loadDraft(key), annotation]);
 }
 function onAnnotationsRemoved({ sessionId, ids }) {
   const agent = state.agents.find((a) => a.mainSessionId === sessionId);
   if (!agent || !Array.isArray(ids)) return;
-  const lane = laneOf(agent.id);
-  if (lane) return lane.editor.removeAnnotations(ids);
   const key = draftKey(state.workspace.id ?? state.workspace.path, agent);
+  const editor = laneOf(agent.id)?.editor ?? pendingEditors.get(key);
+  if (editor) return editor.removeAnnotations(ids);
   saveDraft(key, loadDraft(key).filter((b) => b.type !== "web_annotation" || !ids.includes(b.id)));
-}
-function dropPageAnnotations(notes) {
-  const byPage = Map.groupBy(notes.filter((n) => n.pageId && n.id), (n) => n.pageId);
-  // 网页可能已经关了或换了文档：那边已经没有这些批注，不算错。
-  for (const [pageId, list] of byPage) xsb.page(pageId, "annotationsRemove", list.map((n) => n.id)).catch(() => {});
 }
 xsb.on((event) => {
   if (event.controls) laneOf(event.agentId)?.controls.update(event.controls);
@@ -965,7 +970,7 @@ xsb.on((event) => {
 /** 读一次快照并画出整个窗口。打开工作区之后再调用一次。 */
 export async function start() {
   rememberSide();
-  Object.assign(state, { activities: {}, workflows:{} }, await xsb.load(), { open: [], settings: null, listing: true, tab: null, workflowTab: false, catalogTab: false, tabOrder: [], artifactTabs: [], artifactDetails: false });
+  Object.assign(state, { activities: {}, workflows:{} }, await xsb.load(), { open: [], settings: null, listing: true, tab: null, workflowTab: false, catalogTab: false, tabOrder: [], artifactTabs: [] });
   catalogScroll = 0;
   $("#artifact-body").scrollTop = 0;
   artifactBrowser.reset();

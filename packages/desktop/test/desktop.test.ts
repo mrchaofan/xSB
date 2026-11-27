@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { Paths } from "@xsb/hub";
-import { Answer, Workflow, Agents, Assets, Connection, History, Question, RunExt, Tasks } from "@xsb/protocol";
+import { Answer, Workflow, Agents, Assets, Connection, ConversationEvent, History, Question, RunExt, Tasks } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
@@ -293,6 +293,43 @@ test("older pages preserve live updates and do not restore historical waiting", 
   assert.equal(ws["activities"].get("a").kind, "writing");
   peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "state_update", state: "idle" } });
   assert.deepEqual(ws.working(), []);
+  ws.close();
+});
+
+test("published entries project by source and stable ID in ledger order without waking the agent", async () => {
+  const peer = new Peer(), a = { ...agent("a"), mainSessionId: "s" };
+  snapshot(peer, [a]);
+  const event = { schemaVersion: 1, source: { kind: "plugin", id: "example", label: "Example" }, id: "posted", sessionId: "s",
+    markdown: "complete".repeat(3000) };
+  const info = (value: unknown) => ({ sessionUpdate: "session_info_update", _meta: { [ConversationEvent.key]: value } });
+  const output = (text: string) => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+  const legacy = { sessionUpdate: "user_message_chunk", messageId: "earlier", _meta: { [OriginExt.key]: { kind: "system" } },
+    content: { type: "text", text: JSON.stringify({ completed: "End", version: "plan-1", predecessors: [] }) } };
+  peer.requests.set(History.page, ({ before }) => before === undefined ? { updates: [], cursor: 50, agent: a }
+    : { updates: [legacy, output("historical answer")], cursor: null, agent: a });
+  const ws = workspace(peer);
+  await ws.load();
+  const emit = update => peer.emit("session/update", { sessionId: "s", update });
+  for (const change of [{ schemaVersion: 2 }, { source: "agent" }, { sessionId: "other" }]) emit(info({ ...event, ...change }));
+  emit(info(event));
+  assert.deepEqual(ws["transcripts"].get("a").map(e => e.kind), ["publication"]);
+  assert.deepEqual(ws.working(), []);
+  assert.equal(ws["activities"].size, 0);
+
+  // A result arriving during an unrelated reply occupies its own position without affecting the run.
+  emit(output("before"));
+  const second = { ...event, source: { ...event.source, id: "other", label: "Other" } };
+  emit(info(second));
+  emit(output("after"));
+  emit(info(second));
+  emit(output("!"));
+  const page = await ws.history("a");
+  assert.deepEqual(page.entries.map(e => e.kind === "publication" ? e.source.id : e.content[0].text),
+    [legacy.content.text, "historical answer", event.source.id, "before", second.source.id, "after!"]);
+  assert.equal(page.entries[0].kind, "input");
+  assert.equal(page.entries[0].origin.kind, "system");
+  assert.equal(page.entries[2].markdown, event.markdown);
+  assert.deepEqual(page.entries[2].source, event.source);
   ws.close();
 });
 

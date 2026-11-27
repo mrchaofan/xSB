@@ -400,7 +400,12 @@ export type Redelivered = { messageIds: string[]; with: string };
  * images it was told of but cannot see, text saved to a file it was given the start of, a note of what the input addresses.
  */
 export const DeliveredAs = { key: `${NS}/delivered` } as const;
-export type DeliveredAs = { imagesHidden?: number; spilled?: { chars: number; file: string }[]; scope?: string };
+export type DeliveredAs = {
+  imagesHidden?: number;
+  spilled?: { chars: number; file: string }[];
+  /** A scope note accompanied this input. Older transcripts stored the note here. */
+  scope?: true | string;
+};
 
 /**
  * A question the agent asks with `ask`. The tool waits for an explicit answer or skip, then resumes the same turn.

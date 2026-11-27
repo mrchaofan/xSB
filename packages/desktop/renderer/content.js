@@ -4,7 +4,8 @@
 //   内容 → 对话        contentView
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { append } from "../src/content.ts";
+import { assetRefTag, formatAssetRef } from "@xsb/protocol";
+import { append, assetReferenceParts } from "../src/content.ts";
 import { fromClipboard } from "./clipboard.js";
 import { openDialog } from "./form.js";
 import { ICON, fill, h } from "./dom.js";
@@ -18,8 +19,10 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 });
 DOMPurify.addHook("beforeSanitizeAttributes", (node) => {
   // 本地地址不交给浏览器导航；保留给点击处理器，再由主进程解析。
-  if (node.tagName === "A" && /^(file:|xsb-artifact:)/i.test(node.getAttribute("href") ?? "")) {
-    node.setAttribute("data-file-href", node.getAttribute("href"));
+  if (node.tagName !== "A") return;
+  const href = node.getAttribute("href") ?? "";
+  if (/^(file:|xsb-artifact:|[a-z]:(?:[\\/]|%5c))/i.test(href) || /^[\w.+-]+\.[\w-]+:\d+(?::\d+)?(?:[?#].*)?$/.test(href)) {
+    node.setAttribute("data-file-href", href);
     node.setAttribute("href", "#");
   }
 });
@@ -90,6 +93,18 @@ export function markdownView(text, openLink, className = "md") {
   return el;
 }
 
+/** Keep the file URL on the ACP block; show its readable path in the tooltip. */
+function fileTitle(uri) {
+  try {
+    const url = new URL(uri);
+    if (url.protocol === "file:") {
+      const path = decodeURIComponent(url.pathname);
+      return url.host ? `//${url.host}${path}` : path.replace(/^\/(?=[a-z]:\/)/i, "");
+    }
+  } catch { /* A relative resource URI is already readable. */ }
+  return uri;
+}
+
 /** 文本以外的一块：图片显示本身，文件显示名字，不认识的类型显示类型名。 */
 function partNode(block) {
   if (block.type === "web_annotation") {
@@ -99,36 +114,22 @@ function partNode(block) {
       h("span", { class: "web-annotation-text" }, t("composer.annotation", { index: block.index, note: note.length > 40 ? `${note.slice(0, 40)}…` : note })));
   }
   if (block.type === "image") return h("img", { class: "part", src: block.url || `data:${block.mimeType};base64,${block.data}`, loading: "lazy", decoding: "async", alt: t("content.image.alt") });
-  if (block.type === "asset_reference") return h("span", { class: "part chip asset-ref", title: block.name + " · " + block.version, html: ICON.file }, block.name + " · " + block.version);
+  if (block.type === "asset_reference") return h("span", { class: "part chip asset-ref", title: formatAssetRef(block), html: ICON.file }, formatAssetRef(block));
+  if (block.type === "resource_link") return h("span", { class: "part chip file-ref", title: fileTitle(block.uri), html: ICON.file }, block.name);
   if (block.type === "skill") return h("span", { class: "part chip", title: block.name, html: ICON.file }, t("composer.skillName", { name: block.name }));
-  return h("span", { class: "part chip", title: block.uri, html: ICON.file }, block.type === "resource_link" ? block.name : block.type);
+  return h("span", { class: "part chip", title: block.uri, html: ICON.file }, block.type);
 }
 
 /** 内容 → 对话里的样子：文本按 markdown 渲染，其余各占一块。 */
 export function contentView(content, openLink, { streaming = false, lookupAsset } = {}) {
-  const parts = lookupAsset ? content.flatMap(block => {
-    if (block.type !== "text") return [block];
-    const parts = [];
-    let offset = 0;
-    for (const match of block.text.matchAll(/<asset>(.*?)<\/asset>/gs)) {
-      let ref;
-      try { ref = JSON.parse(match[1]); } catch { continue; }
-      if (typeof ref?.name !== "string" || !/^v[1-9]\d*$/.test(ref?.version)) continue;
-      if (offset < match.index) parts.push({ type: "text", text: block.text.slice(offset, match.index) });
-      parts.push({ type: "asset_reference", name: ref.name, version: ref.version });
-      offset = match.index + match[0].length;
-    }
-    if (offset === 0) return [block];
-    if (offset < block.text.length) parts.push({ type: "text", text: block.text.slice(offset) });
-    return parts;
-  }) : content;
+  const parts = lookupAsset ? content.flatMap(assetReferenceParts) : content;
   const el = h("div", { class: "content" }, ...parts.map((block) => {
     if (block.type === "asset_reference") {
       const preview = lookupAsset?.(block);
-      return h(preview ? "button" : "span", { class: "part chip", title: preview ? "" : t("artifact.unavailable"), html: ICON.file, onclick: preview }, block.name + " · " + block.version + (preview ? "" : " · " + t("artifact.unavailable")));
+      return h(preview ? "button" : "span", { class: "part chip asset-ref", title: preview ? formatAssetRef(block) : t("artifact.unavailable"), html: ICON.file, onclick: preview }, formatAssetRef(block) + (preview ? "" : " · " + t("artifact.unavailable")));
     }
     if (block.type === "text") return markdownView(block.text, openLink);
-    if (block.type === "resource_link") return h("button", { type: "button", class: "part chip", title: block.uri, html: ICON.file, onclick: () => openLink?.(block.uri, el) }, block.name);
+    if (block.type === "resource_link") return h("button", { type: "button", class: "part chip file-ref", title: fileTitle(block.uri), html: ICON.file, onclick: () => openLink?.(block.uri, el) }, block.name);
     return partNode(block);
   }));
   if (!streaming && content.some((block) => block.type === "text")) el.append(h("div", { class: "content-actions" },
@@ -154,15 +155,41 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
   const blocks = new WeakMap();      // 小方块的节点 → 它代表的块
   const isNote = (block) => block.type === "web_annotation";
   let notes = [];
+  const removals = new Map(); // Each note's own cleanup or failure; retrying one never acknowledges another.
+  const noteKey = (note) => note.id ?? note;
   const tray = h("div", { class: "annotation-tray", hidden: true });
   function renderTray() {
     tray.hidden = !notes.length;
     fill(tray, ...notes.map((block) => {
       const card = partNode(block);
-      card.append(h("button", { class: "remove-ref", type: "button", "aria-label": t("composer.remove"), title: t("composer.remove"), html: ICON.close,
-        onclick: () => { notes = notes.filter((b) => b !== block); renderTray(); onAnnotationsRemoved([block]); onChange(); } }));
+      card.append(h("button", { class: "remove-ref", type: "button", disabled: removals.get(noteKey(block))?.busy, "aria-label": t("composer.remove"), title: t("composer.remove"), html: ICON.close,
+        onclick: (event) => removeNote(block, event.currentTarget) }));
       return card;
     }));
+  }
+  function removeNote(block, button) {
+    const key = noteKey(block);
+    const removal = { busy: true };
+    removals.set(key, removal);
+    button.disabled = true;
+    error.hidden = true;
+    reading++;
+    onChange();
+    removal.done = Promise.resolve().then(() => onAnnotationsRemoved([block])).then(() => {
+      notes = notes.filter(note => noteKey(note) !== key);
+      removals.delete(key);
+    }).catch((e) => {
+      if (!removals.has(key)) return;
+      removal.busy = false;
+      removal.error = e;
+      showRemovalError(block, e);
+      throw e;
+    }).finally(() => { reading--; renderTray(); onChange(); });
+    removal.done.catch(() => {});
+  }
+  function showRemovalError(note, reason) {
+    error.textContent = t("composer.annotationRemovalFailed", { index: note.index, error: reason.message });
+    error.hidden = false;
   }
   /** 批注进附件栏；同一条（同一个 id）不会出现两次。 */
   function attach(content) {
@@ -247,7 +274,7 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
     const trimmed = content.map((block, i) => (block.type !== "text" ? block
       : { ...block, text: block.text.slice(i === 0 ? block.text.search(/\S|$/) : 0).replace(i === content.length - 1 ? /\s+$/ : /$^/, "") }));
     return trimmed.filter(block => block.type !== "text" || block.text).flatMap(block => block.type === "asset_reference"
-      ? [{ type: "text", text: "<asset>" + JSON.stringify({ name: block.name, version: block.version }) + "</asset>" }]
+      ? [{ type: "text", text: assetRefTag(block) }]
       : [block]);
   }
 
@@ -287,7 +314,7 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
   function restore(content) {
     caret = null;
     notes = [];
-    content = attach(content);
+    content = attach(content).flatMap(assetReferenceParts);
     renderTray();
     el.replaceChildren(...content.map((block) => {
       if (block.type === "text") return document.createTextNode(block.text);
@@ -297,7 +324,16 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
 
   async function ready() {
     let task;
-    do { task = pending; await task; } while (task !== pending);
+    do {
+      task = pending;
+      try {
+        await Promise.all([task, ...notes.map(note => removals.get(noteKey(note))?.done)]);
+      } catch (e) {
+        const failed = notes.find(note => removals.get(noteKey(note))?.error === e);
+        if (failed) showRemovalError(failed, e);
+        throw e;
+      }
+    } while (task !== pending || notes.some(note => removals.has(noteKey(note))));
   }
 
   /** 网页那边撤下了这些批注（清除批注）：附件栏跟着去掉。 */
@@ -305,6 +341,7 @@ export function createEditor(onEnter, onChange = () => {}, onAnnotationsRemoved 
     const left = notes.filter((n) => !ids.includes(n.id));
     if (left.length === notes.length) return;
     notes = left;
+    for (const id of ids) removals.delete(id);
     renderTray();
     onChange();
   }

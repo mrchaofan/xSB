@@ -247,14 +247,29 @@ test("ask is xSB's own tool, served apart from the workflow tools, and logs no w
   const serve = (server?: string) => {
     const handlers = new Map<string, (params: any) => any>();
     const logged: unknown[] = [], asked: unknown[] = [];
-    const session: any = { source: () => ({ agentId: "a", sessionId: "sa", turnId: "t" }), withStep: (_: unknown, call: () => unknown) => call(), agentId: "a", current: { started: true, id: "t" }, acceptsTools: true, observeExecution() {}, toolOutput() {}, recordWorkflow: (_: string, d: unknown) => logged.push(d) };
-    const hub: any = { lifecycle: new Lifecycle(new Hooks<any, any>({ log() {}, vetoed() {}, deadLetter() {} })), agent: () => ({}), policy: () => ({ outputTokens: 4000 }), paths: {}, questions: { ask: (_: unknown, args: unknown) => (asked.push(args), "shown") } };
+    const session: any = { source: () => ({ agentId: "a", sessionId: "sa", turnId: "t" }), withStep: (_: unknown, call: () => unknown) => call(), agentId: "a", current: { started: true, id: "t" }, acceptsTools: true, observeExecution() {}, toolOutput() {} };
+    const workflows = {
+      call: (_: unknown, name: string) => { if (name === "ask") throw Error("unknown workflow tool"); return "adopted"; },
+      record: (s: unknown, turnId: string, event: unknown) => { assert.equal(s, session); assert.equal(turnId, "t"); logged.push(event); },
+    };
+    const hub: any = { lifecycle: new Lifecycle(new Hooks<any, any>({ log() {}, vetoed() {}, deadLetter() {} })), agent: () => ({}), policy: () => ({ outputTokens: 4000 }), paths: {}, state: { store: { healthy: true } }, workflows, questions: { ask: (_: unknown, args: unknown) => (asked.push(args), "shown") } };
     serveMcp(hub, { onRequest(name: string, handler: (params: any) => any) { handlers.set(name, handler); } } as any, () => session);
     handlers.get(BRIDGE_ATTACH)!({ token: "x", ...(server ? { server } : {}) });
-    return { handlers, logged, asked };
+    return { handlers, logged, asked, workflows };
   };
   const workflow = serve();
   assert.ok(!workflow.handlers.get("tools/list")!({}).tools.some((t: any) => t.name === "ask"), "not among the workflow tools");
+  const invoke = (name: string, receipt: string) => workflow.handlers.get("tools/call")!({ name, arguments: {}, _meta: { "dev.xsb/call-id": receipt } });
+  assert.equal((await invoke("execute", "ok")).content[0].text, "adopted");
+  assert.equal((await invoke("ask", "failed")).isError, true);
+  assert.deepEqual(workflow.logged, [
+    { kind: "tool", tool: "execute", receipt: "ok", arguments: "{}", result: "adopted" },
+    { kind: "tool", tool: "ask", receipt: "failed", arguments: "{}", error: "unknown workflow tool" },
+  ]);
+  let writes = 0;
+  workflow.workflows.record = () => { writes++; throw Error("journal unavailable"); };
+  await assert.rejects(invoke("execute", "unwritten"), /journal unavailable/);
+  assert.equal(writes, 1, "a failed audit neither acknowledges the tool nor writes a second, misleading tool outcome");
   const own = serve(XSB_SERVER);
   assert.deepEqual(own.handlers.get("tools/list")!({}).tools.map((t: any) => t.name), ["ask"]);
   assert.equal(own.handlers.get("initialize")!({}).serverInfo.name, "xsb");

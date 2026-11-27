@@ -4,17 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { Store } from "@xsb/store";
-import { Boundaries, OriginExt, RunExt } from "@xsb/protocol";
+import { Boundaries, ConversationEvent, OriginExt, RunExt } from "@xsb/protocol";
 import { Paths } from "../src/paths.ts";
 import { turnsSinceCleared } from "../src/transcript.ts";
 import { handoff } from "../src/prompts.ts";
 
-function readTurns(updates: any[]) {
+function readTurns(updates: any[], bounds?: Parameters<typeof turnsSinceCleared>[3]) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-transcript-"));
   try {
     const store = new Store(dir);
     updates.forEach((update) => store.append(Paths.transcript("a", "s"), { ts: "2026-01-01T00:00:00Z", update }, false));
-    return turnsSinceCleared(store, "a", "s");
+    return turnsSinceCleared(store, "a", "s", bounds);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -24,6 +24,18 @@ const input = (id: string, text: string, steered = false) => ({
   _meta: { [OriginExt.key]: { kind: "user", steered } },
 });
 const reply = (text: string) => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+
+test("a display-only publication between reply chunks uses none of the model's handoff budget", () => {
+  const publication = { sessionUpdate: "session_info_update", _meta: { [ConversationEvent.key]: {
+    schemaVersion: 1, id: "report", sessionId: "s", source: { kind: "plugin", id: "audit", label: "Audit" },
+    markdown: "Only the user sees this.\n".repeat(1000),
+  } } };
+  const history = [input("u", "Inspect the file"), reply("Before. "), reply("After.")];
+  const bounds = { maxChars: 1024, stopAtRenewal: true };
+  const turns = readTurns([history[0], history[1], publication, history[2]], bounds);
+  assert.deepEqual(turns, readTurns(history, bounds));
+  assert.equal(turns[0].reply, "Before. After.");
+});
 
 test("handoffs preserve autonomous output separately from the preceding turn's reply", () => {
   const turns = readTurns([
@@ -54,6 +66,13 @@ test("handoff retains tools reported only as updates and the final answer after 
   ]);
   assert.deepEqual(turns.map(t => t.tools), [["Read image", "Verify dimensions"], ["Read next image"]]);
   assert.deepEqual(turns.map(t => t.reply), ["Verified and registered.", "Next image ready."]);
+});
+
+test("workflow assets keep their usable version references across a context handoff", () => {
+  const asset = { id: "workflow/行程 @ 上海.md", type: "workflow", name: "行程 @ 上海.md", version: 2,
+    by: "author", description: "行程 @ 上海.md", path: "/work/trip.md", createdAt: "2026-01-01T00:00:00Z" };
+  const prompt = handoff("renewed", [], { tasks: [], waiting: [], assets: [asset] });
+  assert.ok(prompt.includes("<asset>行程 @ 上海.md@v2</asset>"));
 });
 
 test("handoff respects cleared boundaries and keeps steered inputs and tool updates in one turn", () => {

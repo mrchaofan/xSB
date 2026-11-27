@@ -16,13 +16,13 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { Answer, Question, RunExt, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent } from "@xsb/protocol";
+import { Answer, Question, RunExt, SessionControls, ToolServers, Workflow, Agents, Assets, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry } from "@xsb/protocol";
 import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, Asset, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
 import type { ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
-import { artifactPath } from "./artifact-link.ts";
+import { artifactKind, artifactPath } from "./artifact-link.ts";
 
 export const ARTIFACT_SCHEME = "xsb-artifact";
 
@@ -40,7 +40,6 @@ export type Notice = { agentId: string; name: string; kind: "done" | "failed" | 
 type Notify = (notice: Notice) => void;
 type Tool = Extract<Entry, { kind: "tool" }>;
 
-const KINDS: Record<string, Artifact["kind"]> = { ".md": "markdown", ".html": "html", ".htm": "html", ".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image", ".webp": "image", ".svg": "image", ".mp4": "video", ".webm": "video", ".mov": "video", ".m4v": "video" };
 const TOOL_STATUS: Record<string, Tool["status"]> = { completed: "done", failed: "failed" };
 
 export class Workspace {
@@ -508,6 +507,14 @@ export class Workspace {
       return this.put(agentId, { id: this.newId(), kind: "boundary", boundary });
     }
     const info = update.sessionUpdate === "session_info_update" ? update._meta : undefined;
+    const publication = info && conversationEntry(update, sessionId);
+    if (publication) {
+      const id = `publication:${JSON.stringify([sessionId, publication.source.id, publication.id])}`;
+      if (this.transcripts.get(agentId)?.some(entry => entry.id === id)) return;
+      // Preserve the event's position if an unrelated model reply is streaming across it.
+      this.settle(agentId);
+      return this.put(agentId, { id, kind: "publication", source: publication.source, markdown: publication.markdown });
+    }
     // A question the agent asked (the `ask` tool): a card, closed by the user's reply, which the card then shows.
     const question = info?.[Question.key] as Question | undefined;
     if (question) {
@@ -928,7 +935,7 @@ export class Workspace {
       name: asset ? name : known?.name ?? name,
       sessionIds: [...sessionIds],
       fileUri: pathToFileURL(file).href,
-      kind: KINDS[path.extname(file).toLowerCase()] ?? "text",
+      kind: artifactKind(file),
       agentId: asset ? agentId : known?.agentId ?? agentId,
       path: path.relative(this.paths.project, file),
       // The version in the URL makes the renderer read a changed file again.
@@ -945,6 +952,8 @@ export class Workspace {
 
   /** A version of an asset of the library: what agents hand to each other. */
   private asset(asset: Asset): void {
-    this.artifact(asset.path, asset.by, `${asset.name}${path.extname(asset.path)}`, asset.type, asset);
+    const ext = path.extname(asset.path);
+    const name = asset.name.toLowerCase().endsWith(ext.toLowerCase()) ? asset.name : asset.name + ext;
+    this.artifact(asset.path, asset.by, name, asset.type, asset);
   }
 }

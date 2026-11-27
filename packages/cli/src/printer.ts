@@ -1,17 +1,22 @@
 /** Turns `session/update` notifications into terminal output. */
-import { Discarded, OriginExt, textOf } from "@xsb/protocol";
+import { stripVTControlCharacters } from "node:util";
+import { Discarded, OriginExt, conversationEntry, textOf } from "@xsb/protocol";
 import type { OriginMeta, SessionUpdate } from "@xsb/protocol";
 import { t } from "./text.ts";
 
 const tty = process.stdout.isTTY;
 const dim = (s: string): string => (tty ? `\x1b[2m${s}\x1b[0m` : s);
 const bold = (s: string): string => (tty ? `\x1b[1m${s}\x1b[0m` : s);
+/** Keep Markdown lines and indentation. Published text cannot move the terminal cursor or set its modes. */
+const terminalText = (value: string): string =>
+  stripVTControlCharacters(value).replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
 
 export class Printer {
   /** sessionId -> agent id, shown in front of output when several sessions are on screen. */
   readonly labels = new Map<string, string>();
   /** Tool calls by id, and what each is called. */
   private tools = new Map<string, string>();
+  private publications = new Set<string>();
   showLabels = false;
   /** The stream that owns the current, unfinished line. */
   private open: string | null = null;
@@ -59,6 +64,15 @@ export class Printer {
         return this.line(`${label}${dim(`← ${from(origin)}${origin?.steered ? t.interjected : ""}: ${body}`)}`);
       }
       case "session_info_update": {
+        const entry = conversationEntry(update, sessionId);
+        if (entry) {
+          const key = JSON.stringify([sessionId, entry.source.id, entry.id]);
+          if (this.publications.has(key)) return;
+          this.publications.add(key);
+          const source = terminalText(entry.source.label).replace(/\s+/g, " ").trim();
+          const markdown = terminalText(entry.markdown).replace(/\n$/, "");
+          return this.line(`${label}${bold(`[${source}]`)}\n${markdown}`);
+        }
         const discarded = update._meta?.[Discarded.key] as Discarded | undefined;
         if (discarded) this.line(`${label}${dim(`← ${from(discarded.origin)}${t.discarded}: ${textOf(discarded.content)}`)}`);
         return;

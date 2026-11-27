@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 Object.assign(globalThis, { window: { xsb: { language: "zh-CN" } }, document: { documentElement: {}, querySelectorAll: () => [] } });
-const { expandAnnotation } = await import("../renderer/web-annotation.js");
+const { dropPageAnnotations, expandAnnotation } = await import("../renderer/web-annotation.js");
 
 const note = { type: "web_annotation", index: 2, note: "按钮太浅", label: "button#buy", url: "https://shop.example/", title: "Shop",
   html: '<button id="buy">```买```</button>', image: { mimeType: "image/png", data: "aW1hZ2U=" } };
@@ -24,4 +24,16 @@ test("only a PNG in base64 becomes a picture", () => {
     assert.equal(blocks.length, 1);
     assert.equal(blocks[0].type, "text");
   }
+});
+
+test("cleanup after a send addresses each annotation on its own page, including large drafts", async () => {
+  const calls: unknown[][] = [];
+  Object.assign(globalThis, { xsb: { page: async (...args: unknown[]) => { calls.push(args); } } });
+  const notes = Array.from({ length: 202 }, (_, i) => ({ pageId: "p1", id: String(i) }));
+  await dropPageAnnotations([...notes, notes[0], { pageId: "p2", id: "other" }]);
+  assert.deepEqual(calls, [
+    ["p1", "annotationsRemove", notes.slice(0, 200).map(note => note.id)],
+    ["p1", "annotationsRemove", ["200", "201"]],
+    ["p2", "annotationsRemove", ["other"]],
+  ]);
 });

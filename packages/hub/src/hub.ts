@@ -20,7 +20,7 @@ import { Lifecycle } from "./lifecycle.ts";
  */
 import fs from "node:fs";
 import net from "node:net";
-import { Agents, Assets as AssetsExt, Connection, Ledger, RpcError, Tasks, failure, errorMessage } from "@xsb/protocol";
+import { Agents, Assets as AssetsExt, Connection, Ledger, PluginPublication, RpcError, Tasks, failure, errorMessage } from "@xsb/protocol";
 import type { AgentInfo, AgentSpec, McpServer } from "@xsb/protocol";
 import type { Op } from "@xsb/store";
 import { Workflows } from "./workflows.ts";
@@ -42,6 +42,7 @@ import { serveMcp } from "./mcp.ts";
 import { activePlugins, toolsKey } from "./plugins.ts";
 import { contextServer } from "./tool-context.ts";
 import type { ContextOwner } from "./tool-context.ts";
+import type { Publisher } from "./publications.ts";
 import { randomBytes } from "node:crypto";
 import { Paths } from "./paths.ts";
 import { Permissions } from "./permissions.ts";
@@ -61,6 +62,8 @@ import { newId, now } from "./util.ts";
 
 /** How long deleting a conversation waits for its stopped turns to end: past a session's own 10 s stop timeout. */
 const DELETE_STOP_WAIT_MS = 15_000;
+
+type PublicationGrant = { publisher: Publisher; origin: LiveSession; toolKey: string; bound: () => boolean };
 
 export class Hub {
   readonly paths: Paths;
@@ -85,6 +88,7 @@ export class Hub {
   /** Bridge token -> session: how a tool call is known to come from that session. */
   private bridgeTokens = new Map<string, LiveSession>();
   private contextTokens = new Map<string, ContextOwner>();
+  private publicationTokens = new Map<string, PublicationGrant>();
   private mcpClients = new Set<Connection>();
   private failedStorage?: Promise<void>;
   private maintenanceScheduled = false;
@@ -166,6 +170,7 @@ export class Hub {
         conn,
         (token) => this.bridgeTokens.get(token),
         (token) => this.contextTokens.get(token),
+        (token) => this.publisher(token),
       );
     });
     // Whoever stopped the last hub may have said that its unfinished work is not to be taken up again.
@@ -201,6 +206,7 @@ export class Hub {
     this.jobs.close();
     for (const session of this.live.values()) { this.questions.cancel(session); this.elicitations.cancel(session); }
     this.contextTokens.clear();
+    this.publicationTokens.clear();
     for (const conn of this.mcpClients) conn.close();
     for (const server of this.servers) server.close();
     for (const client of this.clients) client.conn.close();
@@ -216,6 +222,7 @@ export class Hub {
     this.stopping = true;
     this.bridgeTokens.clear();
     this.contextTokens.clear();
+    this.publicationTokens.clear();
     for (const conn of this.mcpClients) conn.close();
     for (const server of this.servers) server.close();
     for (const client of this.clients) client.conn.close();
@@ -261,7 +268,7 @@ export class Hub {
   toolServers(
     agent: AgentSpec,
     clientMcp: McpServer[] = [],
-  ): { server: McpServer; from: ToolOrigin }[] {
+  ): { server: McpServer; from: ToolOrigin; pluginId?: string; revision?: string }[] {
     const all = [
       ...activePlugins(this.paths).map((t) => ({ ...t, from: "plugin" as const })),
       ...clientMcp.map((server) => ({ server, from: "client" as const })),
@@ -291,6 +298,11 @@ export class Hub {
    * Returns how many wait for their work to end.
    */
   applyTools(): number {
+    if (this.publicationTokens.size) {
+      const active = new Set(activePlugins(this.paths).map(t => toolsKey([t])));
+      for (const [token, grant] of this.publicationTokens)
+        if (!active.has(grant.toolKey)) this.publicationTokens.delete(token);
+    }
     for (const session of this.live.values()) {
       if (!session.rec.main || !this.state.agents.has(session.agentId) || !session.toolsKey) continue;
       if (session.toolsKey === this.toolsKeyFor(session)) continue;
@@ -306,6 +318,7 @@ export class Hub {
     if (!session) return void this.toolsPending.delete(agentId);
     if (session.busy) return;
     this.toolsPending.delete(agentId);
+    this.revokePublications(session.id);
     this.backends.stop(agentId);
   }
 
@@ -464,6 +477,7 @@ export class Hub {
     const sessions = new Set([...this.state.sessions.values()].filter((s) => members.some((a) => a.id === s.agentId)).map((s) => s.id));
     const queued = [...this.state.mail.values()].filter((m) => sessions.has(m.to.sessionId)).map((m) => ops.ack(m.id));
     this.state.commit([...queued, ops.putAgent({ ...this.agent(agentId), deleted: now() })]);
+    for (const id of sessions) this.revokePublications(id);
     for (const a of members) {
       this.backends.stop(a.id);
       this.broadcast(Agents.removed, { id: a.id });
@@ -483,6 +497,7 @@ export class Hub {
       this.lifecycle.emit("session.closed", session.source(), { reason: "purged" });
       this.live.delete(session.id);
       this.bridgeTokens.delete(session.bridgeToken);
+      this.revokePublications(session.id);
     }
     const assets = [...this.state.assets.values()].filter(versions => versions.every(v => gone.has(v.by))).flat();
     const files = [...[...gone].map(id => this.paths.agentDir(id)), ...assets.filter(a => path.resolve(a.path).startsWith(this.paths.dir + path.sep)).map(a => a.path)];
@@ -537,6 +552,7 @@ export class Hub {
   /** Revoke an unresponsive backend's existing tool bridges before accepting a new run. */
   rotateBridge(session: LiveSession): void {
     this.questions.cancel(session);
+    this.revokePublications(session.id);
     for (const [token, owner] of this.contextTokens)
       if (owner.session === session) this.contextTokens.delete(token);
     this.bridgeTokens.delete(session.bridgeToken);
@@ -553,6 +569,42 @@ export class Hub {
     const token = randomBytes(32).toString("hex");
     this.contextTokens.set(token, { session, server: server.name });
     return contextServer(server, this.paths.socket("mcp"), token);
+  }
+
+  /** Each ACP new/resume attempt gets fresh plugin credentials, valid only on that binding. */
+  backendToolServers(origin: LiveSession, bound: () => boolean): McpServer[] {
+    this.revokePublications(origin.id);
+    const session = this.publicationDestination(origin);
+    return this.toolServers(this.agent(origin.agentId), origin.clientMcp).map(tool => {
+      const server = this.withToolContext(tool.server, origin);
+      if (server.type !== "stdio" || !tool.pluginId || !session) return server;
+      const token = randomBytes(32).toString("hex");
+      this.publicationTokens.set(token, { publisher: { session, pluginId: tool.pluginId }, origin, bound, toolKey: toolsKey([tool]) });
+      return { ...server, env: [...(server.env ?? []), { name: PluginPublication.tokenEnv, value: token }] };
+    });
+  }
+
+  revokePublications(originId: string): void {
+    for (const [token, grant] of this.publicationTokens)
+      if (grant.origin.id === originId) this.publicationTokens.delete(token);
+  }
+
+  /** Route only from a current session to its live, undeleted main conversation. */
+  private publicationDestination(origin: LiveSession): LiveSession | undefined {
+    const source = this.state.agents.get(origin.agentId);
+    if (!source || this.live.get(origin.id) !== origin || this.isDeleted(source) || !this.workflows.available(origin)) return;
+    const session = this.live.get(this.workflows.owner(origin));
+    if (!session?.rec.main) return;
+    const target = this.state.agents.get(session.agentId);
+    if (target && !this.isDeleted(target) && this.workflows.owner(session) === session.id) return session;
+  }
+
+  private publisher(token: string): Publisher | undefined {
+    const grant = this.publicationTokens.get(token);
+    if (this.stopping || !grant || !grant.bound()) return;
+    if (this.publicationDestination(grant.origin) === grant.publisher.session &&
+        activePlugins(this.paths).some(t => toolsKey([t]) === grant.toolKey)) return grant.publisher;
+    this.publicationTokens.delete(token);
   }
 }
 

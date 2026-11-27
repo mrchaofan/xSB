@@ -4,10 +4,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { PluginPublication, ToolContext, type McpServer } from "@xsb/protocol";
+import type { Backend } from "../src/backend.ts";
 import { Hub } from "../src/hub.ts";
 import { Paths } from "../src/paths.ts";
 import { initProject } from "../src/config.ts";
 import { activePlugins, approvePlugin, listPlugins, pluginRoot, setPluginEnabled } from "../src/plugins.ts";
+import { ops } from "../src/state.ts";
+import { empty } from "../src/workflow-state.ts";
 
 function setup(t: test.TestContext) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "xsb-plugins-")));
@@ -148,4 +152,91 @@ test("conversations get the active plugins in name order; only a change restarts
   put("global", "beta");
   hub.applyTools();
   assert.deepEqual(stopped, [session.agentId]);
+});
+
+function env(servers: McpServer[], serverName: string, name: string): string | undefined {
+  const server = servers.find(s => s.name === serverName);
+  assert.equal(server?.type, "stdio");
+  return server.env?.find(entry => entry.name === name)?.value;
+}
+
+test("only installed stdio plugins receive a publication credential, fenced at every backend binding", async t => {
+  const { paths, put } = setup(t);
+  const forged = { name: PluginPublication.tokenEnv, value: "from-manifest" };
+  put("global", "reports", {
+    render: { command: "node", env: { [forged.name]: forged.value } },
+    remote: { type: "http", url: "https://example.test/mcp" },
+  });
+  const hub = new Hub(paths.project);
+  const session = hub.createConversation("claude", "Talk", undefined, [
+    { type: "stdio", name: "from-client", command: "node", env: [forged] },
+  ]);
+  const granted: string[] = [];
+  const backend = { caps: { systemPrompt: true }, open() {}, close() {}, conn: {
+    isClosed: false,
+    request: async (method: string, params: { mcpServers: McpServer[] }) => {
+      const servers = params.mcpServers;
+      const token = env(servers, "render", PluginPublication.tokenEnv)!;
+      assert.match(token, /^[0-9a-f]{64}$/);
+      assert.equal(hub["publisher"](token), undefined, "a binding attempt has no write authority yet");
+      assert.equal(hub["publisher"](env(servers, "render", ToolContext.tokenEnv)!), undefined);
+      assert.equal(env(servers, "from-client", PluginPublication.tokenEnv), undefined);
+      assert.ok(env(servers, "from-client", ToolContext.tokenEnv));
+      assert.deepEqual(servers.find(s => s.name === "remote"), { type: "http", name: "remote", url: "https://example.test/mcp", headers: [] });
+      granted.push(token);
+      if (method === "session/resume") throw new Error("cannot restore");
+      return { sessionId: "restored" };
+    },
+  } };
+  // Exercise the actual resume fallback and capture what the backend would give each stdio process.
+  session.save({ backendSessionId: "prior" });
+  hub.backends.for = async () => backend as unknown as Backend;
+  await session.ensureBackend();
+  assert.equal(granted.length, 2);
+  assert.notEqual(granted[0], granted[1]);
+  assert.equal(hub["publisher"](granted[0]), undefined);
+  assert.deepEqual(hub["publisher"](granted[1]), { session, pluginId: "reports" });
+  hub.rotateBridge(session);
+  assert.equal(hub["publisher"](granted[1]), undefined);
+  session.onBackendGone(backend as unknown as Backend, "closed");
+  await session.ensureBackend();
+  const rebound = granted.at(-1)!;
+  assert.deepEqual(hub["publisher"](rebound), { session, pluginId: "reports" });
+  session.onBackendGone(backend as unknown as Backend, "closed");
+  assert.equal(hub["publisher"](rebound), undefined);
+});
+
+test("plugin publications follow their host-selected main conversation and lose authority on update, retirement and deletion", async t => {
+  const { paths, put } = setup(t);
+  const folder = put("project", "reports");
+  approvePlugin(paths, "reports");
+  const hub = new Hub(paths.project);
+  const owner = hub.createConversation(), other = hub.createConversation();
+  const flow = empty(owner.id);
+  const worker = hub.createConversation("claude", "Proof", {
+    owner: owner.id, node: "Proof", bind(agentId, sessionId) {
+      flow.instances.Proof = { id: "instance", agentId, sessionId, goals: [], extras: [], paused: false, interruptions: [] };
+      return ops.workflow(flow);
+    },
+  });
+  const grant = (s: typeof owner) => env(hub.backendToolServers(s, () => true), "reports", PluginPublication.tokenEnv)!;
+  const workerToken = grant(worker), otherToken = grant(other);
+  assert.deepEqual(hub["publisher"](workerToken), { session: owner, pluginId: "reports" });
+  assert.deepEqual(hub["publisher"](otherToken), { session: other, pluginId: "reports" });
+  hub.state.commit([ops.workflow({ ...flow, instances: {} })]);
+  assert.equal(hub["publisher"](workerToken), undefined);
+  assert.equal(env(hub.backendToolServers(worker, () => true), "reports", PluginPublication.tokenEnv), undefined,
+    "opening a retired node's historical session cannot grant new publication credentials");
+
+  fs.appendFileSync(path.join(folder, "index.js"), "\n// revision 2");
+  approvePlugin(paths, "reports");
+  assert.equal(hub["publisher"](otherToken), undefined, "re-approving an update does not extend an old process's credential");
+  const beforeDisable = grant(other);
+  setPluginEnabled("project", "reports", false, paths);
+  hub.applyTools();
+  setPluginEnabled("project", "reports", true, paths);
+  assert.equal(hub["publisher"](beforeDisable), undefined, "disabling and re-enabling does not revive an issued credential");
+  const final = grant(other);
+  await hub.deleteConversation(other.agentId);
+  assert.equal(hub["publisher"](final), undefined);
 });

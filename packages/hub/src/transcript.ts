@@ -7,7 +7,7 @@
  * @xsb/protocol). So whatever decides what a model sees reads the transcript backward and stops at the first
  * boundary of the kind `cleared`: what lies before it is the user's to keep, not the model's to be given.
  */
-import { Boundaries, InsertionTrace, OriginExt, RunExt } from "@xsb/protocol";
+import { Boundaries, ConversationEvent, InsertionTrace, OriginExt, RunExt } from "@xsb/protocol";
 import type { BackendRun, Boundary, ContentBlock, OriginMeta } from "@xsb/protocol";
 import type { Store } from "@xsb/store";
 import { Paths } from "./paths.ts";
@@ -25,6 +25,10 @@ export type PastTurn = {
 /** The boundary a transcript record is, if it is one. */
 export const boundaryOf = (update: any): Boundary | undefined =>
   update?.sessionUpdate === "session_info_update" ? (update._meta?.[Boundaries.key] as Boundary | undefined) : undefined;
+
+/** Passive conversation entries are outside the model's turn history and its size budget. */
+const conversationEvent = (update: any): boolean =>
+  update?.sessionUpdate === "session_info_update" && update._meta?.[ConversationEvent.key] !== undefined;
 
 const said = (content: ContentBlock | undefined): string =>
   !content ? "" : content.type === "text" ? (content.text ?? "") : `[${content.type}]`;
@@ -69,6 +73,7 @@ export function turnsSinceCleared(store: Store, agentId: string, sessionId: stri
   for (const rec of store.readBackward(Paths.transcript(agentId, sessionId))) {
     const boundary = boundaryOf(rec.update);
     if ((boundary?.kind === "cleared" || boundary?.kind === "not_restored") || (bounds?.stopAtRenewal && boundary?.handoff)) break;
+    if (conversationEvent(rec.update)) continue;
     chars += JSON.stringify(rec).length;
     if (bounds && chars > bounds.maxChars) break;
     records.push(rec as { ts: string; update: any });
@@ -175,6 +180,7 @@ export function taskRecord(store: Store, agentId: string, sessionId: string, tas
   for (const rec of store.readBackward(Paths.transcript(agentId, sessionId))) {
     const record = rec as Record, update = record.update;
     if (boundaryOf(update)?.kind === "cleared") break;
+    if (conversationEvent(update)) continue;
     records.push(record);
     const key = insertionKey(update);
     if (key && update?._meta?.[InsertionTrace.key]?.phase === "observed") {

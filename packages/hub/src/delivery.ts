@@ -124,7 +124,8 @@ export class Delivery {
   /** The prompt a mail item becomes (`message.pre_submit` may rewrite it, or veto it: then it is not delivered). */
   render(item: MailItem, session: LiveSession): Delivered | undefined {
     const { state, kernel } = this.hub;
-    const rendered = item.prompt ? { prompt: item.prompt, gives: undefined } : (() => {
+    const source = item.workflowNotice && item.prompt ? this.hub.workflows.noticePrompt(item.prompt) : item.prompt;
+    const rendered = source ? { prompt: source, gives: undefined } : (() => {
       const { text: said, gives } = renderMail(state, item, this.taskContext(item, session), session.given);
       const history = item.results && (item.workGeneration ?? 0) < kernel.generation(session.id)
         ? "These results belong to work accepted before the user's stop. They are historical context; do not resume that work unless the user asks.\n"

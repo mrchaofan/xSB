@@ -20,8 +20,8 @@ import path from "node:path";
  * stopped while the hub still held it. The user's is then kept for the next
  * turn; mail waits for a turn of its own.
  */
-import { Question, SessionControls, InsertionTrace, Boundaries, Accepted, Discarded, DeliveredAs, OriginExt, RunExt, TurnExt, TurnFailure, RpcError, CONNECTION_CLOSED, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
-import type { ExecutionSource, BackendRun, RunUpdate, Boundary, ContentBlock, DiscardReason, ElicitationResponse, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
+import { Question, SessionControls, InsertionTrace, Boundaries, Accepted, ConversationEvent, Discarded, DeliveredAs, OriginExt, RunExt, TurnExt, TurnFailure, RpcError, CONNECTION_CLOSED, failure, errorMessage, isStateUpdate, isTerminal, text } from "@xsb/protocol";
+import type { ExecutionSource, BackendRun, RunUpdate, Boundary, ContentBlock, ConversationEntry, DiscardReason, ElicitationResponse, McpServer, Origin, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, StopReason } from "@xsb/protocol";
 import type { ToolContextState, TurnWindow } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Backend } from "./backend.ts";
@@ -115,13 +115,13 @@ const migrationPreface = (m: NonNullable<SessionRec["migratedFrom"]>): string =>
   `Workflows of that conversation did not move.`;
 
 /** How the user's input differs as the model gets it (`DeliveredAs`): images it cannot see, text saved to files, a note in front. */
-const deliveredAs = (content: ContentBlock[], given: ContentBlock[], scope: string | undefined, images: boolean): DeliveredAs | undefined => {
+const deliveredAs = (content: ContentBlock[], given: ContentBlock[], scope: boolean, images: boolean): DeliveredAs | undefined => {
   const imagesHidden = images ? 0 : content.filter((b) => b.type === "image").length;
   const spilled = content.flatMap((b, i) => {
     const file = b.type === "text" && given[i] !== b ? /saved whole at (\S+?);/.exec(String(given[i]?.text ?? ""))?.[1] : undefined;
     return file ? [{ chars: String(b.text ?? "").length, file }] : [];
   });
-  const out: DeliveredAs = { ...(imagesHidden ? { imagesHidden } : {}), ...(spilled.length ? { spilled } : {}), ...(scope ? { scope } : {}) };
+  const out: DeliveredAs = { ...(imagesHidden ? { imagesHidden } : {}), ...(spilled.length ? { spilled } : {}), ...(scope ? { scope: true } : {}) };
   return Object.keys(out).length ? out : undefined;
 };
 
@@ -398,7 +398,10 @@ export class LiveSession {
   async ensureBackend(): Promise<Backend> {
     const backend = await this.hub.backends.for(this.hub.agent(this.agentId));
     if (this.backend !== backend) {
-      this.binding ??= this.bind(backend).finally(() => (this.binding = undefined));
+      this.binding ??= this.bind(backend).catch(error => {
+        this.hub.revokePublications(this.id);
+        throw error;
+      }).finally(() => (this.binding = undefined));
       await this.binding;
     }
     return backend;
@@ -422,15 +425,16 @@ export class LiveSession {
     }
     const { paths } = this.hub;
     this.toolsKey = this.hub.toolsKeyFor(this);
-    const params = {
+    const params = () => ({
       cwd: agent.workspace,
       // The hub's own tools, then the others the agent has (Hub.toolServers): the system prompt says where each comes from.
-      mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), bridgeServer(paths.socket("mcp"), this.bridgeToken, XSB_SERVER), ...this.hub.toolServers(agent, this.clientMcp).map((t) => this.hub.withToolContext(t.server, this))],
+      mcpServers: [bridgeServer(paths.socket("mcp"), this.bridgeToken), bridgeServer(paths.socket("mcp"), this.bridgeToken, XSB_SERVER),
+        ...this.hub.backendToolServers(this, () => this.backend === backend && !!this.rec.backendSessionId && !backend.conn.isClosed)],
       ...(backend.caps.systemPrompt ? { systemPrompt: { mode: "append", content: [text(instructions)] } } : {}),
       ...(backend.caps.additionalDirectories
         ? { additionalDirectories: [paths.shared, paths.assets, ] }
         : {}),
-    };
+    });
 
     const prior = this.rec.backendSessionId;
     // A backend session of another backend is not that backend's to restore: the conversation is handed over instead.
@@ -442,7 +446,7 @@ export class LiveSession {
         // Every ACP v2 agent resumes; the history is not replayed (the hub has it).
         backend.open(prior, this);
         try {
-          this.setup = await backend.conn.request("session/resume", { sessionId: prior, ...params });
+          this.setup = await backend.conn.request("session/resume", { sessionId: prior, ...params() });
         } catch (e) {
           backend.close(prior);
           throw e;
@@ -464,7 +468,7 @@ export class LiveSession {
       }
     }
 
-    const created = await backend.conn.request("session/new", params);
+    const created = await backend.conn.request("session/new", params());
     this.setup = created;
     if (renewal !== "backend_changed") await this.restoreConfig(backend, created.sessionId);
     // Without the system prompt capability the instructions ride on the first prompt.
@@ -655,10 +659,6 @@ export class LiveSession {
     this.contextSize = undefined;
   }
 
-  recordWorkflow(turnId: string, data: Record<string,unknown>): void {
-    this.emit({sessionUpdate:"session_info_update",_meta:{"dev.xsb/workflow-log":{turnId,...data}}} as SessionUpdate);
-  }
-
   toolOutput(value: string): void {
     this.estimated += textTokens(value);
   }
@@ -713,6 +713,7 @@ export class LiveSession {
   /** The backend process is gone; the next turn binds to a new one. A turn it was running fails. */
   onBackendGone(backend: Backend, reason: string): void {
     if (this.backend !== backend) return;
+    this.hub.revokePublications(this.id);
     this.lifecycle.emit("session.unbound", this.source(), { reason });
     this.closeSteps("disconnected", true);
     this.suggestions = [];
@@ -750,6 +751,11 @@ export class LiveSession {
   onBackendUpdate(update: SessionUpdate, backendSessionId?: string): void {
     const turn = this.current;
     if (backendSessionId && backendSessionId !== this.rec.backendSessionId) return;
+    // Only Hub transactions can author conversation events, including on updates retained for later processing.
+    if (update._meta && Object.hasOwn(update._meta, ConversationEvent.key)) {
+      update = { ...update, _meta: { ...update._meta } };
+      delete update._meta![ConversationEvent.key];
+    }
     const correlation = update._meta?.[TurnExt.key] as { id?: string } | undefined;
     const origin = update._meta?.[OriginExt.key] as OriginMeta | undefined;
     const turnId = correlation?.id ?? origin?.turnId;
@@ -932,7 +938,7 @@ export class LiveSession {
   emit(update: SessionUpdate, except?: Client): void {
     const file = Paths.transcript(this.agentId, this.id);
     const durable = update.sessionUpdate === "user_message_chunk" || !!update._meta?.[Accepted.key] ||
-      !!update._meta?.[Discarded.key] || !!update._meta?.[MessageDelivery.key] || !!update._meta?.[Question.key];
+      !!update._meta?.[Discarded.key] || !!update._meta?.[MessageDelivery.key] || !!update._meta?.[Question.key] || !!update._meta?.[ConversationEvent.key];
     const eventId = newId("event");
     const record = { ts: now(), eventId, update };
     const initialOffset = this.hub.state.store.bytes(file);
@@ -948,6 +954,12 @@ export class LiveSession {
         if (view) client.conn.notify("session/update", { sessionId: this.id, update: view });
       }
     });
+  }
+
+  /** A host-authorized source publishes prepared Markdown into this conversation, atomically with its caller's state. */
+  appendConversationEntry(id: string, source: ConversationEntry["source"], markdown: string): void {
+    const entry: ConversationEntry = { schemaVersion: 1, sessionId: this.id, id, source, markdown };
+    this.emit({ sessionUpdate: "session_info_update", _meta: { [ConversationEvent.key]: entry } });
   }
 
   private *recordOffset(file: string, eventId: string): Generator<number> {
@@ -1054,12 +1066,18 @@ export class LiveSession {
 
   /** The receipt of an input: it is in the conversation, or it never will be. Its sender learns which. */
   private receipt(input: Input, inserted: boolean, why: unknown = RpcError.cancelled()): void {
-    if (inserted && input.receipted) return;
+    if (inserted && input.receipted) {
+      this.hub.workflows?.auditInsertion(this, input);
+      return;
+    }
     const about = { agentId: this.agentId, sessionId: this.id, from: fromOf(input.origin), ...(input.origin.taskId ? { taskId: input.origin.taskId } : {}) };
     const unknown = !inserted && (why as RpcError)?.data && ((why as RpcError).data as any).errorKind === "execution_uncertain";
     this.hub.state.atomic(() => {
       this.hub.kernel.mark(input.messageId, inserted ? "inserted" : unknown ? "insertion_uncertain" : "discarded_unseen", about);
-      if (inserted) this.show(input);
+      if (inserted) {
+        this.hub.workflows?.auditInsertion(this, input);
+        this.show(input);
+      }
       this.hub.state.afterCommit(() => {
         this.hub.kernel.hooks.emit("message.insertion_receipt", { messageId: input.messageId, about, inserted, outcome: inserted ? "inserted" : unknown ? "unknown" : "not_inserted" });
         if (inserted) {
@@ -1226,7 +1244,6 @@ export class LiveSession {
       // Of this turn only: a later turn is given its own, up to date (`refused` does not put it back).
       turn.workflowPreface = workflowContext;
       this.preface(workflowContext);
-      void turn.first.inserted.promise.then(() => this.recordWorkflow(turn.id,{ context:workflowContext }),() => {});
     }
   }
 
@@ -1262,15 +1279,14 @@ export class LiveSession {
       }
     }
     const content = [...this.prefaces.map((p) => text(p)), ...batch.flatMap(i => {
-      // A node's first input has its purpose in the turn's workflow context; the main conversation's does not.
-      const scope = users(i) && (i !== turn.first || !this.hub.agent(this.agentId).workflowOwner) ? this.hub.workflows?.interruptionContext(this,i.messageId) : undefined;
-      if (scope) void i.inserted.promise.then(()=>this.recordWorkflow(turn.id,{messageId:i.messageId,scope}),()=>{});
+      if (!users(i)) return i.content;
       // What the message is to the question the agent asked, if it replies to one (questions.ts): the card shows the user.
-      const reply = users(i) ? this.hub.questions?.scope(i.messageId) : undefined;
+      const reply = this.hub.questions?.scope(i.messageId);
       if (reply) void i.inserted.promise.then(() => this.hub.questions?.given(i.messageId), () => {});
-      const given = users(i) ? this.spill(i.content, policy) : i.content;
-      if (users(i)) i.deliveredAs = deliveredAs(i.content, given, scope, backend.caps.image);
-      return [...[reply, scope].filter((note): note is string => !!note).map((note) => text(note)), ...given];
+      const given = this.spill(i.content, policy);
+      const prompt = this.hub.workflows?.userPrompt(this, turn, i, given);
+      i.deliveredAs = deliveredAs(i.content, given, !!prompt?.scope, backend.caps.image);
+      return [...[reply, prompt?.scope].filter((note): note is string => !!note).map(text), ...(prompt?.content ?? given)];
     })];
     const tokens = contentTokens(content);
     if (tokens + this.standingTokens + policy.reserveTokens > policy.promptTokens) {

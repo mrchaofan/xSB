@@ -196,6 +196,7 @@ export class Pages {
    */
   async annotate(id: string, sender: WebContents, op: string, arg?: unknown): Promise<void> {
     const page = this.pages.get(id);
+    if (!page && op === "annotationsRemove" && sender === this.host.document) return;
     if (!page) throw new Error("this page was closed");
     const annotator = page.annotator;
     // The composer of the page's conversation, in the main window, takes out notes it sent or dropped.
