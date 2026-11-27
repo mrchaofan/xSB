@@ -188,7 +188,7 @@
       return controls;
     },
     openPage: async (url, embedded, sessionId) => {
-      const page = { id: "page" + ++sequence, sessionId, contentsId: 0, url, title: long ? L("网页") : "", loading: false, canGoBack: false, canGoForward: false, window: false, pinned: false, agent: false };
+      const page = { id: "page" + ++sequence, sessionId, url, title: long ? L("网页") : "", loading: false, canGoBack: false, canGoForward: false, window: false, pinned: false, agent: false };
       if (!embedded) emit({ page });
       return structuredClone(page);
     },
@@ -196,6 +196,7 @@
     readClipboardImages: async () => null,
     copyText: (text) => navigator.clipboard.writeText(text),
     contextMenu: async () => null, // Native menus exist only in Electron.
+    overlay: async () => null,     // The overlay over web pages exists only in Electron (../src/overlay.ts).
     pathOf: (file) => file.name,
     openArtifact: async () => structuredClone(art),
     revealArtifact: async () => {},

@@ -1,17 +1,18 @@
 // Run after building the desktop app (window-harness.cjs): the right-click menus of the session rows and the
-// side panel's tabs. Real mouse and key input, so Esc and a click outside are what close them.
+// side panel's tabs. Real mouse and key input, so Esc and a click outside are what close them. A tab's menu is drawn in the
+// window's overlay (src/overlay.ts), a view over the window and its web pages, which closes itself.
 // XSB_SCREENSHOTS=<folder> saves pictures of the menus there.
 const fs = require("node:fs");
 const path = require("node:path");
 const assert = require("node:assert/strict");
 const { pathToFileURL } = require("node:url");
 
-require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, click, send, has, until, untilJS, root }) => {
+require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, click, send, has, until, untilJS, root, workspace }) => {
   const text = (await import(pathToFileURL(path.join(root, "packages/desktop/renderer/text.js")).href)).TEXT[await js("xsb.language")];
   const shots = process.env.XSB_SCREENSHOTS;
   // Session menus use a real Electron Menu. Control only popup completion so this test
   // verifies IPC/item routing without depending on the OS's nested menu event loop.
-  const { Menu } = require("electron");
+  const { BrowserWindow, Menu, webContents } = require("electron");
   let nativeMenu, finishMenu;
   Menu.prototype.popup = function(options) {
     nativeMenu = this;
@@ -36,10 +37,13 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
     await mouse("mouseMove", x, y);
     await mouse("mouseDown", x, y, "right");
     await mouse("mouseUp", x, y, "right");
-    await until(() => sel.startsWith("#agents") ? nativeMenu : has(".context-menu:popover-open"), "context menu on " + sel);
-    if (sel.startsWith("#agents")) assert.equal(await has(".context-menu"), false, "session menu uses the OS");
+    await until(async () => sel.startsWith("#agents") ? nativeMenu : overlay() && !overlay().webContents.isLoadingMainFrame() && await inOverlay("!!document.querySelector('.overlay-menu')"), "context menu on " + sel);
+    if (sel.startsWith("#agents")) assert.equal(!!overlay(), false, "session menu uses the OS");
+    else assert.equal(win.contentView.children.at(-1), overlay(), "the menu is over everything, web pages included");
   };
-  const items = () => nativeMenu ? nativeMenu.items.map(item => item.label + (item.enabled ? "" : "(off)")) : js('[...document.querySelectorAll(".context-menu [role=menuitem]")].map(b=>b.querySelector(".session-menu-name").textContent+(b.disabled?"(off)":""))');
+  const overlay = () => win.contentView.children.find((view) => view.webContents.getURL().endsWith("overlay.html"));
+  const inOverlay = (code) => overlay().webContents.executeJavaScript(code);
+  const items = () => nativeMenu ? nativeMenu.items.map(item => item.label + (item.enabled ? "" : "(off)")) : inOverlay('[...document.querySelectorAll(".context-menu [role=menuitem]")].map(b=>b.querySelector(".session-menu-name").textContent+(b.disabled?"(off)":""))');
   const choose = (label) => {
     if (nativeMenu) {
       const item = nativeMenu.items.find(item => item.label === label);
@@ -48,9 +52,9 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
       finishMenu();
       return;
     }
-    return js('[...document.querySelectorAll(".context-menu [role=menuitem]")].find(b=>b.querySelector(".session-menu-name").textContent===' + JSON.stringify(label) + ").click()");
+    return inOverlay('[...document.querySelectorAll(".context-menu [role=menuitem]")].find(b=>b.querySelector(".session-menu-name").textContent===' + JSON.stringify(label) + ").click()");
   };
-  const closed = (label) => until(async () => !(await has(".context-menu")), label);
+  const closed = (label) => until(() => !overlay(), label);
   const count = () => js('document.querySelectorAll("#agents .row").length');
   const rowOf = async (agent) => "#agents .row:nth-child(" + ((await js("xsb.load().then(s=>s.agents.filter(a=>!a.workflowOwner).map(a=>a.id))")).indexOf(agent) + 1) + ")";
   win.show();
@@ -73,13 +77,15 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await untilJS('document.querySelectorAll("#tabs .tab").length===2', "two tabs");
   await rightClick(pageTab);
   await shoot("tab-menu");
+  assert.ok(overlay().webContents.isFocused(), "the menu takes the keyboard");
   assert.deepEqual(await items(), [text["web.reload"], text["tabs.copyUrl"] + "(off)", text["web.external"] + "(off)", text["web.detach"],
     text["tabs.close"], text["tabs.closeOthers"], text["tabs.closeRight"]], "web tab menu");
-  win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
+  overlay().webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
   await closed("Esc closes the menu");
+  await until(() => win.webContents.isFocused(), "the keyboard back in the window");
   await rightClick(pageTab);
-  await mouse("mouseDown", 700, 600);
-  await mouse("mouseUp", 700, 600);
+  // Outside the menu is the overlay's own backdrop: the click closes it and lands nowhere else.
+  for (const type of ["mouseDown", "mouseUp"]) overlay()?.webContents.sendInputEvent({ type, x: 700, y: 600, button: "left", clickCount: 1 });
   await closed("a click outside closes the menu");
   assert.equal(await js('document.querySelectorAll("#tabs .tab").length'), 2, "the click outside did nothing else");
   // The tab that stays eases to its new width: a CSS transition on the same element (styles.css .tab, pages.js syncTabs).
@@ -95,7 +101,6 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.deepEqual((await items()).slice(-2), [text["tabs.closeOthers"] + "(off)", text["tabs.closeRight"] + "(off)"]);
   // The page in a window of its own (page.html): one header row as high as the main window's, then the page.
   await choose(text["web.detach"]);
-  const { BrowserWindow } = require("electron");
   const pageWin = await until(() => BrowserWindow.getAllWindows().find((w) => w !== win && w.webContents.getURL().endsWith("page.html")), "page window");
   await until(() => pageWin.webContents.executeJavaScript("!!document.querySelector('#title') && document.readyState === 'complete'"), "page window ready");
   const header = await pageWin.webContents.executeJavaScript("(() => { const r = document.querySelector('.titlebar').getBoundingClientRect(), b = document.querySelector('#restore').getBoundingClientRect(); const mac = document.documentElement.dataset.platform === 'mac'; return [r.height, document.querySelector('#title').getBoundingClientRect().left >= (mac ? 72 : 0), b.right <= innerWidth, getComputedStyle(document.querySelector('.titlebar')).display] })()");
@@ -104,6 +109,48 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   if (shots) fs.writeFileSync(path.join(shots, "page-window.png"), (await pageWin.capturePage()).toPNG());
   await pageWin.webContents.executeJavaScript("document.querySelector('#restore').click()");
   await until(() => pageWin.isDestroyed() || !pageWin.isVisible(), "page back in the main window");
+
+  // A modal in the window's document covers the page, including its cutout.
+  const site = await until(() => win.contentView.children.find(v => v.webContents.getURL() === "about:blank"), "restored web page");
+  const hole = () => js("getComputedStyle(document.body).maskImage");
+  assert.match(await hole(), /linear-gradient/);
+  await click("#tabs button[aria-label=" + JSON.stringify(text["tabs.opened"]) + "]");
+  await until(() => !win.contentView.children.includes(site), "the page yields to the open tab list");
+  assert.equal(await hole(), "none");
+  await click("dialog.tabs-dialog .actions button");
+  await until(() => win.contentView.children.includes(site), "closing the tab list restores the same page");
+  assert.match(await hole(), /linear-gradient/);
+
+  // HTML previews and browser tabs share the native page slot. Keep the preview's live document across switches.
+  fs.writeFileSync(path.join(workspace, "preview.html"), '<!doctype html><input id="draft">');
+  await send("#lanes .lane", "!say [Preview](preview.html)");
+  const link = "#lanes .lane .output a";
+  await until(() => has(link), "HTML file link");
+  await click(link);
+  const artifactTab = '#tabs .tab[data-id^="artifact:"]';
+  const previewView = await until(() => win.contentView.children.find(v => v.webContents.getURL().startsWith("xsb-artifact:")), "HTML preview shown");
+  const previewId = previewView.webContents.id;
+  await previewView.webContents.executeJavaScript("document.querySelector('#draft').value = 'retained'");
+  await click(pageTab + " .tab-main");
+  await until(() => win.contentView.children.includes(site), "browser tab shown");
+  await click(artifactTab + " .tab-main");
+  await until(() => win.contentView.children.includes(previewView), "HTML preview reattached");
+  assert.equal(await previewView.webContents.executeJavaScript("document.querySelector('#draft').value"), "retained");
+
+  // Leave before the new preview's IPC reply. The visible browser tab must still track layout changes.
+  await click("#artifact-info");
+  await click('#artifact-modes [data-mode="source"]');
+  await until(() => has("#artifact-body pre.source"), "HTML source loaded");
+  await js(q('#artifact-modes [data-mode="preview"]') + ".click(); " + q(pageTab + " .tab-main") + ".click()");
+  await until(() => webContents.getAllWebContents().some(contents =>
+    contents.id !== previewId && contents.getURL().startsWith("xsb-artifact:") && !contents.isLoading()), "new HTML preview finished opening in the background");
+  await until(() => win.contentView.children.includes(site), "browser tab kept after leaving a pending preview");
+  const width = site.getBounds().width;
+  await js(q("#web-body") + ".style.maxWidth = " + JSON.stringify((width - 32) + "px"));
+  await until(() => win.contentView.children.includes(site) && site.getBounds().width < width, "browser tab follows its slot after the late preview");
+  await js(q("#web-body") + ".style.removeProperty('max-width')");
+  await click(artifactTab + " .icon-btn");
+
   await rightClick(pageTab);
   await choose(text["tabs.close"]);
   await until(async () => !(await has(pageTab)), "tab closed");

@@ -136,17 +136,18 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await shoot("ask-native");
   await click(panel + " .ask-next");
   await echoed('"question_0":"sqlite"');
-  await untilJS('xsb.load().then(s=>s.transcripts[' + JSON.stringify(agent.id) + '].some(e=>e.kind==="question"&&e.source==="acp"&&e.state==="answered"))', "native question answered");
   assert.equal(await has(panel), false);
 
   await untilJS(q(row + " .state") + ".dataset.state==='idle'", "native turn ended before further work");
+  assert.ok((await js("xsb.load()")).transcripts[agent.id].some(e => e.kind === "question" && e.source === "acp" && e.state === "answered"), "native question answered");
 
   // Delivered workflows expose no meaningless pause/resume control.
   const graph = [{ node: "审阅", prompt: '!call finish {"summary":"已审阅","assets":[]}' }, { node: "完成", kind: "end" }, { from: "审阅", to: "完成" }].map(v => JSON.stringify(v)).join("\n");
   await send(lane, '!call execute ' + JSON.stringify({ graphJsonl: graph }));
-  await untilJS('xsb.load().then(s=>Object.values(s.workflows).some(f=>f.state==="completed"))', "workflow delivered and queried as completed");
+  // Loading the startup snapshot suspends live events. Observe delivery in the UI before reading it.
   await untilJS('document.querySelector("#flow-heading")?.textContent.includes(' + JSON.stringify(text["flow.finished"]) + ')', "completed workflow badge");
   assert.equal(await js('document.querySelectorAll("#flow-heading .btn").length'), 0);
+  assert.equal((await js("xsb.load()")).workflows[agent.mainSessionId].state, "completed");
 
   await send(lane, '!say | 日期 | 推荐安排 |\n!say | --- | --- |\n!say | 1月1日：抵达与休息 | 北京直飞珠海，入住后在附近散步。 |\n!say | 1月2日：东澳岛 | 上午去、下午回，午餐与安静休息。 |');
   await until(() => has(lane + " .md tbody td"), "markdown table");
@@ -161,7 +162,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.equal(await js('document.querySelector(' + JSON.stringify(tool + " .tool-status") + ').textContent'), text["tool.status.done"]);
   await click(tool + " summary");
   await send(lane, "!titlelater 120 珠海亲子旅行");
-  await untilJS('xsb.load().then(s=>s.agents.find(a=>a.id===' + JSON.stringify(agent.id) + ').name==="珠海亲子旅行")', "native title update after idle");
-  assert.equal(await js(q(row + " .row-text strong") + '.textContent'), "珠海亲子旅行");
+  await untilJS(q(row + " .row-text strong") + '.textContent==="珠海亲子旅行"', "native title update after idle");
+  assert.equal((await js("xsb.load()")).agents.find(a => a.id === agent.id).name, "珠海亲子旅行");
   console.log("Electron + real Hub/ACP: consultation settings, persisted inheritance, updated model instructions and both ask paths passed");
 });

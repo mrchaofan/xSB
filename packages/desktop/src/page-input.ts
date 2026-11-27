@@ -1,6 +1,6 @@
 /** Native user events are blocked during Agent control. Mouse events from CDP are
  * allowed only while an owned Input.dispatchMouseEvent command is in flight.
- * A shield above the page, in the document that shows it (renderer/page-control.js),
+ * A shield view above the page, owned by the window that shows it (page-host.ts),
  * takes physical mouse input in that interval.
  *
  * While the user annotates a page, its keyboard is blocked too; the mouse goes
@@ -8,18 +8,25 @@
  * and leaves only scrolling to the page.
  */
 import type { WebContents } from "electron";
-const states = new WeakMap<WebContents, { controlled: boolean; annotating: boolean; injected: number }>();
+const states = new WeakMap<WebContents, { controlled: boolean; annotating: boolean; injected: number; pressed: number }>();
+/** How recent a press of the user's counts as what gave a page the keyboard. */
+const PRESS_MS = 500;
 const FROM_DEBUGGER = 1 << 23; // Blink flag exposed as _modifiers by the pinned private Electron.
 
 export function installInputGuard(contents: WebContents): void {
-  const state = { controlled: false, annotating: false, injected: 0 };
+  const state = { controlled: false, annotating: false, injected: 0, pressed: 0 };
   states.set(contents, state);
   contents.on("before-input-event", (event, input) => {
     if ((state.controlled || state.annotating) && !(((input as unknown as { _modifiers?: number })._modifiers ?? 0) & FROM_DEBUGGER)) event.preventDefault();
   });
-  contents.on("before-mouse-event", (event) => {
+  contents.on("before-mouse-event", (event, mouse) => {
     if (state.controlled && state.injected === 0) event.preventDefault();
+    else if (state.injected === 0 && (mouse as { type?: string }).type === "mouseDown") state.pressed = Date.now();
   });
+}
+/** Whether the user, not an agent, pressed the mouse on the page a moment ago. */
+export function pressedByUser(contents: WebContents): boolean {
+  return Date.now() - (states.get(contents)?.pressed ?? 0) < PRESS_MS;
 }
 export function controlInput(contents: WebContents, controlled: boolean): void {
   const state = states.get(contents); if (state) state.controlled = controlled;

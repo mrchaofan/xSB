@@ -13,9 +13,11 @@ const file = path.join(directory, "main.cjs");
 try {
   // The app's own page window, and the module that shows a page, as the app runs them.
   const renderer = (name) => fileURLToPath(new URL("../renderer/" + name, import.meta.url));
-  for (const name of ["page.html", "styles.css"]) fs.copyFileSync(renderer(name), path.join(directory, name));
-  await build({ input: renderer("page-window.js"), platform: "browser", output: { file: path.join(directory, "page-window.js"), format: "iife" } });
-  await build({ input: renderer("webview.js"), platform: "browser", output: { file: path.join(directory, "webview.js"), format: "esm" } });
+  for (const name of ["page.html", "overlay.html", "annotation.html", "styles.css"]) fs.copyFileSync(renderer(name), path.join(directory, name));
+  for (const name of ["page-window.js", "overlay.js", "annotation.js"]) {
+    await build({ input: renderer(name), platform: "browser", output: { file: path.join(directory, name), format: "iife" } });
+  }
+  await build({ input: renderer("page-slot.js"), platform: "browser", output: { file: path.join(directory, "page-slot.js"), format: "esm" } });
   // Exercise the real tab/focus routing with only unrelated app state and panels stubbed.
   const panelStubs = {
     "./app.js": `export const state = window.auditState; export const rootSession = () => 'sa'; export const rememberPosition = () => {}; export const renderArtifact = () => {}; export const revealArtifacts = () => {};`,
@@ -34,10 +36,11 @@ try {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   const child = spawn(require("electron"), [file, directory, ...(process.argv.includes("--tabs-only") ? ["--tabs-only"] : [])], { env, stdio: "inherit" });
-  const timer = setTimeout(() => child.kill("SIGKILL"), 60000);
+  const timer = setTimeout(() => child.kill("SIGKILL"), 90000);
   const code = await new Promise((resolve) => child.on("exit", (code) => resolve(code)));
   clearTimeout(timer);
   if (code !== 0) throw new Error(`native browser smoke test failed (exit ${code})`);
+  if (!fs.existsSync(path.join(directory, "passed"))) throw new Error("native browser smoke test exited before completing its assertions");
 } finally {
   fs.rmSync(directory, { recursive: true, force: true });
 }

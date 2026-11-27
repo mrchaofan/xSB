@@ -3,8 +3,8 @@ import "./preferences.js";
 // 网页是从右栏移过来的同一个，不重新加载；关掉这个窗口就关掉了网页和它的标签（../src/pages.ts）。
 import { $ } from "./dom.js";
 import "./i18n.js";      // 换上 page.html 里的静态文字
-import { showWeb } from "./webview.js";
-import { annotateButton } from "./annotate.js";
+import { showWeb } from "./page-slot.js";
+import { annotateButton, showAnnotateBar } from "./annotate.js";
 import { syncWindowColors } from "./preferences.js";
 
 let id;
@@ -17,6 +17,7 @@ function sync(page) {
   syncWindowColors();
   $("#pin").setAttribute("aria-pressed", String(page.pinned));
   annotateButton($("#annotate"), page);
+  showAnnotateBar($("#annotate-bar"), page);
   showWeb($("#web-body"), page);
 }
 
