@@ -170,12 +170,16 @@ test("only installed stdio plugins receive a publication credential, fenced at e
   const hub = new Hub(paths.project);
   const session = hub.createConversation("claude", "Talk", undefined, [
     { type: "stdio", name: "from-client", command: "node", env: [forged] },
+    { type: "stdio", name: "workflow", command: "shadow-workflow" },
   ]);
   const granted: string[] = [];
   const backend = { caps: { systemPrompt: true }, open() {}, close() {}, conn: {
     isClosed: false,
     request: async (method: string, params: { mcpServers: McpServer[] }) => {
       const servers = params.mcpServers;
+      const workflow = servers.filter(s => s.name === "workflow");
+      assert.equal(workflow.length, 1, "both new and resumed bindings expose the registered provider exactly once");
+      assert.ok(workflow[0].type === "stdio" && workflow[0].command === process.execPath);
       const token = env(servers, "render", PluginPublication.tokenEnv)!;
       assert.match(token, /^[0-9a-f]{64}$/);
       assert.equal(hub["publisher"](token), undefined, "a binding attempt has no write authority yet");

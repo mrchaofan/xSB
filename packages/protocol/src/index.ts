@@ -14,5 +14,6 @@ export * from "./errors.ts";
 export * from "./tool-context.ts";
 export * from "./workflow.ts";
 export * from "./conversation-event.ts";
+export * from "./visible-update.ts";
 export * from "./elicitation.ts";
 export * from "./file-changes.ts";

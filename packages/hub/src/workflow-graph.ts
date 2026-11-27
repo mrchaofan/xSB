@@ -23,23 +23,34 @@ export function canonical(v: unknown): string {
 }
 export const fingerprint = (v: unknown) => createHash("sha256").update(canonical(v)).digest("hex");
 
-export function nodeDefinition(value: unknown): NodeDef {
+export function nodeDefinition(value: unknown, markdown = object(value) && Object.hasOwn(value, "requirements")): NodeDef {
   if (!object(value)) throw Error("Expected a node definition");
-  const { node, kind = "task", input = {}, inputSchema, prompt, model, schema, multi = false, agent } = value;
+  const { node, kind = "task", input = {}, inputSchema, prompt, requirements, model, schema, multi = false, agent } = value;
   word(node, "node name");
-  if (
-    node in Object.prototype ||
-    node === "*" ||
-    !["task", "end"].includes(kind) ||
-    !object(input) ||
-    typeof multi !== "boolean"
-  )
+  if (node in Object.prototype || node === "*" || !["task", "end"].includes(kind))
     throw Error("Invalid node definition");
-  if (Object.keys(value).some((k) => !["node", "kind", "input", "inputSchema", "prompt", "model", "schema", "multi", "agent"].includes(k)))
-    throw Error("Unknown node field");
-  if (kind === "task") word(prompt, "task prompt");
   if (agent !== undefined && kind !== "task") throw Error("Only task nodes can configure an agent");
   if (model !== undefined) word(model, "model");
+  const allowed = markdown
+    ? kind === "end" ? ["node", "kind"] : ["node", "kind", "requirements", "input", "model", "agent"]
+    : ["node", "kind", "input", "inputSchema", "prompt", "model", "schema", "multi", "agent"];
+  const unknown = Object.keys(value).find(key => !allowed.includes(key));
+  if (unknown) throw Error(`Unknown node field "${unknown}" on "${node}"`);
+
+  if (markdown) {
+    if (kind === "task") word(requirements, `requirements for "${node}"`);
+    if (Object.hasOwn(value, "input") && typeof value.input !== "string")
+      throw Error(`Node "${node}" expects Markdown text for input`);
+    return {
+      node, kind, input: {}, multi: false,
+      ...(kind === "task" && { requirements }),
+      ...(value.input !== undefined && { entryInput: value.input }),
+      ...(model !== undefined && { model }),
+      ...(agent !== undefined && { agent: nodeAgent(agent) }),
+    };
+  }
+  if (!object(input) || typeof multi !== "boolean") throw Error("Invalid node definition");
+  if (kind === "task") word(prompt, "task prompt");
   for (const [field, contract] of [["schema", schema], ["inputSchema", inputSchema]] as const) {
     if (contract === undefined) continue;
     if (!object(contract)) throw Error(`Node "${node}" expects a JSON Schema object for ${field}`);
@@ -95,23 +106,38 @@ export function indexGraph(nodes: NodeDef[], edges: Edge[]) {
   return { incoming, outgoing };
 }
 
+/** Markdown routing selects a target. All of its textual cases describe that same option. */
+export function branchCandidates(edges: Edge[], name: string): { node: string; case: string }[] {
+  const targets = new Map<string, string[]>();
+  for (const edge of edges) {
+    if (edge.from !== name || edge.case === undefined) continue;
+    const cases = targets.get(edge.to);
+    if (cases) cases.push(edge.case);
+    else targets.set(edge.to, [edge.case]);
+  }
+  return Array.from(targets, ([node, cases]) => ({ node, case: cases.join("\n") }));
+}
+
 export function parseGraph(raw: string): WorkflowGraph {
   const nodes: NodeDef[] = [],
     edges: Edge[] = [];
   const seen = new Set<string>(),
     edgeSet = new Set<string>();
-  for (const line of word(raw, "graphJsonl")
-    .split(/\r?\n/)
-    .filter((l) => l.trim())) {
-    const v = JSON.parse(line);
+  const rows = word(raw, "graphJsonl").split(/\r?\n/).filter(line => line.trim()).map(line => {
+    const v: unknown = JSON.parse(line);
     if (!object(v)) throw Error("Expected one graph object per line");
+    return v;
+  });
+  const markdown = rows.some(v => Object.hasOwn(v, "node") && Object.hasOwn(v, "requirements"));
+  for (const v of rows) {
     if ("node" in v) {
-      const n = nodeDefinition(v);
+      const n = nodeDefinition(v, markdown);
       if (seen.has(n.node)) throw Error(`Duplicate node ${n.node}`);
       seen.add(n.node);
       nodes.push(n);
     } else {
       if (Object.keys(v).some((k) => !["from", "to", "case", "bind"].includes(k))) throw Error("Unknown edge field");
+      if (markdown && Object.hasOwn(v, "bind")) throw Error("Markdown edges carry the source output and cannot declare bind");
       const e: Edge = {
         from: word(v.from, "from"),
         to: word(v.to, "to"),
@@ -127,6 +153,14 @@ export function parseGraph(raw: string): WorkflowGraph {
   nodes.sort((a, b) => compare(a.node, b.node));
   const { incoming, outgoing } = indexGraph(nodes, edges);
   const byName = new Map(nodes.map((n) => [n.node, n]));
+  if (markdown) {
+    for (const n of nodes) {
+      const indegree = incoming.get(n.node)!.length;
+      if (n.entryInput !== undefined && indegree > 0)
+        throw Error(`Node "${n.node}" has predecessors: only an entry task can declare input`);
+      if (n.kind === "end" && indegree === 0) throw Error(`End "${n.node}" needs a predecessor delivery`);
+    }
+  }
   const contracts = nodes.some(n => n.inputSchema !== undefined) || edges.some(e => e.bind !== undefined);
   if (contracts) {
     for (const n of nodes) {
@@ -148,7 +182,9 @@ export function parseGraph(raw: string): WorkflowGraph {
   }
   if (order.length !== nodes.length) throw Error("Workflow contains a cycle");
   const branches = order.flatMap((n) => {
-    const options = [...new Set(outgoing.get(n.node)!.flatMap((e) => e.case ?? []))];
+    const out = outgoing.get(n.node)!;
+    const options = markdown ? branchCandidates(out, n.node).map(candidate => candidate.node) :
+      [...new Set(out.flatMap(e => e.case ?? []))];
     return options.length ? [{ n, options, count: n.multi ? 2 ** options.length : options.length, i: 0 }] : [];
   });
   const checkedInputs = new Map<NodeDef, Edge[]>();
@@ -170,7 +206,8 @@ export function parseGraph(raw: string): WorkflowGraph {
     let ends = 0;
     for (const n of order) {
       const signals = incoming.get(n.node)!.map((edge) => {
-        const skip = skipped.has(edge.from) || (edge.case !== undefined && !choices.get(edge.from)!.has(edge.case));
+        const skip = skipped.has(edge.from) ||
+          (edge.case !== undefined && !choices.get(edge.from)!.has(markdown ? edge.to : edge.case));
         return { edge, signal: { state: skip ? "skipped" as const : "ready" as const } };
       });
       const gate = entrance(signals);
@@ -198,20 +235,25 @@ export function parseGraph(raw: string): WorkflowGraph {
     while (j < branches.length && ++branches[j].i === branches[j].count) branches[j++].i = 0;
     if (j === branches.length) break;
   }
-  return { nodes: order, edges };
+  return { ...(markdown && { format: "markdown" }), nodes: order, edges };
 }
 
-/** A graph in the JSONL a model writes it in, leaving out the fields it can leave out: parsed back, it is the same graph. */
-export function graphJsonl({ nodes, edges }: WorkflowGraph): string {
-  const node = ({ node, kind, prompt, input, inputSchema, model, schema, multi, agent }: NodeDef) => ({
+/** JSONL shape exposed to the planner, omitting normalized defaults. */
+export function nodeJson({ node, kind, prompt, requirements, entryInput, input, inputSchema, model, schema, multi, agent }: NodeDef) {
+  return {
     node,
-    ...(kind === "end" ? { kind } : { prompt }),
+    ...(kind === "end" ? { kind } : requirements !== undefined ? { requirements } : { prompt }),
     ...(Object.keys(input).length > 0 && { input }),
+    ...(entryInput !== undefined && { input: entryInput }),
     ...(inputSchema !== undefined && { inputSchema }),
     ...(model !== undefined && { model }),
     ...(schema !== undefined && { schema }),
     ...(agent !== undefined && { agent }),
     ...(multi && { multi }),
-  });
-  return [...nodes.map(node), ...edges].map((v) => JSON.stringify(v)).join("\n");
+  };
+}
+
+/** The JSONL a model writes, which parses back to the same graph. */
+export function graphJsonl({ nodes, edges }: WorkflowGraph): string {
+  return [...nodes.map(nodeJson), ...edges].map((v) => JSON.stringify(v)).join("\n");
 }

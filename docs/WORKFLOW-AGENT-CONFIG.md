@@ -1,18 +1,18 @@
 # 工作流任务 Agent 配置与缓存
 
-节点的 `prompt`、`input`、`inputSchema`、`model` 和交付 `schema` 描述当前工作，`agent` 定义长期执行这类工作的角色和技能。主 Agent 在规划新节点时生成配置，Hub 校验并持久化。
+节点的 `requirements` 声明输入参数和交付要求。入口任务可以用 Markdown `input` 提供实际材料。`model` 选择执行模型，`agent` 定义长期执行这类工作的角色和技能。主 Agent 在规划新节点时生成配置，Hub 校验并持久化。
 
 ```jsonl
-{"node":"审阅","prompt":"检查记录是否符合交付标准。","input":{"标准":"全部检查通过","记录":"3 项检查均通过"},"inputSchema":{"type":"object","properties":{"标准":{"type":"string"},"记录":{"type":"string"}},"required":["标准","记录"],"additionalProperties":false},"schema":{"type":"boolean","description":"记录是否符合标准"},"agent":{"systemPrompt":"依据实际交付和验证证据审阅，明确区分事实与推测。","skills":[{"name":"证据核对","description":"核对记录与验收标准。","content":"逐项核对验收条件和实际证据，报告检查方法与未验证项。"}]}}
-{"node":"完成","kind":"end","inputSchema":{"type":"object","properties":{"通过审阅":{"type":"boolean"}},"required":["通过审阅"],"additionalProperties":false}}
-{"from":"审阅","to":"完成","bind":{"通过审阅":""}}
+{"node":"审阅","requirements":"需要验收标准和检查记录。交付审阅结论，列出支持结论的记录。","input":"标准：全部检查通过。\n记录：3 项检查均通过。","agent":{"systemPrompt":"依据实际交付和验证证据审阅，明确区分事实与推测。","skills":[{"name":"证据核对","description":"核对记录与验收标准。","content":"逐项核对验收条件和实际证据，报告检查方法与未验证项。"}]}}
+{"node":"完成","kind":"end"}
+{"from":"审阅","to":"完成"}
 ```
 
 ## 不可变配置与可变任务
 
 `NodeAgentConfig` 只允许 `systemPrompt` 与 `skills`，结束节点不接受 agent 配置。技能只允许 name、description、content；名称唯一，不绑定文件路径或后端 slash command。模型、输入和产物契约继续使用现有节点字段，不开放任意后端参数或 systemPrompt override 模式。
 
-同名同类型节点重用原 Instance：
+同一图格式中，同名同类型节点重用原 Instance。切换图格式会创建新的节点实例与任务会话，使模型取得对应格式的工具声明。
 
 - 省略 agent 或其中某个字段，继承旧值。已有默认角色也已固定，不能后来追加角色/技能。
 - 显式修改系统提示词、技能顺序、名称、描述或正文，plan 和 execute 都拒绝；候选、版本、任务与正在执行的会话不发生部分变更。

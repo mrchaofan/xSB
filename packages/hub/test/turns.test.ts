@@ -3,8 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { text, ConversationEvent, RunExt, TurnExt, TurnFailure, RpcError, OriginExt, CONNECTION_CLOSED } from "@xsb/protocol";
-import type { Addr, Task } from "@xsb/protocol";
+import { text, isAssistantOnly, ConversationEvent, RunExt, TurnExt, TurnFailure, RpcError, OriginExt, CONNECTION_CLOSED } from "@xsb/protocol";
+import type { Addr, ContentBlock, Task } from "@xsb/protocol";
 import { Store } from "@xsb/store";
 import { Delivery } from "../src/delivery.ts";
 import { Elicitations } from "../src/elicitations.ts";
@@ -15,7 +15,7 @@ import { LiveSession } from "../src/session.ts";
 import { State, ops } from "../src/state.ts";
 import type { MailItem } from "../src/state.ts";
 import { Workflows } from "../src/workflows.ts";
-import { adopt, empty } from "../src/workflow-state.ts";
+import { adopt, claim, empty, normalize, notice } from "../src/workflow-state.ts";
 import { readWorkflowJournal, workflowJournal } from "../src/workflow-journal.ts";
 import { deferred } from "../src/util.ts";
 import { contextPolicy, contextRef, textTokens } from "../src/context.ts";
@@ -32,8 +32,9 @@ function setup(t: test.TestContext, reopen?: string) {
   ]);
   const hooks = new Hooks<any, any>({ log() {}, vetoed() {}, deadLetter(_point, _event, error) { throw error; } });
   const effects: string[] = [], prompts: string[] = [];
+  const promptBlocks: ContentBlock[][] = [];
   const hub: any = {
-    state, paths, live: new Map(), stopping: false,
+    state, paths, live: new Map(), sessionProviders: new Map(), stopping: false,
     agentChanged() {}, log() {}, permissions: { cancel() {} }, policy: () => contextPolicy("mock"),
     agent: (id: string) => state.agents.get(id), role: () => ({ grants: ["dispatch", "message"], skills: [] }),
     toolServers: () => [{ from: "role", server: { name: "render" } }],
@@ -54,6 +55,7 @@ function setup(t: test.TestContext, reopen?: string) {
       caps: { orderedCancellation: true },
       async prompt(_id: string, blocks: any[], origin?: any) {
         prompts.push(blocks.map((b) => b.text).join("\n"));
+        promptBlocks.push(blocks);
         if (heldMessageIds.delete(origin?.messageId) || holdSteered && origin?.steered) return new Promise<string>((resolve, reject) => { pending.add(reject); heldReplies.set(origin.messageId, { session, resolve }); });
         session.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
         return "receipt";
@@ -104,8 +106,107 @@ function setup(t: test.TestContext, reopen?: string) {
     for (const live of hub.live.values()) live.releaseUserStop(false);
     if (!reopen) fs.rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, paths, state, hooks, kernel, hub, effects, prompts, A, B, C, session, give, settle, stop, idle, unread, holdPrompts, acceptHeld };
+  return { dir, paths, state, hooks, kernel, hub, effects, prompts, promptBlocks, A, B, C, session, give, settle, stop, idle, unread, holdPrompts, acceptHeld };
 }
+
+test("ACP audiences follow each block of a mixed prompt with a workflow node and ordinary peer mail", async t => {
+  const { state, hub, kernel, A, B, C, session, promptBlocks, idle, settle } = setup(t);
+  state.commit([ops.putAgent({ ...hub.agent(A.agentId), workflowOwner: B.sessionId, workflowNode: "Plan" })]);
+  const workflows = new Workflows(hub);
+  hub.sessionProviders.set("workflow", {
+    supplementalInput: workflows.supplementalInput.bind(workflows),
+    context: () => "current graph", userScope: () => "scope for this correction",
+  });
+  for (const [node, sender] of [["node", A], ["peer", C]] as const) {
+    const item: MailItem = { id: node, from: { kind: "agent", ...sender }, to: B, ts: "", kind: "message", pref: "lazy", prompt: [text(node)] };
+    state.commit([ops.enqueue(item)]);
+    kernel.mark(item.id, "inboxed", { ...B, from: item.from });
+  }
+  const user = { ...text("Change my dates"), annotations: { audience: ["user", "assistant"] } };
+  const accepted = session.enqueue({ origin: { kind: "user" }, prompt: [user] });
+  await accepted.inserted.promise;
+  assert.deepEqual(promptBlocks[0].filter(b => !isAssistantOnly(b)), [user, text("peer")]);
+  for (const phrase of ["current graph", "scope for this correction", "node"])
+    assert.ok(promptBlocks[0].some(b => isAssistantOnly(b) && b.text === phrase));
+  assert.ok(workflows.supplementalInput(hub.live.get(A.sessionId), { kind: "agent", ...C }));
+  assert.ok(!workflows.supplementalInput(hub.live.get(A.sessionId), { kind: "user" }));
+  idle(); await settle();
+});
+
+test("only a registered provider validates its own queue items, independently of the ID format", async t => {
+  const { hub, session, state, prompts, idle, settle } = setup(t);
+  const checked = new Set<string>(), inserted: string[] = [];
+  hub.sessionProviders.set("example", {
+    acceptsInput(_session: LiveSession, id: string) { checked.add(id); return id === "opaque"; },
+    inserted(_session: LiveSession, id: string) { inserted.push(id); },
+  });
+  hub.stopping = true;
+  const enqueue = (messageId: string, provider?: string) => session.enqueue({
+    provider, origin: { kind: "system", messageId }, prompt: [text(messageId)],
+  });
+  const unknown = enqueue("missing", "unregistered"), stale = enqueue("old", "example");
+  const ordinary = enqueue("attempt_ordinary"), live = enqueue("opaque", "example");
+  hub.stopping = false;
+  session.pump();
+  await assert.rejects(unknown.inserted.promise, /withdrew/);
+  await assert.rejects(stale.inserted.promise, /withdrew/);
+  await ordinary.inserted.promise;
+  idle(); await live.inserted.promise;
+  assert.deepEqual(prompts, ["attempt_ordinary", "opaque"]);
+  assert.deepEqual(checked, new Set(["old", "opaque"]));
+  assert.deepEqual(inserted, ["opaque"]);
+  assert.equal(state.ledger.get("old")?.state, "discarded_unseen");
+  idle(); await settle();
+});
+
+test("revoking the first provider input during bind keeps peer work and the user's protected turn", async t => {
+  const { hub, state, kernel, A, B, session, prompts, effects, give, idle, settle } = setup(t);
+  const gate = deferred<void>(), bind = (session as any).ensureBackend;
+  (session as any).ensureBackend = async () => { await gate.promise; return bind(); };
+  let live = true;
+  hub.sessionProviders.set("example", { acceptsInput: () => live });
+  const first = session.enqueue({ provider: "example", origin: { kind: "system", messageId: "assignment" }, prompt: [text("REVOKED")] });
+  const turn = session.current!;
+  const peer = give(A, B, "PEER TASK"); await settle();
+  const user = session.steer({ origin: { kind: "user", messageId: "correction" }, prompt: [text("CORRECTION")] })!;
+  const item: MailItem = { provider: "example", id: "old-notice", kind: "message", from: { kind: "system" }, to: B, content: "STALE NOTICE", ts: "" };
+  state.commit([ops.enqueue(item)]);
+  kernel.mark(item.id, "inboxed", { ...B, from: item.from });
+  live = false;
+  gate.resolve();
+  await assert.rejects(first.inserted.promise, /withdrew/);
+  await user.inserted.promise;
+  assert.equal(session.current, turn);
+  assert.equal(turn.protected, true);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /PEER TASK/);
+  assert.match(prompts[0], /CORRECTION/);
+  assert.doesNotMatch(prompts[0], /REVOKED|STALE NOTICE/);
+  assert.equal(state.mail.has(item.id), false);
+  assert.equal(state.ledger.get(item.id)?.state, "discarded_unseen");
+  assert.equal(state.tasks.get(peer.id)?.status, "running");
+  assert.ok(!effects.includes("cancel"));
+  idle(); await settle();
+  assert.equal(state.tasks.get(peer.id)?.status, "completed");
+});
+
+test("submit rechecks a provider steer after the enclosing transaction commits", async t => {
+  const { hub, session, state, prompts, idle, settle } = setup(t);
+  let live = true;
+  hub.sessionProviders.set("example", { acceptsInput: () => live });
+  await session.enqueue({ origin: { kind: "system", messageId: "first" }, prompt: [text("FIRST")] }).inserted.promise;
+  const turn = session.current!;
+  const stale = state.atomic(() => {
+    const pending = session.steer({ provider: "example", origin: { kind: "system", messageId: "pending" }, prompt: [text("STALE")] })!;
+    live = false;
+    return pending;
+  });
+  await assert.rejects(stale.inserted.promise, /withdrew/);
+  assert.equal(state.ledger.get("pending")?.offered, undefined);
+  assert.equal(session.current, turn);
+  assert.deepEqual(prompts, ["FIRST"]);
+  idle(); await settle();
+});
 
 test("context refusal recovers the same task without publishing a terminal result, and records the attempt", async (t) => {
   const { session, state, hub, A, B, give, settle, effects } = setup(t);
@@ -124,6 +225,61 @@ test("context refusal recovers the same task without publishing a terminal resul
   await settle();
   assert.equal(state.tasks.get(task.id)!.status, "completed");
   assert.equal(session.rec.contextRecovery, undefined);
+});
+
+test("a refused main turn retries its acknowledged escalation and drops a withdrawn choice invitation", async t => {
+  const { hub, session, state, kernel, B, prompts, promptBlocks, settle, idle } = setup(t);
+  hub.session = (id: string) => hub.live.get(id);
+  hub.broadcast = () => {};
+  const workflows = new Workflows(hub);
+  hub.sessionProviders.set("workflow", workflows);
+  t.after(() => { hub.stopping = true; });
+
+  const flow = empty(session.id);
+  adopt(flow, { graphJsonl: [
+    { node: "source", prompt: "Assess the options" }, { node: "done", kind: "end" },
+    { from: "source", to: "done", case: "left" }, { from: "source", to: "done", case: "right" },
+  ].map(row => JSON.stringify(row)).join("\n") }, false);
+  const work = claim(flow, "source")!;
+  work.staged = { summary: "Review complete" };
+  work.state = "ended";
+  normalize(flow);
+  assert.ok(flow.instances.source.invitation);
+  notice(flow, '{"escalate":"source","message":"Confirm publication date"}');
+  const mail = flow.outbox.map(n => {
+    n.posted = n.id;
+    return { id: n.id, to: B, ts: "", from: { kind: "system" }, kind: "message", provider: "workflow",
+      pref: n.invitation ? "lazy" : "wake", invitation: n.invitation, prompt: [text(n.text)] } satisfies MailItem;
+  });
+  state.commit([ops.workflow(flow), ...mail.map(ops.enqueue)]);
+  for (const item of mail) kernel.route(item);
+  await settle();
+  const [invitation, escalation] = mail, turn = session.current!;
+  assert.deepEqual(turn.inputs.map(i => i.messageId), [escalation.id, invitation.id]);
+  assert.ok(turn.inputs.every(i => i.receipted));
+  assert.deepEqual(workflows.read(session.id).outbox, []);
+  assert.equal(state.mail.size, 0);
+  assert.match(prompts[0], /"choose":"source"/);
+
+  const gate = deferred<void>(), bind = (session as any).ensureBackend;
+  (session as any).ensureBackend = async () => { await gate.promise; return bind(); };
+  session.onBackendUpdate({ sessionUpdate: "state_update", state: "idle", stopReason: "error",
+    error: { code: -32603, message: "Internal error: Prompt is too long" } });
+  assert.equal(turn.recovering, true);
+  workflows.control(session.id, "pause", ["source"]);
+  assert.equal(workflows.read(session.id).instances.source.invitation, undefined);
+  gate.resolve();
+  await settle();
+  assert.equal(session.current, turn);
+  assert.deepEqual(turn.inputs.map(i => i.messageId), [escalation.id]);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /Confirm publication date/);
+  assert.doesNotMatch(prompts[1], /"choose":"source"/);
+  assert.ok(promptBlocks.every(batch => batch.every(isAssistantOnly)), "the old outbox delivery and the replacement backend both carry assistant-only content");
+  assert.equal(state.ledger.get(invitation.id)?.state, "inserted");
+  idle();
+  assert.equal((await turn.done.promise).stopReason, "end_turn");
+  assert.equal(workflows.acceptsInput(session, escalation.id), false);
 });
 
 test("a prompt rejection for overflow retires the backend before another turn", async (t) => {
@@ -628,9 +784,44 @@ test("a peer's work goes into an agent's turn; once the user spoke into it, the 
   assert.equal(state.tasks.get(peer.id)!.status, "completed");
 });
 
+for (const timing of ["before", "during"] as const) test(`unregistering a workflow ${timing} prompt preparation omits its graph and scope from the offer`, async t => {
+  const { state, session, hub, kernel, hooks, B, C, prompts, idle, settle } = setup(t);
+  hub.workflows = new Workflows(hub);
+  hub.sessionProviders.set("workflow", hub.workflows);
+  const flow = empty(session.id);
+  adopt(flow, { graphJsonl: '{"node":"A","requirements":"hidden graph"}\n{"node":"done","kind":"end"}\n{"from":"A","to":"done"}' }, false);
+  const blocks = [text("ordinary user text")];
+  flow.interruptions.push({ id: "ordinary", target: flow.active!, prompt: blocks });
+  const mail: MailItem = { id: "waiting", to: B, from: { kind: "agent", ...C }, kind: "message", content: "waiting mail", pref: "lazy", ts: "" };
+  state.commit([ops.workflow(flow), ops.enqueue(mail)]);
+  kernel.mark(mail.id, "inboxed", { ...B, from: mail.from });
+  const receipts: string[] = [];
+  hooks.on("message.insertion_receipt", e => { if (e.inserted) receipts.push(e.messageId); });
+  if (timing === "before") hub.sessionProviders.delete("workflow");
+  else hub.sessionProviders.set("removeWorkflow", { userScope() { hub.sessionProviders.delete("workflow"); } });
+  await session.enqueue({ origin: { kind: "user", messageId: "ordinary" }, prompt: blocks }).inserted.promise;
+  await settle();
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /^ordinary user text\n/);
+  assert.doesNotMatch(prompts[0], /hidden graph|\[xSB workflow\]|addressing the current workflow/);
+  assert.equal([...prompts[0].matchAll(/waiting mail/g)].length, 1);
+  assert.deepEqual(session.current!.inputs.map(i => i.messageId), ["ordinary", "waiting"]);
+  assert.deepEqual(receipts, ["ordinary", "waiting"]);
+  assert.deepEqual(state.store.read(workflowJournal(session)), []);
+  idle(); await settle();
+
+  hub.sessionProviders.delete("removeWorkflow");
+  hub.sessionProviders.set("workflow", hub.workflows);
+  await session.enqueue({ origin: { kind: "user", messageId: "later" }, prompt: [text("next message")] }).inserted.promise;
+  assert.match(prompts[1], /\[xSB workflow\][\s\S]*hidden graph/, "re-registering gives the backend the graph it has never received");
+  hub.sessionProviders.delete("workflow");
+  idle(); await settle();
+});
+
 test("a workflow journals the context and scope actually inserted, keeping original user input in conversation history", async (t) => {
   const { state, session, hub, settle } = setup(t);
   hub.workflows = new Workflows(hub);
+  hub.sessionProviders.set("workflow", hub.workflows);
   const flow = empty(session.id);
   adopt(flow, { graphJsonl: [{ node: "A", prompt: "Review" }, { node: "end", kind: "end" }, { from: "A", to: "end" }].map(row => JSON.stringify(row)).join("\n") }, false);
   const messageId = "interruption";
@@ -647,11 +838,12 @@ test("a workflow journals the context and scope actually inserted, keeping origi
   await settle();
   const turnId = session.current!.id;
   const scope = "[xSB] The user is addressing the current workflow.";
-  assert.deepEqual(offered.slice(-3), [text(scope), ...blocks]);
+  assert.deepEqual(offered.slice(-3), [{ ...text(scope), annotations: { audience: ["assistant"] } }, ...blocks]);
   const context = offered.find(block => block.text?.startsWith("[xSB workflow]"))?.text;
   assert.ok(context);
   assert.deepEqual(state.store.read(workflowJournal(session)), [], "offering a prompt is not its insertion");
 
+  hub.sessionProviders.delete("workflow"); // The offer was made while the provider was registered.
   insertion.resolve("backend-message");
   await input.inserted.promise;
   const journal = state.store.read(workflowJournal(session));

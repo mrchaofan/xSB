@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { contextRef } from "../src/context.ts";
 import { F, State } from "../src/state.ts";
 import { Workflow, Agents, SessionControls, Backends, Boundaries, Connection, Discarded, History, Ledger, RunExt, TurnFailure, LANGUAGES, LanguageExt, OriginExt, PROTOCOL_VERSION, Tasks, conversationEntry, explain, languageOf } from "@xsb/protocol";
-import type { AgentInfo, ConversationEntry, Language, SessionUpdate, Task } from "@xsb/protocol";
+import type { AgentInfo, ConversationEntry, Language, SessionUpdate, Task, WorkflowView } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 import { isVeto } from "../src/hooks.ts";
 import { isTerminal as isTerminalStatus } from "@xsb/protocol";
@@ -58,6 +58,7 @@ fs.writeFileSync(
       "context-refusal": { command: node, args: [MOCK, "--context-refusal", "--context-refusal-file", path.join(project, "refused-once")] },
       "context-refusal-always": { command: node, args: [MOCK, "--context-refusal-always"] },
       unisolated: { command: node, args: [MOCK, "--no-turn-isolation"] },
+      "route-test": { command: node, args: [MOCK, "--no-turn-isolation", "--choose-saved", "Merge"] },
       publisher: { command: node, args: [MOCK, "--plugin", "audit-output"] },
     },
   }),
@@ -129,13 +130,19 @@ async function connect(): Promise<Client> {
 }
 
 /** What an agent was given, in every session of its own, as its transcripts have it (work goes to work sessions). */
-const received = (agentId: string): { text: string; origin: any }[] =>
-  [...hub.state.sessions.values()]
-    .filter((s) => s.agentId === agentId)
-    .flatMap((s) => hub.state.store.read(Paths.transcript(agentId, s.id)))
-    .map((r: any) => r.update)
-    .filter((u: any) => u?.sessionUpdate === "user_message_chunk")
-    .map((u: any) => ({ text: u.content.text ?? "", origin: u._meta?.[OriginExt.key] }));
+const received = (agentId: string): { text: string; origin: any }[] => {
+  const messages = new Map<string, { text: string; origin: any }>();
+  for (const session of hub.state.sessions.values()) if (session.agentId === agentId) {
+    for (const { update } of hub.state.store.read(Paths.transcript(agentId, session.id))) {
+      if (update?.sessionUpdate !== "user_message_chunk") continue;
+      const id = update.messageId, block = update.content.text ?? "";
+      const message = messages.get(id);
+      if (message) message.text += "\n" + block;
+      else messages.set(id, { text: block, origin: update._meta?.[OriginExt.key] });
+    }
+  }
+  return [...messages.values()];
+};
 
 /** What an agent said, in every session of its own, as its transcripts have it. */
 const answered = (agentId: string): string =>
@@ -381,15 +388,20 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   const session = await create("bare");
   await prompt(session.id,"hi");
   assert.match(said.get(session.id)!,/Each conversation has one effective execution turn/);
+  assert.match(said.get(session.id)!, /workflow\.plan/);
+  assert.doesNotMatch(said.get(session.id)!, /graphJsonl|Read request|整理需求/);
   said.set(session.id,"");
   await prompt(session.id,"again");
   assert.equal(said.get(session.id),"echo: again\n");
+  await prompt(session.id, call("guide", {}));
+  assert.match(answered(session.agentId), /result\(guide\):[^]*```jsonl\n\{"node":/);
+  assert.equal(hub.state.workflows.has(session.id), false, "on-demand MCP help leaves an ordinary conversation without a workflow");
 }
 // Node profiles reach ACP session/new, survive rebinding, and expose portable skills through real MCP.
 for (const backend of ["mock", "bare"]) {
   const main = await create(backend);
   const profile = { systemPrompt: "E2E stable reviewer role", skills: [{ name: "review", description: "Inspect evidence", content: "E2E portable skill procedure" }] };
-  const program = "!instructions\n!echo\n" + call("load_skill", { name: "review" }) + "\n" + call("finish", { summary: "profile tested" });
+  const program = "!audiences\n!instructions\n!echo\n" + call("load_skill", { name: "review" }) + "\n" + call("finish", { summary: "profile tested" });
   const rows = [{ node: "reviewer", prompt: program, agent: profile }, { node: "done", kind: "end" }, { from: "reviewer", to: "done" }];
   await prompt(main.id, call("execute", { graphJsonl: rows.map(row => JSON.stringify(row)).join("\n") }));
   await until("configured node completes", () => hub.workflows.read(main.id).instances.reviewer.last?.valid);
@@ -399,7 +411,10 @@ for (const backend of ["mock", "bare"]) {
   const prefix = worker.rec.workflowPrompt!;
   assert.ok(prefix.includes(profile.systemPrompt) && !prefix.includes(profile.skills[0].content));
   assert.match(answered(worker.agentId), /E2E portable skill procedure/);
-  const source = received(worker.agentId).find(message => message.text.startsWith("# Workflow task") || message.text.startsWith("# 工作流任务"))!.text;
+  const audiences = JSON.parse(/^audiences: (.+)$/m.exec(answered(worker.agentId))![1]);
+  assert.deepEqual(audiences.slice(-2), [["user", "assistant"], ["assistant"]], "actual ACP prompt separates the visible action from its model-only assignment");
+  assert.ok(audiences.slice(0, -2).every((audience: string[]) => JSON.stringify(audience) === '["assistant"]'), "fallback standing instructions are model-only");
+  const source = received(worker.agentId).find(message => /^(Start|开始) reviewer\n# /.test(message.text))!.text;
   assert.ok(source.includes(program));
   const result = await until("main conversation displays the workflow publication", () => publications.get(main.id)?.[0]);
   assert.equal(result.source.id, "workflow");
@@ -821,6 +836,12 @@ let refusedId: string;
   const socket = net.connect(paths.socket("mcp")); await new Promise(resolve => socket.once("connect", resolve));
   const oldBridge = new Connection(socket, socket, "old-turn-tools");
   await oldBridge.request("_xsb/attach", { token: oldToken });
+  hub.sessionProviders.delete("workflow");
+  try {
+    await assert.rejects(oldBridge.request("tools/list", {}), /bridge revoked/);
+  } finally {
+    hub.sessionProviders.set("workflow", hub.workflows);
+  }
   await conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "!sleep 5000\n!say MUST-NOT-RESUME" }] });
   conn.notify("session/cancel", { sessionId });
   await idle(session.agentId);
@@ -872,6 +893,92 @@ let refusedId: string;
   await until("resumed end delivered",()=>instances().end.last?.valid);
   assert.equal(instances().A.replan,undefined);
   console.log("ok workflow revisions, task chat redirection, scoped resume and unaffected siblings");
+}
+
+// A paused task retains its Markdown delivery. A fresh source turn chooses the
+// next node, which reads both accepted direct outputs when the join is ready.
+{
+  const owner = await create("route-test");
+  const decide = (input: string, output: string, action: string) => ({
+    node: "Decision", input, requirements: [call("finish", {output}), action].join("\n"),
+  });
+  const graph = [
+    decide("杭州和苏州", "两座城市", "!waitForInput"),
+    {node:"Preference", input:"公共交通", requirements:call("finish", {output:"首选高铁"})},
+    {node:"Merge", requirements:call("finish", {output:"杭州 → 苏州（高铁）"})},
+    {node:"Local", requirements:call("finish", {output:"杭州（市内公交）"})},
+    {node:"End", kind:"end"},
+    {from:"Decision", to:"Merge", case:"跨城"}, {from:"Decision", to:"Local", case:"单城"},
+    {from:"Preference", to:"Merge"}, {from:"Preference", to:"Local"},
+    {from:"Merge", to:"End"}, {from:"Local", to:"End"},
+  ];
+  const graphJsonl = graph.map(r => JSON.stringify(r)).join("\n");
+  const view = () => conn.request<WorkflowView>(Workflow.get,{sessionId:owner.id});
+  const at = (v: WorkflowView, name: string) => v.nodes.find(n => n.name === name)!;
+  await prompt(owner.id, call("execute",{graphJsonl}));
+  const staged = await until("Markdown source submitted its output", async () => {
+    const v = await view();
+    return at(v,"Decision")?.markdown?.output === "两座城市" && at(v,"Preference")?.status === "completed" ? v : undefined;
+  });
+  assert.equal(at(staged,"Merge").markdown?.input, undefined);
+  const source = hub.session(at(staged,"Decision").sessionId!);
+  const socket = net.connect(paths.socket("mcp"));
+  await new Promise(resolve => socket.once("connect", resolve));
+  const bridge = new Connection(socket, socket, "retired-source-turn");
+  try {
+    const token = source.bridgeToken;
+    await bridge.request("_xsb/attach", {token});
+    const info = await bridge.request<{ instructions: string }>("initialize", {protocolVersion:"2025-11-25"});
+    assert.match(info.instructions, /workflow\.finish/);
+    assert.doesNotMatch(info.instructions, /graphJsonl|Read request|整理需求/);
+    const { tools } = await bridge.request<{ tools: { name: string }[] }>("tools/list", {});
+    assert.ok(!tools.some(t => t.name === "guide"), "task agents only see their own tool catalog");
+    const paused = await conn.request<WorkflowView>(Workflow.pause,{sessionId:owner.id,nodes:["Decision"]});
+    assert.equal(at(paused,"Decision").markdown?.output, "两座城市");
+    assert.equal(at(paused,"Decision").markdown?.choice, undefined);
+    await until("paused source backend fenced", () => source.bridgeToken !== token);
+    await conn.request(Workflow.resume,{sessionId:owner.id,nodes:["Decision"]});
+    await assert.rejects(bridge.request("tools/call", {name:"choose",arguments:{node:"Local"}}), /bridge revoked/);
+  } finally { bridge.close(); }
+  const completed = await until("Markdown route completed", async () => {
+    const v = await view();
+    return v.state === "completed" ? v : undefined;
+  });
+  assert.equal(at(completed,"Decision").markdown?.choice, "Merge");
+  assert.deepEqual(at(completed,"Merge").markdown?.sources?.map(s => s.node), ["Decision","Preference"]);
+  assert.match(at(completed,"Merge").markdown!.input!, /两座城市[^]*首选高铁/);
+  assert.equal(at(completed,"Local").markdown?.input, undefined);
+  assert.equal(at(completed,"End").markdown?.output, "杭州 → 苏州（高铁）");
+  const prompts = received(source.agentId).map(e => e.text);
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts[0].includes("杭州和苏州"));
+  assert.ok(prompts[1].includes("两座城市") && prompts[1].includes("跨城"));
+  assert.ok(!prompts[1].includes("!call finish"), "resume only asks for the missing choice");
+  assert.equal(received(owner.agentId).length, 1, "routing never wakes the main conversation");
+  const publication = await until("Markdown completion published", () => publications.get(owner.id)?.[0]);
+  assert.match(publication.markdown, /杭州 → 苏州（高铁）/);
+  assert.doesNotMatch(publication.markdown, /首选高铁|两座城市/);
+  const cleared = await conn.request<WorkflowView>(Workflow.rollback,{sessionId:owner.id,nodes:["Decision"]});
+  assert.equal(at(cleared,"Decision").markdown?.output, undefined);
+  assert.equal(at(cleared,"Decision").markdown?.choice, undefined);
+  assert.equal(at(cleared,"Merge").markdown?.input, undefined);
+  assert.equal(at(cleared,"End").markdown?.output, undefined);
+  assert.equal(at(cleared,"Preference").markdown?.output, "首选高铁");
+  await until("published old route marked withdrawn", () =>
+    publications.get(owner.id)?.find(e => e.id === publication.id && e.withdrawn));
+  const replacement = decide("只游杭州", "一座城市", call("choose",{node:"Local"}));
+  await prompt(owner.id, call("execute",{replaceNode:replacement}));
+  const rerun = await until("replacement route completed after rollback", async () => {
+    const v = await view();
+    return at(v,"End")?.markdown?.output === "杭州（市内公交）" ? v : undefined;
+  });
+  assert.equal(at(rerun,"Decision").markdown?.choice, "Local");
+  assert.equal(at(rerun,"Merge").markdown?.output, undefined);
+  assert.match(at(rerun,"Local").markdown!.input!, /一座城市[^]*首选高铁/);
+  assert.equal(received(at(rerun,"Preference").agentId!).length, 1, "the independent input is reused");
+  await until("new route published with a fresh delivery ID", () =>
+    publications.get(owner.id)?.find(e => !e.withdrawn && e.id !== publication.id && e.markdown === "杭州（市内公交）"));
+  console.log("ok Markdown worker routing, scoped resume, direct joins and rollback over ACP/MCP");
 }
 
 // Additional assignments survive losing the issuing process between receipt and

@@ -11,7 +11,7 @@
  * the kernel's questions about sessions (`recipient`), takes back what the kernel withdrew, stops the turns that
  * only served work that was stopped, and tells the kernel how turns ended.
  */
-import { errorMessage, text, RpcError } from "@xsb/protocol";
+import { assistantOnly, errorMessage, text, RpcError } from "@xsb/protocol";
 import type { Addr, ContentBlock, DiscardReason, OriginMeta } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Hub } from "./hub.ts";
@@ -51,7 +51,7 @@ export class Delivery {
       if (entry.from.kind === "user") {
         const session = this.hub.live.get(entry.sessionId);
         session?.unaccepted(entry.messageId, entry.discardReason ?? (entry.state === "insertion_uncertain" ? "uncertain" : this.hub.stopping ? "abandoned" : "refused"));
-        if (session) this.hub.workflows?.discarded(session, entry.messageId);
+        session?.userInputDiscarded(entry.messageId);
       }
     });
     hooks.on("message.withdrawn", (items) => {
@@ -74,7 +74,7 @@ export class Delivery {
   recipient(to: Addr): Recipient {
     // Asking makes nothing: a session that is not registered is not there to deliver to.
     const known = this.hub.state.agents.has(to.agentId) ? this.hub.live.get(to.sessionId) : undefined;
-    const session = known && this.hub.workflows?.available(known) !== false ? known : undefined;
+    const session = known?.available ? known : undefined;
     return {
       exists: !!session,
       source: session?.source(),
@@ -124,6 +124,10 @@ export class Delivery {
   /** The prompt a mail item becomes (`message.pre_submit` may rewrite it, or veto it: then it is not delivered). */
   render(item: MailItem, session: LiveSession): Delivered | undefined {
     const { state, kernel } = this.hub;
+    if (!session.acceptsInput(item.provider, item.id)) {
+      kernel.reject(item, "The input's provider withdrew this delivery.");
+      return;
+    }
     const rendered = item.prompt ? { prompt: item.prompt, gives: undefined } : (() => {
       const { text: said, gives } = renderMail(state, item, session.given);
       const history = item.results && (item.workGeneration ?? 0) < kernel.generation(session.id)
@@ -144,10 +148,14 @@ export class Delivery {
     };
     // User/task instructions remain intact. Results/notices may be excerpts, always with retrievable originals.
     const prompt = item.from.kind !== "user" && item.kind !== "task"
-      ? decided.prompt.map((b) => b.type === "text" ? text(boundedText(this.hub.paths, session.agentId, b.text ?? "", this.hub.policy(session.agentId).outputTokens)) : b)
+      ? decided.prompt.map((b) => b.type === "text" ? { ...b, text: boundedText(this.hub.paths, session.agentId, b.text ?? "", this.hub.policy(session.agentId).outputTokens) } : b)
       : decided.prompt;
     const excerpted = prompt.some((b, i) => b.type === "text" && decided.prompt[i]?.type === "text" && b.text !== decided.prompt[i].text);
-    return { origin, prompt, item, gives: excerpted ? undefined : rendered.gives };
+    // Keep a provider's explicit public summary alongside the private parts of a program input.
+    const blocks = session.supplementalInput(origin, undefined, item.provider)
+      ? prompt.map(block => block.annotations?.audience?.includes("user") ? block : assistantOnly(block))
+      : prompt;
+    return { origin, prompt: blocks, item, gives: excerpted ? undefined : rendered.gives };
   }
 
   /** A result handed to the tool call that waits for it: it is in the model's conversation once the call returns. */
@@ -202,7 +210,7 @@ export class Delivery {
       delivered.push(next);
       left -= cost;
     }
-    if (delivered.length) delivered[0] = { ...delivered[0], prompt: [text(inboxDigest(delivered.length)), ...delivered[0].prompt] };
+    if (delivered.length) delivered[0] = { ...delivered[0], prompt: [assistantOnly(text(inboxDigest(delivered.length))), ...delivered[0].prompt] };
     return delivered;
   }
 

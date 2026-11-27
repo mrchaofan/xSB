@@ -91,8 +91,26 @@ try {
   const liveReport = await live.until("> done");
   assert.match(liveReport, /\[Workflow\]\n# Workflow completed\n[\s\S]*## `A`\n\n> done/);
   await live.close();
-  assert.match(ok("send",result.nodes[0].sessionId,"hello task","--history-only"),/\[xSB task conversation\][^]*hello task/);
+  const taskChat = result.nodes[0].sessionId;
+  assert.match(ok("send",taskChat,"!say Hello from task","--history-only"), /Hello from task/);
+  const taskReplay = chat(taskChat, "--history");
+  const taskHistory = await taskReplay.until(`talking to ${taskChat}.`);
+  assert.match(taskHistory, /Hello from task/);
+  assert.equal(taskHistory.match(/← xsb: (?:Start|开始) A$/gm)?.length, 1);
+  assert.doesNotMatch(taskHistory, /# Workflow task|!call finish|\[xSB task conversation\]/);
+  await taskReplay.close();
   assert.equal(JSON.parse(ok("workflow","show",b)).nodes.length,0);
+  const markdownOwner = ok("session","new","Markdown","--backend","mock").trim();
+  const flow = [{node:"Draw",requirements:'!call finish {"output":"image.png"}'},
+    {node:"Done",kind:"end"},{from:"Draw",to:"Done"}].map(v => JSON.stringify(v)).join("\n");
+  ok("send", markdownOwner, "!call execute " + JSON.stringify({graphJsonl:flow}));
+  for (let i = 0; i < 15; i++) {
+    if (JSON.parse(ok("workflow","show",markdownOwner)).state === "completed") break;
+  }
+  const rolled = JSON.parse(ok("workflow","rollback",markdownOwner,"Draw"));
+  assert.equal(rolled.history[0].rollback, true);
+  assert.equal(rolled.history[0].nodes.find((n: any) => n.name === "Draw").markdown.output, "image.png");
+  assert.equal(rolled.nodes.find((n: any) => n.name === "Draw").markdown.output, undefined);
   assert.equal(xsb("session","new","--backend","nope").code,13);
   assert.notEqual(xsb("role","add","painter").code,0);
   console.log("ok independent sessions, direct chat, workflow through the MCP bridge and task chat");

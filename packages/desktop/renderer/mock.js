@@ -267,8 +267,10 @@
           a.workflowNode ? [a.workflowNode] : undefined,
         );
     },
-    async workflowControl(id, pause, names) {
+    async workflowControl(id, action, names) {
       const f = data.workflows[id];
+      if (action === "rollback") throw Error("This preview uses a legacy workflow.");
+      const pause = action === true || action === "pause";
       if (!names) f.paused = pause;
       for (const n of f.nodes)
         if (n.agentId && (!names || names.includes(n.name))) {

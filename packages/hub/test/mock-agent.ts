@@ -14,10 +14,12 @@
  *   !plugin <tool> <json> call a real additional stdio MCP server selected with --plugin <name>
  *   !done <result>        report_result on that task
  *   !echo                 emit the whole prompt, as a prompt without directives is
+ *   !audiences            report the ACP audiences on the last inserted prompt's blocks
  *   !await <json>         subscribe to every task dispatched since the last !await
  *   !perm                 ask the client for permission and emit the outcome
  *   !servers              emit the names of the MCP servers the session was given
  *   !tools                emit the names of the team's tools the session has now
+ *   --choose-saved NODE   call choose(NODE) when a routing continuation presents a saved delivery
  *   !usage <n>            report that the conversation uses n tokens of context
  *   !update <json>        emit a native ACP session update
  *   !images               emit image data retained in this backend conversation
@@ -52,6 +54,7 @@ type Session = {
   task?: string;
   /** The prompt of the running work, as text. */
   prompt: string;
+  audiences?: (string[] | null)[];
   /** Standing instructions supplied on session/new or session/resume. */
   instructions?: string;
   /** Names of the MCP servers the session was opened with. */
@@ -160,6 +163,8 @@ async function step(session: Session, line: string): Promise<void> {
     }
     case "echo":
       return say(session, `echo: ${session.prompt.replaceAll("\n", " | ")}\n`);
+    case "audiences":
+      return say(session, `audiences: ${JSON.stringify(session.audiences)}\n`);
     case "consultation":
       return say(session, "consultation: " + (session.instructions?.match(/Current preference: (enabled|disabled)|当前偏好：[开启关闭]+/)?.[0] ?? "No system preference"));
     case "instructions":
@@ -239,13 +244,17 @@ const program = (source: string): string[] => {
 
 /** Insert input into the conversation: it is echoed, answered (a prompt), and its program is what the work does next. */
 function insert(session: Session, prompt: any[], answer?: (r: { messageId: string }) => void): void {
+  session.audiences = prompt.map(block => block.annotations?.audience ?? null);
   session.images.push(...prompt.filter((b) => b.type === "image").map((b) => b.data));
   const messageId = `user_${++counter}`;
   update(session, { sessionUpdate: "user_message", messageId, content: prompt });
   answer?.({ messageId });
   const text = textOf(prompt);
   session.prompt = session.running ? `${session.prompt}\n${text}` : text;
-  session.lines.unshift(...program(given(session, text)));
+  const chooseSaved = flags.indexOf("--choose-saved");
+  if (chooseSaved >= 0 && /^## (Saved delivery|已保存的交付)$/m.test(text) && /^## (Candidate nodes|候选节点)$/m.test(text))
+    session.lines.unshift("!call choose " + JSON.stringify({node: flags[chooseSaved + 1]}));
+  else session.lines.unshift(...program(given(session, text)));
 }
 
 /** Work until there is nothing left, then take what was held: each held prompt is the next work. */

@@ -138,7 +138,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.equal(await js(q(main + " .editor") + ".textContent"), "typed while reading");
   const finish = (s) => "!call finish " + JSON.stringify({ summary: s });
   const rows = [
-    { node: "起草", prompt: "!sleep 9000\n" + finish("起草完成") },
+    { node: "起草", prompt: "!say DRAFT-STARTED\n!sleep 9000\n" + finish("起草完成") },
     { node: "审阅", prompt: finish("审阅完成") },
     { node: "完成", kind: "end" },
     { from: "起草", to: "审阅" },
@@ -176,14 +176,16 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.equal(await has(panel), false);
   await click(".dag-node:not(:disabled)");
   await until(() => has(panel), "task chat");
-  await untilJS(q(panel + " .input .said h1") + "?.textContent.match(/Workflow task|工作流任务/)!=null", "readable assignment title");
-  const assignmentSource = await js(`xsb.load().then(snapshot => snapshot.transcripts[${q(panel)}.dataset.agent].find(entry => entry.kind === "input" && entry.origin.kind === "system").content[0].text)`);
-  assert.ok(assignmentSource.includes(rows[0].prompt), "the exact task instructions remain in the sent Markdown");
-  assert.equal(await js(q(panel + " .input .said details") + ".open"), false, "internal assignment identifiers start collapsed");
+  await untilJS(q(panel + " .output") + '?.textContent.includes("DRAFT-STARTED")', "the task agent received its assignment");
+  const taskEntries = () => js(q(panel + " .entries") + ".textContent");
+  const startLines = () => js(`[...document.querySelectorAll(${JSON.stringify(panel + " .input .said")})].map(node=>node.textContent.trim()).filter(text=>/^(开始|Start) 起草$/.test(text))`);
+  assert.equal((await startLines()).length, 1, "the node assignment is shown as one start message");
+  assert.doesNotMatch(await taskEntries(), /!sleep 9000|!call finish|# Workflow task|# 工作流任务/);
   await click(panel + " .task-control");
   await untilJS(q(panel + " .task-control") + ".innerText.match(/Resume|继续/)!=null", "task stop");
   await send(panel, "!say SIDE-ONLY");
   await untilJS(q(panel + " .entries") + '.innerText.includes("SIDE-ONLY")', "task conversation");
+  await untilJS(q(panel + " .input[data-origin=user]") + '?.textContent.includes("!say SIDE-ONLY")', "direct user input stays in task chat");
   assert.equal(await js(q(main + " .entries") + '.innerText.includes("SIDE-ONLY")'), false);
   await click(panel + " .task-control");
   await untilJS(q(panel + " .task-control") + ".innerText.match(/Stop|停止/)!=null", "task resume");
@@ -211,10 +213,13 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await untilJS('!!document.querySelector("#task-conversation .editor")', "task restored");
   assert.equal(await js(q(panel + " .editor") + ".textContent.replace('costume.md','')"), "task-only");
   assert.equal(await js(q(main + " .editor") + ".textContent"), "main-only");
+  const startsBeforeReload = await startLines();
   const loaded = new Promise(resolve => win.webContents.once("did-finish-load", resolve));
   win.webContents.reload();
   await loaded;
   await until(() => has(panel + " .editor .file-ref"), "window reload restores task and file reference draft");
+  assert.deepEqual(await startLines(), startsBeforeReload, "reloading the transcript preserves start messages once each");
+  assert.doesNotMatch(await taskEntries(), /!sleep 9000|!call finish|# Workflow task|# 工作流任务/);
   assert.equal(await js(q(main + " .editor") + ".textContent"), "main-only");
   await click(second);
   assert.equal(await js(q(main + " .editor") + ".textContent"), "second session draft");
@@ -324,7 +329,42 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await js(`(() => { const select = document.querySelector("#flow-heading select"); select.value = ${JSON.stringify(version)}; select.dispatchEvent(new Event("change")); })()`);
   await click(bill);
   assert.deepEqual(await rawContract(), accepted, "history shows the same exact input, delivery and provenance");
+
+  const markdown = [
+    { node: "Read", requirements: '!call finish {"output":"Travel brief"}\n!call choose {"node":"Plan trip"}', input: "Visit two cities." },
+    { node: "Plan trip", requirements: '!call finish {"output":"# Travel route\\n\\nTake the train."}' },
+    { node: "End of trip", kind: "end" },
+    { from: "Read", to: "Plan trip", case: "Two cities" },
+    { from: "Plan trip", to: "End of trip" },
+  ];
+  const detail = part => '#flow-contract [data-part="' + part + '"]';
+  await js(`(() => { const select = document.querySelector("#flow-heading select"); select.value = ""; select.dispatchEvent(new Event("change")); })()`);
+  await send(main, "!call plan " + graphArgs(markdown));
+  await until(() => has(".flow-plans button:last-child"), "Markdown candidate");
+  await click(".flow-plans button:last-child");
+  await click('.dag-node[data-node="Read"]');
+  assert.match(await js(q(detail("entryInput")) + ".innerText"), /Visit two cities/);
+  assert.match(await js(q(detail("candidates")) + ".innerText"), /Plan trip.*Two cities/s);
+  await click('.dag-node[data-node="Plan trip"]');
+  assert.equal(await has(detail("entryInput")), false);
+  assert.equal(await has(detail("assignedInput")), false);
+  await send(main, "!call execute {}");
+  await until(() => has('.dag-node[data-node="End of trip"][data-state="completed"]'), "Markdown result published");
+  await click('.dag-node[data-node="Read"]');
+  assert.match(await js(q(detail("selectedTarget")) + ".innerText"), /Plan trip/);
+  assert.ok(await has(".dag-surface path.chosen"));
+  await click('.dag-node[data-node="Plan trip"]');
+  assert.match(await js(q(detail("assignedInput")) + ".innerText"), /Travel brief/);
+  assert.match(await js(q(".input-sources") + ".textContent"), /Read/);
+  assert.equal(await js(q(detail("result") + " h1") + ".textContent"), "Travel route");
+  await click("#flow-contract [data-action=rollback-node]");
+  await untilJS('[...document.querySelectorAll("#flow-heading option")].some(o=>o.value.startsWith("rollback"))', "node rollback snapshot");
+  await js('(() => {const el = document.querySelector("#flow-heading select"); el.value = [...el.options].find(o=>o.value.startsWith("rollback")).value; el.dispatchEvent(new Event("change"));})()');
+  await click('.dag-node[data-node="Plan trip"]');
+  assert.match(await js(q(detail("result")) + ".innerText"), /Take the train/);
+  assert.equal(await has("#flow-contract [data-action=rollback-node]"), false);
+  assert.equal(await has("#flow-heading [data-action=rollback]"), false);
   console.log(
-    "Electron + real Hub/ACP: direct chat, DAG, task prompts, stop/resume, native files, web tabs, drafts, model/effort, usage, publication and candidate/active/history node contracts passed",
+    "Electron + real Hub/ACP: direct chat, DAG, task prompts, stop/resume, native files, web tabs, drafts, model/effort, usage, publication, node contracts and Markdown routing/rollback passed",
   );
 });

@@ -1,6 +1,6 @@
 import path from "node:path";
-import { Discarded, History, RpcError, fileChanges, fileEditInput, fileEditPath } from "@xsb/protocol";
-import type { ContentBlock, FileChange, HistoryImage, SessionUpdate } from "@xsb/protocol";
+import { Discarded, History, RpcError, fileChanges, fileEditInput, fileEditPath, userVisibleUpdate } from "@xsb/protocol";
+import type { ContentBlock, FileChange, HistoryImage, SessionUpdate, SupplementalInput } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
 import type { LiveSession } from "./session.ts";
 import type { Store } from "@xsb/store";
@@ -15,16 +15,21 @@ function savedOutput(output: unknown): string | undefined {
 }
 
 /** Only transcript content the desktop displays crosses its history connection. */
-export function historyUpdate(update: SessionUpdate, sessionId: string, offset: number): SessionUpdate | undefined {
+export function historyUpdate(raw: SessionUpdate, sessionId: string, offset: number, supplementalOrigin?: SupplementalInput): SessionUpdate | undefined {
+  const update = userVisibleUpdate(raw, supplementalOrigin);
+  if (!update) return;
   const block = (content: ContentBlock, index: number): ContentBlock => content.type === "image"
-    ? { type: "image", mimeType: content.mimeType, data: "", _meta: { [History.imageKey]: { sessionId, offset, index } } }
+    ? { type: "image", mimeType: content.mimeType, data: "", ...(content.annotations && { annotations: content.annotations }), _meta: { [History.imageKey]: { sessionId, offset, index } } }
     : content;
   if (update.sessionUpdate === "user_message_chunk" || update.sessionUpdate === "agent_message_chunk") {
     return { ...update, content: block(update.content, -1) };
   }
   if (update.sessionUpdate === "session_info_update") {
     const discarded = update._meta?.[Discarded.key] as Discarded | undefined;
-    return discarded ? { ...update, _meta: { ...update._meta, [Discarded.key]: { ...discarded, content: discarded.content.map(block) } } } : update;
+    if (!discarded) return update;
+    const original = (raw._meta![Discarded.key] as Discarded).content;
+    return { ...update, _meta: { ...update._meta, [Discarded.key]: { ...discarded,
+      content: discarded.content.map((b, index) => b.type === "image" ? block(b, original === discarded.content ? index : original.indexOf(b)) : b) } } };
   }
   if (update.sessionUpdate === "tool_call_update") {
     const { sessionUpdate, toolCallId, title, name, kind, status, locations, _meta } = update;
@@ -130,31 +135,34 @@ export function historyFiles(hub: Hub, owner: string) {
 }
 
 /** Page boundaries fall before a complete input, so output and multi-block input stay together. */
-export function historyPage(store: Store, agentId: string, sessionId: string, before?: number, turns = 10) {
+export function historyPage(store: Store, agentId: string, sessionId: string, before?: number, turns = 10, supplementalOrigin?: SupplementalInput) {
   const reversed: SessionUpdate[] = [];
   let cursor: number | null = null;
   let inputs = 0;
   let inputId: string | undefined;
   for (const { offset, record } of store.readBackwardEntries(Paths.transcript(agentId, sessionId), before)) {
-    const update = record.update as SessionUpdate;
+    const update = historyUpdate(record.update, sessionId, offset, supplementalOrigin);
+    if (!update) { cursor = offset; continue; }
     if (inputs >= turns && !(update.sessionUpdate === "user_message_chunk" && update.messageId === inputId)) break;
     if (update.sessionUpdate === "user_message_chunk" && update.messageId !== inputId) {
       if (inputs >= turns) break;
       inputId = update.messageId;
       inputs++;
     }
-    const view = historyUpdate(update, sessionId, offset);
-    if (view) reversed.push(view);
+    reversed.push(update);
     cursor = offset;
   }
   return { updates: reversed.reverse(), cursor: cursor === 0 || reversed.length === 0 ? null : cursor };
 }
 
-export function historyImage(store: Store, agentId: string, ref: HistoryImage): ContentBlock {
+export function historyImage(store: Store, agentId: string, ref: HistoryImage, supplementalOrigin?: SupplementalInput): ContentBlock {
   if (!Number.isSafeInteger(ref.offset) || ref.offset < 0 || !Number.isSafeInteger(ref.index) || ref.index < -1) throw RpcError.invalidParams("invalid image reference");
   const update = store.readAt(Paths.transcript(agentId, ref.sessionId), ref.offset)?.update;
-  const discarded = update?._meta?.[Discarded.key] as Discarded | undefined;
-  const content = ref.index === -1 ? update?.content : discarded?.content[ref.index];
+  const view = update && userVisibleUpdate(update, supplementalOrigin);
+  const original = update?._meta?.[Discarded.key] as Discarded | undefined;
+  const discarded = view?._meta?.[Discarded.key] as Discarded | undefined;
+  const content = ref.index === -1 ? view?.content : original?.content[ref.index];
+  if (ref.index !== -1 && (!content || !discarded?.content.includes(content))) throw RpcError.notFound("history image");
   if (content?.type !== "image" || typeof content.data !== "string") throw RpcError.notFound("history image");
   return content;
 }

@@ -4,7 +4,7 @@
  * Each new ACP session starts an independent main conversation. Extensions expose
  * its workflow, active task conversations and installed backends.
  */
-import { SessionControls, ToolServers, Workflow, Agents, Backends, History, Boundaries, LANGUAGES, LanguageExt, MessageDelivery, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
+import { SessionControls, ToolServers, Workflow, Agents, Backends, History, Boundaries, LANGUAGES, LanguageExt, MessageDelivery, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, userVisibleUpdate } from "@xsb/protocol";
 import type { Connection, HistoryImage, OriginMeta } from "@xsb/protocol";
 import { describeBackends, loadProjectConfig, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
@@ -90,7 +90,8 @@ export class Client {
       if (p.replayFrom && p.replayFrom.type !== "start") throw RpcError.invalidParams(`unsupported replayFrom "${p.replayFrom.type}"`);
       if (p.replayFrom) {
         for (const { update } of hub.state.store.read(Paths.transcript(session.agentId, session.id))) {
-          conn.notify("session/update", { sessionId: session.id, update });
+          const view = userVisibleUpdate(update, session.supplementalInput);
+          if (view) conn.notify("session/update", { sessionId: session.id, update: view });
         }
       }
       conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "state_update", state: session.foregroundState, background: session.composerState().background } });
@@ -102,7 +103,7 @@ export class Client {
       const session = hub.session(p.sessionId);
       hub.workflows.readable(session);
       if (p.before !== undefined && (!Number.isSafeInteger(p.before) || p.before < 0)) throw RpcError.invalidParams("invalid history cursor");
-      const page = historyPage(hub.state.store, session.agentId, session.id, p.before);
+      const page = historyPage(hub.state.store, session.agentId, session.id, p.before, 10, session.supplementalInput);
       if (p.before === undefined) this.attach(session);
       return { ...page, state: session.busy ? "running" : "idle", agent: hub.agentInfo(hub.agent(session.agentId)) };
     });
@@ -117,7 +118,7 @@ export class Client {
       const session = hub.session(p.sessionId);
       hub.workflows.readable(session);
       if (!this.attached.has(session)) throw RpcError.notFound("unattached session");
-      return historyImage(hub.state.store, session.agentId, p);
+      return historyImage(hub.state.store, session.agentId, p, session.supplementalInput);
     });
 
     conn.onRequest("session/list", (p) => {
@@ -166,7 +167,7 @@ export class Client {
       const messageId = origin.messageId;
       // An interruption is the workflow's only once the model has it: one that never gets there blocks nothing.
       return hub.urlElicitations.forward(session.agentId, this, ctx.id, ctx.signal, () => hub.delivery.fromUser(session, p.prompt, origin, this)).catch((e) => {
-        hub.workflows.discarded(session, messageId);
+        session.userInputDiscarded(messageId);
         throw e;
       });
     });
@@ -263,7 +264,7 @@ export class Client {
     conn.onRequest(Agents.purge, () => hub.purgeDeleted());
     conn.onRequest(Workflow.get, p => hub.workflows.get(p.sessionId));
     conn.onRequest(Workflow.list, () => ({ workflows: hub.workflows.list() }));
-    for (const action of ["pause","resume"] as const) conn.onRequest(Workflow[action], p => hub.workflows.control(p.sessionId,action,p.nodes));
+    for (const action of ["pause","resume","rollback"] as const) conn.onRequest(Workflow[action], p => hub.workflows.control(p.sessionId,action,p.nodes));
 
     // ---- backends and tasks ---------------------------------------
 

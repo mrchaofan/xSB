@@ -9,6 +9,8 @@ export type ConversationEntry = {
   sessionId: string;
   source: { kind: "plugin"; id: string; label: string };
   markdown: string;
+  /** A later event with the same identity marks the original, historical entry withdrawn. */
+  withdrawn?: true;
 };
 
 /** A local MCP plugin can publish from its own process over the tool-context socket. */
@@ -27,5 +29,6 @@ export function conversationEntry(update: SessionUpdate, sessionId: string): Con
       !identifier(entry.id) || entry.sessionId !== sessionId || typeof entry.markdown !== "string") return;
   const source = entry.source;
   if (!record(source) || source.kind !== "plugin" || !identifier(source.id) || !identifier(source.label)) return;
-  return { schemaVersion: 1, id: entry.id, sessionId, source: { kind: "plugin", id: source.id, label: source.label }, markdown: entry.markdown };
+  return { schemaVersion: 1, id: entry.id, sessionId, source: { kind: "plugin", id: source.id, label: source.label },
+    markdown: entry.markdown, ...(entry.withdrawn === true && { withdrawn: true }) };
 }

@@ -73,10 +73,11 @@ async function run(args: Args): Promise<void> {
       throw Error("xsb session new [title] [--backend NAME] | list");
     case "workflow": {
       const [action,id,...nodes] = rest;
-      if (!id || !["show","pause","resume"].includes(action)) throw Error("xsb workflow show|pause|resume SESSION [NODE ...]");
+      if (!id || !(action === "show" || action === "pause" || action === "resume" || action === "rollback"))
+        throw Error("xsb workflow show|pause|resume|rollback SESSION [NODE ...]");
       const conn = await connectHub(project(args),false);
       try {
-        const graph = await conn.request<WorkflowView>(action === "show" ? Workflow.get : action === "pause" ? Workflow.pause : Workflow.resume,{sessionId:id,...(nodes.length ? {nodes} : {})});
+        const graph = await conn.request<WorkflowView>(action === "show" ? Workflow.get : Workflow[action],{sessionId:id,...(nodes.length ? {nodes} : {})});
         console.log(JSON.stringify(graph,null,2));
       } finally { conn.close(); }
       return;

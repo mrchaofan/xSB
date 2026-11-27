@@ -77,7 +77,9 @@ export class Backend {
   private readable(prompt: ContentBlock[]): ContentBlock[] {
     prompt = skillPrompt(prompt, this.caps);
     if (this.caps.image) return prompt;
-    return prompt.map((block) => (block.type === "image" ? text(`[An image (${block.mimeType}) was attached here; you cannot see images.]`) : block));
+    return prompt.map((block) => block.type === "image"
+      ? { ...text(`[An image (${block.mimeType}) was attached here; you cannot see images.]`), ...(block.annotations && { annotations: block.annotations }) }
+      : block);
   }
 
   /**
