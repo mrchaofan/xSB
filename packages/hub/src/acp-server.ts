@@ -255,8 +255,8 @@ export class Client {
       const created = hub.migrate(agent.id, p.backend);
       return { agent: hub.agentInfo(hub.agent(created.agentId)) };
     });
-    conn.onRequest(Agents.delete, (p) => {
-      hub.deleteConversation(p?.agentId);
+    conn.onRequest(Agents.delete, async (p) => {
+      await hub.deleteConversation(p?.agentId);
       return {};
     });
     conn.onRequest(Agents.purge, () => hub.purgeDeleted());

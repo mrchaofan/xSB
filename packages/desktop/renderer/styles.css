@@ -213,6 +213,8 @@ body.no-workspace .hub { display: none; }
 .backend-mark .backend-icon { width: 12px; height: 12px; padding: 0; }
 .backend-mark-text { max-width: 88px; height: 18px; padding: 0 var(--space-1h); border-radius: var(--radius-sm); background: var(--wash); color: var(--ink-2); font-size: var(--text-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-row { min-height: 44px; }
+/* 删除中：中枢正在停下它的工作，行先淡出 */
+.session-row[aria-busy="true"] { opacity: .5; pointer-events: none; }
 /* 删除按钮悬停时出现在行的最右，盖住状态点 */
 /* 名字占满中间，后端图标和状态点靠右成两列，各行对齐 */
 .session-row .row-text { flex: 1 1 auto; }

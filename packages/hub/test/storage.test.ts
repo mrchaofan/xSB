@@ -113,9 +113,9 @@ test("project relocation keeps identity and resolves managed paths while preserv
   assert.equal(after.session(s.id).rec.backendSessionId, undefined);
 });
 
-test("a cleanup interrupted before snapshot publication resumes on restart", t => {
+test("a cleanup interrupted before snapshot publication resumes on restart", async t => {
   const h = hub(t), s = h.createConversation();
-  h.deleteConversation(s.agentId);
+  await h.deleteConversation(s.agentId);
   h.state.store.failpoint = point => { if (point === "before-snapshot-publish") throw Error("interrupted cleanup"); };
   assert.throws(() => h.purgeDeleted(), /interrupted cleanup/);
   const restored = new Hub(h.paths.project); restored.stopping = true;
