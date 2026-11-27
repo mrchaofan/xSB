@@ -2,7 +2,7 @@
 // namespaced by the folder; they never change the hub's team configuration.
 const GLOBAL_KEY = "xsb.ui.global";
 const workspaceKey = (path) => `xsb.ui.workspace:${path}`;
-export const GLOBAL_DEFAULTS = { theme: "light", showTools: true };
+export const GLOBAL_DEFAULTS = { theme: "light", showTools: false };
 export const WORKSPACE_DEFAULTS = { showCompleted: false };
 
 /** Move folder-keyed UI state to the project's persistent identity; keep old keys as a fallback. */

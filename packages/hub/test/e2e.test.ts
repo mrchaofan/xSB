@@ -218,9 +218,18 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   const controls = await conn.request(SessionControls.get, { sessionId: empty.id, discover: true });
   assert.equal(controls.connected, true, "a new conversation's settings come from its backend session");
   assert.ok(hub.session(empty.id).rec.backendSessionId, "opened before the first message");
+  // Settings chosen before the first message are not records.
+  await conn.request("session/set_config_option", { sessionId: empty.id, configId: "model", type: "id", value: "studio" });
+  await conn.request("session/set_config_option", { sessionId: empty.id, configId: "effort", type: "id", value: "high" });
   assert.ok(!(await conn.request(Agents.list)).agents.find((x: any) => x.id === empty.agentId).conversed, "no records yet");
   await conn.request(Agents.set, { agentId: empty.agentId, backend: "steerable" });
   assert.equal(hub.session(empty.id).rec.backendSessionId, undefined, "the old backend session held nothing and is dropped");
+  // Until its first message it switches as often as the user likes, whether or not a backend was opened for its settings.
+  for (const [backend, discover] of [["mock", false], ["steerable", true], ["mock", false], ["steerable", false]] as const) {
+    if (discover) await conn.request(SessionControls.get, { sessionId: empty.id, discover: true });
+    assert.ok(!(await conn.request(Agents.list)).agents.find((x: any) => x.id === empty.agentId).conversed, "still no records");
+    await conn.request(Agents.set, { agentId: empty.agentId, backend });
+  }
   await prompt(empty.id, "!say ON-STEERABLE");
   assert.match(said.get(empty.id)!, /ON-STEERABLE/);
   const marks = (sid: string, agentId: string) => hub.state.store.read(Paths.transcript(agentId, sid)).map((r: any) => r.update?._meta?.["dev.xsb/boundary"]?.kind).filter(Boolean);

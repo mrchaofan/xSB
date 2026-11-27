@@ -347,6 +347,7 @@ export class Hub {
       title: title?.trim() || undefined,
       ...(initial && { migratedFrom: initial.migratedFrom }),
       ...(title?.trim() && !task ? { titleEdited: true } : {}),
+      conversed: false,
       createdAt: now(),
       updatedAt: now(),
     };
@@ -486,7 +487,7 @@ export class Hub {
     const rec = this.state.mainSession(agentId);
     if (rec) return this.live.get(rec.id)!;
     this.agent(agentId);
-    const made: SessionRec = { id: newId("ses"), agentId, main: true, createdAt: now(), updatedAt: now() };
+    const made: SessionRec = { id: newId("ses"), agentId, main: true, conversed: false, createdAt: now(), updatedAt: now() };
     this.state.commit([ops.putSession(made)]);
     const session = this.track(new LiveSession(this, made));
     session.clientMcp = clientMcp;

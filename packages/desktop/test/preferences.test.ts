@@ -35,7 +35,7 @@ test("appearance survives a reload while each workspace retains its own task fil
   assert.equal("density" in JSON.parse(values.get("xsb.ui.global")!), false);
   assert.equal(reloaded.workspacePreferences("/films/one").showCompleted, true);
   assert.equal(reloaded.workspacePreferences("/films/two").showCompleted, false);
-  assert.equal(reloaded.globalPreferences().showTools, true);
+  assert.equal(reloaded.globalPreferences().showTools, false);
 });
 
 test("corrupt and obsolete saved preferences fall back to usable defaults", () => {
@@ -61,7 +61,7 @@ test("other windows update appearance and notify the task list, unrelated storag
   values.clear();
   storageListener({ key: null });
   assert.equal(dataset.theme, "light");
-  assert.equal(classes.has("hide-tools"), false);
+  assert.equal(classes.has("hide-tools"), true, "tool calls are hidden by default");
 });
 
 test("a failed preference save remains visible to the caller and leaves appearance unchanged", () => {
