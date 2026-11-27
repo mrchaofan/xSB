@@ -47,7 +47,7 @@ for (const backend of ["claude", "codex"]) test(`${backend} questions return on 
   assert.equal(hub.agentInfo(hub.agent(session.agentId)).asking, true);
   assert.ok(updates.some(u => u._meta?.[Question.key]?.source === "acp"));
   resolve({ action: "accept", content: { question_0: "pg" } });
-  await until(() => !session.busy && updates.some(u => u.content?.text?.includes('"question_0":"pg"')));
+  await until(() => updates.some(u => u.sessionUpdate === "state_update" && u.state === "idle"));
   assert.ok(updates.some(u => u.content?.text?.includes('"question_0":"pg"')));
   const answered = updates.find(u => u._meta?.[Question.key]?.state === "answered")._meta[Question.key];
   assert.deepEqual(answered.answers, ["Postgres"]);
@@ -85,7 +85,7 @@ test("invalid native answers cannot reach the backend as accepted choices", asyn
 test("the backend receives the workflow MCP bridge and no built-in ask server", async t => {
   const { client, session, updates, send } = await setup(t);
   await send("!servers");
-  await until(() => !session.busy);
+  await until(() => updates.some(u => u.sessionUpdate === "state_update" && u.state === "idle"));
   const names = updates.find(u => u.content?.text?.startsWith("servers: ")).content.text.trim().slice(9).split(", ");
   assert.ok(names.includes("workflow"));
   assert.ok(!names.includes("xsb"));
