@@ -4,7 +4,7 @@
  * Each new ACP session starts an independent main conversation. Extensions expose
  * its workflow, active task conversations and installed backends.
  */
-import { Answer, SessionControls, ToolServers, Workflow, Agents, Backends, History, Boundaries, LANGUAGES, LanguageExt, MessageDelivery, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
+import { SessionControls, ToolServers, Workflow, Agents, Backends, History, Boundaries, LANGUAGES, LanguageExt, MessageDelivery, Ledger, OriginExt, PROTOCOL_VERSION, RpcError, Tasks } from "@xsb/protocol";
 import type { Connection, HistoryImage, OriginMeta } from "@xsb/protocol";
 import { describeBackends, loadProjectConfig, saveProjectConfig } from "./config.ts";
 import type { Hub } from "./hub.ts";
@@ -93,7 +93,7 @@ export class Client {
           conn.notify("session/update", { sessionId: session.id, update });
         }
       }
-      conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "state_update", state: session.current ? "running" : "idle", background: session.composerState().background } });
+      conn.notify("session/update", { sessionId: session.id, update: { sessionUpdate: "state_update", state: session.foregroundState, background: session.composerState().background } });
       this.attach(session);
       return { ...setup(session), _meta: sessionMeta(session) };
     });
@@ -140,11 +140,7 @@ export class Client {
       // Closing detaches this client. The session belongs to the agent and lives on.
       session.clients.delete(this);
       this.attached.delete(session);
-      return {};
-    });
-
-    conn.onRequest(Answer.submit, (p) => {
-      hub.questions.answer(this.own(p.sessionId), p.answer);
+      hub.elicitations.detach(session, this);
       return {};
     });
 
@@ -152,16 +148,15 @@ export class Client {
       const session = this.own(p.sessionId);
       if (!Array.isArray(p.prompt)) throw RpcError.invalidParams("prompt must be an array of content blocks");
       if (!p.prompt.length) throw RpcError.invalidParams("prompt must not be empty");
-      if (p._meta?.[Answer.key]) throw RpcError.invalidParams(`Question replies must use ${Answer.submit}`);
+      // Older clients submitted targeted question replies in prompt metadata. Never deliver one as new input.
+      if (p._meta && Object.hasOwn(p._meta, "dev.xsb/answer")) throw RpcError.invalidParams("This question has expired");
       // Answered once it is in the conversation; the user's word never waits behind work (kernel.ts, `deliveryPolicy`).
       const origin = userOrigin(p);
       origin.messageId ??= newId("m");
       // The same message sent again (its answer was lost): no second copy, and no second workflow interruption.
       if (hub.delivery.known(origin.messageId)) return hub.delivery.fromUser(session, p.prompt, origin, this);
-      // A message to an agent that asked the user something replies to it: answers, a skip, or other words instead.
       session.clearSuggestions();
-      hub.questions.reply(session, origin.messageId);
-      hub.elicitations.cancel(session);
+      hub.elicitations.cancel(session, "blocking");
       hub.workflows.input(session,origin.messageId,p.prompt,p._meta?.[Workflow.target]);
       if (!session.rec.title && !hub.agent(session.agentId).workflowOwner) {
         const first = p.prompt.find((b: any) => b.type === "text")?.text?.trim();
@@ -291,10 +286,11 @@ export class Client {
   }
 
   private attach(session: LiveSession): void {
+    const alreadyAttached = this.attached.has(session);
     session.clients.add(this);
     this.attached.add(session);
     this.hub.permissions.route();
-    this.hub.elicitations.route();
+    if (!alreadyAttached) this.hub.elicitations.attach(session, this);
   }
 
   /** A session this client may drive. Attaching is implicit: the hub is local and single-user. */

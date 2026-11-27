@@ -242,45 +242,34 @@ test("an already attached MCP connection is rejected after its bridge is revoked
   await assert.rejects(handlers.get("tools/call")!({ name: "dispatch_task", arguments: {} }), /bridge revoked/);
 });
 
-test("ask is xSB's own tool, served apart from the workflow tools, and logs no workflow call", async () => {
-  const { serveMcp, BRIDGE_ATTACH, XSB_SERVER, bridgeServer } = await import("../src/mcp.ts");
-  const serve = (server?: string) => {
-    const handlers = new Map<string, (params: any) => any>();
-    const logged: unknown[] = [], asked: unknown[] = [];
-    const session: any = { source: () => ({ agentId: "a", sessionId: "sa", turnId: "t" }), withStep: (_: unknown, call: () => unknown) => call(), agentId: "a", current: { started: true, id: "t" }, acceptsTools: true, observeExecution() {}, toolOutput() {} };
-    const workflows = {
-      call: (_: unknown, name: string) => { if (name === "ask") throw Error("unknown workflow tool"); return "adopted"; },
-      record: (s: unknown, turnId: string, event: unknown) => { assert.equal(s, session); assert.equal(turnId, "t"); logged.push(event); },
-    };
-    const hub: any = { lifecycle: new Lifecycle(new Hooks<any, any>({ log() {}, vetoed() {}, deadLetter() {} })), agent: () => ({}), policy: () => ({ outputTokens: 4000 }), paths: {}, state: { store: { healthy: true } }, workflows, questions: { ask: (_: unknown, args: unknown) => (asked.push(args), "shown") } };
-    serveMcp(hub, { onRequest(name: string, handler: (params: any) => any) { handlers.set(name, handler); } } as any, () => session);
-    handlers.get(BRIDGE_ATTACH)!({ token: "x", ...(server ? { server } : {}) });
-    return { handlers, logged, asked, workflows };
+test("the workflow MCP bridge records tool outcomes and rejects the retired server", async () => {
+  const { serveMcp, BRIDGE_ATTACH } = await import("../src/mcp.ts");
+  const handlers = new Map<string, (params: any) => any>();
+  const logged: unknown[] = [];
+  const session: any = { source: () => ({ agentId: "a", sessionId: "sa", turnId: "t" }), withStep: (_: unknown, call: () => unknown) => call(), agentId: "a", current: { started: true, id: "t" }, acceptsTools: true, observeExecution() {}, toolOutput() {} };
+  const workflows = {
+    call: (_: unknown, name: string) => { if (name === "ask") throw Error("unknown workflow tool"); return "adopted"; },
+    record: (s: unknown, turnId: string, event: unknown) => { assert.equal(s, session); assert.equal(turnId, "t"); logged.push(event); },
   };
-  const workflow = serve();
-  assert.ok(!workflow.handlers.get("tools/list")!({}).tools.some((t: any) => t.name === "ask"), "not among the workflow tools");
-  const invoke = (name: string, receipt: string) => workflow.handlers.get("tools/call")!({ name, arguments: {}, _meta: { "dev.xsb/call-id": receipt } });
+  const hub: any = { lifecycle: new Lifecycle(new Hooks<any, any>({ log() {}, vetoed() {}, deadLetter() {} })), agent: () => ({}), policy: () => ({ outputTokens: 4000 }), paths: {}, state: { store: { healthy: true } }, workflows };
+  serveMcp(hub, { onRequest(name: string, handler: (params: any) => any) { handlers.set(name, handler); } } as any, () => session);
+
+  assert.throws(() => handlers.get(BRIDGE_ATTACH)!({ token: "x", server: "xsb" }), /unknown bridge server/);
+  assert.throws(() => handlers.get("tools/list")!({}), /not attached/);
+  handlers.get(BRIDGE_ATTACH)!({ token: "x", server: "workflow" });
+  assert.equal(handlers.get("initialize")!({}).serverInfo.name, "workflow");
+  assert.ok(!handlers.get("tools/list")!({}).tools.some((t: any) => t.name === "ask"));
+  const invoke = (name: string, receipt: string) => handlers.get("tools/call")!({ name, arguments: {}, _meta: { "dev.xsb/call-id": receipt } });
   assert.equal((await invoke("execute", "ok")).content[0].text, "adopted");
   assert.equal((await invoke("ask", "failed")).isError, true);
-  assert.deepEqual(workflow.logged, [
+  assert.deepEqual(logged, [
     { kind: "tool", tool: "execute", receipt: "ok", arguments: "{}", result: "adopted" },
     { kind: "tool", tool: "ask", receipt: "failed", arguments: "{}", error: "unknown workflow tool" },
   ]);
   let writes = 0;
-  workflow.workflows.record = () => { writes++; throw Error("journal unavailable"); };
+  workflows.record = () => { writes++; throw Error("journal unavailable"); };
   await assert.rejects(invoke("execute", "unwritten"), /journal unavailable/);
   assert.equal(writes, 1, "a failed audit neither acknowledges the tool nor writes a second, misleading tool outcome");
-  const own = serve(XSB_SERVER);
-  assert.deepEqual(own.handlers.get("tools/list")!({}).tools.map((t: any) => t.name), ["ask"]);
-  assert.equal(own.handlers.get("initialize")!({}).serverInfo.name, "xsb");
-  const result = await own.handlers.get("tools/call")!({ name: "ask", arguments: { questions: [] }, _meta: { "dev.xsb/call-id": "c1" } });
-  assert.equal(result.content[0].text, "shown");
-  assert.deepEqual(own.asked, [{ questions: [] }]);
-  assert.deepEqual(own.logged, [], "no workflow log");
-  assert.ok((await own.handlers.get("tools/call")!({ name: "execute", arguments: {}, _meta: { "dev.xsb/call-id": "c2" } })).isError, "no workflow tool here");
-  const entry: any = bridgeServer("/s", "tok", XSB_SERVER);
-  assert.equal(entry.name, "xsb");
-  assert.ok(entry.env.some((e: any) => e.name === "XSB_MCP_SERVER" && e.value === "xsb"));
 });
 
 test("an attached but idle/stopped MCP caller cannot detach new work from a stopped turn", async () => {

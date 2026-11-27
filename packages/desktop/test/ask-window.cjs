@@ -1,6 +1,5 @@
-// Run after building the desktop app (window-harness.cjs): an agent asks the user with the ask tool. The card shows in
-// the conversation, the agent waits for the answer, and the user answers, skips, or writes something else instead.
-// The scripted backend echoes what it is given, so the test sees what the model got. XSB_SCREENSHOTS=<folder> saves pictures.
+// Electron, the real Hub and a scripted backend exchanging blocking and async ACP forms.
+// XSB_SCREENSHOTS=<folder> saves pictures of the same cards used by the app.
 const fs = require("node:fs");
 const path = require("node:path");
 const assert = require("node:assert/strict");
@@ -17,7 +16,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   const lane = "#lanes .lane";
   const card = (state) => lane + ` .entry.question[data-state="${state}"]`;
   const rowOf = async (agent) => "#agents .row:nth-child(" + ((await js("xsb.load().then(s=>s.agents.filter(a=>!a.workflowOwner).map(a=>a.id))")).indexOf(agent) + 1) + ")";
-  const ask = (questions) => "!call ask " + JSON.stringify({ questions });
+  const ask = (message, properties, required = []) => "!elicit " + JSON.stringify({ message, requestedSchema: { type: "object", properties, required } });
   const echoed = (words) => untilJS(q(lane + " .entries") + ".innerText.includes(" + JSON.stringify(words) + ")", "echo " + words);
   win.show();
 
@@ -61,14 +60,14 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await untilJS(q(row + " .state") + ".dataset.state==='idle'", "updated instructions completed");
 
   // Three kinds in one call.
-  await send(lane, ask([
-    { question: "预算多少？", kind: "single", options: ["5000 以内", "5000–10000", "不限"], other: true },
-    { question: "想看哪些风景？", kind: "multi", options: ["海边", "雪山", "草原", "古镇"] },
-    { question: "从哪里出发？", kind: "text" },
-  ]));
+  await send(lane, ask("出行计划", {
+    budget: { type: "string", title: "预算多少？", _meta: { codex: { isOther: true } }, oneOf: ["5000 以内", "5000–10000", "不限", "None of the above"].map(label => ({ const: label, title: label })) },
+    budget_note: { type: "string", title: "Additional answer or note", _meta: { codex: { role: "user_note", questionId: "budget" } } },
+    views: { type: "array", title: "想看哪些风景？", items: { anyOf: ["海边", "雪山", "草原", "古镇"].map(label => ({ const: label })) } },
+    city: { type: "string", title: "从哪里出发？" },
+  }, ["budget", "views", "city"]));
   const panel = lane + " .ask-panel";
   await until(() => has(panel), "question panel above the composer");
-  assert.equal(await js("getComputedStyle(" + q(lane + " .tool > summary") + ", '::before').content"), "none", "tool rows do not get a second generic disclosure arrow");
   await untilJS(q(row + " .state") + ".dataset.state==='asking'", "the row says it waits for the answer");
   assert.equal(await js(q(lane + " .lane-state span") + ".textContent"), text["state.asking"]);
   assert.equal(await js(q(panel + " .ask-head small") + ".textContent"), "1/3");
@@ -77,7 +76,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await shoot("ask-open");
   await new Promise(r => setTimeout(r, 150));
   assert.equal(await js(q(row + " .state") + ".dataset.state"), "asking");
-  assert.equal(await js(q(lane + " .entries") + ".innerText.includes('result(ask)')"), false, "ask has not returned before submission");
+  assert.equal(await js(q(lane + " .entries") + ".innerText.includes('native answer:')"), false, "the request is still open");
 
   // 1/3: an answer of one's own.
   await click(panel + " .ask-row:last-child");
@@ -100,35 +99,37 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.equal(await has(panel), false, "the panel goes once answered");
   assert.equal(await js(q(card("answered") + " .ask-answers") + ".innerText.includes('8000 左右')"), true);
   assert.equal(await js(q(card("answered") + " .ask-answers") + ".innerText.includes('海边、雪山')"), true);
-  await echoed("[xSB] The user's answers to the questions you asked (ask).");
-  await echoed("杭州");
+  await echoed('"budget_note":"8000 左右"');
+  await echoed('"budget":"None of the above"');
+  await echoed('"city":"杭州"');
   assert.equal(await js("[...document.querySelectorAll(" + JSON.stringify(lane + " .entry.input[data-origin=user]") + ")].filter(e=>!e.hidden).some(e=>e.textContent.includes('杭州'))"), false,
     "the answer is shown by the record, not as a message of its own");
   await untilJS(q(row + " .state") + ".dataset.state==='idle'", "no longer waiting");
   await shoot("ask-answered");
 
   // Skipped.
-  await send(lane, ask([{ question: "要不要住民宿？", kind: "single", options: ["要", "不要"] }]));
+  await send(lane, ask("旅行计划", { hotel: { type: "string", title: "要不要住民宿？", enum: ["要", "不要"] } }));
   await until(() => has(lane + " .ask-panel"), "second question");
   await click(lane + " .ask-foot .btn:not(.primary)");
   await until(() => has(card("skipped")), "skipped");
-  await echoed("[xSB] The user skipped the questions you asked (ask).");
+  await echoed('native answer: {"action":"decline"}');
 
   // A message instead of an answer.
-  await send(lane, ask([{ question: "几天？", kind: "text" }]));
+  await send(lane, ask("几天？", { days: { type: "string" } }));
   await until(() => has(lane + " .ask-panel"), "third question");
   await send(lane, "先看看天气再说");
-  await until(() => has(card("superseded")), "superseded");
-  await echoed("[xSB] The user did not answer the questions you asked (ask) and wrote this instead.");
-  assert.equal(await js(q(card("superseded") + " .ask-record-head small") + ".textContent"), text["ask.state.superseded"]);
+  await until(() => has(card("cancelled")), "superseded blocking form was cancelled");
+  await echoed('native answer: {"action":"cancel"}');
+  await echoed("先看看天气再说");
   assert.equal(await has(lane + " .ask-panel"), false);
   // Backend-native ACP forms share the same UI, but return through the request rather than session/prompt.
   const native = { message: "原生提问：使用哪个数据库？", requestedSchema: { type: "object", properties: {
-    question_0: { type: "string", oneOf: [{ const: "sqlite", title: "SQLite", description: "本地保存" }, { const: "pg", title: "Postgres" }] },
+    question_0: { type: "string", title: "数据库", oneOf: [{ const: "sqlite", title: "SQLite", description: "本地保存" }, { const: "pg", title: "Postgres" }] },
     question_0_custom: { type: "string", title: "Other" },
   } } };
   await send(lane, "!elicit " + JSON.stringify(native));
   await until(() => has(panel), "native ACP form reuses ask panel");
+  assert.equal(await js(q(panel + " .ask-head strong") + ".textContent"), native.message);
   await js('xsb.setConsultation("project",true)');
   assert.equal(await has(panel), true, "preference changes do not cancel the active native callback");
   assert.equal(await js("document.querySelectorAll(" + JSON.stringify(panel + " .ask-row") + ").length"), 3);
@@ -140,6 +141,27 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
 
   await untilJS(q(row + " .state") + ".dataset.state==='idle'", "native turn ended before further work");
   assert.ok((await js("xsb.load()")).transcripts[agent.id].some(e => e.kind === "question" && e.source === "acp" && e.state === "answered"), "native question answered");
+
+  // Codex publishes each async request separately and does other work. Idle leaves both forms answerable.
+  const asyncForm = (title) => "!elicitAsync " + JSON.stringify({
+    message: "Codex keeps working while you answer.", _meta: { codex: { delivery: "async" } },
+    requestedSchema: { type: "object", properties: { question_0: { type: "string", title, _meta: { codex: { isOther: false, isSecret: false } } } } },
+  });
+  await send(lane, [asyncForm("下次出发日期？"), asyncForm("补充行程？"), "!say OTHER WORK"].join("\n"));
+  const count = "document.querySelectorAll(" + JSON.stringify(panel) + ").length";
+  await untilJS(count + "===2", "two independently answerable async forms");
+  await echoed("OTHER WORK");
+  await untilJS(q(row + " .state") + ".dataset.state==='idle'", "pending async forms permit idle");
+  const second = lane + " .ask-panel:nth-child(2)";
+  await js("(()=>{const e=" + q(second + " .ask-text") + ";e.value='周五';e.dispatchEvent(new InputEvent('input',{bubbles:true}));})()");
+  await click(panel + " .ask-foot .btn");
+  await untilJS(count + "===1", "only skipped form closed");
+  assert.equal(await js(q(panel + " .ask-text") + ".value"), "周五", "closing another form preserves the draft");
+  const expired = await js(q(panel) + ".dataset.question");
+  await click(panel + " .ask-next");
+  await echoed('"question_0":"周五"');
+  await untilJS(count + "===0", "async answer returned");
+  await assert.rejects(js('xsb.answerQuestion(' + JSON.stringify(agent.id) + ',{questionId:' + JSON.stringify(expired) + ',skipped:true})'), /expired/);
 
   // Delivered workflows expose no meaningless pause/resume control.
   const graph = [{ node: "审阅", prompt: '!call finish {"summary":"已审阅"}' }, { node: "完成", kind: "end" }, { from: "审阅", to: "完成" }].map(v => JSON.stringify(v)).join("\n");
@@ -155,6 +177,7 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.deepEqual(sizes, { left: "12px", top: "8px", button: 36, icon: 16 });
   await shoot("workflow-completed-table");
   const tool = lane + " .entry.tool";
+  assert.equal(await js("getComputedStyle(" + q(tool + " > summary") + ", '::before').content"), "none", "tool rows do not get a second generic disclosure arrow");
   assert.ok(await js('[...document.querySelectorAll(' + JSON.stringify(tool) + ')].every(e=>e.tagName==="DETAILS"&&!e.open)'), "tools are one-line collapsed details");
   assert.equal(await js('getComputedStyle(document.querySelector(' + JSON.stringify(tool + " summary") + ')).height'), "24px");
   await click(tool + " summary");
@@ -164,5 +187,5 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await send(lane, "!titlelater 120 珠海亲子旅行");
   await untilJS(q(row + " .row-text strong") + '.textContent==="珠海亲子旅行"', "native title update after idle");
   assert.equal((await js("xsb.load()")).agents.find(a => a.id === agent.id).name, "珠海亲子旅行");
-  console.log("Electron + real Hub/ACP: consultation settings, persisted inheritance, updated model instructions and both ask paths passed");
+  console.log("Electron + real Hub/ACP: consultation settings and native blocking and asynchronous forms passed");
 });

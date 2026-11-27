@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import { Paths } from "@xsb/hub";
-import { Answer, Workflow, Agents, Connection, ConversationEvent, History, Question, RunExt, Tasks } from "@xsb/protocol";
+import { Workflow, Agents, Connection, ConversationEvent, History, Question, RunExt, Tasks } from "@xsb/protocol";
 import { address } from "../src/address.ts";
 import { Driven } from "../src/browser.ts";
 import { Workspace } from "../src/workspace.ts";
@@ -156,24 +156,52 @@ test("a native form arriving before the first snapshot waits for session mapping
   const response = peer.requests.get("elicitation/create")(request, { signal: abort.signal });
   await ws.load();
   peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "session_info_update", _meta: { [Question.key]: { id: "native", source: "acp", state: "open", questions: [{ question: "Choose", kind: "single", options: ["A", "B"] }] } } } });
-  await ws.send("a", [], undefined, undefined, { questionId: "native", answers: ["B"] });
+  ws.answerQuestion("a", { questionId: "native", answers: ["B"] });
   assert.deepEqual(await response, { action: "accept", content: { choice: "B" } });
   ws.close();
 });
 
-test("ask answers use the targeted callback without a prompt or replayable outbox input", async () => {
-  const peer = new Peer(); snapshot(peer, [{ ...agent("a"), mainSessionId: "s" }]);
-  peer.requests.set(History.page, () => ({ updates: [], more: false, agent: { ...agent("a"), mainSessionId: "s" } }));
-  const ws = workspace(peer), replies = [];
+test("parallel native forms retain independent callbacks across idle and ordinary chat; stale replies cannot enter the outbox", async t => {
+  const { peer, open } = sending(t);
+  const ws = open(), sent: string[] = [];
   await ws.load();
-  peer.requests.set("session/prompt", () => assert.fail("an ask answer cannot start another prompt"));
-  peer.requests.set(Answer.submit, p => { replies.push(p); return {}; });
-  await ws.send("a", [{ type: "text", text: "B" }], undefined, undefined, { questionId: "q", answers: ["B"] });
-  assert.deepEqual(replies, [{ sessionId: "s", answer: { questionId: "q", answers: ["B"] } }]);
-  assert.equal(ws["pending"].size, 0);
-  peer.requests.set(Answer.submit, () => { throw Error("This question has expired"); });
-  await assert.rejects(ws.send("a", [], undefined, undefined, { questionId: "q", skipped: true }), /expired/);
-  assert.equal(ws["pending"].size, 0);
+  peer.requests.set("session/prompt", p => { sent.push(p.prompt[0].text); return { messageId: "u" }; });
+  const request = (id: string, abort: AbortController) => peer.requests.get("elicitation/create")({
+    sessionId: "s", mode: "form", message: id, _meta: { [Question.key]: { id }, codex: { delivery: "async" } },
+    requestedSchema: { type: "object", properties: { answer: { type: "string" } } },
+  }, { signal: abort.signal });
+  const first = new AbortController();
+  const a = request("q1", first), b = request("q2", new AbortController());
+  await ws.send("a", [{ type: "text", text: "Independent input" }]);
+  peer.emit("session/update", { sessionId: "s", update: { sessionUpdate: "state_update", state: "idle" } });
+  ws["rebuildHistory"]("a");
+  assert.equal(ws["transcripts"].get("a")!.filter(e => e.kind === "question" && e.answerable).length, 2);
+  assert.throws(() => ws.answerQuestion("wrong", { questionId: "q2", skipped: true }), /expired/);
+  ws.answerQuestion("a", { questionId: "q2", answers: ["B"] });
+  assert.deepEqual(await b, { action: "accept", content: { answer: "B" } });
+  first.abort();
+  assert.deepEqual(await a, { action: "cancel" });
+  assert.throws(() => ws.answerQuestion("a", { questionId: "q1", skipped: true }), /expired/);
+  assert.deepEqual(sent, ["Independent input"]);
+  assert.equal(Object.keys(ws["readOutbox"]()).length, 1, "only the ordinary input went to the outbox");
+  ws.close();
+});
+
+test("terminal async records and historical ask cards replay without creating answer callbacks", async t => {
+  const { peer, open } = sending(t);
+  const questions = [{ question: "Which database?", kind: "single", options: ["SQLite"] }];
+  const update = (record: object) => ({ sessionUpdate: "session_info_update", _meta: { [Question.key]: record } });
+  peer.requests.set(History.page, () => ({ agent: { ...agent("a"), mainSessionId: "s" }, updates: [
+    update({ id: "legacy", state: "open", questions }),
+    update({ id: "legacy", state: "answered", answers: ["SQLite"] }),
+    update({ id: "async", source: "acp", delivery: "async", state: "answered", answers: ["SQLite"], questions }),
+  ] }));
+  const ws = open();
+  const entries = (await ws.load()).transcripts.a.filter(e => e.kind === "question");
+  assert.deepEqual(entries.map(e => [e.questionId, e.questions[0].question, e.answers, e.answerable]), [
+    ["legacy", "Which database?", ["SQLite"], false], ["async", "Which database?", ["SQLite"], false],
+  ]);
+  for (const entry of entries) assert.throws(() => ws.answerQuestion("a", { questionId: entry.questionId, skipped: true }), /expired/);
   ws.close();
 });
 

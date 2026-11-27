@@ -5,7 +5,8 @@
   "type": "module",
   "private": true,
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./codex-config": "./src/codex-config.ts"
   },
   "bin": {
     "xsb-hub": "bin/xsb-hub",

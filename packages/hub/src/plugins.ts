@@ -67,7 +67,7 @@ type Found = { name: string; scope: PluginScope; dir: string; servers?: Record<s
 
 export const MANIFEST = ".mcp.json";
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-/** The hub's own tools go by these names (mcp.ts); neither a plugin nor a server of one can take them. */
+/** Keep the workflow server and xSB's historical built-in namespace reserved for existing sessions. */
 const RESERVED = new Set(["workflow", "xsb"]);
 const named = (name: string) => NAME.test(name) && !RESERVED.has(name);
 

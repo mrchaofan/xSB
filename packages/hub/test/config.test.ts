@@ -89,7 +89,7 @@ test("main and task agents get localized effective consultation guidance without
   assert.match(hub.systemPromptFor(agent), /当前偏好：关闭/);
   for (const language of ["en", "zh-CN"] as const) for (const enabled of [true, false]) {
     const guidance = consultationGuidance(enabled, language);
-    assert.ok(guidance.includes("ACP") && guidance.includes("xSB ask"));
+    assert.ok(guidance.includes("ACP") && !guidance.includes("xSB ask"));
     assert.match(guidance, language === "en" ? /silence as consent/ : /沉默视为同意/);
   }
   assert.match(TASK_LIFECYCLE_RULES, /consultation preference[^]*never permission approvals or stop authority/);

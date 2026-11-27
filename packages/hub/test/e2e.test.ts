@@ -339,8 +339,8 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
 // 6. To a priority-prompt backend (as the pinned Claude/Codex adapters do), it goes in at once, and the work goes on with it.
 {
   const c = (await create("steerable")).id;
-  const turn = prompt(c, "!sleep 400\n!say END");
-  await until("c running", () => hub.session(c).current?.started);
+  const turn = prompt(c, "!waitForInput\n!say END");
+  await until("first prompt inserted", () => hub.session(c).current?.first.in);
   const originalTurn = hub.session(c).current;
   await conn.request("session/prompt", { sessionId: c, prompt: [{ type: "text", text: "!say MID" }] });
   assert.ok(originalTurn?.inputs.some(i => i.in && i.content.some(b => b.type === "text" && b.text === "!say MID")), "the standard prompt was inserted under its original Hub turn");

@@ -64,7 +64,7 @@ JSONL 中每个节点和每条边各占一行。任务节点支持 `input`、`mo
 
 ## 内置工具的感知
 
-工作流工具由 xSB 通过名为 `workflow` 的 MCP 服务提供，代理程序里显示为 `mcp__workflow__<工具>` 或 `workflow.<工具>`。系统提示词的"Your tools"一节和这个 MCP 服务 `initialize` 返回的 `instructions` 都说明：这些就是用户所说的工作流、编排、拆分任务、"workflow 技能"，它们不是磁盘上的 skill 文件，也不需要安装。工具描述以 "xSB workflow:" 开头。`ask` 不在其中：它是 xSB 自己的工具，来自 `xsb` 服务（见[向用户提问](ASK.md)）。
+工作流工具由 xSB 通过名为 `workflow` 的 MCP 服务提供，代理程序里显示为 `mcp__workflow__<工具>` 或 `workflow.<工具>`。系统提示词的"Your tools"一节和这个 MCP 服务 `initialize` 返回的 `instructions` 都说明：这些就是用户所说的工作流、编排、拆分任务、"workflow 技能"，它们不是磁盘上的 skill 文件，也不需要安装。工具描述以 "xSB workflow:" 开头。向用户征询决定时，Agent 使用后端原生提问工具，桌面端通过 ACP v2 显示问题。[向用户提问](ASK.md)
 
 ## 用户直接问任务 Agent
 
@@ -80,7 +80,7 @@ JSONL 中每个节点和每条边各占一行。任务节点支持 `input`、`mo
 
 ## 任务 Agent 向用户提问
 
-`ask` 不是工作流工具，是 xSB 自己的独立工具（见[向用户提问](ASK.md)），在工作流里也能用。任务 Agent 在执行指派时提问：这一轮没调 `finish` 就结束，也不算未完成，工作保持进行、等待回答；回答所在的那一轮接续同一项工作，在其中 `finish`。回答若赶在提问那一轮结束前送到，会并入那一轮，那一轮仍须 `finish`。节点被暂停或中枢重启后，等待取消，之后的回答按普通插话处理。
+任务 Agent 需要用户决定才能完成本次指派时，使用 Claude 或 Codex 的原生同步提问。答复通过原 ACP 请求返回，当前 attempt 继续执行并在同一轮调用 `finish`。支持异步提问的 Codex 模型也可以先开展与答案无关的工作。任务节点的执行轮结束、暂停、停止或后端换绑时，仍待答的表单关闭，迟到的答复失效。[向用户提问](ASK.md)
 
 ## 插话、暂停与恢复
 

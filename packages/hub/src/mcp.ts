@@ -15,9 +15,7 @@ import { shipped } from "./paths.ts";
 
 import type { LiveSession } from "./session.ts";
 import { workflowTools } from "./workflow-tools.ts";
-import { consultationGuidance, WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT, XSB_TOOLS_ABOUT } from "./prompts.ts";
-import { consultationSettings, projectLanguage } from "./config.ts";
-import { ASK_TOOL } from "./questions.ts";
+import { WORKFLOW_MAIN_ABOUT, WORKFLOW_TASK_ABOUT } from "./prompts.ts";
 import { boundedText } from "./context.ts";
 import { newId, VERSION } from "./util.ts";
 import { servePublications } from "./publications.ts";
@@ -35,15 +33,12 @@ export const BRIDGE_SERVER_ENV = "XSB_MCP_SERVER";
 
 /** The workflow tools. */
 export const WORKFLOW_SERVER = "workflow";
-/** xSB's own tools that are no workflow's, though usable in one: `ask` (questions.ts). */
-export const XSB_SERVER = "xsb";
-type Server = typeof WORKFLOW_SERVER | typeof XSB_SERVER;
 
-/** An `mcpServers` entry that gives a backend session the hub's tools: each server is a bridge of its own. */
-export function bridgeServer(socketPath: string, token: string, name: Server = WORKFLOW_SERVER): McpServer {
+/** The workflow MCP server for this backend session. */
+export function bridgeServer(socketPath: string, token: string): McpServer {
   return {
     type: "stdio",
-    name,
+    name: WORKFLOW_SERVER,
     command: process.execPath,
     args: [BRIDGE],
     env: [
@@ -52,7 +47,7 @@ export function bridgeServer(socketPath: string, token: string, name: Server = W
       { name: "ELECTRON_RUN_AS_NODE", value: "1" },
       { name: BRIDGE_SOCKET_ENV, value: socketPath },
       { name: BRIDGE_TOKEN_ENV, value: token },
-      { name: BRIDGE_SERVER_ENV, value: name },
+      { name: BRIDGE_SERVER_ENV, value: WORKFLOW_SERVER },
     ],
   };
 }
@@ -70,7 +65,6 @@ export function serveMcp(
   const connectionId = newId("mcp");
   let session: LiveSession | undefined;
   let token: string | undefined;
-  let server: Server = WORKFLOW_SERVER;
   const attached = (): LiveSession => {
     if (!session || !token || lookup(token) !== session)
       throw new RpcError(-32600, "not attached or bridge revoked");
@@ -78,19 +72,18 @@ export function serveMcp(
   };
 
   conn.onRequest(BRIDGE_ATTACH, (p) => {
+    if (p.server !== undefined && p.server !== WORKFLOW_SERVER) throw RpcError.invalidParams("unknown bridge server");
     session = lookup(p.token);
     if (!session) throw RpcError.invalidParams("unknown bridge token");
     token = p.token;
-    server = p.server === XSB_SERVER ? XSB_SERVER : WORKFLOW_SERVER;
     return {};
   });
   conn.onRequest("initialize", (p) => ({
     protocolVersion: MCP_VERSIONS.includes(p.protocolVersion) ? p.protocolVersion : MCP_VERSIONS[0],
     capabilities: { tools: {} },
-    serverInfo: { name: server, version: VERSION },
+    serverInfo: { name: WORKFLOW_SERVER, version: VERSION },
     // Shown to the model by agent programs that pass server instructions on: what these tools are, before it guesses.
     instructions: (() => {
-      if (server === XSB_SERVER) return XSB_TOOLS_ABOUT + "\n\n" + consultationGuidance(consultationSettings(hub.paths).effective, projectLanguage(hub.paths));
       try { return hub.agent(attached().agentId).workflowOwner ? WORKFLOW_TASK_ABOUT : WORKFLOW_MAIN_ABOUT; }
       catch { return WORKFLOW_MAIN_ABOUT; }
     })(),
@@ -98,7 +91,7 @@ export function serveMcp(
   conn.onRequest("ping", () => ({}));
   conn.onRequest("tools/list", () => {
     const session = attached();
-    return { tools: server === XSB_SERVER ? [ASK_TOOL] : workflowTools(!!hub.agent(session.agentId).workflowOwner) };
+    return { tools: workflowTools(!!hub.agent(session.agentId).workflowOwner) };
   });
   conn.onRequest("tools/call", async (p, ctx) => {
     const owner = attached();
@@ -110,25 +103,18 @@ export function serveMcp(
       typeof p._meta?.["dev.xsb/call-id"] === "string"
         ? p._meta["dev.xsb/call-id"]
         : connectionId + "/" + JSON.stringify(ctx.id);
-    const step = hub.lifecycle.step(owner.source(), `mcp:${receipt}`, { tool: p.name, server });
+    const step = hub.lifecycle.step(owner.source(), `mcp:${receipt}`, { tool: p.name, server: WORKFLOW_SERVER });
     const args = p.arguments ?? {};
     const budget = hub.policy(owner.agentId).outputTokens;
-    const log = server === WORKFLOW_SERVER ? {
+    const log = {
       kind: "tool" as const,
       tool: p.name,
       receipt,
       arguments: boundedText(hub.paths, owner.agentId, JSON.stringify(args), budget),
-    } : undefined;
+    };
     let answer: string;
     try {
-      let result: unknown;
-      if (server === XSB_SERVER) {
-        if (p.name !== ASK_TOOL.name) throw Error(`Unknown tool ${p.name}`);
-        result = await owner.withStep(step.source, () => hub.questions.ask(owner, args, ctx?.signal));
-        // Waiting for a person must not let an old bridge/turn credit output to new work.
-        if (attached() !== owner || owner.current?.id !== turnId || !owner.acceptsTools)
-          throw RpcError.cancelled();
-      } else result = owner.withStep(step.source, () => hub.workflows.call(owner, p.name, args, receipt));
+      const result = owner.withStep(step.source, () => hub.workflows.call(owner, p.name, args, receipt));
       answer = boundedText(
         hub.paths,
         owner.agentId,
@@ -136,13 +122,13 @@ export function serveMcp(
         budget,
       );
     } catch (error) {
-      if (log && !hub.state.store.healthy) throw error;
+      if (!hub.state.store.healthy) throw error;
       const message = (error as Error).message;
-      if (log) hub.workflows.record(owner, turnId, { ...log, error: message });
+      hub.workflows.record(owner, turnId, { ...log, error: message });
       step.end({ status: "failed" });
       return { content: [{ type: "text", text: message }], isError: true };
     }
-    if (log) hub.workflows.record(owner, turnId, { ...log, result: answer });
+    hub.workflows.record(owner, turnId, { ...log, result: answer });
     owner.toolOutput(answer);
     step.end({ status: "completed" });
     return { content: [{ type: "text", text: answer }] };

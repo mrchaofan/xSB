@@ -1,33 +1,33 @@
-// 智能体的提问（ask 工具），仿 Codex：问题贴在输入框上方，一题一页（1/3），选项是带编号的竖向列表，按数字键也能选；
-// 单选和多选可以带"其他"，在最后一行直接输入。最后一题提交，或者跳过；不回答、直接在输入框发消息，问题也就结束了。
-// 提交或跳过通过 Answer 回到正在等待的工具调用，在同一轮继续。
-// 对话里只留一条问答记录。
+// 每个 ACP 表单保留自己的页码与草稿。提交或跳过回到打开它的请求。
 import { ICON, h } from "./dom.js";
 import { t } from "./i18n.js";
 
 const OTHER = "\u0000other";
 
-/** 发给模型的文字：问题和答案逐条列出（界面上由记录显示）。 */
-const replyText = (questions, answers) =>
-  questions.map((q, n) => `${n + 1}. ${q.question}\n${[answers[n] ?? ""].flat().join("、")}`).join("\n\n");
 const shown = (answer) => [answer ?? ""].flat().join("、");
 
 /** 对话里的问答记录：还没结束的由输入框上方的面板显示，这里不画。 */
 export function questionRecord(base, entry) {
-  if (entry.state === "open") return h("div", { ...base, hidden: true });
+  if (entry.state === "open" && entry.answerable) return h("div", { ...base, hidden: true });
   return h("div", { ...base, "data-state": entry.state },
     h("div", { class: "ask-record-head" }, h("span", { class: "ask-record-icon", html: ICON.info }), h("span", {}, t("ask.title")), h("small", {}, t(`ask.state.${entry.state}`))),
-    entry.state === "answered" && h("ol", { class: "ask-answers" }, ...entry.questions.map((q, n) =>
-      h("li", {}, h("span", {}, q.question), h("strong", {}, shown(entry.answers?.[n]) || t("ask.unanswered"))))));
+    entry.questions.length > 0 && h("ol", { class: "ask-answers" }, ...entry.questions.map((q, n) =>
+      h("li", {}, h("span", {}, q.question), entry.state === "answered" && h("strong", {}, shown(entry.answers?.[n]) || t("ask.unanswered"))))));
 }
 
-/** 车道里该有的提问面板：最后一个还没结束的提问。面板跨重画保留，选到一半的不丢。 */
+/** 按请求 ID 增删面板，另一个表单打开或关闭时，正在编辑的草稿、焦点和页码都保留。 */
 export function syncAskPanel(lane, entries, send) {
-  const open = entries.findLast((e) => e.kind === "question" && e.state === "open");
-  const current = lane.querySelector(".ask-panel");
-  if (current?.dataset.question === open?.questionId) return;
-  current?.remove();
-  if (open) lane.querySelector(".composer").before(askPanel(open, send));
+  const open = new Map(entries.filter(e => e.kind === "question" && e.state === "open" && e.answerable).map(e => [e.questionId, e]));
+  let stack = lane.querySelector(".ask-stack");
+  if (!open.size) { stack?.remove(); return; }
+  if (!stack) {
+    stack = h("div", { class: "ask-stack" });
+    lane.querySelector(".composer").before(stack);
+  }
+  for (const panel of [...stack.children]) {
+    if (!open.delete(panel.dataset.question)) panel.remove();
+  }
+  for (const entry of open.values()) stack.append(askPanel(entry, send));
 }
 
 function askPanel(entry, send) {
@@ -53,18 +53,18 @@ function askPanel(entry, send) {
     render();
     if (value === OTHER && isPicked(n, OTHER)) panel.querySelector(".ask-other-input")?.focus();
   };
-  const reply = async (content, answer) => {
+  const reply = async (answer) => {
     sending = true;
     error = "";
     render();
-    try { await send([{ type: "text", text: content }], answer); }
+    try { await send(answer); }
     catch (e) { sending = false; error = e.message; render(); }
   };
   const next = () => {
     if (answerOf(page) === undefined && !questions[page].optional || sending) return;
     if (page < questions.length - 1) { page++; return render(); }
     const answers = questions.map((_, n) => answerOf(n) ?? null);
-    void reply(replyText(questions, answers), { questionId: entry.questionId, answers });
+    void reply({ questionId: entry.questionId, answers });
   };
   const typed = (e) => {
     written[page] = e.target.value;
@@ -84,7 +84,7 @@ function askPanel(entry, send) {
     panel.replaceChildren(
       h("div", { class: "ask-head" },
         h("strong", {}, q.question),
-        h("small", {}, [q.kind === "multi" && t("ask.kind.multi"), questions.length > 1 && `${page + 1}/${questions.length}`].filter(Boolean).join(" · "))),
+        h("small", {}, [entry.delivery === "async" && t("ask.async"), q.kind === "multi" && t("ask.kind.multi"), questions.length > 1 && `${page + 1}/${questions.length}`].filter(Boolean).join(" · "))),
       q.kind === "text"
         ? h("textarea", { class: "ask-text", rows: 2, placeholder: t("ask.placeholder"), disabled: sending, oninput: typed, onkeydown: enter })
         : h("div", { class: "ask-rows", role: "menu" },
@@ -94,7 +94,7 @@ function askPanel(entry, send) {
       error && h("p", { class: "error", role: "alert" }, error),
       h("div", { class: "ask-foot" },
         h("small", {}, q.kind === "text" ? "" : t("ask.keys")),
-        h("button", { class: "btn", type: "button", disabled: sending, onclick: () => reply(t("ask.skipText"), { questionId: entry.questionId, skipped: true }) }, t("ask.skip")),
+        h("button", { class: "btn", type: "button", disabled: sending, onclick: () => reply({ questionId: entry.questionId, skipped: true }) }, t("ask.skip")),
         page > 0 && h("button", { class: "btn", type: "button", disabled: sending, onclick: () => { page--; render(); } }, t("ask.previous")),
         h("button", { class: "btn primary ask-next", type: "button", disabled: sending || answerOf(page) === undefined && !q.optional, onclick: next }, t(last ? "ask.submit" : "ask.next"))));
     const field = panel.querySelector(".ask-text, .ask-other-input");

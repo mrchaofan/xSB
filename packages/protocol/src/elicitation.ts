@@ -1,11 +1,38 @@
-/** ACP forms projected onto the same questions used by xSB's own ask UI. */
+/** ACP forms projected onto question cards, retaining the original field names and wire values. */
 import type { FormElicitationRequest } from "./acp.ts";
 import type { QuestionAnswer, QuestionItem } from "./ext.ts";
 import { RpcError } from "./jsonrpc.ts";
 
-type Field = { key: string; schema: any; choices: { label: string; value: unknown }[]; custom?: string; otherValue?: unknown };
+type Field = { key: string; schema: any; choices: { label: string; value: unknown }[]; custom?: string; otherValue?: unknown; airTyped?: boolean };
 export type ElicitationForm = { questions: QuestionItem[]; fields: Field[] };
 const fail = (message: string): never => { throw RpcError.invalidParams(message); };
+const CODEX_OTHER = "None of the above";
+
+// codex-acp's AIR decoder accepts a typed answer in the primary select itself. Its
+// declared enum lists only the original choices. Recognize the explicit wire extension
+// on both the request and the companion before admitting this extra answer shape.
+function codexAirTyped(request: FormElicitationRequest, key: string, companion?: string): boolean {
+  const props = request.requestedSchema.properties;
+  const listed = (request._meta?.jetbrains as any)?.air?.customAnswerFields;
+  const note = companion && props[companion];
+  return typeof companion === "string" && Array.isArray(listed) && listed.includes(companion) &&
+    props[key]?.type === "string" && props[key]._meta?.codex?.isOther === true && Array.isArray(props[key].oneOf) &&
+    note?.type === "string" && note._meta?.codex?.role === "user_note" && note._meta.codex.questionId === key &&
+    (note._meta?.jetbrains?.air?.customAnswer === true || note._meta?._askUserQuestionCustomAnswer === true);
+}
+
+/** Validation for the original backend response, including codex-acp's negotiated AIR typed choices. */
+export function elicitationResponseSchema(request: FormElicitationRequest): FormElicitationRequest["requestedSchema"] {
+  const schema = request.requestedSchema;
+  const properties = { ...schema.properties };
+  for (const [companion, note] of Object.entries(schema.properties)) {
+    const key = note?._meta?.codex?.questionId;
+    if (typeof key !== "string" || !Object.hasOwn(properties, key) || !codexAirTyped(request, key, companion)) continue;
+    const { oneOf, ...primary } = properties[key];
+    properties[key] = { ...primary, anyOf: [{ oneOf }, { type: "string", pattern: "\\S" }] };
+  }
+  return { ...schema, properties };
+}
 
 export function elicitationForm(request: FormElicitationRequest): ElicitationForm {
   const schema = request.requestedSchema;
@@ -18,7 +45,7 @@ export function elicitationForm(request: FormElicitationRequest): ElicitationFor
     const custom = prop?._meta?.jetbrains?.air?.customAnswer ?? prop?._meta?._askUserQuestionCustomAnswer;
     const target = custom?.isCustomAnswer === true ? custom.questionId : codex?.role === "user_note" ? codex.questionId
       : /^question_\d+_custom$/.test(key) && prop?.title === "Other" ? key.slice(0, -7) : undefined;
-    if (prop?.type === "string" && typeof target === "string" && props[target]) companions.set(target, key);
+    if (prop?.type === "string" && typeof target === "string" && Object.hasOwn(props, target)) companions.set(target, key);
   }
   const fields: Field[] = [], questions: QuestionItem[] = [];
   for (const [key, prop] of Object.entries(props)) {
@@ -33,13 +60,15 @@ export function elicitationForm(request: FormElicitationRequest): ElicitationFor
     });
     if (new Set(choices.map((o: any) => o.label)).size !== choices.length) return fail(`Ambiguous form options: ${key}`);
     const field: Field = { key, schema: prop, choices, custom: companions.get(key) };
-    if (field.custom) {
-      const other = choices.findIndex((o: any) => o.value === "Other");
+    if (field.custom && prop._meta?.codex?.isOther === true) {
+      field.airTyped = codexAirTyped(request, key, field.custom);
+      const other = choices.findIndex((o: any) => o.value === CODEX_OTHER);
       if (other >= 0) field.otherValue = choices.splice(other, 1)[0].value;
     }
     const kind = prop.type === "array" ? "multi" : choices.length ? "single" : "text";
     const question: QuestionItem = {
-      question: prop.description && /^question_\d+$/.test(key) ? prop.description : prop.title || request.message || key,
+      question: /^question_\d+$/.test(key) && !prop._meta?.codex && field.custom
+        ? prop.description || request.message || prop.title || key : prop.title || request.message || key,
       kind,
       optional: !schema.required?.includes(key),
       ...(choices.length ? { options: choices.map((o: any) => o.label), optionDescriptions: choices.map((o: any) => o.description) } : {}),
@@ -57,7 +86,8 @@ export function elicitationForm(request: FormElicitationRequest): ElicitationFor
 
 export function elicitationContent(form: ElicitationForm, answers: QuestionAnswer[]): Record<string, unknown> {
   if (!Array.isArray(answers) || answers.length !== form.fields.length) return fail("Expected one answer per form field");
-  const content: Record<string, unknown> = {};
+  // Backend-defined property names (including "__proto__") are data.
+  const content: Record<string, unknown> = Object.create(null);
   form.fields.forEach((field, index) => {
     const answer = answers[index], question = form.questions[index];
     if (answer == null || answer === "") {
@@ -74,7 +104,12 @@ export function elicitationContent(form: ElicitationForm, answers: QuestionAnswe
       if (typeof answer !== "string") return fail("Invalid form answer");
       const picked = field.choices.find((o) => o.label === answer);
       if (picked) content[field.key] = picked.value;
-      else if (field.custom) {
+      else if (field.airTyped) {
+        if (!answer.trim()) return fail("Invalid custom answer");
+        content[field.key] = answer;
+        // The adapter consumes its own marker; preserve a user who literally typed it.
+        if (answer === CODEX_OTHER) content[field.custom!] = answer;
+      } else if (field.custom) {
         content[field.custom] = answer;
         if (field.otherValue !== undefined) content[field.key] = field.otherValue;
       } else if (field.choices.length) return fail("Unknown form option");
@@ -89,15 +124,15 @@ export function elicitationContent(form: ElicitationForm, answers: QuestionAnswe
     if (typeof value === "number" && (schema.minimum != null && value < schema.minimum || schema.maximum != null && value > schema.maximum)) return fail("Number is outside the allowed range");
     if (Array.isArray(value) && (schema.minItems != null && value.length < schema.minItems || schema.maxItems != null && value.length > schema.maxItems)) return fail("Selection count is outside the allowed range");
   });
-  return content;
+  return { ...content };
 }
 
 export function elicitationAnswers(form: ElicitationForm, content: Record<string, unknown>): QuestionAnswer[] {
   return form.fields.map((field, n) => {
-    const raw = content[field.key];
+    const raw = Object.hasOwn(content, field.key) ? content[field.key] : undefined;
     const chosen = [raw].flat().flatMap((value) => field.choices.filter((o) => o.value === value).map((o) => o.label));
-    const custom = field.custom && content[field.custom];
-    const values = [...chosen.filter((s) => s !== "Other"), ...(typeof custom === "string" && custom ? [custom] : [])];
+    const custom = field.custom && Object.hasOwn(content, field.custom) ? content[field.custom] : undefined;
+    const values = [...chosen, ...(typeof custom === "string" && custom ? [custom] : [])];
     if (form.questions[n].kind === "multi") return values;
     return values.length ? values.join("、") : raw == null ? null : String(raw);
   });

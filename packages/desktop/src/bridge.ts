@@ -37,8 +37,8 @@ export type Entry = { id: string } & (
   | { kind: "publication"; source: ConversationEntry["source"]; markdown: string }
   | { kind: "tool"; title: string; status: "running" | "done" | "failed"; toolKind?: string; changes?: (FileChange & { uri: string })[]; imagePath?: string; savedFile?: { path: string; uri: string }; name?: string; input?: unknown; output?: unknown; terminalOutput?: string }
   | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
-  /** What the agent asked the user (the `ask` tool) and what became of it. Its reply's own message is not shown apart. */
-  | { kind: "question"; questionId: string; questions: QuestionItem[]; state: QuestionState; answers?: QuestionAnswer[]; source?: "acp"; delivery?: "async" }
+  /** Historical questions can be read. Only the client holding a live ACP request can submit an answer. */
+  | { kind: "question"; questionId: string; questions: QuestionItem[]; state: QuestionState; answers?: QuestionAnswer[]; source?: "acp"; delivery?: "async"; answerable?: boolean }
   | { kind: "error"; text: string }
   /** Where what the model sees starts anew: before it, the model sees nothing (`cleared`) or only a handoff. */
   | { kind: "boundary"; boundary: Boundary }

@@ -16,10 +16,10 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { Answer, Question, RunExt, SessionControls, ToolServers, Workflow, Agents, fileChanges, fileEditPath, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry } from "@xsb/protocol";
+import { Question, RunExt, SessionControls, ToolServers, Workflow, Agents, fileChanges, fileEditPath, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry } from "@xsb/protocol";
 import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
-import type { ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
+import type { Answer, ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
 import { artifactKind, artifactPath } from "./artifact-link.ts";
@@ -86,7 +86,7 @@ export class Workspace {
   /** Entry id -> how to answer the permission request it shows. */
   private asking = new Map<string, { agentId: string; entry: Extract<Entry, { kind: "permission" }>; request: PermissionRequest; answer: (r: PermissionResponse) => void }>();
   private seq = 0;
-  private nativeQuestions = new Map<string, { agentId: string; form: ReturnType<typeof elicitationForm>; answer: (r: ElicitationResponse) => void }>();
+  private nativeQuestions = new Map<string, { agentId: string; form: ReturnType<typeof elicitationForm>; entry: Extract<Entry, { kind: "question" }>; answer: (r: ElicitationResponse) => void }>();
   private replaying = false;
   private historyUpdates = new Map<string, SessionUpdate[]>();
   private historyCursors = new Map<string, number | null>();
@@ -315,6 +315,7 @@ export class Workspace {
   }
 
   private onAgentRemoved(id: string): void {
+    for (const pending of this.nativeQuestions.values()) if (pending.agentId === id) pending.answer({ action: "cancel" });
     // Invalidate a pending history page too: it must not restore a removed agent.
     this.agentVersions.set(id, (this.agentVersions.get(id) ?? 0) + 1);
     for (const [sessionId, agentId] of this.sessionAgent) if (agentId === id) this.sessionAgent.delete(sessionId);
@@ -378,6 +379,8 @@ export class Workspace {
     try {
       const sessionId = this.agents.get(agentId)?.mainSessionId;
       if (sessionId) for (const update of this.historyUpdates.get(agentId) ?? []) this.onUpdate(sessionId, update);
+      // A long-lived async form's opening record can precede the loaded history page.
+      for (const pending of this.nativeQuestions.values()) if (pending.agentId === agentId) this.put(agentId, pending.entry);
       if (this.agents.get(agentId)?.state === "idle") {
         this.settle(agentId);
         this.finishTools(agentId);
@@ -510,22 +513,26 @@ export class Workspace {
       this.settle(agentId);
       return this.put(agentId, { id, kind: "publication", source: publication.source, markdown: publication.markdown });
     }
-    // A question the agent asked (the `ask` tool): a card, closed by the user's reply, which the card then shows.
+    // Transcript records also replay legacy questions. Only a live request makes a card answerable.
     const question = info?.[Question.key] as Question | undefined;
     if (question) {
       const id = `${sessionId}:question:${question.id}`;
       const prior = this.transcripts.get(agentId)?.find((e): e is Extract<Entry, { kind: "question" }> => e.id === id && e.kind === "question");
+      const entry: Extract<Entry, { kind: "question" }> = { ...prior, id, kind: "question", questionId: question.id,
+        questions: question.questions ?? prior?.questions ?? [], state: question.state,
+        ...(question.source ? { source: question.source } : {}), ...(question.delivery ? { delivery: question.delivery } : {}) };
       if (question.state === "open") {
         this.settle(agentId);
         if (this.live && !this.replaying) this.notify({ agentId, kind: "question", detail: question.questions?.[0]?.question ?? "" });
-        return this.put(agentId, { id, kind: "question", questionId: question.id, questions: question.questions ?? [], state: "open", ...(question.source ? { source: question.source } : {}), ...(question.delivery ? { delivery: question.delivery } : {}) });
+        return this.put(agentId, { ...entry, answerable: this.nativeQuestions.has(question.id) });
       }
       if (question.reply && question.state !== "superseded") {
         this.replies.add(question.reply);
         const input = this.inputEntry(agentId, `${sessionId}:${question.reply}`);
         if (input) this.put(agentId, { ...input, reply: true });
       }
-      if (prior) this.put(agentId, { ...prior, state: question.state, ...(question.answers ? { answers: question.answers } : {}) });
+      if (!this.replaying) this.nativeQuestions.get(question.id)?.answer({ action: "cancel" });
+      if (prior || question.questions) this.put(agentId, { ...entry, answerable: false, ...(question.answers ? { answers: question.answers } : {}) });
       return;
     }
     const accepted = info?.[Accepted.key] as Accepted | undefined;
@@ -659,23 +666,7 @@ export class Workspace {
    * at once; the hub sends it back under the same id when it has become part
    * of a turn, and that entry takes the place of this one.
    */
-  /** `answer`: return a targeted answer/skip through the pending tool, without another user prompt. */
-  async send(agentId: string, content: Content, target?: string, again?: { messageId?: string; resendOf?: string }, answer?: Answer): Promise<void> {
-    if (answer) {
-      const entry = this.transcripts.get(agentId)?.find((e) => e.kind === "question" && e.questionId === answer.questionId);
-      if (entry?.kind === "question" && entry.source === "acp") {
-        const pending = this.nativeQuestions.get(answer.questionId);
-        if (!pending || pending.agentId !== agentId) throw RpcError.notFound("This question has expired");
-        const response: ElicitationResponse = answer.skipped ? { action: "decline" }
-          : { action: "accept", content: elicitationContent(pending.form, answer.answers ?? []) };
-        pending.answer(response);
-        return;
-      }
-      const sessionId = await this.session(this.agents.get(agentId)!);
-      await this.conn.request(Answer.submit, { sessionId, answer });
-      return;
-    }
-    for (const pending of this.nativeQuestions.values()) if (pending.agentId === agentId) pending.answer({ action: "cancel" });
+  async send(agentId: string, content: Content, target?: string, again?: { messageId?: string; resendOf?: string }): Promise<void> {
     const agent = this.agents.get(agentId)!;
     // One id for the message, kept until xsb has it: sent again under it, it is never a second copy (the hub knows it).
     const messageId = again?.messageId ?? `m_${randomUUID()}`;
@@ -810,6 +801,13 @@ export class Workspace {
     return new Promise((answer) => this.asking.set(entry.id, { agentId, entry, request, answer }));
   }
 
+  answerQuestion(agentId: string, answer: Answer): void {
+    const pending = this.nativeQuestions.get(answer.questionId);
+    if (!pending || pending.agentId !== agentId) throw RpcError.notFound("This question has expired");
+    pending.answer(answer.skipped ? { action: "decline" }
+      : { action: "accept", content: elicitationContent(pending.form, answer.answers ?? []) });
+  }
+
   private async onElicitation(request: import("@xsb/protocol").FormElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
     if (!this.live) await this.ready;
     if (signal.aborted || this.left || this.conn.isClosed) return { action: "cancel" };
@@ -818,6 +816,10 @@ export class Workspace {
     const form = elicitationForm(request);
     const questionId = (request._meta?.[Question.key] as { id?: string } | undefined)?.id;
     if (!questionId) throw RpcError.invalidParams("Missing question identity");
+    if (this.nativeQuestions.has(questionId)) throw RpcError.invalidParams("Duplicate question identity");
+    const id = `${request.sessionId}:question:${questionId}`;
+    const entry: Extract<Entry, { kind: "question" }> = { id, kind: "question", source: "acp", questionId, state: "open",
+      answerable: true, questions: form.questions, ...((request._meta?.codex as any)?.delivery === "async" ? { delivery: "async" } : {}) };
     return new Promise((resolve) => {
       let settled = false;
       const answer = (response: ElicitationResponse) => {
@@ -825,10 +827,12 @@ export class Workspace {
         settled = true;
         signal.removeEventListener("abort", cancel);
         this.nativeQuestions.delete(questionId);
+        this.put(agentId, { ...entry, answerable: false });
         resolve(response);
       };
       const cancel = () => answer({ action: "cancel" });
-      this.nativeQuestions.set(questionId, { agentId, form, answer });
+      this.nativeQuestions.set(questionId, { agentId, form, entry, answer });
+      this.put(agentId, entry);
       signal.addEventListener("abort", cancel, { once: true });
       if (signal.aborted) cancel();
     });

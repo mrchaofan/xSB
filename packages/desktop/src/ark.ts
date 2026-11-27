@@ -329,10 +329,10 @@ export function claudeEnv(binding: ArkBinding): Record<string, string> {
   };
 }
 
-/** Codex through codex-acp's `CODEX_CONFIG`, which it passes to codex as `-c` overrides. The key stays in the environment (`env_key`): codex-acp logs the config. */
+/** The packaged Codex launcher merges these provider settings with its inherited CODEX_CONFIG at startup. */
 export function codexEnv(binding: ArkBinding): Record<string, string> {
   return {
-    CODEX_CONFIG: JSON.stringify({
+    XSB_ARK_CODEX_CONFIG: JSON.stringify({
       model_provider: "xsb-ark",
       model: binding.model,
       model_providers: { "xsb-ark": { name: "Volcengine Ark", base_url: binding.baseUrl, env_key: "XSB_ARK_API_KEY", wire_api: "responses" } },
