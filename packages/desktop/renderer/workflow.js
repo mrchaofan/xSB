@@ -23,7 +23,7 @@ export function restoreWorkflowPanel(flow, saved) {
 
 /** 节点能不能打开对话：有会话、智能体还在列表里（当前的，或已被新版本删掉、只能查看的）。 */
 const openable = (n) => !!(n.sessionId && n.agentId && agentOf(n.agentId));
-const inspectable = (n) => !!(n?.contract || n?.markdown);
+const inspectable = (n) => !!(n?.contract || n?.markdown || (n?.kind === "task" && !n.sessionId && n.controls));
 
 /** 选中一个节点的对话。正在看历史版本时，只认那个版本里的节点。 */
 export function showTask(id) {
@@ -162,10 +162,10 @@ export function renderWorkflow(flow) {
     (shown.kind === "candidate" && shown.nodes.find(inspectable));
   const id = node ? node.agentId : fallback;
   const error = h("small", { class: "error", role: "alert" }, flow.error);
-  const held = flow.controls?.resume;
-  const control = (action, names) => xsb.workflowControl(flow.sessionId, action, names)
-    .catch((e) => ($("#flow-heading [role='alert']").textContent = e.message));
-  const button = (action, label) => h("button", { class: "btn sm", "data-action": action, onclick: () => control(action) }, label);
+  const stop = (name) => xsb.stopWorkflow(flow.sessionId, shown.version, name).catch(e => {
+    const alert = $("#flow-heading [role='alert']");
+    if (alert && currentFlow()?.sessionId === flow.sessionId) alert.textContent = e.message;
+  });
   const look = (version) => { viewing.set(flow.sessionId, version === flow.version ? null : version); renderWorkflow(flow); };
   // 活动方案和候选方案并排切换；历史版本（最新的在前）收在下拉里。
   const plans = flow.version && flow.candidate && h("div", { class: "segmented flow-plans", role: "group", "aria-label": t("flow.version.label") },
@@ -185,10 +185,11 @@ export function renderWorkflow(flow) {
     h("small", { title: shown.version }, shown.version),
     history,
     shown.kind === "history" && h("span", { class: "flow-badge" }, t("flow.version.readonly")),
-    // 主会话的插话挡住了整张图（它那一轮失败或被停了）：和暂停一样，给"继续"。
     shown.kind === "active" && flow.state === "completed" && h("span", { class: "flow-badge" }, t("flow.finished")),
-    shown.kind === "active" && (held ? flow.controls?.resume : flow.controls?.pause) && button(held ? "resume" : "pause", t(held ? "flow.resume" : "flow.pause")),
-    shown.kind === "active" && flow.controls?.rollback && button("rollback", t("flow.rollback")),
+    shown.kind === "active" && flow.state === "paused" && h("span", { class: "flow-badge" }, t("flow.paused")),
+    shown.kind === "active" && flow.controls?.stop && h("button", {
+      class: "btn sm", "data-action": "stop", onclick: () => stop(),
+    }, t("flow.stopWorkflow")),
     error);
   document.querySelector("#side-workflow").classList.toggle("flow-folded", folded);
   const map = $("#flow-map");
@@ -205,11 +206,14 @@ export function renderWorkflow(flow) {
   if (focusedNode)
     map.querySelector(`button[data-node="${CSS.escape(focusedNode)}"]:enabled`)?.focus({ preventScroll: true });
 
-  renderContract(flow, versionKey, node, shown.edges, (href, container) => followContentLink(href, container, id ?? state.open[0]),
-    shown.kind === "active" && node?.controls?.rollback && (() => control("rollback", [node.name])));
+  const chat = node && openable(node);
+  const stopNode = shown.kind === "active" && node?.controls?.stop && h("button", {
+    class: "btn sm task-control", "data-action": "stop-node", onclick: () => stop(node.name),
+  }, t("flow.stop"));
+  renderContract(flow, versionKey, inspectable(node) ? node : undefined, shown.edges,
+    (href, container) => followContentLink(href, container, id ?? state.open[0]), !chat && stopNode);
 
   // 下方的对话：当前版本里的节点可以对话；已被删掉的节点、历史版本里的节点只能查看。
-  const chat = node && openable(node);
   if (focused && chat && shown.kind === "active") {
     selected.set(flow.sessionId, id);
     state.referenceAgent = id;
@@ -225,6 +229,9 @@ export function renderWorkflow(flow) {
     if (chat || dropped) openTaskLane(id, panel, readonly && t(readonly));
     else if (!panel.hidden) fill(panel, h("p", { class: "empty" }, t(shown.nodes.some(inspectable) ? "flow.inspect" : shown.kind === "candidate" ? "flow.preview" : "flow.pick")));
   }
+  const head = panel.querySelector(".lane-head");
+  head?.querySelector(".task-control")?.remove();
+  if (chat && stopNode) head.append(stopNode);
   placeAgents(panel, shown.nodes.filter(openable), id);
 }
 

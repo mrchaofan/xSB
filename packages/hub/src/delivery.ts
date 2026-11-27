@@ -312,16 +312,28 @@ export class Delivery {
       return inputs ? [{ session, ...inputs, to: { agentId: session.agentId, sessionId: session.id } }] : [];
     });
     if (!scopes.length) return false;
-    const stopped = this.hub.kernel.stopSessions(scopes, extra);
+    const release = () => {
+      for (const { session, cancelling } of scopes) session.abortUserStop(cancelling);
+    };
+    let stopped;
+    try {
+      stopped = scopes.length === sessions.length ? this.hub.kernel.stopSessions(scopes, extra)
+        : { veto: "Another stop is being committed in the selected scope." };
+    } catch (error) {
+      release();
+      throw error;
+    }
     if (isVeto(stopped)) {
-      for (const { session } of scopes) session.releaseUserStop();
+      release();
       this.hub.log(`user stop refused: ${stopped.veto}`);
       return false;
     }
-    for (const { session } of scopes) {
-      session.rec = this.hub.state.sessions.get(session.id) ?? session.rec;
-      session.cancelUserWork();
-    }
+    this.hub.state.afterCommit(() => {
+      for (const { session } of scopes) {
+        session.rec = this.hub.state.sessions.get(session.id) ?? session.rec;
+        session.cancelUserWork();
+      }
+    }, release);
     return true;
   }
 

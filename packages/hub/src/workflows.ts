@@ -194,7 +194,7 @@ export class Workflows {
       return true;
     };
     // The accepted end and its passive conversation entry share a WAL transaction.
-    if (!(result || withdrawn.length ? this.hub.state.atomic(persist) : persist())) return;
+    if (!(result || withdrawn.length ? this.hub.state.atomic(persist) : persist())) return false;
     this.hub.state.afterCommit(() => {
       // All old completions and tool writes are already fenced by the committed snapshot.
       for (const [name, old] of Object.entries(prior.instances)) {
@@ -223,6 +223,7 @@ export class Workflows {
       this.publish(f.owner);
       this.schedule(f.owner);
     });
+    return true;
   }
   private schedule(owner: string) {
     if (this.scheduled.has(owner) || this.hub.stopping) return;
@@ -516,29 +517,40 @@ export class Workflows {
       p.retry = true;
     }
   }
+  /** A panel stop is confined to task sessions of the displayed plan. The main conversation stays available. */
+  stop(owner: string, version: string, node?: string) {
+    const snapshot = this.get(owner);
+    if (!snapshot.version || snapshot.version !== version) throw Error("Active workflow version changed");
+    const scope = node === undefined ? snapshot : snapshot.nodes.find(n => n.name === node && n.kind === "task");
+    if (!scope) throw Error(`Unknown task: ${node}`);
+    if (!scope.controls?.stop) return snapshot;
+    if (!this.stopScope(owner, node, new Set())) throw Error("The workflow stop was refused");
+    return this.get(owner);
+  }
   userStop(s: LiveSession) {
-    const owner = this.owner(s),
-      spec = this.hub.agent(s.agentId);
+    const owner = this.owner(s);
     if (!graphOf(this.read(owner))) return this.hub.delivery.userStop(s);
+    this.stopScope(owner, this.hub.agent(s.agentId).workflowNode, new Set([s]));
+  }
+  private stopScope(owner: string, node: string | undefined, sessions: Set<LiveSession>) {
     const f = structuredClone(this.read(owner));
-    const sessions = new Set([s]);
     // What the stop takes away that the main agent was told is coming: it hears that it will not.
     const cancelled: string[] = [];
-    if (!spec.workflowOwner) {
+    if (node === undefined) {
       f.interruptions = [];
       if (f.outbox.length) cancelled.push(`${f.outbox.length} workflow notice(s) not yet delivered to you were dropped by the user's stop`);
       f.outbox = [];
     }
-    control(f, true, spec.workflowOwner ? [spec.workflowNode!] : undefined);
+    control(f, true, node === undefined ? undefined : [node]);
     for (const [name, i] of Object.entries(f.instances))
-      if (!spec.workflowOwner || spec.workflowNode === name) {
+      if (node === undefined || node === name) {
         if (i.sessionId) sessions.add(this.hub.session(i.sessionId));
         if (i.extras.length) cancelled.push(`${i.extras.length} queued additional prompt(s) for node "${name}" were cancelled by the user's stop`);
         i.extras = [];
         i.interruptions = [];
       }
     if (cancelled.length) f.cancelled = [...(f.cancelled ?? []), ...cancelled];
-    this.save(f, [], sessions);
+    return this.save(f, [], sessions.size ? sessions : undefined);
   }
   input(s: LiveSession, id: string, blocks: ContentBlock[], target?: string) {
     this.accessible(s);
@@ -650,7 +662,8 @@ export class Workflows {
     const inputErrors = Object.fromEntries(Object.entries(f.instances).flatMap(([name, i]) =>
       i.resolved && "error" in i.resolved ? [[name, i.resolved.error]] : []));
     const errors = Object.keys(inputErrors).length ? { inputErrors } : {};
-    const state = canonical({ paused: f.paused, error: f.error ?? null, ...errors });
+    const pausedNodes = Object.keys(f.instances).filter(name => f.instances[name].paused);
+    const state = canonical({ paused: f.paused, pausedNodes, error: f.error ?? null, ...errors });
     if (prior && !f.cancelled?.length && prior.state === state && (settled(f) || prior.turns + 1 < WORKFLOW_REFRESH_TURNS)) {
       prior.turns++;
       return;

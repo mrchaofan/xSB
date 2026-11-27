@@ -4,7 +4,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { app, BrowserWindow, ipcMain, nativeImage } from "electron";
-import type { WebContentsView } from "electron";
+import type { WebContents, WebContentsView } from "electron";
 import { PageHost } from "../src/page-host.ts";
 import { Pages } from "../src/pages.ts";
 import { BrowserSession } from "../src/browser.ts";
@@ -12,25 +12,61 @@ import { BrowserSession } from "../src/browser.ts";
 const cwd = process.argv[2];
 app.setPath("userData", path.join(cwd, "user-data"));
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until(check: () => boolean | Promise<boolean>) {
+async function until(check: () => boolean | Promise<boolean>, label = String(check)) {
   for (let end = Date.now() + 10000; Date.now() < end; ) {
     if (await check()) return;
     await pause(50);
   }
-  throw new Error(`native browser condition timed out: ${check}`);
+  throw new Error(`native browser condition timed out: ${label}`);
+}
+/** Record native and DOM blur throughout agent work so that temporarily stealing and restoring focus fails. */
+async function whileEditing(contents: WebContents, selector: string, action: () => Promise<void>, draft = '未提交的草稿') {
+  const js = (code: string) => contents.executeJavaScript(code);
+  host!.show();
+  host!.focus();
+  await until(() => host!.isFocused());
+  contents.focus();
+  await js(`(() => { const el = document.querySelector(${JSON.stringify(selector)});
+    el.focus();
+    if (el.isContentEditable) el.textContent = ${JSON.stringify(draft)}; else el.value = ${JSON.stringify(draft)};
+    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    window.editorBlurred = false;
+    el.addEventListener('blur', window.onEditorBlur = () => { window.editorBlurred = true; });
+  })()`);
+  const blurs: string[] = [];
+  const windowBlur = () => { blurs.push('window'); };
+  const contentsBlur = () => { blurs.push('webContents'); };
+  host!.on('blur', windowBlur);
+  contents.on('blur', contentsBlur);
+  try {
+    await action();
+    assert.deepEqual(blurs, [], `${selector} keeps native focus throughout agent work`);
+    assert.ok(contents.isFocused(), `${selector} still owns the native keyboard`);
+    const after = await js(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); return {
+      blurred: window.editorBlurred, active: el === document.activeElement, text: el.isContentEditable ? el.textContent : el.value,
+    }; })()`);
+    assert.deepEqual(after, { blurred: false, active: true, text: draft }, `${selector} keeps the unsent edit and DOM focus`);
+  } finally {
+    host!.removeListener('blur', windowBlur);
+    contents.removeListener('blur', contentsBlur);
+    await js(`document.querySelector(${JSON.stringify(selector)}).removeEventListener('blur', window.onEditorBlur)`);
+  }
 }
 const body = `<title>Opener</title><h1>Original</h1><input aria-label="Agent input" id="field"><button onclick="window.clicks=(window.clicks||0)+1">Change</button>
 <script>addEventListener('keydown',()=>window.keys=(window.keys||0)+1)</script>
 <div id="region" style="height:120px;overflow:auto"><div style="height:800px;padding-top:300px"><p id="deep">Deep text</p></div></div>
 <form id="post" action="/post" method="POST" target="_blank"><input name="value" value="preserved é"></form>
 <a href="/popup" target="_blank">Agent popup</a>
+<a href="#section">Jump to section</a>
 <form id="download" action="/download" method="POST"><input name="value" value="file"></form>
 <script>addEventListener('message', e => window.received = e.data)</script>`;
 let postBody = "";
 let downloadCookie = "";
 const server = http.createServer((req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  if (req.url === "/later") {
+  if (req.url === "/redirect") {
+    res.writeHead(302, { Location: '/destination' }); res.end();
+  } else if (req.url === "/later") {
     setTimeout(() => res.end(body), 1500);
   } else if (req.url === "/slow") {
     res.writeHead(200, { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment; filename="slow.csv"', 'Content-Length': '6' });
@@ -70,9 +106,9 @@ contextBridge.exposeInMainWorld('xsb', {
   const html = path.join(cwd, 'host.html');
   const hostUrl = new URL(`file://${html}`).href;
   const tabHtml = path.join(cwd, 'tabs.html');
-  fs.writeFileSync(tabHtml, `<html><link rel="stylesheet" href="styles.css"><body style="margin:0;height:100vh;display:flex;flex-direction:column"><input id="hostEditor" style="position:absolute;left:-9999px">
-<div id="tabs"></div><div id="side-workflow"></div><div id="side-launcher"></div><div id="side-artifacts"></div>
-<section id="side-web" style="display:flex;flex:1;flex-direction:column"><header><button id="web-back"></button><button id="web-forward"></button><button id="web-reload"></button><button id="web-external"></button><button id="web-detach"></button><button id="web-annotate"></button><input id="web-url"></header><div id="web-annotate-bar" class="annotate-bar" hidden></div><main id="web-body" class="web-body"></main></section>
+  fs.writeFileSync(tabHtml, `<html><link rel="stylesheet" href="styles.css"><body style="margin:0;height:100vh;display:flex;flex-direction:column"><div id="hostEditor" contenteditable="true">Chat</div>
+<div id="tabs"></div><section class="side" id="side-workflow"><div id="taskEditor" contenteditable="true">Task</div></section><div id="side-launcher"></div><section class="side" id="side-artifacts"><input id="fileSearch"></section>
+<section class="side" id="side-web" style="position:relative;display:flex;flex:1;flex-direction:column"><header><button id="web-back"></button><button id="web-forward"></button><button id="web-reload"></button><button id="web-external"></button><button id="web-detach"></button><button id="web-annotate"></button><input id="web-url"></header><div id="web-annotate-bar" class="annotate-bar" hidden></div><main id="web-body" class="web-body"></main></section>
 <script>window.auditState = { pages: [], agents: [], artifacts: [], artifactTabs: [], tab: null, workflowTab: false, catalogTab: false };</script>
 <script type="module">
 import {onPage, onPageRemoved, selectTab} from './pages-audit.js';
@@ -133,6 +169,7 @@ xsb.on(event => {
   };
   async function checkTabPresentation() {
   // Check the production tab renderer independently of the shield/input fixture above.
+  host.setContentSize(1120, 700);
   await host.loadFile(tabHtml);
   await until(async () => await host!.webContents.executeJavaScript('typeof window.selectPage === "function"'));
   await host.webContents.executeJavaScript(`window.auditState.pages = ${JSON.stringify(pages.list())}; window.selectPage(null); document.querySelector('#hostEditor').focus(); true`);
@@ -177,7 +214,7 @@ xsb.on(event => {
   const userPage = pages.open(url, { sessionId: 'sa' });
   await until(async () => (await host!.webContents.executeJavaScript('window.auditState.tab')) === userPage.id);
   await until(() => pages!.contents(userPage.id)!.getTitle() === 'Opener' && !pages!.contents(userPage.id)!.isLoading());
-  await until(() => pages!.contents(userPage.id)!.isFocused());
+  await until(() => pages!.contents(userPage.id)!.isFocused(), 'new user page gets the keyboard');
   assert.ok(pageViewIn(host, userPage.id), 'a user-created tab selects and shows its page');
   await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
   await pages.navigate(userPage.id, url);
@@ -204,7 +241,7 @@ xsb.on(event => {
   await until(() => !shown(agentPage.id));
   const index = pages.list().filter(p => p.sessionId === 'sa').findIndex(p => p.id === userPage.id);
   await host.webContents.executeJavaScript(`document.querySelectorAll('dialog .opened-tabs button')[${index}].click()`);
-  await until(() => pages!.contents(userPage.id)!.isFocused());
+  await until(() => pages!.contents(userPage.id)!.isFocused(), 'user page selected from the modal gets the keyboard');
   host.webContents.focus();
   await host.webContents.executeJavaScript(`document.querySelector('[data-id="${userPage.id}"] .icon-btn').click()`);
   await until(() => pages!.contents(background.id)!.isFocused());
@@ -236,7 +273,76 @@ xsb.on(event => {
   assert.equal(await host.webContents.executeJavaScript('window.auditState.tab'), blankId, 'an address being edited stays with its original tab');
   assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'web-url');
   assert.equal(host.webContents.isFocused(), true);
-  console.log("PASS user tabs focus, new agent tabs and popups switch display without host focus, existing agent selection stays in the background");
+  await whileEditing(host.webContents, '#web-url', async () => {
+    await host!.webContents.executeJavaScript("document.querySelector('#web-url').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true })); true");
+    await pause(100);
+    assert.equal(pages!.contents(blankId)!.getURL(), 'about:blank', 'IME Return accepts a candidate without navigating');
+  }, url + '/candidate');
+  await invoke('browser_open', { url });
+  const driven = pages.list().at(-1)!;
+  await host.webContents.executeJavaScript(`window.selectPage(${JSON.stringify(driven.id)}, false)`);
+  await until(() => !!pageViewIn(host!, driven.id));
+  await whileEditing(host.webContents, '#hostEditor', async () => {
+    const snapshot = (await invoke('browser_snapshot')).content[0].text;
+    const button = Number(/\[(\d+)\] button "Change"/.exec(snapshot)![1]);
+    const afterClick = (await invoke('browser_click', { ref: button })).content[0].text;
+    const field = Number(/\[(\d+)\] textbox "Agent input"/.exec(afterClick)![1]);
+    await invoke('browser_type', { ref: field, text: 'agent text' });
+    await invoke('browser_press_key', { key: 'Enter' });
+    assert.deepEqual(await pages!.contents(driven.id)!.executeJavaScript("[window.clicks, document.querySelector('#field').value, window.keys > 0]"), [1, 'agent text', true]);
+  });
+  console.log("PASS same-window agent click, type and Enter preserve the host window, WebContents and chat editor focus throughout");
+  await host.webContents.executeJavaScript("window.selectPage('workflow')");
+  await whileEditing(host.webContents, '#taskEditor', async () => {
+    await invoke('browser_open', { url });
+    assert.equal(await host!.webContents.executeJavaScript('window.auditState.tab'), 'workflow', 'agent tabs preserve the active task conversation');
+  });
+  // The user edits the side panel while the agent clicks a link in a separate, drawn page.
+  const popupOpener = pages.list().at(-1)!;
+  await invoke('browser_select', { pageId: popupOpener.id, presentation: 'window' });
+  await until(() => BrowserWindow.getAllWindows().some(w => w !== host && !!pageViewIn(w, popupOpener.id)));
+  await host.webContents.executeJavaScript("window.selectPage('catalog')");
+  await whileEditing(host.webContents, '#fileSearch', async () => {
+    const snapshot = (await invoke('browser_snapshot')).content[0].text;
+    const ref = Number(/\[(\d+)\] link "Agent popup"/.exec(snapshot)![1]);
+    const count = pages!.list().length;
+    await invoke('browser_click', { ref });
+    await until(() => pages!.list().length > count);
+    assert.equal(await host!.webContents.executeJavaScript('window.auditState.tab'), 'catalog', 'agent popups preserve the file search');
+  });
+  await invoke('browser_close', { pageId: popupOpener.id });
+  const js = (code: string) => host!.webContents.executeJavaScript(code);
+  host.setContentSize(900, 700);
+  await js("window.selectPage(null)");
+  await whileEditing(host.webContents, '#hostEditor', async () => {
+    await invoke('browser_open', { url });
+    assert.equal(await js('window.auditState.tab'), null, 'an agent page leaves the narrow chat visible');
+  });
+  host.setContentSize(1120, 700);
+  await invoke('browser_select', { pageId: driven.id });
+  await js(`window.selectPage(${JSON.stringify(driven.id)}, false)`);
+  const addressIs = (pathname: string) => until(async () => await js("document.querySelector('#web-url').value") === url + pathname);
+  await invoke('browser_navigate', { url: url + '/redirect' });
+  await addressIs('/destination');
+  await invoke('browser_navigate', { url: url + '/next' });
+  await addressIs('/next');
+  await invoke('browser_back');
+  await addressIs('/destination');
+  await js("document.querySelector('#web-forward').click()");
+  await addressIs('/next');
+  const snapshot = (await invoke('browser_snapshot')).content[0].text;
+  const link = Number(/\[(\d+)\] link "Jump to section"/.exec(snapshot)![1]);
+  await invoke('browser_click', { ref: link });
+  await addressIs('/next#section');
+  await whileEditing(host.webContents, '#web-url', async () => {
+    await invoke('browser_navigate', { url: url + '/actual' });
+  });
+  await js("document.querySelector('#web-url').blur()");
+  await addressIs('/actual');
+  await js(`(() => { const input = document.querySelector('#web-url'); input.focus(); input.value = 'draft';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true })); input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); })()`);
+  await addressIs('/actual');
+  console.log("PASS user tab focus, agent tabs and popups while editing, narrow chat, navigation history and address bar drafts");
   }
   async function checkUserAnnotations() {
     const composer = path.join(cwd, "composer.html");
@@ -459,6 +565,14 @@ xsb.on(event => {
   assert.equal(await editor()!.webContents.executeJavaScript("getComputedStyle(document.querySelector('.annotate-editor')).borderTopColor"), 'rgb(217, 119, 87)', 'the editor uses the tone of the page being annotated');
   assert.ok(placed.y >= pageBox.y + element.y + element.height, 'the editor is below the element');
   assert.equal(placed.width, 300);
+  const noteEditor = editor()!.webContents;
+  await whileEditing(noteEditor, '.annotate-text', async () => {
+    const result = await browser!.call('browser_snapshot', {}, new AbortController().signal);
+    assert.equal(result.isError, true, 'agent access waits while the user edits a note');
+    assert.equal(editor()?.webContents, noteEditor);
+    assert.equal((await target()).seq, 1);
+    assert.equal(await noteEditor.executeJavaScript("document.querySelector('.annotate-text').value"), '批注草稿');
+  }, '批注草稿');
   // A fixed CSS slot still moves and grows in native DIPs when the app is zoomed. The
   // inspector reports the selected element in the website's independently zoomed CSS pixels.
   await host.webContents.executeJavaScript("document.querySelector('.page-slot').style.cssText = 'position:fixed;left:40px;top:32px;width:540px;height:360px'; true");

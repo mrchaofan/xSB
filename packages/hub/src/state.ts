@@ -198,7 +198,7 @@ export class State {
   topics = new Map<string, Map<string, { topic: string; peers: Map<string, TopicPeer> }>>();
   /** The edges between tasks, reversed (task-graph.ts): task -> the tasks started for it, and those that wait for it (`after`). */
   graph: Graph = { children: new Map(), waiters: new Map() };
-  private transaction?: { operations: Op[]; stored: Op[]; effects: (() => void)[] };
+  private transaction?: { operations: Op[]; stored: Op[]; effects: (() => void)[]; rollback: (() => void)[] };
   private writtenBytes = 0;
   private paths?: Paths;
   private loading = false;
@@ -215,7 +215,7 @@ export class State {
     if (this.transaction) return action();
     const original = this.tables();
     Object.assign(this, structuredClone(original));
-    const transaction = this.transaction = { operations: [] as Op[], stored: [] as Op[], effects: [] as (() => void)[] };
+    const transaction = this.transaction = { operations: [] as Op[], stored: [] as Op[], effects: [] as (() => void)[], rollback: [] as (() => void)[] };
     let result: T;
     try {
       result = action();
@@ -223,6 +223,7 @@ export class State {
     } catch (error) {
       Object.assign(this, original);
       this.transaction = undefined;
+      for (const undo of transaction.rollback.reverse()) undo();
       throw error;
     }
     Object.assign(this, original);
@@ -233,8 +234,11 @@ export class State {
     return result;
   }
 
-  afterCommit(effect: () => void): void {
-    if (this.transaction) this.transaction.effects.push(effect);
+  afterCommit(effect: () => void, rollback?: () => void): void {
+    if (this.transaction) {
+      this.transaction.effects.push(effect);
+      if (rollback) this.transaction.rollback.push(rollback);
+    }
     else effect();
   }
 

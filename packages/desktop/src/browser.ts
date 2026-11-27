@@ -141,8 +141,10 @@ export class Driven {
   private captured?: { text: string; title: string; url: string; loading: boolean };
   private contents: WebContents;
   private shield: (on: boolean) => void;
-  private engaged = false;
-  private letGo: () => void;
+  private signal?: AbortSignal;
+  private enabling?: Promise<void>;
+  private disabling?: Promise<void>;
+  private letGo?: () => void;
 
   /** `shield` puts the page under agent control (a visible shield, user input blocked) or gives it back. */
   constructor(contents: WebContents, shield: (on: boolean) => void) {
@@ -156,25 +158,57 @@ export class Driven {
    * input slips in, then focus emulation, so that injected clicks keep the
    * host's real focus where the user left it.
    */
-  async engage(): Promise<void> {
-    if (this.engaged) return;
-    this.engaged = true;
-    this.shield(true);
-    await this.raw("Emulation.setFocusEmulationEnabled", { enabled: true });
+  async engage(signal: AbortSignal): Promise<this> {
+    signal.throwIfAborted();
+    if (!this.enabling) {
+      this.shield(true);
+      this.signal = signal;
+      this.enabling = this.enableFocus();
+    }
+    await this.enabling;
+    signal.throwIfAborted();
+    return this;
+  }
+
+  private async enableFocus(): Promise<void> {
+    if (!this.letGo || !this.attached()) {
+      this.letGo?.();
+      this.letGo = holdDebugger(this.contents);
+      this.refs = [];
+      this.captured = undefined;
+    }
+    await this.raw("Emulation.setFocusEmulationEnabled", { enabled: true }, " (enable)");
   }
 
   /** Give the page back to the user, at the end of a tool call. */
-  disengage(): void {
-    if (!this.engaged) return;
-    this.engaged = false;
-    this.shield(false);
-    if (this.attached()) void this.contents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {});
+  disengage(): Promise<void> {
+    if (this.disabling) return this.disabling;
+    if (!this.enabling) return Promise.resolve();
+    this.signal = undefined;
+    this.disabling = this.disableFocus(this.enabling);
+    return this.disabling;
+  }
+
+  private async disableFocus(enabling: Promise<void>): Promise<void> {
+    try {
+      // Even a timed-out enable may have reached Chromium. Reset it before releasing the shield.
+      await enabling.catch(() => {});
+      if (this.attached()) await this.raw("Emulation.setFocusEmulationEnabled", { enabled: false }, " (disable)");
+    } catch (error) {
+      this.letGo?.();
+      this.letGo = undefined;
+      throw error;
+    } finally {
+      this.enabling = undefined;
+      this.disabling = undefined;
+      this.shield(false);
+    }
   }
 
   /** The agent is done with the page. The page stays, for the user. */
-  release(): void {
-    this.disengage();
-    this.letGo();
+  async release(): Promise<void> {
+    try { await this.disengage(); }
+    finally { this.letGo?.(); this.letGo = undefined; }
   }
 
   private attached(): boolean {
@@ -182,30 +216,38 @@ export class Driven {
   }
 
   /** One command of the protocol, on a page under control. */
-  private async send(method: string, params: object = {}): Promise<any> {
-    await this.engage();
+  private send(method: string, params: object = {}): Promise<any> {
+    if (!this.signal) throw new Error("browser request no longer controls this page");
+    this.signal.throwIfAborted();
     return this.raw(method, params);
   }
 
   /** A page that does not answer is an error to the agent, not a call that never ends. */
-  private raw(method: string, params: object): Promise<any> {
-    const late = new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`the page did not answer ${method}`)), COMMAND_TIMEOUT_MS).unref());
+  private raw(method: string, params: object, detail = ""): Promise<any> {
+    const late = new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`the page did not answer ${method}${detail}`)), COMMAND_TIMEOUT_MS).unref());
     return Promise.race([injectedCommand(this.contents, method, params), late]);
   }
 
   /** What an action set off (a navigation, a request that redraws the page) has had time to show. */
-  async settled(): Promise<void> {
+  async settled(signal: AbortSignal): Promise<void> {
     await sleep(300);
-    for (const until = Date.now() + LOAD_TIMEOUT_MS; this.contents.isLoading() && Date.now() < until; ) await sleep(100);
+    for (const until = Date.now() + LOAD_TIMEOUT_MS; this.contents.isLoading() && Date.now() < until; ) {
+      signal.throwIfAborted();
+      await sleep(100);
+    }
+    signal.throwIfAborted();
   }
 
   /**
    * The page in reading order, from its accessibility tree: what a person using it by ear would be told.
    * A long page is given in parts: `from` is where in its content to go on.
    */
-  async snapshot(from = 0): Promise<string> {
+  async snapshot(signal: AbortSignal, from = 0): Promise<string> {
     if (!Number.isSafeInteger(from) || from < 0) throw new Error("from must be a non-negative integer");
-    if (from === 0 || !this.captured) await this.capture();
+    if (from === 0 || !this.captured) {
+      await this.engage(signal);
+      await this.capture();
+    }
     const { text, title, url, loading: pending } = this.captured!;
     const loading = pending ? "(the page was still loading: start a new snapshot for updated content)\n" : "";
     const end = from + SNAPSHOT_LIMIT;
@@ -243,6 +285,16 @@ export class Driven {
     return { backendNodeId };
   }
 
+  async navigate(url: string): Promise<void> {
+    const { errorText, isDownload } = await this.send("Page.navigate", { url });
+    if (errorText && !isDownload) throw new Error(errorText);
+  }
+
+  async back(): Promise<void> {
+    const { currentIndex, entries } = await this.send("Page.getNavigationHistory");
+    if (currentIndex > 0) await this.send("Page.navigateToHistoryEntry", { entryId: entries[currentIndex - 1].id });
+  }
+
   async click(index: number): Promise<void> {
     const node = this.node(index);
     await this.send("DOM.scrollIntoViewIfNeeded", node);
@@ -277,14 +329,13 @@ export class Driven {
   }
 
   async screenshot(): Promise<string> {
-    await this.engage();
     // A page attached a moment ago (Pages.drawn) can hold its first capture until something else asks for
     // a frame; a second request releases both. Ask again a few times, unless one has answered.
     let answered = false;
     const shot = async (delay: number): Promise<string> => {
       await sleep(delay);
       if (answered) throw new Error("answered");
-      const { data } = await this.raw("Page.captureScreenshot", { format: "png" });
+      const { data } = await this.send("Page.captureScreenshot", { format: "png" });
       answered = true;
       return data;
     };
@@ -309,7 +360,7 @@ export class BrowserSession {
   private reportedRevision = 0;
   private opened: string[] = [];
   private popupErrors: string[] = [];
-  private released = false;
+  private lifetime = new AbortController();
   private cwd: string;
   private pagesFor: (cwd: string) => BrowserTarget | undefined;
   private contextSource?: BrowserContextSource;
@@ -328,14 +379,14 @@ export class BrowserSession {
     this.downloads?.setContext(state);
   }
 
-  release(): void {
-    this.released = true;
+  async release(): Promise<void> {
+    this.lifetime.abort();
     this.unwatch?.();
     this.contextSource?.close();
-    for (const tab of this.tabs.values()) {
-      tab.driven.release();
-      this.pages?.releaseAgent(tab.id);
-    }
+    await Promise.all([...this.tabs.values()].map(async tab => {
+      try { await tab.driven.release(); }
+      finally { this.pages?.releaseAgent(tab.id); }
+    }));
   }
 
   private prune(): void {
@@ -352,7 +403,7 @@ export class BrowserSession {
 
   private adopt(id: string): Tab {
     const contents = this.pages!.focus(id, false);
-    const tab = { id, contents, driven: new Driven(contents, (on) => this.pages!.setAgentControl(id, on && !this.released)) };
+    const tab = { id, contents, driven: new Driven(contents, (on) => this.pages!.setAgentControl(id, on)) };
     this.tabs.set(id, tab);
     this.current = id;
     this.opened.push(id);
@@ -370,14 +421,21 @@ export class BrowserSession {
     }
   }
 
-  private open(): Tab {
+  private async open(signal: AbortSignal): Promise<Tab> {
     this.prepare();
     const sessionId = this.contextState && (this.sessionOf?.(this.contextState.agentId) ?? this.contextState.sessionId);
     const { id } = this.pages!.open("about:blank", { agent: true, background: true, sessionId, downloads: this.downloads, onPopup: (id) => {
-      try { if (!this.released) this.adopt(id); }
+      try { if (!this.lifetime.signal.aborted) this.adopt(id); }
       catch (e) { this.popupErrors.push(`Could not control popup ${id}: ${errorMessage(e)}`); this.pages!.releaseAgent(id); }
     } });
-    return this.adopt(id);
+    try {
+      await this.pages!.waitForInitialDocument(id);
+      signal.throwIfAborted();
+      return this.adopt(id);
+    } catch (e) {
+      this.pages!.releaseAgent(id);
+      throw e;
+    }
   }
 
   private list(): object {
@@ -407,25 +465,34 @@ export class BrowserSession {
   }
 
   /** The end of a tool call, or of its request, gives every page back to the user. */
-  private disengage(): void {
-    for (const tab of this.tabs.values()) tab.driven.disengage();
+  private async disengage(): Promise<void> {
+    const released = await Promise.allSettled([...this.tabs.values()].map(tab => tab.driven.disengage()));
+    const failed = released.find(result => result.status === "rejected");
+    if (failed) throw failed.reason;
   }
 
-  async call(name: string, args: any, signal: AbortSignal): Promise<any> {
+  async call(name: string, args: any, request: AbortSignal): Promise<any> {
+    const signal = AbortSignal.any([request, this.lifetime.signal]);
     let result: any;
-    const release = (): void => this.disengage();
-    signal.addEventListener("abort", release, { once: true });
+    let releasing: Promise<void> | undefined;
+    const release = () => releasing ??= this.disengage();
+    const abort = () => { void release().catch(() => {}); };
+    signal.addEventListener("abort", abort, { once: true });
     try {
-      if (this.released || signal.aborted) throw new Error("browser session or request was closed");
-      if (this.contextSource) {
-        this.setContext(await this.contextSource.snapshot());
+      try {
+        signal.throwIfAborted();
+        if (this.contextSource) this.setContext(await this.contextSource.snapshot());
+        result = await this.perform(name, args, signal);
+      } catch (e) {
+        result = { content: [{ type: "text", text: errorMessage(e) }], isError: true };
+      } finally {
+        signal.removeEventListener("abort", abort);
+        await release();
       }
-      result = await this.perform(name, args, signal);
+      if (!result.isError) signal.throwIfAborted();
     } catch (e) {
-      result = { content: [{ type: "text", text: errorMessage(e) }], isError: true };
-    } finally {
-      signal.removeEventListener("abort", release);
-      this.disengage();
+      if (result?.isError) result.content.push({ type: "text", text: errorMessage(e) });
+      else result = { content: [{ type: "text", text: errorMessage(e) }], isError: true };
     }
     // Every response, including a screenshot or failed navigation, carries native side effects.
     if (this.opened.length) result.content.push({ type: "text", text: `Opened pages: ${JSON.stringify(this.opened.splice(0))}. Use browser_tabs to list them and browser_select to return to an earlier page.` });
@@ -439,7 +506,7 @@ export class BrowserSession {
 
   private async perform(name: string, args: any, signal: AbortSignal): Promise<any> {
     const text = (value: string): any => ({ content: [{ type: "text", text: value }] });
-    if (signal.aborted || this.released) throw new Error("browser session or request was closed");
+    signal.throwIfAborted();
     if (name === "browser_downloads_list" || name === "browser_downloads_progress") {
       const allowed = name === "browser_downloads_list" ? ["from"] : ["id"];
       if (Object.keys(args).some((key) => !allowed.includes(key))) throw new Error(`${name} only accepts ${allowed.join(", ")}; it is a nonblocking query`);
@@ -452,8 +519,8 @@ export class BrowserSession {
     if (name === "browser_tabs") return text(JSON.stringify(this.list()));
     if (name === "browser_close") {
       const tab = this.tab(String(args.pageId ?? ""));
-      tab.driven.release();
-      this.pages!.call(tab.id, "close");
+      this.pages!.call(tab.id, "close", "background");
+      await tab.driven.release();
       this.tabs.delete(tab.id);
       return text(JSON.stringify(this.list()));
     }
@@ -467,11 +534,11 @@ export class BrowserSession {
       if (args.presentation !== undefined && args.presentation !== "panel" && args.presentation !== "window") throw new Error("presentation must be panel or window");
       const url = address(String(args.url ?? ""));
       this.prune();
-      const tab = name === "browser_open" || !this.current ? this.open() : this.tab();
+      const tab = name === "browser_open" || !this.current ? await this.open(signal) : this.tab();
       if (name === "browser_open") this.presentation(tab.id, args.presentation);
-      await tab.driven.engage();
+      await tab.driven.engage(signal);
       const revision = this.downloads!.revision;
-      try { await this.pages!.navigate(tab.id, url); }
+      try { await tab.driven.navigate(url); }
       catch (e) {
         // Chromium can reject a document with ERR_FAILED or ERR_ABORTED before
         // emitting will-download on the next event-loop turn. Correlate an actual
@@ -482,28 +549,30 @@ export class BrowserSession {
       }
     } else if (name === "browser_screenshot") {
       const tab = this.tab();
-      await tab.driven.engage();
+      await tab.driven.engage(signal);
       const data = await this.pages!.drawn(tab.id, () => tab.driven.screenshot());
       return { content: [{ type: "image", data, mimeType: "image/png" }, { type: "text", text: `pageId: ${tab.id}` }] };
-    } else if (name === "browser_click") await this.tab().driven.click(args.ref);
-    else if (name === "browser_type") {
-      const tab = this.tab();
-      await tab.driven.type(args.ref, String(args.text));
-      if (args.submit) await tab.driven.key("Enter");
-    } else if (name === "browser_press_key") await this.tab().driven.key(String(args.key));
-    else if (name === "browser_back") {
-      const tab = this.tab();
-      await tab.driven.engage();
-      tab.contents.navigationHistory.goBack();
-    }
-    else if (name !== "browser_snapshot") throw new Error(`no tool "${name}"`);
+    } else if (name === "browser_click") {
+      const driven = await this.tab().driven.engage(signal);
+      await driven.click(args.ref);
+    } else if (name === "browser_type") {
+      const driven = await this.tab().driven.engage(signal);
+      await driven.type(args.ref, String(args.text));
+      if (args.submit) await driven.key("Enter");
+    } else if (name === "browser_press_key") {
+      const driven = await this.tab().driven.engage(signal);
+      await driven.key(String(args.key));
+    } else if (name === "browser_back") {
+      const driven = await this.tab().driven.engage(signal);
+      await driven.back();
+    } else if (name !== "browser_snapshot") throw new Error(`no tool "${name}"`);
     // The selected tab can change while a popup is being created. Settle the opener
     // first, then capture the newly selected page, with its own element numbering.
     const before = this.tab();
-    await before.driven.settled();
+    await before.driven.settled(signal);
     const tab = this.tab();
-    if (tab !== before) await tab.driven.settled();
-    return text(`pageId: ${tab.id}\n${await tab.driven.snapshot(name === "browser_snapshot" ? args.from ?? 0 : 0)}`);
+    if (tab !== before) await tab.driven.settled(signal);
+    return text(`pageId: ${tab.id}\n${await tab.driven.snapshot(signal, name === "browser_snapshot" ? args.from ?? 0 : 0)}`);
   }
 }
 
@@ -515,7 +584,7 @@ export function serveBrowser(socketPath: string, pagesFor: (cwd: string) => Brow
     let browser: BrowserSession | undefined;
     // Tools mutate the current page and snapshot refs. Serialize calls on this connection.
     let tail: Promise<unknown> = Promise.resolve();
-    void conn.closed.then(() => browser?.release());
+    void conn.closed.then(() => browser?.release()).catch(e => console.error("Releasing browser pages:", errorMessage(e)));
     conn.onNotification(ATTACH, (p) => {
       if (!browser && typeof p.cwd === "string" && p.cwd) browser = new BrowserSession(p.cwd, pagesFor,
         typeof p.contextSocket === "string" && typeof p.contextToken === "string" ? new BrowserContext(p.contextSocket, p.contextToken) : undefined);

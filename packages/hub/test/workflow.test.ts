@@ -55,7 +55,7 @@ test("completion is independent of model delivery and controls cannot replay a c
   hub.state.commit([ops.workflow(f)]);
   assert.deepEqual(f.outbox, []);
   assert.equal(hub.workflows.get(root.id).state, "completed");
-  assert.deepEqual(hub.workflows.get(root.id).controls, { pause: false, resume: false });
+  assert.deepEqual(hub.workflows.get(root.id).controls, { stop: false, pause: false, resume: false });
   assert.deepEqual(hub.workflows.list(), [hub.workflows.get(root.id)]);
   hub.workflows.restart();
   assert.equal(hub.workflows.read(root.id).paused, false);
@@ -71,7 +71,7 @@ test("completion is independent of model delivery and controls cannot replay a c
   assert.equal(hub.workflows.get(root.id).state, "running");
   hub.workflows.restart();
   assert.equal(hub.workflows.get(root.id).state, "paused");
-  assert.deepEqual(hub.workflows.get(root.id).controls, { pause: false, resume: true });
+  assert.deepEqual(hub.workflows.get(root.id).controls, { stop: false, pause: false, resume: true });
 });
 
 test("a delivered predecessor can still pause its unfinished branch", () => {
@@ -203,11 +203,11 @@ test("runtime-only turn changes publish fresh workflow controls for a pending co
   root.current = { id: "handling" } as Turn;
   hub.kernel.hooks.emit("acp.turn_changed", { agentId: root.agentId, sessionId: root.id });
   await hub.kernel.hooks.settled();
-  assert.deepEqual(snapshots.at(-1).controls, { pause: true, resume: false });
+  assert.deepEqual(snapshots.at(-1).controls, { stop: true, pause: true, resume: false });
   root.current = undefined;
   hub.kernel.hooks.emit("acp.turn_changed", { agentId: root.agentId, sessionId: root.id });
   await hub.kernel.hooks.settled();
-  assert.deepEqual(snapshots.at(-1).controls, { pause: false, resume: true });
+  assert.deepEqual(snapshots.at(-1).controls, { stop: true, pause: false, resume: true });
   assert.equal(hub.workflows.read(root.id).interruptions[0].id, "correction", "query publication does not consume input");
 });
 
@@ -224,6 +224,8 @@ test("the localized read-only guide supplies a runnable Markdown example on dema
     const prompt = hub.systemPromptFor(hub.agent(root.agentId));
     assert.match(prompt, /workflow\.plan/);
     assert.match(prompt, /workflow\.guide/);
+    assert.match(prompt, /workflow\.rollback/);
+    assert.match(prompt, /workflow\.resume/);
     assert.match(prompt, language === "zh-CN" ? /即使用户未提工作流，也主动/ : /proactively use.*even when the user does not mention workflows/);
     assert.doesNotMatch(prompt, /graphJsonl|整理需求|Read request/);
     assert.ok(workflowTools(false).some(t => t.name === "guide"));
@@ -231,6 +233,8 @@ test("the localized read-only guide supplies a runnable Markdown example on dema
     assert.doesNotMatch(JSON.stringify(workflowTools(false)), /整理需求|Read request/);
     const guide = hub.workflows.call(root, "guide", {}, newId("call"));
     assert.ok(typeof guide === "string");
+    assert.match(guide, /resume\(\{\}\)/);
+    assert.match(guide, /rollback\(\{nodes:\[/);
     const example = /```jsonl\n([^]*?)\n```/.exec(guide)![1];
     assert.throws(() => hub.workflows.call(root, "guide", {graphJsonl: example}, newId("call")), /additional properties/);
     assert.equal(hub.state.workflows.has(root.id), false, "reading the guide creates no draft, version or receipt");
@@ -829,6 +833,117 @@ test("user stop clears the selected scope's held inputs, keeping independent con
     [next, b, c].map((id) => hub.state.mail.has(id)),
     [false, false, true],
   );
+});
+
+test("panel stop checks the displayed version and can freeze tasks before dispatch", t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-panel-stop-before-dispatch-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  const root = hub.createConversation();
+  const f = build(graph(task("A"), task("B"), end(), edge("A", "B"), edge("B", "end")));
+  f.owner = root.id;
+  hub.state.commit([ops.workflow(f)]);
+  const stop = (version: string, node?: string) => hub.workflows.stop(root.id, version, node);
+  assert.throws(() => stop("outdated", "B"), /version changed/);
+  assert.throws(() => stop(f.active!, "missing"), /Unknown task/);
+  assert.throws(() => stop(f.active!, "end"), /Unknown task/);
+  assert.equal(hub.workflows.read(root.id).paused, false);
+  assert.equal(hub.workflows.get(root.id).nodes.find(n => n.name === "B")!.controls!.stop, true);
+  const held = stop(f.active!, "B");
+  assert.equal(held.nodes.find(n => n.name === "B")!.controls!.stop, false);
+  assert.equal(held.nodes.find(n => n.name === "B")!.sessionId, undefined);
+  assert.equal(held.nodes.find(n => n.name === "A")!.controls!.stop, true);
+  assert.equal(stop(f.active!).paused, true);
+  assert.equal(hub.kernel.generation(root.id), 0);
+  assert.equal(new Hub(dir).workflows.read(root.id).paused, true);
+});
+
+test("a panel stop freezes the selected sessions with their backlog and preserves the main turn", t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-panel-stop-scope-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  const root = hub.createConversation();
+  const f = build(graph(task("A"), task("B"), end(), edge("A", "end"), edge("B", "end")));
+  f.owner = root.id;
+  const [a, b] = ["A", "B"].map(node => {
+    claim(f, node);
+    additional(f, node, "also review the source");
+    return hub.createConversation("claude", node, { owner: root.id, node, bind(agentId, sessionId) {
+      Object.assign(f.instances[node], { agentId, sessionId });
+      return ops.workflow(f);
+    } });
+  });
+  const mainTurn = turnFor(root, "ongoing main conversation");
+  const taskTurn = turnFor(a, f.instances.A.work!.attempt!, "workflow");
+  const cancellations: string[] = [];
+  Object.assign(a, { backend: { cancel: () => cancellations.push("A"), caps: { orderedCancellation: true } } });
+  a.onBackendUpdate({ sessionUpdate: "state_update", state: "running" });
+  t.after(() => a.releaseUserStop(false));
+  const hold = (s: LiveSession) => {
+    const id = newId("held"), to = { agentId: s.agentId, sessionId: s.id }, from = { kind: "user" } as const;
+    hub.state.commit([ops.enqueue({ id, from, to, kind: "message", ts: "", prompt: [text("Please review")] })]);
+    hub.kernel.mark(id, "queued", { ...to, from });
+    return id;
+  };
+  const [aa, bb, main] = [a, b, root].map(hold);
+  assert.throws(() => hub.state.atomic(() => {
+    hub.workflows.stop(root.id, f.active!, "A");
+    assert.deepEqual(cancellations, []);
+    throw Error("aborted parent transaction");
+  }), /aborted parent transaction/);
+  assert.equal(hub.workflows.read(root.id).instances.A.paused, false);
+  assert.equal(a.acceptsTools, true);
+  assert.equal(hub.state.mail.has(aa), true);
+  const held = hub.workflows.stop(root.id, f.active!, "A");
+  assert.equal(held.paused, false);
+  assert.equal(held.nodes.find(n => n.name === "B")!.status, "running");
+  assert.equal(taskTurn.cancelledBy, "user");
+  assert.equal(hub.workflows.read(root.id).instances.A.extras.length, 0);
+  assert.deepEqual([aa, bb, main].map(id => hub.state.mail.has(id)), [false, true, true]);
+  const freeze = hub.state.store.read(F.workflows).find(rec => rec.maps?.instances?.set.A?.paused)!;
+  const withdrawn = hub.state.store.read(F.mailbox).find(rec => rec.op === "ack" && rec.id === aa)!;
+  assert.equal(freeze._tx.split(":")[0], withdrawn._tx.split(":")[0]);
+  const later = hold(a);
+  const all = hub.workflows.stop(root.id, f.active!);
+  assert.equal(all.paused, true);
+  assert.equal(all.controls!.stop, false);
+  assert.equal(hub.workflows.read(root.id).instances.B.extras.length, 0);
+  assert.deepEqual([later, bb, main].map(id => hub.state.mail.has(id)), [false, false, true]);
+  assert.deepEqual(cancellations, ["A"], "widening the stop preserves the existing backend cancellation");
+  assert.equal(root.current, mainTurn);
+  assert.equal(mainTurn.cancelledBy, undefined);
+  assert.equal(hub.kernel.generation(root.id), 0);
+});
+
+test("a reentrant stop of the whole workflow cannot commit only the other branch", t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-panel-stop-hook-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const hub = new Hub(dir);
+  hub.stopping = true;
+  const root = hub.createConversation();
+  const f = build(graph(task("A"), task("B"), end(), edge("A", "end"), edge("B", "end")));
+  f.owner = root.id;
+  const [a, b] = ["A", "B"].map(node => hub.createConversation("claude", node, {
+    owner: root.id, node, bind(agentId, sessionId) {
+      Object.assign(f.instances[node], { agentId, sessionId });
+      return ops.workflow(f);
+    },
+  }));
+  hub.kernel.adoptUser({ agentId: a.agentId, sessionId: a.id }, [text("work")], "work");
+  let attempted = false;
+  hub.kernel.hooks.decider("task.pre_stop", decision => {
+    attempted = true;
+    assert.throws(() => hub.workflows.stop(root.id, f.active!), /stop was refused/);
+    return decision;
+  });
+  const snapshot = hub.workflows.stop(root.id, f.active!, "A");
+  assert.equal(attempted, true);
+  assert.equal(snapshot.paused, false);
+  assert.equal(hub.kernel.generation(a.id), 1);
+  assert.equal(hub.kernel.generation(b.id), 0);
+  assert.equal(b.acceptsTools, true);
 });
 
 test("an adopted version keeps the one it replaced; a dropped node's conversation stays readable, not writable", (t) => {

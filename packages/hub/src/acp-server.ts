@@ -264,6 +264,13 @@ export class Client {
     conn.onRequest(Agents.purge, () => hub.purgeDeleted());
     conn.onRequest(Workflow.get, p => hub.workflows.get(p.sessionId));
     conn.onRequest(Workflow.list, () => ({ workflows: hub.workflows.list() }));
+    conn.onRequest(Workflow.stop, p => {
+      if (!p || typeof p.sessionId !== "string" || typeof p.version !== "string" ||
+          (p.node !== undefined && typeof p.node !== "string") ||
+          Object.keys(p).some(k => !["sessionId", "version", "node", "_meta"].includes(k)))
+        throw RpcError.invalidParams("Expected sessionId, version and optionally one node name");
+      return hub.workflows.stop(p.sessionId, p.version, p.node);
+    });
     for (const action of ["pause","resume","rollback"] as const) conn.onRequest(Workflow[action], p => hub.workflows.control(p.sessionId,action,p.nodes));
 
     // ---- backends and tasks ---------------------------------------

@@ -117,7 +117,7 @@ function remember(f: Flow, rollback = false) {
   const graph = graphOf(f)!;
   f.history = [{
     version: f.active!, retiredAt: now(), nodes: before.nodes.map(n => ({
-      ...n, ...(n.controls && { controls: { pause: false, resume: false } }),
+      ...n, ...(n.controls && { controls: { stop: false, pause: false, resume: false } }),
     })), edges: graph.edges,
     ...(graph.format && { format: graph.format }),
     ...(rollback && { rollback: true, snapshot: newId("rollback") }),
@@ -645,7 +645,7 @@ export function view(f: Flow, includeContracts = true): WorkflowView {
   const state = done ? "completed" : graph ? held ? "paused" : "running" : f.candidate ? "proposed" : "empty";
   return {
     state,
-    controls: { pause: !!graph && !done && !held, resume: !!graph && !done && held, ...(graph?.format === "markdown" && { rollback: true }) },
+    controls: { stop: !!graph && !done && !f.paused, pause: !!graph && !done && !held, resume: !!graph && !done && held, ...(graph?.format === "markdown" && { rollback: true }) },
     sessionId: f.owner,
     history: includeContracts ? f.history ?? [] : f.history?.map(h => ({
       ...h, nodes: h.nodes.map(({ contract, markdown, ...node }) => node),
@@ -683,7 +683,9 @@ export function view(f: Flow, includeContracts = true): WorkflowView {
               : inputError ? "input_error" : gate.blocked
                 ? "paused"
                 : gate.signal.state);
-        const actionable = !finished || !!i.work || !!i.extras.length || !!i.interruptions.length;
+        const pendingWork = !!i.work || !!i.extras.length || !!i.interruptions.length;
+        const actionable = !finished || pendingWork;
+        const pendingGraphTask = !finished && (choosing || !!i.invitation || (!i.last?.valid && gate.signal.state !== "skipped"));
         return {
           name: n.node,
           kind: n.kind,
@@ -709,6 +711,7 @@ export function view(f: Flow, includeContracts = true): WorkflowView {
           } }),
           additionalResults: i.additionalResults?.map(({ id, summary, output }) => ({ id, summary: includeContracts ? output ?? summary : summary })),
           controls: {
+            stop: n.kind === "task" && !f.paused && !i.paused && (pendingWork || pendingGraphTask),
             pause: n.kind === "task" && actionable && !i.paused && !f.paused,
             resume: n.kind === "task" && !f.paused && actionable &&
               (!!i.paused || !!i.replan || i.work?.state === "suspended" || !!i.interruptions.length),

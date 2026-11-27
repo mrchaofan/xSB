@@ -19,6 +19,13 @@ function ownerOf(page) {
 export const sessionPages = () => (state.pages ?? []).filter(p => ownerOf(p) === rootSession());
 const pageOf = id => sessionPages().find(p => p.id === id);
 const titleOf = (page) => (!page.url || page.url === "about:blank" ? t("tabs.new") : page.title || page.url);
+const address = $("#web-url");
+let editingAddress;
+function syncAddress(page) {
+  if (!page || editingAddress === page.id) return;
+  editingAddress = undefined;
+  address.value = page.url.replace(/^about:blank$/, "");
+}
 
 /** 网页的图标：加载中转圈，否则是网站的 favicon，没有或加载失败时是地球。 */
 function pageIcon(page) {
@@ -262,7 +269,7 @@ export function renderSide(focusPage = false) {
   $("#web-back").disabled = !page.canGoBack;
   $("#web-forward").disabled = !page.canGoForward;
   annotateButton($("#web-annotate"), page);
-  if (document.activeElement !== $("#web-url")) $("#web-url").value = page.url.replace(/^about:blank$/, "");
+  syncAddress(page);
   if (page.window) {
     fill($("#web-body"), h("div", { class: "web-note" },
       h("p", {}, t("web.detached")),
@@ -297,7 +304,7 @@ async function newTab() {
   if (rootSession() === owner && state.tab === page.id) $("#web-url").focus();
 }
 
-/** 用户新开的网页接过焦点。展示智能体的新标签时保留用户在当前网页或地址栏的输入。 */
+/** 用户新开的网页接过焦点。后台网页可以展示，但不能隐藏正操作的面板，也不能在窄窗口遮住输入。 */
 export function onPage(page, keepTab = false) {
   const known = state.pages.find(p => p.id === page.id);
   if (!page.sessionId) page.sessionId = known?.sessionId ?? rootSession();
@@ -306,7 +313,9 @@ export function onPage(page, keepTab = false) {
   if (known) Object.assign(known, page);
   else {
     state.pages.push(page);
-    if (here && !keepTab && !(page.background && document.activeElement === $("#web-url"))) {
+    const active = document.activeElement;
+    const keepPanel = page.background && (active?.closest(".side") || (innerWidth <= 1000 && (active?.isContentEditable || active?.matches("input, textarea"))));
+    if (here && !keepTab && !keepPanel) {
       rememberPosition();
       state.tab = page.id;
       revealArtifacts();
@@ -336,13 +345,28 @@ $("#web-forward").onclick = act("forward");
 $("#web-reload").onclick = act("reload");
 $("#web-external").onclick = act("external");
 $("#web-detach").onclick = act("detach");
-$("#web-url").onkeydown = (e) => {
-  const text = e.target.value.trim();
+address.oninput = address.oncompositionstart = () => { editingAddress = state.tab; };
+address.onblur = () => {
+  editingAddress = undefined;
+  address.setCustomValidity("");
+  syncAddress(pageOf(state.tab));
+};
+address.onkeydown = (e) => {
+  if (e.isComposing) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    address.blur();
+    return;
+  }
+  const tab = state.tab, submitted = address.value, text = submitted.trim();
   e.target.setCustomValidity("");
   if (e.key !== "Enter" || !text) return;
   // 地址怎么补全、哪些能打开，由主进程定（与智能体的浏览器工具是同一条规则）；打不开的原因就写在地址栏上。
-  xsb.page(state.tab, "navigate", text).then(() => e.target.blur(), (error) => {
-    e.target.setCustomValidity(error.message);
-    e.target.reportValidity();
+  const stillEditing = () => state.tab === tab && document.activeElement === address && address.value === submitted;
+  xsb.page(tab, "navigate", text).then(() => { if (stillEditing()) address.blur(); }, (error) => {
+    if (!stillEditing()) return;
+    address.setCustomValidity(error.message);
+    address.reportValidity();
   });
 };

@@ -539,7 +539,7 @@ function answerOf(given: unknown): Answer {
   if (!Array.isArray(a.answers) || !a.answers.every((v) => v === null || text(v) || (Array.isArray(v) && v.every(text)))) throw Error("Invalid form answers");
   return { questionId: a.questionId, answers: a.answers };
 }
-const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","renameConversation","setAvatar","setBackend","conversationFiles","refreshArtifact","workflowControl","history","send","resend","cancelMessage","sendMessageNow","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
+const WORKSPACE_CALLS = new Set(["composerState","setComposerOption","newSession","renameConversation","setAvatar","setBackend","conversationFiles","refreshArtifact","stopWorkflow","history","send","resend","cancelMessage","sendMessageNow","migrate","deleteConversation","cleanUp","cancel","clear","permit"]);
 
 ipcMain.on("xsb:language", (event) => {
   event.returnValue = language();

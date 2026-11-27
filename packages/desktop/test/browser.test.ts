@@ -9,6 +9,7 @@ import { Connection, ToolContext } from "@xsb/protocol";
 import type { ToolContextState } from "@xsb/protocol";
 import { BrowserSession, BROWSER_INSTRUCTIONS, ATTACH, serveBrowser } from "../src/browser.ts";
 import { BrowserDownloads, ownDownloads } from "../src/browser-downloads.ts";
+import { installInputGuard } from "../src/page-input.ts";
 
 class Context {
   state: ToolContextState = { agentId: "a", sessionId: "sa", turnId: "turn-1", active: true, turns: [{ id: "turn-1", startedAt: 0 }] };
@@ -119,45 +120,44 @@ class FakePages {
   counter = 0;
   operations: string[] = [];
   clicked?: () => void;
-  failNavigation = false;
-  setAgentControl() {}
+  command?: (id: string, method: string, args: any) => any;
+  setAgentControl(id: string, on: boolean) { this.operations.push(`${id}:control:${on}`); }
   open(_url: string, options: any = {}) {
     const id = `p${++this.counter}`;
     let dead = false;
     let attached = false;
     const contents = {
+      on() {},
       isDestroyed: () => dead,
       destroy: () => { dead = true; },
       debugger: {
         attach() { attached = true; }, isAttached: () => attached, detach() { attached = false; },
         sendCommand: async (method: string, args: any) => {
+          if (!attached) throw new Error("debugger is detached");
+          const reply = await this.command?.(id, method, args);
+          if (reply !== undefined) return reply;
+          if (method === "Page.navigate") this.entries.get(id).url = args.url;
           if (method === "Accessibility.getFullAXTree") return { nodes: [{ nodeId: "1", role: { value: "link" }, name: { value: id }, backendDOMNodeId: Number(id.slice(1)) }] };
           if (method === "DOM.getContentQuads") return { quads: [[0, 0, 10, 0, 10, 10, 0, 10]] };
+          if (method === "DOM.resolveNode") return { object: { objectId: "field" } };
           if (method === "Input.dispatchMouseEvent" && args.type === "mouseReleased") this.clicked?.();
           if (method === "Page.captureScreenshot") return { data: "aW1hZ2U=" };
           return {};
         },
       },
       getTitle: () => id, getURL: () => this.entries.get(id)?.url ?? "about:blank", isLoading: () => false,
-      navigationHistory: { goBack() {} },
     };
+    installInputGuard(contents as any, true);
     this.entries.set(id, { id, options, contents, url: "about:blank", window: false });
     return { id };
   }
   contents(id: string) { return this.entries.get(id)?.contents; }
+  async waitForInitialDocument(_id: string) {}
   focus(id: string, focusContents = true) {
     this.operations.push(`${id}:focus:${focusContents}`);
     return this.contents(id);
   }
-  async navigate(id: string, url: string) {
-    const entry = this.entries.get(id);
-    if (this.failNavigation) {
-      entry.options.downloads.accept({ preventDefault() {} }, new Item() as any, id);
-      throw new Error("net::ERR_ABORTED");
-    }
-    entry.url = url;
-  }
-  call(id: string, op: string) {
+  call(id: string, op: string, _source?: string) {
     this.operations.push(`${id}:${op}`);
     if (op === "close") { this.contents(id).destroy(); this.entries.delete(id); }
     else this.entries.get(id).window = op === "detach";
@@ -188,6 +188,156 @@ test("new pages preserve the original, and popups/select/close remain connection
   assert.deepEqual(pages.operations.filter(op => op.includes(":focus:")), ["p1:focus:false", "p2:focus:false", "p1:focus:false", "p3:focus:false"]);
   const user = pages.open("about:blank"); assert.equal((await invoke("browser_select", { pageId: user.id })).isError, true);
   await invoke("browser_close", { pageId: "p3" }); assert.match(read(await invoke("browser_snapshot")), /pageId: p2/);
+});
+
+test("a new agent tab waits for its blank renderer before attaching or navigating", async t => {
+  const pages = new FakePages(), project = temp(t);
+  const browser = new BrowserSession(project, () => ({ pages: pages as any, project }));
+  t.after(() => browser.release());
+  const commands: string[] = [];
+  pages.command = (_id, method) => { commands.push(method); };
+  for (const cancel of [false, true]) {
+    const opened = Promise.withResolvers<string>(), loaded = Promise.withResolvers<void>();
+    pages.waitForInitialDocument = id => { opened.resolve(id); return loaded.promise; };
+    const request = new AbortController();
+    const opening = browser.call("browser_open", { url: "one.example" }, request.signal);
+    const id = await opened.promise;
+    assert.equal(pages.contents(id).debugger.isAttached(), false);
+    assert.deepEqual(commands, []);
+    if (cancel) request.abort();
+    loaded.resolve();
+    const result = await opening;
+    assert.equal(!!result.isError, cancel);
+    if (cancel) {
+      assert.deepEqual(commands, []);
+      assert.equal(pages.entries.get(id).options.agent, undefined);
+    } else {
+      assert.deepEqual(commands.slice(0, 2), ["Emulation.setFocusEmulationEnabled", "Page.navigate"]);
+      commands.length = 0;
+    }
+  }
+});
+
+test("page input waits for focus emulation and the tool keeps the shield until Chromium confirms release", async t => {
+  const pages = new FakePages(), project = temp(t);
+  const browser = new BrowserSession(project, () => ({ pages: pages as any, project }));
+  t.after(() => browser.release());
+  await browser.call("browser_navigate", { url: "one.example" }, signal());
+  pages.operations.length = 0;
+  const enable = Promise.withResolvers<void>(), disable = Promise.withResolvers<void>();
+  const started = Promise.withResolvers<void>(), ending = Promise.withResolvers<void>();
+  pages.command = async (_id, method, args) => {
+    pages.operations.push(args.enabled === undefined ? method : `focus=${args.enabled}`);
+    if (args.enabled === true) { started.resolve(); await enable.promise; }
+    if (args.enabled === false) { ending.resolve(); await disable.promise; }
+  };
+  let done = false;
+  const typing = browser.call("browser_type", { ref: 1, text: "你好" }, signal()).then(result => { done = true; return result; });
+  await started.promise;
+  assert.deepEqual(pages.operations, ["p1:control:true", "focus=true"]);
+  enable.resolve();
+  await ending.promise;
+  assert.equal(done, false);
+  assert.ok(pages.operations.includes("Input.dispatchMouseEvent") && pages.operations.includes("Input.insertText"));
+  assert.equal(pages.operations.includes("p1:control:false"), false);
+  disable.resolve();
+  assert.ok(!(await typing).isError);
+  assert.deepEqual(pages.operations.slice(-2), ["focus=false", "p1:control:false"]);
+});
+
+test("cancelled page work cannot reacquire focus and debugger cleanup survives a failed reset", async t => {
+  const pages = new FakePages(), project = temp(t);
+  const browser = new BrowserSession(project, () => ({ pages: pages as any, project }));
+  t.after(() => browser.release());
+  await browser.call("browser_navigate", { url: "one.example" }, signal());
+  const started = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>(), aborted = new AbortController();
+  const commands: string[] = [];
+  pages.command = async (_id, method, args) => {
+    commands.push(args.enabled === undefined ? method : `focus=${args.enabled}`);
+    if (method === "DOM.getContentQuads") { started.resolve(); await finish.promise; }
+  };
+  const click = browser.call("browser_click", { ref: 1 }, aborted.signal);
+  await started.promise;
+  aborted.abort();
+  finish.resolve();
+  assert.ok((await click).isError);
+  assert.deepEqual(commands, ["focus=true", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "focus=false"]);
+  assert.equal(pages.operations.at(-1), "p1:control:false");
+
+  pages.command = (_id, _method, args) => { if (args.enabled === false) throw Error("focus reset failed"); };
+  assert.match(read(await browser.call("browser_snapshot", {}, signal())), /focus reset failed/);
+  assert.equal(pages.contents("p1").debugger.isAttached(), false);
+  assert.equal(pages.operations.at(-1), "p1:control:false");
+  pages.command = undefined;
+  assert.ok(!(await browser.call("browser_snapshot", {}, signal())).isError);
+  assert.equal(pages.contents("p1").debugger.isAttached(), true);
+  pages.command = (_id, method, args) => {
+    if (method === "Input.dispatchKeyEvent") throw Error("key was not acknowledged");
+    if (args.enabled === false) throw Error("focus reset failed");
+  };
+  const failedKey = await browser.call("browser_press_key", { key: "Enter" }, signal());
+  assert.deepEqual(failedKey.content.map((part: { text: string }) => part.text), ["key was not acknowledged", "focus reset failed"]);
+});
+
+test("a refused page or close keeps the user's controls and the tab's debugger", async t => {
+  const pages = new FakePages(), project = temp(t);
+  const browser = new BrowserSession(project, () => ({ pages: pages as any, project }));
+  t.after(() => browser.release());
+  await browser.call("browser_navigate", { url: "one.example" }, signal());
+  const commands: string[] = [];
+  pages.command = (_id, method) => { commands.push(method); };
+  const controls: boolean[] = [];
+  pages.setAgentControl = (_id, on) => { controls.push(on); if (on) throw Error("user is annotating"); };
+  pages.call = (_id, op, source) => {
+    assert.equal(op, "close");
+    assert.equal(source, "background");
+    throw Error("user is annotating");
+  };
+  const click = await browser.call("browser_click", { ref: 1 }, signal());
+  const close = await browser.call("browser_close", { pageId: "p1" }, signal());
+  for (const result of [click, close]) { assert.equal(result.isError, true); assert.match(read(result), /user is annotating/); }
+  assert.deepEqual(commands, []);
+  assert.deepEqual(controls, [true]);
+  assert.equal(pages.contents("p1").debugger.isAttached(), true);
+});
+
+test("agent navigation and history use the owned page debugger, including redirects and downloads", async t => {
+  const pages = new FakePages(), project = temp(t), context = new Context();
+  const browser = new BrowserSession(project, () => ({ pages: pages as any, project }), context);
+  t.after(() => browser.release());
+  const userPage = pages.open("about:blank");
+  const nav = (url: string) => browser.call("browser_navigate", { url }, signal());
+  const commands: string[] = [];
+  let historyIndex = 0;
+  pages.command = (id, method, args) => {
+    assert.equal(id, "p2");
+    if (method.startsWith("Page.")) commands.push(method);
+    if (method === "Page.getNavigationHistory") return { currentIndex: historyIndex, entries: [{ id: 44 }, { id: 58 }] };
+    if (method === "Page.navigateToHistoryEntry") { assert.equal(args.entryId, 44); pages.entries.get(id).url = "https://one.example/"; }
+    if (method !== "Page.navigate") return;
+    switch (args.url) {
+      case "https://redirect.example/":
+        pages.entries.get(id).url = "https://final.example/";
+        return { frameId: "main" };
+      case "https://export.example/": return { isDownload: true, errorText: "net::ERR_ABORTED" };
+      case "https://slow-export.example/":
+        setTimeout(() => pages.entries.get(id).options.downloads.accept(event, new Item(), id), 5);
+        return { errorText: "net::ERR_ABORTED" };
+      case "https://failure.example/": return { errorText: "net::ERR_CONNECTION_REFUSED" };
+    }
+  };
+  assert.ok(!(await nav("one.example")).isError);
+  assert.ok(!(await browser.call("browser_back", {}, signal())).isError);
+  assert.ok(read(await nav("redirect.example")).includes("https://final.example/"));
+  historyIndex = 1;
+  assert.ok(read(await browser.call("browser_back", {}, signal())).includes("https://one.example/"));
+  assert.deepEqual(commands, ["Page.navigate", "Page.getNavigationHistory", "Page.navigate", "Page.getNavigationHistory", "Page.navigateToHistoryEntry"]);
+  assert.ok(!(await nav("export.example")).isError);
+  assert.ok(read(await nav("slow-export.example")).includes("report.csv"));
+  const failed = await nav("failure.example");
+  assert.equal(failed.isError, true);
+  assert.match(read(failed), /ERR_CONNECTION_REFUSED/);
+  assert.equal(pages.contents(userPage.id).debugger.isAttached(), false);
 });
 
 test("list/progress APIs are small, nonblocking, and reset on runtime turn changes without another browser action", async (t) => {

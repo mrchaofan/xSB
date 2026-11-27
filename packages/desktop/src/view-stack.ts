@@ -1,10 +1,8 @@
 /**
  * The native views laid over an app window's own document, in layers.
  *
- * Electron has no z-index for views: what is drawn on top is the last child.
- * Re-adding a child puts it on top, and that is the one move used here.
- * Each change computes the order the layers want and makes it with the
- * fewest moves (`restack`), so a page that stays where it is is not touched.
+ * Electron draws its last child on top. Insert each view at its layer so showing
+ * a control shield never reattaches the page, an open menu or an active editor.
  *
  *   overlay      menus over everything (overlay.ts)
  *   annotation   the editor of a note on the page shown (page-host.ts)
@@ -17,19 +15,7 @@ import type { View } from "electron";
 export const LAYERS = ["page", "control", "annotation", "overlay"] as const;
 export type Layer = (typeof LAYERS)[number];
 
-/**
- * How to turn `current` into `desired` by removing views and re-adding views on top: the longest start of
- * `desired` that `current` already has in order stays, everything after it is added again, in order.
- */
-export function restack<T>(current: readonly T[], desired: readonly T[]): { remove: T[]; add: T[] } {
-  const wanted = new Set(desired);
-  let kept = 0;
-  for (const item of current) if (item === desired[kept]) kept++;
-  return { remove: current.filter((item) => !wanted.has(item)), add: desired.slice(kept) };
-}
-
 export class ViewStack {
-  /** In the order they were put, which is their order within a layer. */
   private layers = new Map<View, Layer>();
   private root: View;
 
@@ -41,23 +27,17 @@ export class ViewStack {
   put(view: View, layer: Layer): void {
     if (this.layers.get(view) === layer) return;
     this.layers.delete(view);
+    const rank = LAYERS.indexOf(layer);
+    const index = [...this.layers.values()].filter(existing => LAYERS.indexOf(existing) <= rank).length;
+    this.root.addChildView(view, index);
     this.layers.set(view, layer);
-    this.apply();
   }
 
   take(view: View): void {
-    if (this.layers.delete(view)) this.apply();
+    if (this.layers.delete(view)) this.root.removeChildView(view);
   }
 
   has(view: View): boolean {
     return this.layers.has(view);
-  }
-
-  private apply(): void {
-    const rank = (layer: Layer): number => LAYERS.indexOf(layer);
-    const desired = [...this.layers].sort((a, b) => rank(a[1]) - rank(b[1])).map(([view]) => view);
-    const { remove, add } = restack(this.root.children, desired);
-    for (const view of remove) this.root.removeChildView(view);
-    for (const view of add) this.root.addChildView(view);
   }
 }

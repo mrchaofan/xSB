@@ -2,6 +2,7 @@ export const Workflow = {
   get: "_dev.xsb/workflow/get",
   list: "_dev.xsb/workflow/list",
   update: "_dev.xsb/workflow/update",
+  stop: "_dev.xsb/workflow/stop",
   pause: "_dev.xsb/workflow/pause",
   resume: "_dev.xsb/workflow/resume",
   rollback: "_dev.xsb/workflow/rollback",
@@ -64,7 +65,7 @@ export type WorkflowNodeView = {
     error?: string;
   };
   additionalResults?: { id: string; summary: string }[];
-  controls?: { pause: boolean; resume: boolean; rollback?: boolean };
+  controls?: { stop?: boolean; pause: boolean; resume: boolean; rollback?: boolean };
 };
 
 /**
@@ -85,7 +86,7 @@ export type WorkflowHistory = {
 export type WorkflowView = {
   /** Authoritative runtime state and actions; clients need not infer them from node labels. */
   state?: "empty" | "proposed" | "running" | "paused" | "completed";
-  controls?: { pause: boolean; resume: boolean; rollback?: boolean };
+  controls?: { stop?: boolean; pause: boolean; resume: boolean; rollback?: boolean };
   /** Earlier active versions, the latest first. */
   history?: WorkflowHistory[];
   sessionId: string;

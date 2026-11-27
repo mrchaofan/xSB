@@ -31,6 +31,7 @@ function discard() {
 }
 
 textarea.onkeydown = (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === "Escape") { e.preventDefault(); discard(); }
   else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save(); }
 };

@@ -73,22 +73,22 @@ function markdownDetails(node, edges, openLink, sourcesOpen) {
 }
 
 /** Read the selected graph version and its accepted values directly; display never parses an assignment. */
-export function renderContract(flow, version, node, edges, openLink, rollback) {
+export function renderContract(flow, version, node, edges, openLink, stopButton) {
   const panel = $("#flow-contract");
-  if (!node?.contract && !node?.markdown) {
+  if (!node) {
     panel.hidden = true;
     if (panel.workflow) fill(panel);
     panel.workflow = undefined;
     return;
   }
   const sameNode = panel.dataset.version === version && panel.dataset.node === node.name && panel.workflow?.sessionId === flow.sessionId;
-  if (sameNode && panel.workflow === flow) return;
+  if (sameNode && panel.workflow === flow && !!stopButton === !!panel.querySelector("[data-action=stop-node]")) return;
   const top = sameNode ? panel.scrollTop : 0;
   fill(panel, h("summary", {}, t("flow.details", { name: node.name })),
-    node.markdown
-      ? markdownDetails(node, edges, openLink, sameNode && panel.querySelector(".input-sources")?.open)
-      : schemaDetails(node, edges, openLink, sameNode && panel.querySelector(".contract-raw")?.open),
-    rollback && h("button", { type: "button", class: "btn sm", "data-action": "rollback-node", onclick: rollback }, t("flow.rollbackNode")));
+    node.markdown ? markdownDetails(node, edges, openLink, sameNode && panel.querySelector(".input-sources")?.open)
+      : node.contract ? schemaDetails(node, edges, openLink, sameNode && panel.querySelector(".contract-raw")?.open)
+      : h("p", {}, t("flow." + node.status)),
+    stopButton);
   if (!sameNode) panel.open = true;
   panel.dataset.version = version;
   panel.dataset.node = node.name;
