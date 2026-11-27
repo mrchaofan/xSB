@@ -61,6 +61,10 @@ export function renderCompletion(report: Completion, language: Language): string
     if (result !== undefined) parts.push((zh ? "**结果**" : "**Result**") + "\n\n" + resultMarkdown(result));
     return parts.join("\n\n");
   });
+  if (report.result !== undefined) {
+    const history = nodes.length && `<details>\n<summary>${zh ? "节点交付记录" : "Task deliveries"}</summary>\n\n${nodes.join("\n\n")}\n\n</details>`;
+    return [title, resultMarkdown(report.result), overview, history].filter(Boolean).join("\n\n");
+  }
   return [title, overview, ...nodes].join("\n\n");
 }
 
@@ -84,7 +88,18 @@ export function renderAssignment(work: Work, language: Language, resume = false,
   const details: Record<string, unknown> = { id: work.id, kind: work.kind, ...(withdrawn.length && { withdrawn }) };
   if (!resume) {
     if (a.text !== undefined && a.text !== a.target) section(t.target, String(a.target));
-    if (a.input !== undefined) {
+    if (a.inputSchema !== undefined) {
+      const zh = language === "zh-CN";
+      const sources = (a.inputSources ?? {}) as Record<string, unknown>;
+      const fixed = Object.keys(a.input as Record<string, unknown>).filter(name => !Object.hasOwn(sources, name));
+      section(zh ? "本次命名输入" : "Assigned input", json(a.input));
+      section(zh ? "输入字段约定" : "Input schema", json(a.inputSchema));
+      const provenance = [
+        fixed.length && (zh ? "方案固定值 · " : "Fixed in the plan · ") + fixed.map(codeSpan).join(", "),
+        Object.keys(sources).length && json(sources),
+      ].filter(Boolean);
+      if (provenance.length) section(zh ? "输入来源" : "Input sources", provenance.join("\n\n"));
+    } else if (a.input !== undefined) {
       const input = a.input as Record<string, unknown>;
       const entries = Object.entries(input);
       if (entries.length) section(t.input, entries.map(([name, value]) => `### ${name}\n\n${typeof value === "string" ? quoted(value) : json(value)}`).join("\n\n"));
@@ -102,7 +117,7 @@ export function renderAssignment(work: Work, language: Language, resume = false,
       if (value !== undefined && (!Array.isArray(value) || value.length)) section(t[key], `${t.facts}\n\n${(Array.isArray(value) ? value : [value]).map(delivery).join("\n\n")}`);
     }
     // Preserve future fields as well as identifiers/model/reason without repeating the task body.
-    for (const [key, value] of Object.entries(a)) if (!["target", "text", "input", "schema", "revisions", "predecessors", "previous"].includes(key)) details[key] = value;
+    for (const [key, value] of Object.entries(a)) if (!["target", "text", "input", "inputSchema", "inputSources", "schema", "revisions", "predecessors", "previous"].includes(key)) details[key] = value;
   }
   sections.push(`<details>\n<summary>${t.details}</summary>\n\n${json(details)}\n\n</details>`);
   return sections.join("\n\n");

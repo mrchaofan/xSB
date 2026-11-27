@@ -946,6 +946,20 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 .dag-node:disabled { cursor: default; border-style: dashed; color: var(--ink-3); }
 .dag-node[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-wash); }
 #task-conversation { flex: 1; min-height: 0; display: flex; }
+#flow-contract[hidden], #task-conversation[hidden] { display: none; }
+#flow-contract { flex: 0 1 auto; max-height: 34%; overflow: auto; padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--line); }
+#flow-contract:has(+ #task-conversation[hidden]) { flex: 1; max-height: none; }
+#flow-contract summary { cursor: pointer; padding-block: var(--space-1); }
+#flow-contract > summary { font-weight: 600; }
+.contract-body { display: grid; gap: var(--space-3); padding-block: var(--space-2); overflow-wrap: anywhere; }
+.contract-body h4, .contract-body p, .contract-body pre { margin: 0; }
+.contract-body h4 { font-size: var(--text-sm); color: var(--ink-2); margin-bottom: var(--space-1); }
+.contract-body p, .contract-body pre { white-space: pre-wrap; }
+.contract-body pre { font-family: var(--mono); font-size: var(--text-sm); }
+.contract-field { display: grid; gap: var(--space-0); padding: var(--space-1) 0; }
+.contract-field + .contract-field { border-top: 1px solid var(--line); }
+.contract-field small, .contract-source, .contract-raw summary { color: var(--ink-2); font-size: var(--text-sm); }
+.contract-source { overflow-wrap: anywhere; }
 #task-conversation .empty { align-self: center; flex: 1; text-align: center; }
 #task-conversation .flow-none { flex: 1; justify-content: center; }
 #flow-heading[hidden] { display: none; }
