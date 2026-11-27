@@ -59,6 +59,9 @@ import type { MailItem, SessionRec } from "./state.ts";
 import { State, conversed, ops, topicKey } from "./state.ts";
 import { newId, now } from "./util.ts";
 
+/** How long deleting a conversation waits for its stopped turns to end: past a session's own 10 s stop timeout. */
+const DELETE_STOP_WAIT_MS = 15_000;
+
 export class Hub {
   readonly paths: Paths;
   readonly state: State;
@@ -424,24 +427,43 @@ export class Hub {
     return [...this.state.agents.values()].filter((a) => a.id === agentId || (main && a.workflowOwner === main));
   }
 
+  /** The live sessions of a main conversation and of its workflow's agents. */
+  private conversationSessions(agentId: string): LiveSession[] {
+    const members = new Set(this.conversationAgents(agentId).map((a) => a.id));
+    return [...this.live.values()].filter((s) => members.has(s.agentId));
+  }
+
   /**
-   * Delete a main conversation (`Agents.delete`). Nothing of it may be working: a turn ends first, by itself or by
-   * the user's stop. Its workflow is paused so no node starts again; input still queued for it goes with it.
-   * Its files stay until `purgeDeleted`.
+   * Delete a main conversation (`Agents.delete`). What of it is still working is stopped first, by the user's stop
+   * (its workflow's agents too, `Workflows.userStop`), and the deletion waits for every turn to end; work that will
+   * not end in time refuses the deletion. Its workflow is paused so no node starts again; input still queued for it
+   * goes with it. Its files stay until `purgeDeleted`.
    */
-  deleteConversation(agentId: string): void {
+  async deleteConversation(agentId: string): Promise<void> {
     const agent = this.agent(agentId);
     if (agent.workflowOwner || agent.deleted) throw RpcError.notFound(`agent ${agentId}`);
-    const members = this.conversationAgents(agentId);
-    const sessions = new Set([...this.state.sessions.values()].filter((s) => members.some((a) => a.id === s.agentId)).map((s) => s.id));
-    if ([...sessions].some((id) => this.live.get(id)?.busy))
-      throw failure("conversation_busy", { agent: agent.name });
     const main = this.state.mainSession(agentId)?.id;
     if (main && this.state.workflows.has(main)) {
       try { this.workflows.control(main, "pause"); } catch { /* no graph running: nothing to pause */ }
     }
+    const deadline = Date.now() + DELETE_STOP_WAIT_MS;
+    let busy = this.conversationSessions(agentId).filter((s) => s.busy);
+    if (busy.length) {
+      const live = main && this.live.get(main);
+      if (live) this.workflows.userStop(live);
+    }
+    while (busy.length) {
+      if (Date.now() > deadline) throw failure("conversation_busy", { agent: agent.name });
+      // A session the first stop did not reach (a retired workflow agent), or that took new work since: stop it too.
+      for (const s of busy) this.delivery.userStop(s);
+      await Promise.race([...busy.flatMap((s) => s.current ? [s.current.done.promise] : []), new Promise((r) => setTimeout(r, 100))]);
+      if (this.agent(agentId).deleted) return;
+      busy = this.conversationSessions(agentId).filter((s) => s.busy);
+    }
+    const members = this.conversationAgents(agentId);
+    const sessions = new Set([...this.state.sessions.values()].filter((s) => members.some((a) => a.id === s.agentId)).map((s) => s.id));
     const queued = [...this.state.mail.values()].filter((m) => sessions.has(m.to.sessionId)).map((m) => ops.ack(m.id));
-    this.state.commit([...queued, ops.putAgent({ ...agent, deleted: now() })]);
+    this.state.commit([...queued, ops.putAgent({ ...this.agent(agentId), deleted: now() })]);
     for (const a of members) {
       this.backends.stop(a.id);
       this.broadcast(Agents.removed, { id: a.id });

@@ -128,22 +128,28 @@ function applyProviderTheme() {
 
 /**
  * 删除对话（会话行的右键菜单）：有对话记录的先确认；没有记录的（哪怕已有后端会话）直接删。
- * 工作中的对话由中枢拒绝删除（停下后才能删），菜单里这一项不可用。
+ * 不论对话或它的任务 Agent 是否还在工作，菜单都可点：确认后由中枢先停下全部工作再删（Agents.delete），
+ * 停下前这一行显示“正在删除”，别处不必等它。
  */
+const deleting = new Set();
 async function deleteConversation(agent) {
+  if (deleting.has(agent.id)) return;
   if (agent.conversed && !(await confirmDialog(t("rail.delete.title", { name: agent.name }), [h("p", { class: "hint" }, t("rail.delete.body"))], t("rail.delete.confirm")))) return;
+  deleting.add(agent.id);
+  renderRail();
   try { await xsb.deleteConversation(agent.id); }
   catch (e) { openDialog(t("rail.delete.failed"), [h("p", {}, e.message)], [{ label: t("common.close"), primary: true }]); }
+  finally { deleting.delete(agent.id); renderRail(); }
 }
 
 function renderRail() {
   applyProviderTheme();
   const roots = state.agents.filter(a => !a.workflowOwner);
   const menu = (e, a) => openNativeContextMenu(e, [
-    { label: t("rail.delete"), disabled: a.state !== "idle", hint: t("rail.delete.busy"), run: () => deleteConversation(a) },
+    { label: t("rail.delete"), disabled: deleting.has(a.id), hint: t("rail.delete.deleting"), run: () => deleteConversation(a) },
   ]);
   fill($("#agents"), ...roots.map(a =>
-    h("button", { class:"row session-row", "aria-pressed":String(state.open.includes(a.id)),title:a.name,onclick:() => focusLane(a.id),
+    h("button", { class:"row session-row", "aria-pressed":String(state.open.includes(a.id)),"aria-busy":String(deleting.has(a.id)),title:deleting.has(a.id) ? t("rail.delete.deleting") : a.name,onclick:() => focusLane(a.id),
       oncontextmenu: (e) => menu(e, a) },
       avatarImage(a),
       h("span",{class:"row-text"},h("strong",{},a.name)), backendMark(a.backend),

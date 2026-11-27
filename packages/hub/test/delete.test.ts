@@ -41,11 +41,11 @@ function conversation(hub: Hub, paths: Paths, name: string) {
 
 const listed = (hub: Hub) => [...hub.state.agents.values()].filter((a) => a.conversation && !hub.isDeleted(a)).map((a) => a.name);
 
-test("a deleted conversation leaves the list at once; cleaning up removes its files and records for good", (t) => {
+test("a deleted conversation leaves the list at once; cleaning up removes its files and records for good", async (t) => {
   const { hub, paths, stopped } = setup(t);
   const kept = conversation(hub, paths, "kept");
   const gone = conversation(hub, paths, "gone");
-  hub.deleteConversation(gone.session.agentId);
+  await hub.deleteConversation(gone.session.agentId);
   assert.deepEqual(listed(hub), ["kept"]);
   assert.deepEqual(stopped, [gone.session.agentId]);
   assert.ok(fs.existsSync(gone.transcript), "its files stay until the cleanup");
@@ -67,10 +67,26 @@ test("a deleted conversation leaves the list at once; cleaning up removes its fi
   assert.ok(!log.includes(gone.session.agentId), "the log is compacted, not just appended to");
 });
 
-test("a conversation that is working is not deleted", (t) => {
+test("deleting a conversation that is working stops it first, then deletes it", async (t) => {
+  const { hub, paths } = setup(t);
+  const busy = conversation(hub, paths, "busy");
+  let working = true;
+  Object.defineProperty(busy.session, "busy", { get: () => working });
+  const stops: string[] = [];
+  hub.workflows.userStop = ((s: any) => { stops.push(s.id); setTimeout(() => { working = false; }, 10); }) as any;
+  await hub.deleteConversation(busy.session.agentId);
+  assert.deepEqual(stops, [busy.session.id], "the user's stop, once");
+  assert.deepEqual(listed(hub), []);
+});
+
+test("a conversation whose work does not end after the stop is not deleted", async (t) => {
   const { hub, paths } = setup(t);
   const busy = conversation(hub, paths, "busy");
   Object.defineProperty(busy.session, "busy", { get: () => true });
-  assert.throws(() => hub.deleteConversation(busy.session.agentId), /still working; stop it before deleting it/);
+  hub.workflows.userStop = (() => {}) as any;
+  hub.delivery.userStop = (() => {}) as any;
+  let clock = Date.now();
+  t.mock.method(Date, "now", () => (clock += 5_000));
+  await assert.rejects(hub.deleteConversation(busy.session.agentId), (e: any) => e.data?.reason === "conversation_busy");
   assert.deepEqual(listed(hub), ["busy"]);
 });
