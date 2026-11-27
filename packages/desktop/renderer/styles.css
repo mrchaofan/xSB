@@ -981,7 +981,6 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 .launcher-item { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); text-align: left; }
 .launcher-item:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
 .launcher-item:disabled { cursor: default; opacity: .55; }
-.launcher-note { margin: 0 0 var(--space-1); color: var(--ink-3); font-size: var(--text-sm); text-align: center; }
 .launcher-item strong { font-weight: 600; }
 .launcher-item small { white-space: normal; }
 .launcher-icon { flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-md); background: var(--wash); color: var(--ink-2); }

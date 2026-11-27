@@ -28,7 +28,9 @@ export function showWeb(container, page, focus = false) {
 }
 
 function slot(id, element, focus) {
-  let last, lastRatio, queued = false, stopped = false, wantsFocus = focus;
+  let last, lastRatio, queued = false, stopped = false;
+  // 等待布局期间，用户可能已把键盘移到地址栏或对话输入框。
+  let focusOwner = focus ? document.activeElement : null;
   const tell = (bounds) => {
     const key = JSON.stringify(bounds);
     if (key !== last || devicePixelRatio !== lastRatio) {
@@ -40,9 +42,9 @@ function slot(id, element, focus) {
       // 网页可能已经关了或移走了：那就没什么可摆的。
       void xsb.page(id, "bounds", bounds).catch(() => {});
     }
-    if (bounds && wantsFocus) {
-      wantsFocus = false;
-      void xsb.page(id, "focus").catch(() => {});
+    if (bounds && focusOwner) {
+      if (document.activeElement === focusOwner) void xsb.page(id, "focus").catch(() => {});
+      focusOwner = null;
     }
   };
   const covered = (rect) => !!document.querySelector("dialog[open]") || [...document.querySelectorAll("[popover]")].some((p) => {
@@ -88,5 +90,5 @@ function slot(id, element, focus) {
     if (active?.element === element) active = undefined;
   }
   schedule();
-  return { id, element, stop, focus: () => { wantsFocus = true; if (last && last !== "null") tell(JSON.parse(last)); } };
+  return { id, element, stop, focus: () => { focusOwner = document.activeElement; if (last && last !== "null") tell(JSON.parse(last)); } };
 }

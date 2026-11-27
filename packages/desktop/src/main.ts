@@ -607,7 +607,8 @@ async function call(event: Electron.IpcMainInvokeEvent, method: string, args: an
       return pages.open(args[0], { embedded: args[1] === true, sessionId: args[2] });
     case "page":
       try {
-        if (args[1] === "bounds" || args[1] === "focus") return pages.present(args[0], event.sender, args[1], boundsOf(args[2]));
+        if (args[1] === "focus") return pages.present(args[0], event.sender, "focus", args[2] !== false);
+        if (args[1] === "bounds") return pages.present(args[0], event.sender, "bounds", boundsOf(args[2]));
         if (["annotate", "annotationSave", "annotationDiscard", "annotationsClear", "annotationsRemove"].includes(args[1])) return pages.annotate(args[0], event.sender, args[1], args[2]);
         return pages.call(args[0], args[1], args[2]);
       } catch (e) {

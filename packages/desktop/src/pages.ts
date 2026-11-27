@@ -37,7 +37,7 @@ const WEB_PREFERENCES = { sandbox: true, contextIsolation: true, nodeIntegration
 
 /** `background`: an agent opened it, or its page did while the agent was driving it; its tab is shown without taking the user's focus. */
 export type PageOptions = { sessionId?: string; embedded?: boolean; agent?: boolean; background?: boolean; downloads?: BrowserDownloads; onPopup?: (id: string, openerId: string) => void };
-type Page = { id: string; view: WebContentsView; contents: WebContents; embedded: boolean; agent: boolean; background: boolean; controlling?: boolean; window?: PageHost; error?: string; favicon?: string; releaseDownloads?: () => void; annotator?: Annotator; options: PageOptions };
+type Page = { id: string; view: WebContentsView; contents: WebContents; embedded: boolean; agent: boolean; background: boolean; userFocused?: boolean; controlling?: boolean; window?: PageHost; error?: string; favicon?: string; releaseDownloads?: () => void; annotator?: Annotator; options: PageOptions };
 /** `pageWindowUrl`: the document of a page's own window. `toneOf`: the style of annotations on a page of this session (page-annotations.ts), after its agent's backend. */
 type Shell = HostShell & { pageWindowUrl: string; toneOf?: (sessionId?: string) => Tone };
 
@@ -86,13 +86,14 @@ export class Pages {
     installInputGuard(contents);
     if (downloads) page.releaseDownloads = ownDownloads(contents, page.id, downloads, () => { page.error = undefined; this.changed(page); });
     contents.once("destroyed", () => this.close(page));
-    // Chromium gives a page the keyboard by itself when it loads one or opens a popup. A page in the background
-    // (an agent's) gets it only from the user's own click in it: otherwise it goes back to the window's document.
+    // Chromium can give a background page focus when it loads or opens a popup. A user's tab selection
+    // or click in the page can claim that focus, even after Chromium has delivered the focus event.
+    contents.on("blur", () => { page.userFocused = false; });
     contents.on("focus", () => {
       if (!page.background) return;
       setTimeout(() => {
         const host = this.hostOf(page);
-        if (!contents.isDestroyed() && contents.isFocused() && !pressedByUser(contents) && !host.win.isDestroyed() && host.win.isFocused()) host.document.focus();
+        if (!contents.isDestroyed() && contents.isFocused() && !page.userFocused && !pressedByUser(contents) && !host.win.isDestroyed() && host.win.isFocused()) host.document.focus();
       }, 50);
     });
 
@@ -158,16 +159,28 @@ export class Pages {
     if (op === "pin") this.changed(page);
   }
 
-  /**
-   * Where the window's document laid out the page (null: nowhere now), or that the user opened it and it takes
-   * the keyboard. Only the document of the window the page belongs to places it; a late word from one it left is ignored.
-   */
-  present(id: string, sender: WebContents, op: "bounds" | "focus", bounds?: Rectangle | null): void {
+  /** Resolve a tab for interaction. By default its visible view takes the keyboard in the active window. */
+  focus(id: string, focusContents = true): WebContents {
+    const page = this.pages.get(id);
+    if (!page || page.contents.isDestroyed()) throw new Error("this page was closed");
+    if (focusContents) {
+      const host = this.hostOf(page);
+      if (host.showing(id) && host.win.isFocused()) {
+        page.userFocused = true;
+        page.contents.focus();
+      }
+    }
+    return page.contents;
+  }
+
+  /** Only the page's current host may place its view or request keyboard focus after layout. */
+  present(id: string, sender: WebContents, ...[op, value]: ["bounds", bounds?: Rectangle | null] | ["focus", focusContents?: boolean]): void {
     const page = this.pages.get(id);
     if (!page) return;
     const host = this.hostOf(page);
     if (sender !== host.document) return;
-    if (op === "focus") return host.focus(id);
+    if (op === "focus") return void this.focus(id, value);
+    const bounds = value;
     if (!bounds) return host.remove(id);
     // Keep drawing a screenshot until a visible host needs the view. Hidden windows still record the latest layout.
     const drawing = this.drawing.get(id);
@@ -391,11 +404,13 @@ export class Pages {
 
   private changed(page: Page): void {
     // Events of a page that is being destroyed still arrive.
-    if (!this.pages.has(page.id) || page.contents.isDestroyed()) return;
+    if (!this.pages.has(page.id) || page.contents.isDestroyed() || this.host.document.isDestroyed()) return;
     this.hostOf(page).update(this.shown(page));
     if (page.embedded) return;
     const event = { page: this.view(page) };
-    this.send(event);
+    // Switching the displayed tab would unmount a focused web page or its annotation editor.
+    const keepTab = page.background && this.host.win.isFocused() && !this.host.document.isFocused();
+    this.send({ ...event, keepTab });
     if (page.window && !page.window.win.isDestroyed()) page.window.document.send("xsb:event", event);
   }
 

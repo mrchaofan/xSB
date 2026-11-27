@@ -80,7 +80,7 @@ window.selectPage = selectTab;
 xsb.on(event => {
   if (event.webAnnotation) window.notes = [...(window.notes ?? []), event.webAnnotation];
   if (event.webAnnotationsRemoved) window.removed = [...(window.removed ?? []), event.webAnnotationsRemoved];
-  if (event.page) onPage(event.page);
+  if (event.page) onPage(event.page, event.keepTab);
   if (event.removedPage) onPageRemoved(event.removedPage);
 });
 </script></body></html>`);
@@ -183,8 +183,40 @@ xsb.on(event => {
   await pages.navigate(userPage.id, url);
   assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'hostEditor', 'page updates do not focus an existing tab again');
   host.webContents.focus();
-  await host.webContents.executeJavaScript(`window.selectPage('${agentPage.id}'); document.querySelector('#hostEditor').focus(); true`);
+  await host.webContents.executeJavaScript(`const tabButton = document.querySelector('[data-id="${agentPage.id}"] .tab-main'); tabButton.focus(); tabButton.click(); document.querySelector('#hostEditor').focus(); true`);
   await until(() => !!pageViewIn(host!, agentPage.id));
+  assert.equal(host.webContents.isFocused(), true, 'a later user interaction wins while the tab is being laid out');
+  await host.webContents.executeJavaScript(`document.querySelector('[data-id="${agentPage.id}"] .tab-main').click()`);
+  const selected = pages.contents(agentPage.id)!;
+  await until(() => selected.isFocused());
+  await pause(150);
+  assert.equal(selected.isFocused(), true, 'a user-selected agent tab keeps native keyboard focus');
+  await invoke('browser_open', { url });
+  const background = pages.list().at(-1)!;
+  await until(async () => await host!.webContents.executeJavaScript(`!!document.querySelector('[data-id="${background.id}"]')`));
+  assert.equal(await host.webContents.executeJavaScript('window.auditState.tab'), agentPage.id);
+  assert.equal(selected.isFocused(), true, 'opening an agent tab preserves the focused page');
+  assert.equal(shown(background.id), false);
+
+  // Pick a different tab through the modal. Its page receives focus after the modal closes.
+  host.webContents.focus();
+  await host.webContents.executeJavaScript("document.querySelector('#tabs .tab-list + button').click()");
+  await until(() => !shown(agentPage.id));
+  const index = pages.list().filter(p => p.sessionId === 'sa').findIndex(p => p.id === userPage.id);
+  await host.webContents.executeJavaScript(`document.querySelectorAll('dialog .opened-tabs button')[${index}].click()`);
+  await until(() => pages!.contents(userPage.id)!.isFocused());
+  host.webContents.focus();
+  await host.webContents.executeJavaScript(`document.querySelector('[data-id="${userPage.id}"] .icon-btn').click()`);
+  await until(() => pages!.contents(background.id)!.isFocused());
+  await invoke('browser_close', { pageId: background.id });
+  await until(() => !!pageViewIn(host!, additionalPage.id));
+  assert.equal(host.webContents.isFocused(), true, 'automatic selection after an agent closes a tab leaves the keyboard with the host');
+
+  await invoke('browser_select', { pageId: agentPage.id });
+  await host.webContents.executeJavaScript(`document.querySelector('[data-id="${agentPage.id}"] .tab-main').click()`);
+  await until(() => selected.isFocused());
+  host.webContents.focus();
+  await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
   const agentLink = Number(/\[(\d+)\] link "Agent popup"/.exec((await invoke('browser_snapshot')).content[0].text)![1]);
   const beforePopup = pages.list().length;
   await invoke('browser_click', { ref: agentLink });
@@ -200,6 +232,10 @@ xsb.on(event => {
   assert.equal(host.webContents.isFocused(), true, 'a blank tab leaves the keyboard with the address bar');
   const blankId = await host.webContents.executeJavaScript('window.auditState.tab');
   assert.equal(pages.list().find((p) => p.id === blankId)!.background, false);
+  await invoke('browser_open', { url });
+  assert.equal(await host.webContents.executeJavaScript('window.auditState.tab'), blankId, 'an address being edited stays with its original tab');
+  assert.equal(await host.webContents.executeJavaScript('document.activeElement.id'), 'web-url');
+  assert.equal(host.webContents.isFocused(), true);
   console.log("PASS user tabs focus, new agent tabs and popups switch display without host focus, existing agent selection stays in the background");
   }
   async function checkUserAnnotations() {
@@ -564,13 +600,31 @@ xsb.on(event => {
   await pages.drawn('p2', async () => pages!.present('p2', host!.webContents, 'bounds', null));
   assert.equal(pageViewIn(host, 'p2'), undefined, 'returning a loan does not uncover a hidden slot');
   pages.present('p2', host.webContents, 'bounds', slot);
-  // An agent works in the background: selecting and drawing a page that is not on screen leaves the user's view alone.
-  await invoke("browser_select", { pageId: "p1" });
+  // Agent input goes to the selected background page while the displayed page keeps the user's keyboard.
   await until(() => !!pageViewIn(host!, 'p2'));
   assert.equal(shown('p1'), false);
   host.show();
   host.focus();
   await until(() => host!.isFocused());
+  child.focus();
+  await until(() => host!.isFocused() && child.isFocused());
+  let pageBlurred = false;
+  const onPageBlur = () => { pageBlurred = true; };
+  child.once('blur', onPageBlur);
+  const background = (await invoke("browser_select", { pageId: "p1" })).content[0].text;
+  const backgroundField = Number(/\[(\d+)\] textbox "Agent input"/.exec(background)![1]);
+  await original.executeJavaScript("document.querySelector('#field').addEventListener('input', () => window.focusAtInput = document.hasFocus(), { once: true }); true");
+  await invoke('browser_type', { ref: backgroundField, text: '后台输入' });
+  await invoke('browser_press_key', { key: 'Z' });
+  assert.equal(await original.executeJavaScript("document.querySelector('#field').value"), '后台输入Z');
+  assert.equal(await original.executeJavaScript("window.focusAtInput"), true);
+  assert.equal(shown('p1'), false);
+  assert.equal(host.isFocused(), true, 'the visible window stays active during background input');
+  assert.equal(child.isFocused(), true, 'the visible page keeps native keyboard focus during background input');
+  child.off('blur', onPageBlur);
+  assert.equal(pageBlurred, false, 'background input never takes the keyboard from the visible page');
+  // Drawing the background page also preserves the host editor's focus.
+  host.webContents.focus();
   await host.webContents.executeJavaScript("document.querySelector('#hostEditor').focus(); true");
   const drawn = pages.drawn.bind(pages);
   let screenshotScale = 1;

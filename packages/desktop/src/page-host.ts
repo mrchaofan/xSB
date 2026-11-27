@@ -148,11 +148,6 @@ export class PageHost {
     this.decorate();
   }
 
-  /** Give the keyboard to the page shown, when the user opened it. */
-  focus(id: string): void {
-    if (this.showing(id)) this.shown!.page.view.webContents.focus();
-  }
-
   dispose(): void {
     this.overlay.dispose();
     for (const view of [this.shield, this.editor]) if (view?.webContents && !view.webContents.isDestroyed()) view.webContents.close();

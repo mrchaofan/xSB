@@ -26,7 +26,6 @@ try {
     "./workflow.js": `export const currentFlow = () => null; export const renderWorkflow = () => {};`,
     "./artifacts.js": `export const artifactLabel = () => '';`,
     "./file-icons.js": `export const fileIcon = () => null;`,
-    "./form.js": `export const openDialog = () => document.createElement('div');`,
     "./menu.js": `export const openContextMenu = () => {};`,
   };
   await build({ input: renderer("pages.js"), platform: "browser", plugins: [{

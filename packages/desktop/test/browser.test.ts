@@ -145,6 +145,10 @@ class FakePages {
     return { id };
   }
   contents(id: string) { return this.entries.get(id)?.contents; }
+  focus(id: string, focusContents = true) {
+    this.operations.push(`${id}:focus:${focusContents}`);
+    return this.contents(id);
+  }
   async navigate(id: string, url: string) {
     const entry = this.entries.get(id);
     if (this.failNavigation) {
@@ -177,8 +181,11 @@ test("new pages preserve the original, and popups/select/close remain connection
   await invoke("browser_navigate", { url: "one.example" });
   await invoke("browser_open", { url: "two.example", presentation: "window" });
   assert.equal(pages.entries.get("p1").url, "https://one.example/"); assert.ok(pages.operations.includes("p2:detach"));
+  assert.equal((await invoke("browser_select", { pageId: "p1", focus: true })).isError, true);
+  assert.equal(JSON.parse(read(await invoke("browser_tabs"))).currentPageId, "p2");
   await invoke("browser_select", { pageId: "p1" }); pages.clicked = () => { pages.popup("p1"); };
   assert.match(read(await invoke("browser_click", { ref: 1 })), /pageId: p3/);
+  assert.deepEqual(pages.operations.filter(op => op.includes(":focus:")), ["p1:focus:false", "p2:focus:false", "p1:focus:false", "p3:focus:false"]);
   const user = pages.open("about:blank"); assert.equal((await invoke("browser_select", { pageId: user.id })).isError, true);
   await invoke("browser_close", { pageId: "p3" }); assert.match(read(await invoke("browser_snapshot")), /pageId: p2/);
 });
