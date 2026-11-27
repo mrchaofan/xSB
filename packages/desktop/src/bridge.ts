@@ -104,7 +104,8 @@ export type Event =
   | { task: Task }
   | { artifact: Artifact }
   | { artifactsRemoved: string[] }
-  | { page: PageView }
+  /** On a new page, keepTab preserves the current tab while one of the window's native views has focus. */
+  | { page: PageView; keepTab?: boolean }
   | { removedPage: string }
   /** The connection to the workspace's hub is gone. Opening the workspace again makes a new one. */
   | { hub: "down" }

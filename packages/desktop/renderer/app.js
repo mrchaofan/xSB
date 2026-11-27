@@ -948,7 +948,7 @@ xsb.on((event) => {
   }
   else if (event.webAnnotation) addAnnotation(event.webAnnotation);
   else if (event.webAnnotationsRemoved) onAnnotationsRemoved(event.webAnnotationsRemoved);
-  else if (event.page) onPage(event.page);
+  else if (event.page) onPage(event.page, event.keepTab);
   else if (event.removedPage) onPageRemoved(event.removedPage);
   else if (event.hub === "down") showHub(false);
   else if (event.arkLoginUrl) onArkLoginUrl(event.arkLoginUrl);

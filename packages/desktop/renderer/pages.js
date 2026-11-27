@@ -30,12 +30,12 @@ function pageIcon(page) {
 }
 
 /** id："workflow"、"catalog"、制品标签或网页的 id；null 显示启动页。打开工作流或资产管理即让它的标签出现。 */
-export function selectTab(id) {
+export function selectTab(id, focusPage = true) {
   if (id !== state.tab) rememberPosition();
   if (id === "workflow") state.workflowTab = true;
   if (id === "catalog") state.catalogTab = true;
   state.tab = id;
-  renderSide();
+  renderSide(focusPage);
 }
 
 /** 标签栏从左到右的 id。 */
@@ -102,24 +102,28 @@ function dragToReorder(list) {
   };
 }
 
+// 用户关闭网页的请求由主进程回报；收到后允许相邻网页接过焦点。
+const closingPages = new Set();
+
 /** 关掉一个标签；关的是当前标签时，选中它旁边的那个，一个都不剩就回到启动页。 */
 function closeTab(id) {
+  if (pageOf(id)) {
+    closingPages.add(id);
+    void xsb.page(id, "close").catch(() => closingPages.delete(id));
+    return;
+  }
   const ids = tabIds(), index = ids.indexOf(id);
   if (id === "workflow") state.workflowTab = false;
   else if (id === "catalog") state.catalogTab = false;
   else state.artifactTabs = state.artifactTabs.filter((tab) => tab.id !== id);
-  if (state.tab === id) state.tab = ids[index + 1] ?? ids[index - 1] ?? null;
-  renderSide();
+  if (state.tab === id) selectTab(ids[index + 1] ?? ids[index - 1] ?? null);
+  else renderSide();
 }
 
 /** 一次关掉几个标签；当前标签在其中时，改选 keep。 */
 function closeTabs(ids, keep) {
-  if (ids.includes(state.tab)) { rememberPosition(); state.tab = keep; }
-  for (const id of ids) {
-    if (pageOf(id)) void xsb.page(id, "close").catch(() => {});
-    else closeTab(id);
-  }
-  renderSide();
+  if (ids.includes(state.tab)) selectTab(keep);
+  for (const id of ids) closeTab(id);
 }
 
 /** 标签的右键菜单：网页标签先是对这个网页的操作（同地址栏的按钮），然后是关闭标签的几种方式。 */
@@ -135,23 +139,19 @@ function tabMenu(event, id) {
       page.window ? { label: t("web.restore"), icon: "collapse", run: op("restore") } : { label: t("web.detach"), icon: "detach", run: op("detach") },
       null,
     ] : []),
-    { label: t("tabs.close"), icon: "close", run: () => (page ? op("close")() : closeTab(id)) },
+    { label: t("tabs.close"), icon: "close", run: () => closeTab(id) },
     { label: t("tabs.closeOthers"), disabled: !others.length, run: () => closeTabs(others, id) },
     { label: t("tabs.closeRight"), disabled: !right.length, run: () => closeTabs(right, id) },
   ], t("tabs.menu"));
 }
 
-/**
- * 启动页：竖排可以在新标签中打开的东西。网页、资产和工作流都属于一个会话：没有打开的会话时全部不可用，
- * 上方说明要先新建或打开一个会话。
- */
+/** 启动页列出可在新标签中打开的内容。没有打开的会话时禁用这些入口。 */
 function launcher(hasWorkflow) {
   const session = !!rootSession();
   const item = (icon, title, hint, onclick, disabled = false) =>
     h("button", { class: "launcher-item", disabled: disabled || !session, onclick }, h("span", { class: "launcher-icon", html: icon }),
       h("span", { class: "row-text" }, h("strong", {}, title), h("small", {}, hint)));
   return h("div", { class: "launcher" },
-    !session && h("p", { class: "launcher-note" }, t("side.launcher.noSession")),
     state.pages && item(ICON.globe, t("side.launcher.browser"), t("side.launcher.browserHint"), newTab),
     item(ICON.grid, t("tabs.artifacts"), t("side.launcher.assetsHint"), () => selectTab("catalog")),
     item(ICON.flow, t("flow.title"), t(hasWorkflow || !session ? "side.launcher.workflowHint" : "side.launcher.workflowNone"), () => selectTab("workflow")));
@@ -226,7 +226,7 @@ export function renderSide(focusPage = false) {
     }),
     // 智能体打开并操作的网页，图标角上有一个强调色的点。
     ...pages.map((p) => tab(p.id, pageIcon(p), titleOf(p), p.agent ? `${titleOf(p)}\n${p.url}\n${t("tabs.agent")}` : `${titleOf(p)}\n${p.url}`,
-      () => xsb.page(p.id, "close"), { "data-agent": p.agent ? "true" : null })),
+      () => closeTab(p.id), { "data-agent": p.agent ? "true" : null })),
   ].filter(Boolean);
   const byId = new Map(tabs.map((el) => [el.dataset.id, el]));
   syncTabs(tabList, ordered([...byId.keys()]).map((id) => byId.get(id)));
@@ -279,7 +279,7 @@ function openedTabs() {
     ...state.artifactTabs.map((tab) => { const a = state.artifacts.find((a) => a.id === tab.artifactId); return { id: tab.id, title: a?.name ?? tab.artifactId, path: a?.path, icon: fileIcon(a?.name ?? tab.artifactId) }; }),
     ...sessionPages().map((p) => ({ id: p.id, title: titleOf(p), path: p.url, icon: pageIcon({ ...p, loading: false }) })),
   ];
-  fill(list, ...items.map((item) => h("button", { class: "row", "aria-pressed": String(item.id === state.tab), onclick: () => { selectTab(item.id); dialog.close(); } },
+  fill(list, ...items.map((item) => h("button", { class: "row", "aria-pressed": String(item.id === state.tab), onclick: () => { dialog.close(); selectTab(item.id); } },
     item.icon, h("span", { class: "row-text" }, h("strong", {}, item.title), h("small", {}, item.path)))),
     !items.length && h("p", { class: "empty" }, t("tabs.empty")));
   list.querySelector('[aria-pressed="true"]')?.focus();
@@ -291,12 +291,12 @@ let addressBarNext = false;
 async function newTab() {
   const owner = rootSession();
   addressBarNext = true;
-  await xsb.openPage("about:blank", false, owner).finally(() => { addressBarNext = false; });     // 新标签随 page 事件出现并被选中
-  if (rootSession() === owner) $("#web-url").focus();
+  const page = await xsb.openPage("about:blank", false, owner).finally(() => { addressBarNext = false; });     // 新标签随 page 事件出现并被选中
+  if (rootSession() === owner && state.tab === page.id) $("#web-url").focus();
 }
 
-/** 新网页切换展示并打开右栏；只有用户新开的聚焦网页，智能体新开的保留宿主焦点。已有网页更新不切换标签。 */
-export function onPage(page) {
+/** 用户新开的网页接过焦点。展示智能体的新标签时保留用户在当前网页或地址栏的输入。 */
+export function onPage(page, keepTab = false) {
   const known = state.pages.find(p => p.id === page.id);
   if (!page.sessionId) page.sessionId = known?.sessionId ?? rootSession();
   const here = ownerOf(page) === rootSession();
@@ -304,13 +304,12 @@ export function onPage(page) {
   if (known) Object.assign(known, page);
   else {
     state.pages.push(page);
-    if (here) {
+    if (here && !keepTab && !(page.background && document.activeElement === $("#web-url"))) {
       rememberPosition();
       state.tab = page.id;
       revealArtifacts();
       // 用户从启动页新开的空白标签由 newTab 聚焦地址栏，网页不拿走键盘。
       focusPage = !page.background && !addressBarNext;
-      addressBarNext = false;
     }
   }
   if (here) renderSide(focusPage);
@@ -318,13 +317,15 @@ export function onPage(page) {
 
 /** 网页关了：关的是当前标签时，回到它旁边的那个。 */
 export function onPageRemoved(id) {
+  const userClosed = closingPages.delete(id);
   const index = state.pages.findIndex((p) => p.id === id);
   if (index < 0) return;
   const localIndex = sessionPages().findIndex(p => p.id === id);
   state.pages.splice(index, 1);
   if (localIndex < 0) return;
-  if (state.tab === id) state.tab = (sessionPages()[localIndex] ?? sessionPages()[localIndex - 1])?.id ?? state.artifactTabs.at(-1)?.id ?? null;
-  renderSide();
+  if (state.tab !== id) return renderSide();
+  const pages = sessionPages();
+  selectTab((pages[localIndex] ?? pages[localIndex - 1])?.id ?? state.artifactTabs.at(-1)?.id ?? null, userClosed);
 }
 
 const act = (op) => () => xsb.page(state.tab, op);

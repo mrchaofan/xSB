@@ -25,7 +25,11 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
     await js("new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))");
     fs.writeFileSync(path.join(shots, name + ".png"), (await win.capturePage()).toPNG());
   };
-  const mouse = (type, x, y, button = "left") => win.webContents.sendInputEvent({ type, x, y, button, clickCount: 1 });
+  // sendInputEvent bypasses the native hit test. A click in the window chrome first activates its document.
+  const mouse = (type, x, y, button = "left") => {
+    if (type === "mouseDown") { win.focus(); win.webContents.focus(); }
+    win.webContents.sendInputEvent({ type, x, y, button, clickCount: 1 });
+  };
   const leftClick = async (sel) => {
     const [x, y] = await js("(()=>{const r=" + q(sel) + ".getBoundingClientRect();return [Math.round(r.left+r.width/2),Math.round(r.top+r.height/2)]})()");
     await mouse("mouseMove", x, y);
