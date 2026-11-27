@@ -205,7 +205,7 @@ await assert.rejects(conn.request("_dev.xsb/roles/put",{role:{name:"legacy"}}),/
   // The new prompt is inserted into native work: this run gains an owner at the receipt, keeping its original id.
   const joined = await create("steerable"), joinedUpdates: any[] = [];
   conn.updates.push((id, update) => { if (id === joined.id) joinedUpdates.push(update); });
-  await prompt(joined.id, "!say FRONT\n!background 100 500");
+  await prompt(joined.id, "!say FRONT\n!background 100 waitForInput");
   await until("autonomous output before input", () => joinedUpdates.find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("BACKGROUND START")));
   const unowned = joinedUpdates.find(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("BACKGROUND START"))._meta[RunExt.key];
   await prompt(joined.id, "!sleep 25\n!say JOINED");
