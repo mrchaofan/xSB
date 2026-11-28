@@ -151,6 +151,33 @@ test("Files refreshes for edits completed before a task attached or started befo
   ws.close();
 });
 
+test("a permission received while attaching a workflow node survives history loading", async () => {
+  const peer = new Peer();
+  const worker = { ...agent("worker"), mainSessionId: "node-session", workflowOwner: "owner", state: "running" };
+  snapshot(peer);
+  const page = Promise.withResolvers();
+  peer.requests.set(History.page, () => page.promise);
+  const events = [];
+  const ws = new Workspace(new Paths("/tmp/xsb-node-approval"), peer, String, event => events.push(event), () => {});
+  await ws.load();
+
+  peer.emit(Agents.update, { agent: worker });
+  const response = peer.requests.get("session/request_permission")({
+    sessionId: worker.mainSessionId, title: "Write output", options: [{ kind: "allow_once", optionId: "yes" }],
+  }, { signal: new AbortController().signal });
+  page.resolve({ updates: [{ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Preparing output" } }], cursor: null, agent: worker });
+  await ws["mains"].get(worker.id);
+
+  const permissions = (await ws.history(worker.id)).entries.filter(e => e.kind === "permission");
+  assert.equal(permissions.length, 1);
+  const transcript = events.find(event => event.agentId === worker.id && event.transcript).transcript;
+  assert.deepEqual(transcript.entries.map(entry => entry.kind), ["output", "permission"]);
+  assert.equal(transcript.entries[1].id, permissions[0].id);
+  ws.permit(permissions[0].id, true);
+  assert.deepEqual(await response, { outcome: { outcome: "selected", optionId: "yes" } });
+  ws.close();
+});
+
 test("a native form arriving before the first snapshot waits for session mapping and answers via its request", async () => {
   const peer = new Peer(); snapshot(peer, [{ ...agent("a"), mainSessionId: "s" }]);
   const ws = workspace(peer), abort = new AbortController();
@@ -541,38 +568,88 @@ test("task history of a removed agent does not count as current work", async () 
   ws.close();
 });
 
-test("the user is told when the work is done, failed, or waits for them", async () => {
+test("each terminal task notifies once while other conversations are still working", async () => {
   const peer = new Peer();
   snapshot(peer, [agent("a"), agent("b")]);
-  const notices: string[] = [];
-  const ws = workspace(peer, (n) => notices.push(`${n.kind} ${n.name} ${n.detail}`.trim()));
+  const notices: Notice[] = [];
+  const ws = workspace(peer, n => notices.push(n));
   await ws.load();
-  const task = { id: "t1", title: "draw", from: { agentId: "a" }, to: { agentId: "b" }, status: "running" };
-
-  // The work goes through two agents; it is done when the last of them stops and no task is open.
   peer.emit(Agents.update, { agent: { ...agent("a"), state: "running" } });
-  peer.emit(Tasks.update, { task });
-  peer.emit(Agents.update, { agent: agent("a") });
-  assert.deepEqual(notices, []);
-  peer.emit(Tasks.update, { task: { ...task, status: "failed" } });
-  peer.emit(Tasks.update, { task: { ...task, status: "failed", result: "again" } });
-  assert.deepEqual(notices, ["failed b draw", "done b"]);
-
-  // An agent that asks the user, or one the user stopped, going quiet is no news of its own.
-  notices.length = 0;
-  peer.emit(Agents.update, { agent: { ...agent("a"), state: "running" } });
+  const task = { id: "t1", title: "draw", to: { agentId: "b", sessionId: "sb" }, status: "running" };
+  const change = (fields: object) => peer.emit(Tasks.update, { task: { ...task, ...fields } });
+  for (const status of ["completed", "failed", "cancelled", "interrupted"]) {
+    change({ id: status });
+    change({ id: status, status });
+    change({ id: status, status, result: "more detail" });
+  }
+  // A turn going idle is not a task settlement, and an unrelated request must not suppress completion.
   peer.emit(Agents.asks, { agentId: "a", question: "Which cast?" });
   peer.emit(Agents.update, { agent: agent("a") });
-  peer.emit(Agents.update, { agent: { ...agent("a"), state: "running" } });
-  await ws.cancel("a");
-  peer.emit(Agents.update, { agent: agent("a") });
-  assert.deepEqual(notices, ["confirm a Which cast?"]);
+  await ws.load();
+  assert.deepEqual(notices.map(n => [n.kind, n.name, n.detail]), [
+    ["done", "b", "draw"], ["failed", "b", "draw"], ["cancelled", "b", "draw"], ["interrupted", "b", "draw"],
+    ["confirm", "a", "Which cast?"],
+  ]);
+  ws.close();
+});
 
-  // A permission request is asked of the user.
-  notices.length = 0;
-  ws["sessionAgent"].set("s-a", "a");
-  void peer.requests.get("session/request_permission")({ sessionId: "s-a", title: "rm -rf build", subject: { type: "tool_call", toolCall: { toolCallId: "c", title: "rm -rf build" } }, options: [] });
-  assert.deepEqual(notices, ["permission a rm -rf build"]);
+test("workflow task deliveries notify independently of the ledger and snapshot replay", async () => {
+  const peer = new Peer();
+  const root = { ...agent("main"), mainSessionId: "owner" };
+  const worker = { ...agent("worker"), mainSessionId: "node-session", workflowOwner: "owner" };
+  snapshot(peer, [root, worker]);
+  peer.requests.set(History.page, ({ sessionId }) => ({ updates: [], cursor: null, agent: sessionId === "owner" ? root : worker }));
+  const node = { name: "Draft", kind: "task", agentId: "worker", target: "work", status: "running" };
+  const flow = { sessionId: "owner", version: "1", state: "running", nodes: [node], edges: [], paused: false };
+  peer.requests.set(Workflow.list, () => ({ workflows: [flow] }));
+  const notices: Notice[] = [];
+  const ws = workspace(peer, n => notices.push(n));
+  await ws.load();
+  const update = workflow => peer.emit(Workflow.update, { workflow });
+  const choosing = { ...flow, nodes: [{ ...node, status: "choosing", target: "delivery", deliveryId: "delivery" }] };
+  update(choosing);
+  const done = { ...flow, nodes: [{ ...choosing.nodes[0], status: "completed" }] };
+  update(done);
+  update(done);
+  // A new graph result can be accepted with an additional assignment already running on that agent.
+  const extra = { ...done, nodes: [{ ...node, status: "running", deliveryId: "second-delivery" }] };
+  update(extra);
+  const end = { ...done, state: "completed", nodes: [{ ...extra.nodes[0], status: "completed", target: "second-delivery", additionalResults: [{ id: "extra", summary: "Review" }] }] };
+  update(end);
+  update(end);
+  assert.deepEqual(notices.map(n => [n.kind, n.name, n.detail]), [
+    ["done", "worker", "Draft"], ["done", "worker", "Draft"], ["done", "worker", "Review"], ["workflow", "main", ""],
+  ]);
+  ws.close();
+});
+
+test("live ask and approval requests carry their exact entry and close on withdrawal", async () => {
+  const peer = new Peer();
+  const worker = { ...agent("worker"), mainSessionId: "node-session", workflowOwner: "owner" };
+  snapshot(peer, [worker]);
+  const id = "q";
+  const record = { sessionUpdate: "session_info_update", _meta: { [Question.key]: { id, state: "open", source: "acp",
+    questions: [{ kind: "text", question: "How many?" }] } } };
+  peer.requests.set(History.page, () => ({ updates: [record], cursor: null, agent: worker }));
+  const notices: Notice[] = [];
+  const ws = workspace(peer, n => notices.push(n));
+  const question = new AbortController(), permission = new AbortController();
+  const approval = peer.requests.get("session/request_permission")({ sessionId: worker.mainSessionId, title: "Read notes", options: [] }, { signal: permission.signal });
+  const form = peer.requests.get("elicitation/create")({ sessionId: worker.mainSessionId, mode: "form", message: "How many?",
+    requestedSchema: { type: "object", properties: { count: { type: "string", title: "How many?" } } }, _meta: { [Question.key]: { id } } }, { signal: question.signal });
+  await ws.load();
+  ws["rebuildHistory"]("worker");
+  peer.emit("session/update", { sessionId: worker.mainSessionId, update: record });
+  assert.deepEqual(notices.map(n => [n.kind, n.name]), [["permission", "worker"], ["question", "worker"]]);
+  assert.equal(notices[1].entryId, "node-session:question:q");
+  const pending = ws["transcripts"].get("worker");
+  assert.ok(pending.find(e => e.id === notices[1].entryId)?.answerable);
+  permission.abort();
+  question.abort();
+  assert.deepEqual(await approval, { outcome: { outcome: "cancelled" } });
+  assert.deepEqual(await form, { action: "cancel" });
+  assert.equal(pending.find(e => e.id === notices[0].entryId)?.outcome, "cancelled");
+  assert.equal(pending.find(e => e.id === notices[1].entryId)?.answerable, false);
   ws.close();
 });
 

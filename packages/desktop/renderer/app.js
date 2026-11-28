@@ -7,7 +7,8 @@ import { avatarImage, avatarPicker } from "./avatars.js";
 import { AVATARS } from "./avatar-catalog.js";
 import { backendIcon, backendKind, backendMark } from "./backend-icons.js";
 import { createArtifactBrowser, artifactLabel, artifactNavigation } from "./artifacts.js";
-import { currentFlow, renderWorkflow, showTask, workflowPanelState, restoreWorkflowPanel } from "./workflow.js";
+import { currentFlow, focusRequest, pendingWorkflowRequests, renderWorkflow, showTask, syncWorkflowAttention, workflowPanelState, restoreWorkflowPanel } from "./workflow.js";
+import { syncWorkflowAttentionCards } from "./workflow-attention-cards.js";
 import { contentView, createEditor, markdownView } from "./content.js";
 import { transcriptMarkers } from "./transcript-turns.js";
 import { dropPageAnnotations } from "./web-annotation.js";
@@ -231,14 +232,14 @@ function conversationTitle(agentId) {
 }
 
 /** 主会话在中央打开，任务会话在所属工作流的侧栏打开。 */
-export function focusLane(agentId) {
+export function focusLane(agentId, entry) {
   const agent = agentOf(agentId);
   if (!agent) return;
   if (agent.workflowOwner) {
     const root = state.agents.find(a => a.mainSessionId === agent.workflowOwner);
     if (!root) return;
     focusLane(root.id);
-    revealArtifacts(); selectTab("workflow"); showTask(agentId);
+    revealArtifacts(); selectTab("workflow"); showTask(agentId, entry);
     return;
   }
   closeSettings();
@@ -250,6 +251,10 @@ export function focusLane(agentId) {
   }
   const lane = laneOf(agentId);
   lane.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (entry) {
+    focusRequest(lane, entry);
+    return;
+  }
   const target = state.tab === "workflow" && laneOf(state.referenceAgent);
   if (target || state.referenceAgent === agentId) (target || lane).editor.el.focus();
 }
@@ -350,6 +355,7 @@ function openLane(agentId, panel, readonly) {
   }));
   lane.turnMarkers.sync();
   syncAsk(agentId);
+  if (!panel) syncWorkflowRequests();
   syncLane(agentId);
   renderRail();
   const scroller = lane.querySelector(".transcript");
@@ -383,25 +389,35 @@ async function loadHistory(agentId) {
   if (!lane) return;
   const button = lane.querySelector(".history-more");
   if (button.disabled) return;
-  const scroller = lane.querySelector(".transcript");
-  const height = scroller.scrollHeight;
-  const top = scroller.scrollTop;
   button.disabled = true;
   button.textContent = t("history.loading");
   try {
-    const page = await xsb.history(agentId);
-    state.transcripts[agentId] = page.entries;
-    state.history[agentId] = page.cursor;
-    state.partialTurnIds[agentId] = page.partialTurnIds;
-    lane.querySelector(".entries").replaceChildren(...page.entries.map((entry) => entryNode(agentId, entry)));
-    lane.turnMarkers.sync();
-    button.hidden = page.cursor == null;
-    scroller.scrollTop = top + scroller.scrollHeight - height;
+    showHistory(agentId, await xsb.history(agentId));
   } catch (e) {
     button.textContent = e.message;
     return;
   } finally { button.disabled = false; }
   button.textContent = t("history.more");
+}
+
+function showHistory(agentId, page) {
+  const agent = agentOf(agentId);
+  if (!agent) return;
+  state.transcripts[agentId] = page.entries;
+  state.history[agentId] = page.cursor;
+  state.partialTurnIds[agentId] = page.partialTurnIds;
+  const lane = laneOf(agentId);
+  if (lane) {
+    const scroller = lane.querySelector(".transcript");
+    const height = scroller.scrollHeight;
+    const top = scroller.scrollTop;
+    lane.querySelector(".entries").replaceChildren(...page.entries.map(entry => entryNode(agentId, entry)));
+    lane.turnMarkers.sync();
+    syncAsk(agentId);
+    lane.querySelector(".history-more").hidden = page.cursor == null;
+    scroller.scrollTop = top + scroller.scrollHeight - height;
+  }
+  if (agent.workflowOwner === rootSession()) syncWorkflowRequests();
 }
 
 function closeLane(agentId, switching = false) {
@@ -483,6 +499,19 @@ function upsertEntry(agentId, entry) {
 function syncAsk(agentId) {
   const lane = laneOf(agentId);
   if (lane && !lane.dataset.readonly) syncAskPanel(lane, state.transcripts[agentId] ?? [], (answer) => xsb.answerQuestion(agentId, answer));
+}
+
+function syncWorkflowRequests() {
+  const root = state.open[0];
+  const lane = root && laneOf(root);
+  if (!lane) return;
+  const requests = pendingWorkflowRequests();
+  const scroller = lane.querySelector(".transcript");
+  const pinned = pinnedToBottom(scroller);
+  const height = scroller.clientHeight;
+  syncWorkflowAttentionCards(lane, requests, ({ agentId, entry }) => focusLane(agentId, entry));
+  if (pinned && scroller.clientHeight !== height) scroller.scrollTop = scroller.scrollHeight;
+  if (state.tab === "workflow") syncWorkflowAttention(requests);
 }
 
 function entryNode(agentId, entry) {
@@ -575,7 +604,7 @@ function entryNode(agentId, entry) {
     h("code", {}, entry.detail),
     entry.outcome
       ? h("span", {}, { allowed: t("permission.allowed"), rejected: t("permission.rejected"), cancelled: t("permission.cancelled") }[entry.outcome])
-      : h("div", { class: "actions" },
+      : !laneOf(agentId)?.dataset.readonly && h("div", { class: "actions" },
           h("button", { class: "btn", onclick: () => answer(false) }, t("permission.reject")),
           h("button", { class: "btn primary", onclick: () => answer(true) }, t("permission.allow"))));
 }
@@ -947,6 +976,11 @@ export function onAgent(agent) {
   }
   renderRail();
   syncLane(agent.id);
+  if (agent.workflowOwner && agent.workflowOwner === rootSession() &&
+      (previous?.mainSessionId !== agent.mainSessionId || previous?.retired !== agent.retired)) {
+    if (state.tab === "workflow") renderWorkflow(currentFlow());
+    syncWorkflowRequests();
+  }
 }
 /**
  * 网页批注和输入框联动：确认的批注（一份完整快照）进这个网页所属会话输入框的附件栏，下次发送时跟着发出；
@@ -979,10 +1013,12 @@ xsb.on((event) => {
       else renderSide();
       if (state.open[0]) syncLane(state.open[0]);
       for (const n of flow.nodes) if (n.agentId) syncLane(n.agentId);
+      syncWorkflowRequests();
     }
   } else if (event.agent) onAgent(event.agent);
   else if (event.removedAgent) {
     // 删掉的是正在看的对话：改看列表里占它位置的那条（它是最后一条时看新的最后一条），一条不剩才不选中。
+    const removed = agentOf(event.removedAgent);
     const roots = state.agents.filter((a) => !a.workflowOwner);
     const index = state.open.includes(event.removedAgent) ? roots.findIndex((a) => a.id === event.removedAgent) : -1;
     const rest = roots.filter((a) => a.id !== event.removedAgent);
@@ -990,6 +1026,10 @@ xsb.on((event) => {
     state.agents = state.agents.filter((a) => a.id !== event.removedAgent);
     closeLane(event.removedAgent, !!next);
     if (next) focusLane(next.id);
+    if (removed?.workflowOwner && removed.workflowOwner === rootSession()) {
+      if (state.tab === "workflow") renderWorkflow(currentFlow());
+      syncWorkflowRequests();
+    }
   }
   else if (event.task) { upsert(state.tasks, event.task); renderRail(); }
   else if (event.filesChanged) {
@@ -1009,7 +1049,16 @@ xsb.on((event) => {
   else if (event.removedPage) onPageRemoved(event.removedPage);
   else if (event.hub === "down") showHub(false);
   else if (event.arkLoginUrl) onArkLoginUrl(event.arkLoginUrl);
-  else if (event.showAgent) { if (agentOf(event.showAgent)) focusLane(event.showAgent); }
+  else if (event.showAgent) {
+    const agent = agentOf(event.showAgent);
+    if (!agent) return;
+    if (!agent.workflowOwner && document.body.matches(".artifact-focused, .artifact-expanded")) {
+      document.body.classList.remove("artifact-focused", "artifact-expanded");
+      renderSide();
+    }
+    const entry = event.entryId && state.transcripts[event.showAgent]?.find(e => e.id === event.entryId);
+    focusLane(event.showAgent, entry);
+  }
   // 应用菜单：设置；文件 › 打开文件夹… 换了这个窗口的工作区。
   else if (event.openSettings) showSettings();
   else if (event.workspaceChanged) { closeSettings(); start(); }
@@ -1017,6 +1066,7 @@ xsb.on((event) => {
     if (event.activity) state.activities[event.agentId] = event.activity; else delete state.activities[event.agentId];
     syncActivity(event.agentId);
   }
+  else if (event.transcript) showHistory(event.agentId, event.transcript);
   else if (event.partialTurnIds) {
     state.partialTurnIds[event.agentId] = event.partialTurnIds;
     laneOf(event.agentId)?.turnMarkers.sync();
@@ -1026,8 +1076,14 @@ xsb.on((event) => {
     const lane = laneOf(event.agentId);
     lane?.querySelector(`.entry[data-id="${CSS.escape(event.removedEntry)}"]`)?.remove();
     lane?.turnMarkers.sync();
+    syncAsk(event.agentId);
+    if (agentOf(event.agentId)?.workflowOwner === rootSession()) syncWorkflowRequests();
   }
-  else if (event.entry) { upsert(state.transcripts[event.agentId] ??= [], event.entry); upsertEntry(event.agentId, event.entry); }
+  else if (event.entry) {
+    upsert(state.transcripts[event.agentId] ??= [], event.entry);
+    upsertEntry(event.agentId, event.entry);
+    if (["permission", "question"].includes(event.entry.kind) && agentOf(event.agentId)?.workflowOwner === rootSession()) syncWorkflowRequests();
+  }
 });
 
 /** 读一次快照并画出整个窗口。打开工作区之后再调用一次。 */

@@ -5,8 +5,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Agents, Boundaries, Connection, Question, RunExt, Workflow } from "@xsb/protocol";
-import type { ElicitationResponse } from "@xsb/protocol";
+import { Agents, Boundaries, Connection, History, Question, RunExt, TurnExt, Workflow } from "@xsb/protocol";
+import type { ElicitationResponse, PermissionResponse } from "@xsb/protocol";
 import { Hub } from "../src/hub.ts";
 
 const form = { message: "Choose storage", requestedSchema: {
@@ -33,6 +33,31 @@ async function setup(t: any, backend = "claude", extraArgs: string[] = []) {
   const session = hub.session(sessionId);
   return { hub, client, session, updates, send: (prompt: string) => client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt }] }) };
 }
+
+test("an approval settled by another attached client withdraws the original card", async t => {
+  const { hub, client, session, updates, send } = await setup(t);
+  const socket = net.connect(hub.paths.socket("acp"));
+  await new Promise(r => socket.once("connect", r));
+  const other = new Connection(socket, socket);
+  t.after(() => other.close());
+  await other.request("initialize", { protocolVersion: 2, info: { name: "approver", version: "0" } });
+  await other.request(History.page, { sessionId: session.id });
+  let signal: AbortSignal | undefined;
+  client.onRequest("session/request_permission", (request, ctx) => {
+    assert.equal(request._meta[TurnExt.key].id, session.current?.id);
+    signal = ctx.signal;
+    return new Promise(resolve => signal!.addEventListener("abort", () => resolve({ outcome: { outcome: "cancelled" } }), { once: true }));
+  });
+  let choose: (() => void) | undefined;
+  other.onRequest("session/request_permission", p => new Promise<PermissionResponse>(resolve => {
+    choose = () => resolve({ outcome: { outcome: "selected", optionId: p.options[0].optionId } });
+  }));
+  await send("!perm");
+  await until(() => signal && choose);
+  choose!();
+  await until(() => signal!.aborted && !session.busy);
+  assert.ok(updates.some(u => u.content?.text?.includes("perm: selected yes")));
+});
 
 for (const backend of ["claude", "codex"]) test(`${backend} questions return on their ACP request and keep the same turn`, async t => {
   const { hub, client, session, updates, send } = await setup(t, backend);

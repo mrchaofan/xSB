@@ -43,6 +43,8 @@ export type WorkflowNodeView = {
   agentId?: string;
   sessionId?: string;
   target?: string;
+  /** The current accepted graph delivery, including while a choice or additional assignment is pending. */
+  deliveryId?: string;
   summary?: string;
   /** Markdown definition and the currently valid assignment/delivery, including its direct sources. */
   markdown?: {

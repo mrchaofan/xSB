@@ -36,6 +36,7 @@
     "test:workflow-ui": "npm run build && node test/workflow-window.cjs",
     "test:menus-ui": "npm run build && node test/context-menu-window.cjs",
     "test:ask-ui": "npm run build && node test/ask-window.cjs",
+    "test:notifications-ui": "npm run build && node test/notifications-window.cjs",
     "test:turn-ui": "npm run build && node test/turn-copy-window.cjs",
     "test:browser-native": "node test/browser-native.mjs",
     "test:browser-tabs": "node test/browser-native.mjs --tabs-only"

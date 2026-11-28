@@ -695,6 +695,7 @@ export function view(f: Flow, includeContracts = true): WorkflowView {
           agentId: i.agentId,
           sessionId: i.sessionId,
           target: i.work?.kind === "graph" ? i.work.id : i.last?.valid ? i.last.id : undefined,
+          ...(i.last?.valid && { deliveryId: i.last.id }),
           summary: i.last?.valid ? i.last.summary : undefined,
           ...(includeContracts && markdown && { markdown: {
             ...(n.requirements !== undefined && { requirements: n.requirements }),

@@ -44,6 +44,8 @@ export type Entry = { id: string } & (
   | { kind: "boundary"; boundary: Boundary }
 );
 
+export type TranscriptPage = { entries: Entry[]; cursor: number | null; partialTurnIds: string[] };
+
 /**
  * What an agent is doing right now, while it has a turn running: waiting for its model to answer, thinking,
  * writing its reply, or running tools (`detail`: the one that started last). `since` is when that began.
@@ -118,7 +120,7 @@ export type Event =
   /** The user cleared these notes on the page: the composer drops them too. */
   | { webAnnotationsRemoved: { pageId: string; sessionId?: string; ids: string[] } }
   /** Show this agent's conversation: the user clicked a notification of it. */
-  | { showAgent: string }
+  | { showAgent: string; entryId?: string }
   /** The application menu asked for the settings. */
   | { openSettings: true }
   /** Where arkcli asks the user to sign in, for when it opened no browser (ark.ts `login`). */
@@ -128,5 +130,6 @@ export type Event =
   /** What the agent is doing now; `null` when its turn is over. */
   | { agentId: string; activity: Activity | null }
   | { agentId: string; entry: Entry }
+  | { agentId: string; transcript: TranscriptPage }
   | { agentId: string; partialTurnIds: string[] }
   | { agentId: string; removedEntry: string };

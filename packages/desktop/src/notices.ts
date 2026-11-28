@@ -36,17 +36,13 @@ export function setUpNotices(): void {
   shell.writeShortcutLink(link, "create", { target: process.execPath, appUserModelId: APP_ID });
 }
 
-/** Tell the user `title` and `body` about the window `win`, unless they are looking at it. `open` is what a click does once the window is in front. */
+/** Tell the user about an unfocused window. On click, the caller opens the current destination. */
 export function notice(win: BrowserWindow, title: string, body: string, open: () => void): void {
   if (!Notification.isSupported() || win.isDestroyed() || (win.isVisible() && win.isFocused())) return;
   const note = new Notification({ title, body });
   shown.add(note);
   note.on("click", () => {
     shown.delete(note);
-    if (win.isDestroyed()) return;
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
     open();
   });
   note.on("close", () => shown.delete(note));

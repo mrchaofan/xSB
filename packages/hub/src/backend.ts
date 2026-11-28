@@ -150,10 +150,10 @@ export class Backend {
       if (!session) return events.log(`update of session ${p.sessionId}, which the hub did not open: ignored`);
       session.onBackendUpdate(p.update, p.sessionId);
     });
-    conn.onRequest("session/request_permission", (p: PermissionRequest) => {
+    conn.onRequest("session/request_permission", (p: PermissionRequest, ctx) => {
       const session = backend.sessions.get(p.sessionId);
       if (!session) throw RpcError.notFound(`session ${p.sessionId}`);
-      return session.onBackendPermission(p);
+      return session.onBackendPermission(p, ctx.signal);
     });
     conn.onNotification("elicitation/complete", (p) => events.urlComplete?.(backend, p.elicitationId));
     conn.onRequest("elicitation/create", (p: ElicitationRequest, ctx) => {

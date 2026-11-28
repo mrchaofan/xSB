@@ -25,18 +25,30 @@ export function restoreWorkflowPanel(flow, saved) {
 const openable = (n) => !!(n.sessionId && n.agentId && agentOf(n.agentId));
 const inspectable = (n) => !!(n?.contract || n?.markdown || (n?.kind === "task" && !n.sessionId && n.controls));
 
-/** 选中一个节点的对话。正在看历史版本时，只认那个版本里的节点。 */
-export function showTask(id) {
+/** 定位到被点击的请求。开放的提问在输入区，审批和已经结束的请求在记录里。 */
+export function focusRequest(lane, entry) {
+  if (!lane || !entry) return;
+  const form = entry.kind === "question" && lane.querySelector(`.ask-panel[data-question="${CSS.escape(entry.questionId)}"]`);
+  const target = form || lane.querySelector(`.entry[data-id="${CSS.escape(entry.id)}"]`);
+  if (!target || target.hidden) return;
+  target.tabIndex = -1;
+  target.focus({ preventScroll: true });
+  target.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+/** 普通节点选择保留查看中的版本；实时请求必须打开当前可操作的节点。 */
+export function showTask(id, entry) {
   const flow = currentFlow();
   if (!flow) return;
   const shown = versionOf(flow);
-  if (!shown.nodes.some((n) => openable(n) && n.agentId === id)) {
+  if (entry || !shown.nodes.some((n) => openable(n) && n.agentId === id)) {
     if (!flow.nodes.some((n) => openable(n) && n.agentId === id)) return;
     viewing.set(flow.sessionId, null);
   }
   selected.set(flow.sessionId, id);
   if (!agentOf(id)?.retired) state.referenceAgent = id;
   renderWorkflow(flow);
+  if (entry) focusRequest($("#task-conversation .lane"), entry);
 }
 
 /**
@@ -133,6 +145,47 @@ function diagram(nodes, edges, active, choose) {
   return surface;
 }
 
+/** Only requests that this window can answer in the active graph belong in its DAG and main chat. */
+export function pendingWorkflowRequests(flow = currentFlow()) {
+  const requests = [];
+  for (const node of flow?.nodes ?? []) {
+    if (!node.agentId || !node.sessionId) continue;
+    const agent = agentOf(node.agentId);
+    if (!agent || agent.retired || agent.workflowOwner !== flow.sessionId || agent.mainSessionId !== node.sessionId) continue;
+    for (const entry of state.transcripts[agent.id] ?? []) {
+      if ((entry.kind === "question" && entry.state === "open" && entry.answerable) ||
+          (entry.kind === "permission" && !entry.outcome)) {
+        requests.push({ agentId: agent.id, nodeName: node.name, entry });
+      }
+    }
+  }
+  return requests;
+}
+
+/** 只更新活动图上仍有待办的节点；持续输出和打开的提问草稿无需重画。 */
+export function syncWorkflowAttention(requests) {
+  const map = $("#flow-map");
+  if (state.tab !== "workflow" || map.hidden || map.dataset.kind !== "active") return;
+  const labels = new Map();
+  for (const { agentId, entry } of requests) {
+    if (!labels.has(agentId)) labels.set(agentId, new Set());
+    labels.get(agentId).add(t(entry.kind === "question" ? "ask.state.open" : "state.requires_action"));
+  }
+  for (const button of map.querySelectorAll(".dag-node[data-agent]")) {
+    const attention = labels.get(button.dataset.agent);
+    const dot = button.querySelector(".dag-attention");
+    if (attention) {
+      const title = [...attention].join(" · ");
+      if (dot) dot.title = title;
+      else button.append(h("span", { class: "dag-attention", title, "aria-hidden": "true" }));
+      button.setAttribute("aria-description", title);
+    } else if (dot) {
+      dot.remove();
+      button.removeAttribute("aria-description");
+    }
+  }
+}
+
 const when = (iso) => new Date(iso).toLocaleString(language, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
 export function renderWorkflow(flow) {
@@ -196,13 +249,18 @@ export function renderWorkflow(flow) {
   const focusedNode = map.contains(document.activeElement) && document.activeElement.dataset.node;
   // 折叠：整块图收起，只留标题栏，空间都给下方的节点对话。
   map.hidden = folded;
+  map.dataset.kind = shown.kind;
   if (folded) fill(map); else fill(map, diagram(shown.nodes, shown.edges, node?.name, n => {
-    if (openable(n)) showTask(n.agentId);
+    if (openable(n)) {
+      const request = shown.kind === "active" && pendingWorkflowRequests(flow).find(r => r.agentId === n.agentId);
+      showTask(n.agentId, request?.entry);
+    }
     else {
       selected.set(flow.sessionId, { version: versionKey, name: n.name });
       renderWorkflow(flow);
     }
   }));
+  if (!folded && shown.kind === "active") syncWorkflowAttention(pendingWorkflowRequests(flow));
   if (focusedNode)
     map.querySelector(`button[data-node="${CSS.escape(focusedNode)}"]:enabled`)?.focus({ preventScroll: true });
 

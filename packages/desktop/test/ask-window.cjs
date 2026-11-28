@@ -163,9 +163,39 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await untilJS(count + "===0", "async answer returned");
   await assert.rejects(js('xsb.answerQuestion(' + JSON.stringify(agent.id) + ',{questionId:' + JSON.stringify(expired) + ',skipped:true})'), /expired/);
 
-  // Delivered workflows expose no meaningless pause/resume control.
-  const graph = [{ node: "审阅", prompt: '!call finish {"summary":"已审阅"}' }, { node: "完成", kind: "end" }, { from: "审阅", to: "完成" }].map(v => JSON.stringify(v)).join("\n");
+  // Two simultaneous node requests surface in their owning conversation, including while the sidebar is closed.
+  const graph = [
+    { node: "审阅", prompt: ask("审阅范围？", { scope: { type: "string", enum: ["全文", "摘要"] } }) + '\n!call finish {"summary":"已审阅"}' },
+    { node: "写入", prompt: '!perm\n!call finish {"summary":"已写入"}' },
+    { node: "完成", kind: "end" }, { from: "审阅", to: "完成" }, { from: "写入", to: "完成" },
+  ].map(v => JSON.stringify(v)).join("\n");
   await send(lane, '!call execute ' + JSON.stringify({ graphJsonl: graph }));
+  const request = (kind) => lane + ' .workflow-request[data-kind="' + kind + '"]';
+  const dot = (name) => '.dag-node[data-node="' + name + '"] .dag-attention';
+  const taskChat = "#task-conversation .lane";
+  await until(() => has(request("question")), "node question in the main conversation");
+  await until(() => has(request("permission")), "node permission in the main conversation");
+  assert.match(await js(q(request("question")) + ".textContent"), /审阅/);
+  assert.match(await js(q(request("permission")) + ".textContent"), /写入.*Write a file/);
+  assert.ok(await has(dot("审阅")) && await has(dot("写入")), "both DAG nodes need attention");
+  await shoot("workflow-node-requests");
+  await click('#tabs .tab[data-id="workflow"] .icon-btn');
+  await click("#toggle-artifact");
+  const askAgent = await js(q(request("question")) + ".dataset.agent");
+  await click(request("question"));
+  await untilJS(q(taskChat) + "?.dataset.agent===" + JSON.stringify(askAgent), "the question opens its node");
+  assert.ok(await js(q(taskChat + " .ask-panel") + ".checkVisibility()"), "clicking the card reveals the form");
+  await click(taskChat + " .ask-row");
+  await click(taskChat + " .ask-next");
+  await until(async () => !await has(request("question")) && !await has(dot("审阅")), "answered question cleared");
+  assert.ok(await has(request("permission")) && await has(dot("写入")), "the other node is still awaiting approval");
+  const permissionAgent = await js(q(request("permission")) + ".dataset.agent");
+  await click(request("permission"));
+  await untilJS(q(taskChat) + "?.dataset.agent===" + JSON.stringify(permissionAgent), "the permission opens its node");
+  assert.ok(await js(q(taskChat + " .permission .actions") + ".checkVisibility()"), "the pending decision is visible");
+  await click(taskChat + " .permission .btn.primary");
+  await until(async () => !await has(lane + " .workflow-requests") && !await has(dot("写入")), "handled workflow requests cleared");
+  // Delivered workflows expose no meaningless pause/resume control.
   // Loading the startup snapshot suspends live events. Observe delivery in the UI before reading it.
   await untilJS('document.querySelector("#flow-heading")?.textContent.includes(' + JSON.stringify(text["flow.finished"]) + ')', "completed workflow badge");
   assert.equal(await js('document.querySelectorAll("#flow-heading .btn").length'), 0);
