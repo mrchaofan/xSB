@@ -149,8 +149,8 @@ function tabMenu(event, id) {
       null,
     ] : []),
     { label: t("tabs.close"), icon: "close", run: () => closeTab(id) },
-    { label: t("tabs.closeOthers"), disabled: !others.length, run: () => closeTabs(others, id) },
-    { label: t("tabs.closeRight"), disabled: !right.length, run: () => closeTabs(right, id) },
+    { label: t("tabs.closeOthers"), icon: "close", disabled: !others.length, run: () => closeTabs(others, id) },
+    { label: t("tabs.closeRight"), icon: "close", disabled: !right.length, run: () => closeTabs(right, id) },
   ], t("tabs.menu"));
 }
 

@@ -228,10 +228,12 @@ body.no-workspace .hub { display: none; }
 .blank:has(+ .lanes:empty) { display: flex; }
 .blank p { margin: 0; font-size: var(--text-lg); }
 
-/* 对话和侧栏之间只有一条线；拖动的热区左右各多 4px */
-.divider { flex: none; width: 1px; background: var(--line); position: relative; z-index: 1; cursor: col-resize; touch-action: none; user-select: none; }
-.divider::after { content: ""; position: absolute; inset: 0 calc(-1 * var(--space-1)); }
-.divider:hover, .divider.dragging { background: var(--accent); }
+/* 分隔线的指针热区向两侧各扩 4px。 */
+.divider { flex: none; background: var(--line); position: relative; z-index: 1; touch-action: none; user-select: none; }
+.divider::after { content: ""; position: absolute; }
+#divider { width: 1px; cursor: col-resize; }
+#divider::after { inset: 0 calc(-1 * var(--space-1)); }
+.divider:hover, .divider:focus-visible, .divider.dragging { background: var(--accent); }
 
 .artifact { container-type: inline-size; background: var(--paper); overflow: hidden; flex: none; width: var(--artifact-w); display: flex; flex-direction: column; min-width: 0; }
 
@@ -488,11 +490,11 @@ body:not(.no-workspace) .welcome { display: none; }
 .tab-list { --tab-basis: min(200px, calc((100% - (var(--tabs, 1) - 1) * var(--space-0)) / var(--tabs, 1))); }
 .tab { transition: flex-basis .18s cubic-bezier(.2, 0, 0, 1); }
 @starting-style { .tab { flex-basis: 0; } }
-.tab { container: tab / inline-size; flex: 0 1 var(--tab-basis); min-width: 28px; max-width: 200px; height: var(--control-md); display: flex; align-items: center; border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--ink-2); }
+.tab { container: tab / inline-size; flex: 0 1 var(--tab-basis); min-width: 28px; max-width: 200px; height: var(--control-md); display: flex; align-items: center; border-radius: var(--radius-md); font-size: var(--text-sm); color: var(--ink-2); background: var(--wash); }
 .tab-list.frozen .tab { flex: 0 0 var(--tab-frozen); }
 .tab[aria-current="true"] { min-width: 36px; }
-.tab:hover { background: var(--hover); color: var(--ink); }
-.tab[aria-current="true"] { background: var(--selected); color: var(--ink); font-weight: 500; }
+.tab:hover { background: color-mix(in srgb, var(--ink) 5%, var(--wash)); color: var(--ink); }
+.tab[aria-current="true"] { background: color-mix(in srgb, var(--ink) 10%, var(--wash)); color: var(--ink); font-weight: 500; }
 .tab-main { flex: 1; min-width: 0; height: 100%; padding: 0 var(--space-0) 0 var(--space-2); display: flex; align-items: center; gap: var(--space-1h); white-space: nowrap; }
 .tab-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tab .icon-btn { flex: none; width: 20px; height: 20px; margin-right: var(--space-1); border-radius: var(--radius-sm); opacity: 0; }
@@ -788,7 +790,7 @@ td code + code, td .gap + code, td code + .gap { margin-left: var(--space-3); }
 }
 
 @media (max-width: 1000px) {
-  body:not(.artifact-expanded) .artifact, .divider { display: none; }
+  body:not(.artifact-expanded) .artifact, #divider { display: none; }
   body.artifact-expanded .artifact { position: absolute; right: 0; top: 0; bottom: 0; width: min(420px, 100vw); z-index: 3; border-left: 1px solid var(--line); box-shadow: var(--shadow); }
 }
 
@@ -936,7 +938,11 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 #flow-heading strong { flex-shrink: 0; }
 #flow-heading small { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; }
 #flow-heading .btn { white-space: nowrap; margin-left: auto; }
-#flow-map { min-height: 95px; overflow: auto; background: var(--wash); border-bottom: 1px solid var(--line); }
+#flow-map { overflow: auto; background: var(--wash); }
+#flow-divider { height: 1px; cursor: row-resize; }
+#flow-divider::after { inset: calc(-1 * var(--space-1)) 0; }
+#flow-divider::before { content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: var(--space-6); height: 3px; border-radius: var(--radius-sm); background: var(--ink-3); }
+#flow-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .dag-surface { position: relative; margin: 0 auto; }
 .dag-surface svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .dag-surface path { fill: none; stroke: var(--ink-3); stroke-width: 1.25; }
@@ -951,7 +957,7 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 #task-conversation { flex: 1; min-height: 0; display: flex; }
 #flow-contract[hidden], #task-conversation[hidden] { display: none; }
 #flow-contract { flex: 0 1 auto; max-height: 34%; overflow: auto; padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--line); }
-#flow-contract:has(+ #task-conversation[hidden]) { flex: 1; max-height: none; }
+#flow-contract[open]:has(+ #task-conversation[hidden]) { flex: 1; max-height: none; }
 #flow-contract summary { cursor: pointer; padding-block: var(--space-1); }
 #flow-contract > summary { font-weight: 600; }
 .contract-body { display: grid; gap: var(--space-3); padding-block: var(--space-2); overflow-wrap: anywhere; }
@@ -1068,8 +1074,8 @@ dialog.settings-dialog::backdrop { background: var(--backdrop); backdrop-filter:
 .tool-note:not([hidden]) { margin-block: 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--wash); color: var(--ink-2); font-size: var(--text-sm); }
 
 /* 工作流：图可整块折叠；活动/候选切换，历史版本下拉；只读的节点对话 */
-#side-workflow:not(.flow-folded) #flow-map { flex: 0 1 40%; }
-#flow-map[hidden] { display: none; }
+#side-workflow:not(.flow-folded) #flow-map { flex: none; height: 40%; }
+#flow-map[hidden], #flow-map[hidden] + #flow-divider { display: none; }
 .flow-fold svg { width: 14px; height: 14px; }
 .flow-badge { flex: none; height: 20px; display: inline-flex; align-items: center; padding: 0 var(--space-2); border-radius: var(--radius-sm); background: var(--wash); color: var(--ink-3); font-size: var(--text-xs); }
 .lane[data-readonly] .composer, .lane[data-readonly] .task-control { display: none; }

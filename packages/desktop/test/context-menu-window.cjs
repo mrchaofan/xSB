@@ -84,6 +84,9 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   assert.ok(overlay().webContents.isFocused(), "the menu takes the keyboard");
   assert.deepEqual(await items(), [text["web.reload"], text["tabs.copyUrl"] + "(off)", text["web.external"] + "(off)", text["web.detach"],
     text["tabs.close"], text["tabs.closeOthers"], text["tabs.closeRight"]], "web tab menu");
+  const closeIcon = await js(q(pageTab + " .icon-btn") + ".innerHTML");
+  assert.deepEqual(await inOverlay('[...document.querySelectorAll(".context-menu .menu-icon")].slice(-3).map(icon => icon.innerHTML)'),
+    Array(3).fill(closeIcon), "all three close actions show the tab's close icon");
   overlay().webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
   await closed("Esc closes the menu");
   await until(() => win.webContents.isFocused(), "the keyboard back in the window");

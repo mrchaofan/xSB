@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { Paths } from "@xsb/hub";
-import { History } from "@xsb/protocol";
+import { History, Workflow, type WorkflowView } from "@xsb/protocol";
 import { artifactKind, artifactPath } from "../src/artifact-link.ts";
 import { Workspace } from "../src/workspace.ts";
 
@@ -56,4 +56,55 @@ test("clicking a file registers a preview without adding it to Files, and docume
   ]);
   assert.throws(() => ws.openArtifact("missing.md"), /file not found/);
   assert.throws(() => ws.openArtifact("next.md", "writer", "/unknown.md"), /unknown source/);
+});
+
+test("Files includes local Markdown deliveries from this workflow's tasks, additional work and saved versions", async (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-workflow-artifacts-"));
+  t.after(() => fs.rmSync(project, { recursive: true, force: true }));
+  const image = "角色 设定.png";
+  for (const name of [image, "edited.md", "extra.md", "archived.md", "input.md", "example.md", "other.md"])
+    fs.writeFileSync(path.join(project, name), name);
+  let update: (payload: { workflow: WorkflowView }) => void;
+  const peer = {
+    onNotification(name: string, fn: typeof update) { if (name === Workflow.update) update = fn; },
+    onRequest() {}, closed: new Promise(() => {}), close() {},
+    request(method: string, { sessionId }: { sessionId: string }) {
+      assert.equal(method, History.files);
+      return { files: sessionId === "owner" ? [{ path: "edited.md", agentId: "editor" }] : [] };
+    },
+  };
+  const ws = new Workspace(new Paths(project), peer as any, String, () => {});
+  t.after(() => ws.close());
+
+  const task = { kind: "task", status: "completed", name: "Draw", agentId: "artist", paused: false } as const;
+  const output = [
+    "![角色图][character]", "[edited](edited.md)", "[missing](absent.png)", "[site](https://example.org/input.md)",
+    "`[example](example.md)`", "", `[character]: <${image}>`,
+  ].join("\n");
+  const flow: WorkflowView = {
+    sessionId: "owner", version: "plan-2", format: "markdown", edges: [], paused: false,
+    nodes: [{ ...task, markdown: { input: "[source](input.md)", output },
+      additionalResults: [{ id: "extra", summary: "[Notes](extra.md)" }] }],
+    history: [{ version: "plan-1", format: "markdown", retiredAt: "2026-11-20", edges: [],
+      nodes: [{ ...task, agentId: "previous-artist", markdown: { output: "[Archive](archived.md)" } }] }],
+  };
+  update!({ workflow: flow });
+  update!({ workflow: { ...flow, sessionId: "second", history: [], nodes: [
+    { ...task, agentId: "other-artist", markdown: { output: "[Other](other.md)" } },
+  ] } });
+
+  const files = await ws.conversationFiles("owner");
+  assert.deepEqual(files.map(f => [f.name, f.agentId]).sort(), [
+    [image, "artist"], ["edited.md", "editor"], ["extra.md", "artist"], ["archived.md", "previous-artist"],
+  ].sort());
+  for (const file of files) assert.deepEqual(file.sessionIds, ["owner"]);
+  assert.deepEqual((await ws.conversationFiles("second")).map(f => f.name), ["other.md"]);
+
+  const preview = files.find(f => f.name === image)!;
+  const key = new URL(preview.url).searchParams.get("key");
+  assert.ok(key);
+  ws.refreshArtifact(preview.id);
+  assert.equal(ws.canServeArtifact(preview.id, key), true);
+  assert.equal(ws.canServeArtifact(preview.id, null), false);
+  assert.equal(ws.canServeArtifact(preview.id, "other"), false);
 });

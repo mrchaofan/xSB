@@ -22,7 +22,7 @@ import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./
 import type { Answer, ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
-import { artifactKind, artifactPath } from "./artifact-link.ts";
+import { artifactKind, artifactPath, workflowFileLinks } from "./artifact-link.ts";
 
 export const ARTIFACT_SCHEME = "xsb-artifact";
 
@@ -46,7 +46,7 @@ const TOOL_STATUS: Record<string, Tool["status"]> = { completed: "done", failed:
 export class Workspace {
   readonly paths: Paths;
   /** Absolute path -> artifact. Only these files are served to the renderer. */
-  readonly artifacts = new Map<string, Artifact>();
+  readonly artifacts = new Map<string, Artifact & { linkKey?: string }>();
 
   private conn: Connection;
   private say: (e: unknown) => string;
@@ -954,16 +954,26 @@ export class Workspace {
 
   // ---- artifacts --------------------------------------------------------------
 
+  canServeArtifact(file: string, key: string | null): boolean {
+    const known = this.artifacts.get(file);
+    return !!known && (!known.linkKey || known.linkKey === key);
+  }
+
+  private resolveArtifactLink(href: string, agentId?: string, options: { baseFile?: string; localOnly?: boolean } = {}): string {
+    const agent = agentId ? this.agents.get(agentId) : undefined;
+    const { baseFile, localOnly } = options;
+    const directory = baseFile ? path.dirname(baseFile) : agent?.workspace || this.paths.project;
+    const file = this.paths.resolveStored(artifactPath(href, directory));
+    if (localOnly && file.startsWith("\\\\")) throw new Error("not a local file");
+    // Project-relative links also occur when the agent has its own working directory.
+    if (!baseFile && directory !== this.paths.project && !fs.existsSync(file)) return artifactPath(href, this.paths.project);
+    return file;
+  }
+
   /** A file explicitly clicked in the transcript or another document. */
   openArtifact(href: string, agentId?: string, baseFile?: string): Artifact {
     if (baseFile && !this.artifacts.has(baseFile)) throw new Error("unknown source document");
-    const agent = agentId ? this.agents.get(agentId) : undefined;
-    const directory = baseFile ? path.dirname(baseFile) : agent?.workspace || this.paths.project;
-    let file = artifactPath(href, directory);
-    file = this.paths.resolveStored(file);
-    // Project-relative links also occur when the agent has its own working directory.
-    if (!baseFile && !fs.existsSync(file)) file = artifactPath(href, this.paths.project);
-    const artifact = this.artifact(file, agentId ?? "");
+    const artifact = this.artifact(this.resolveArtifactLink(href, agentId, { baseFile }), agentId ?? "");
     if (!artifact) throw new Error(`file not found: ${href}`);
     return artifact;
   }
@@ -972,35 +982,47 @@ export class Workspace {
   refreshArtifact(id: string): void {
     const known = this.artifacts.get(id);
     if (!known) return;
-    if (this.artifact(id, known.agentId) || known.missing) return;
+    if (this.artifact(id, known.agentId, undefined, known.linkKey) || known.missing) return;
     const missing = { ...known, missing: true };
     this.artifacts.set(id, missing);
     this.emit({ artifact: missing });
   }
 
-  /** The Hub projects the whole conversation's files from successful backend edits, including its task agents. */
+  /** Successful edits and local files delivered by Markdown workflow tasks share one catalog entry per path. */
   async conversationFiles(sessionId: string): Promise<Artifact[]> {
     const { files } = await this.conn.request<{ files: { path: string; agentId: string }[] }>(History.files, { sessionId });
-    return files.flatMap(file => {
+    const items = new Map<string, Artifact>();
+    for (const file of files) {
       const absolute = this.paths.resolveStored(path.resolve(this.agents.get(file.agentId)?.workspace ?? this.paths.project, file.path));
       const preview = this.artifact(absolute, file.agentId, sessionId);
-      return preview ? [preview] : [];
-    });
+      if (preview) items.set(absolute, preview);
+    }
+    for (const { agentId, href } of workflowFileLinks(this.workflows.get(sessionId))) {
+      try {
+        const file = this.resolveArtifactLink(href, agentId, { localOnly: true });
+        if (items.has(file)) continue;
+        // A delivery alone must not let an embedded HTML document read a file by guessing its path.
+        const known = this.artifacts.get(file);
+        const preview = this.artifact(file, agentId, sessionId, known ? known.linkKey : randomUUID());
+        if (preview) items.set(file, preview);
+      } catch { /* A remote, invalid or unreadable link contributes no local file. */ }
+    }
+    return [...items.values()];
   }
 
-  private artifact(file: string, agentId: string, owner = this.sessionOwner(agentId)): Artifact | undefined {
+  private artifact(file: string, agentId: string, owner = this.sessionOwner(agentId), linkKey?: string): Artifact | undefined {
     const stat = fs.statSync(file, { throwIfNoEntry: false });
     if (!stat?.isFile()) return undefined;
     const updatedAt = stat.mtime.toISOString();
     const known = this.artifacts.get(file);
     const sessionIds = new Set(known?.sessionIds);
     if (owner) sessionIds.add(owner);
-    const url = `${ARTIFACT_SCHEME}://file/${encodeURIComponent(file)}?v=${stat.mtimeMs}-${stat.ctimeMs}-${stat.size}`;
+    const url = `${ARTIFACT_SCHEME}://file/${encodeURIComponent(file)}?v=${stat.mtimeMs}-${stat.ctimeMs}-${stat.size}${linkKey ? "&key=" + linkKey : ""}`;
     if (known?.url === url && !known.missing && sessionIds.size === known.sessionIds?.length && known.agentId === agentId) return known;
-    const artifact: Artifact = {
+    const artifact = {
       id: file, name: path.basename(file), sessionIds: [...sessionIds], fileUri: pathToFileURL(file).href,
       kind: artifactKind(file), agentId, path: path.relative(this.paths.project, file),
-      url, updatedAt,
+      url, updatedAt, ...(linkKey && { linkKey }),
     };
     this.artifacts.set(file, artifact);
     this.emit({ artifact });
