@@ -16,7 +16,7 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { Question, RunExt, SessionControls, ToolServers, Workflow, Agents, fileChanges, fileEditPath, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry, userVisibleUpdate } from "@xsb/protocol";
+import { Question, RunExt, SessionControls, ToolServers, Workflow, Agents, fileChanges, fileEditPath, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry, historyTurn, userVisibleUpdate } from "@xsb/protocol";
 import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
 import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
 import type { Answer, ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
@@ -39,6 +39,7 @@ type Emit = (event: Event) => void;
 export type Notice = { agentId: string; name: string; kind: "done" | "failed" | "confirm" | "permission" | "question"; detail: string };
 type Notify = (notice: Notice) => void;
 type Tool = Extract<Entry, { kind: "tool" }>;
+type TranscriptPage = { entries: Entry[]; cursor: number | null; partialTurnIds: string[] };
 
 const TOOL_STATUS: Record<string, Tool["status"]> = { completed: "done", failed: "failed", cancelled: "failed" };
 
@@ -90,7 +91,9 @@ export class Workspace {
   private replaying = false;
   private historyUpdates = new Map<string, SessionUpdate[]>();
   private historyCursors = new Map<string, number | null>();
-  private historyLoading = new Map<string, Promise<{ entries: Entry[]; cursor: number | null }>>();
+  private historyLoading = new Map<string, Promise<TranscriptPage>>();
+  /** While older pages remain, distinguish turns seen from their start from late fragments. */
+  private historyTurns = new Map<string, Map<string, boolean>>();
   private historyImages = new Set<string>();
   private notify: (notice: Omit<Notice, "name">) => void;
   /**
@@ -191,7 +194,7 @@ export class Workspace {
     for (const [agentId, entries] of this.transcripts) for (const entry of entries)
       if (entry.kind === "question" && entry.source === "acp" && entry.state === "open") this.put(agentId, { ...entry, state: "cancelled" });
     for (const entryId of [...this.asking.keys()]) this.answer(entryId, "cancelled");
-    for (const agent of [...this.agents.values()]) this.onAgent({ ...agent, state: "idle" });
+    for (const agent of [...this.agents.values()]) this.onAgent({ ...agent, state: "idle", currentTurnId: undefined });
     emit({ hub: "down" });
   }
 
@@ -276,6 +279,7 @@ export class Workspace {
       transcripts: Object.fromEntries(this.transcripts),
       activities: Object.fromEntries(this.activities),
       history: Object.fromEntries(this.historyCursors),
+      partialTurnIds: Object.fromEntries([...this.transcripts.keys()].map(id => [id, this.partialTurnIds(id)])),
     };
   }
 
@@ -292,7 +296,7 @@ export class Workspace {
     this.agents.set(agent.id, agent);
     if (!this.transcripts.has(agent.id)) this.transcripts.set(agent.id, []);
     // A history that cannot be read is said so, where it would have been shown.
-    const failed = (e: unknown): void => this.put(agent.id, { id: this.newId(), kind: "error", text: this.why(e) });
+    const failed = (e: unknown): void => this.put(agent.id, { id: this.newId(), kind: "error", turnId: null, text: this.why(e) });
     if (agent.mainSessionId && !this.mains.has(agent.id)) this.session(agent).catch(failed);
     if (agent.state === "idle") {
       this.settle(agent.id);
@@ -319,7 +323,7 @@ export class Workspace {
     // Invalidate a pending history page too: it must not restore a removed agent.
     this.agentVersions.set(id, (this.agentVersions.get(id) ?? 0) + 1);
     for (const [sessionId, agentId] of this.sessionAgent) if (agentId === id) this.sessionAgent.delete(sessionId);
-    for (const perAgent of [this.agents, this.transcripts, this.mains, this.growing, this.activities, this.tools, this.historyUpdates, this.historyCursors]) perAgent.delete(id);
+    for (const perAgent of [this.agents, this.transcripts, this.mains, this.growing, this.activities, this.tools, this.historyUpdates, this.historyCursors, this.historyTurns]) perAgent.delete(id);
     this.emit({ removedAgent: id });
     this.busy = this.atWork().size > 0;
   }
@@ -338,6 +342,8 @@ export class Workspace {
           this.historyUpdates.set(agent.id, [...page.updates, ...(this.historyUpdates.get(agent.id) ?? [])]);
           this.historyCursors.set(agent.id, page.cursor);
           this.rebuildHistory(agent.id);
+          const partialTurnIds = this.partialTurnIds(agent.id);
+          if (partialTurnIds.length) this.emit({ agentId: agent.id, partialTurnIds });
           if (this.agentVersions.get(agent.id) === version) this.onAgent(page.agent);
           // The main chat may already show Files when a newly discovered task is attached.
           // Its earlier edits arrived through history, where individual refreshes are suppressed.
@@ -375,6 +381,8 @@ export class Workspace {
   private rebuildHistory(agentId: string): void {
     this.transcripts.set(agentId, []);
     this.growing.delete(agentId);
+    if (this.historyCursors.get(agentId) != null) this.historyTurns.set(agentId, new Map());
+    else this.historyTurns.delete(agentId);
     this.replaying = true;
     try {
       const sessionId = this.agents.get(agentId)?.mainSessionId;
@@ -389,12 +397,12 @@ export class Workspace {
   }
 
   /** Prepend one older page; concurrent clicks share the same request. */
-  history(agentId: string): Promise<{ entries: Entry[]; cursor: number | null }> {
+  history(agentId: string): Promise<TranscriptPage> {
     const prior = this.historyLoading.get(agentId);
     if (prior) return prior;
     const cursor = this.historyCursors.get(agentId) ?? null;
     const sessionId = this.agents.get(agentId)?.mainSessionId;
-    if (cursor === null || !sessionId) return Promise.resolve({ entries: this.transcripts.get(agentId) ?? [], cursor: null });
+    if (cursor === null || !sessionId) return Promise.resolve({ entries: this.transcripts.get(agentId) ?? [], cursor: null, partialTurnIds: [] });
     const loading = this.conn.request<HistoryPage>(History.page, { sessionId, before: cursor }).then((page) => {
       this.historyUpdates.set(agentId, [...page.updates, ...(this.historyUpdates.get(agentId) ?? [])]);
       this.historyCursors.set(agentId, page.cursor);
@@ -403,10 +411,26 @@ export class Workspace {
       const pending = (this.transcripts.get(agentId) ?? []).filter((entry) => local(entry) || entry.kind === "permission");
       this.rebuildHistory(agentId);
       pending.forEach((entry) => this.put(agentId, entry));
-      return { entries: this.transcripts.get(agentId) ?? [], cursor: page.cursor };
+      return { entries: this.transcripts.get(agentId) ?? [], cursor: page.cursor, partialTurnIds: this.partialTurnIds(agentId) };
     }).finally(() => this.historyLoading.delete(agentId));
     this.historyLoading.set(agentId, loading);
     return loading;
+  }
+
+  private partialTurnIds(agentId: string): string[] {
+    return Array.from(this.historyTurns.get(agentId) ?? []).filter(([, complete]) => !complete).map(([id]) => id);
+  }
+
+  private trackHistoryTurn(agentId: string, update: SessionUpdate): void {
+    const turns = this.historyTurns.get(agentId);
+    if (!turns) return;
+    const turn = historyTurn(update);
+    if (!turn || turn.record === "metadata") return;
+    const complete = turn.record !== "entry";
+    const prior = turns.get(turn.id);
+    if (prior || prior === complete) return;
+    turns.set(turn.id, complete);
+    if (!this.replaying && (prior === false || !complete)) this.emit({ agentId, partialTurnIds: this.partialTurnIds(agentId) });
   }
 
   private put(agentId: string, entry: Entry): void {
@@ -469,6 +493,7 @@ export class Workspace {
     if (!agentId) return;
     let update = userVisibleUpdate(event);
     if (!update) return;
+    this.trackHistoryTurn(agentId, update);
     if (!this.replaying) this.historyUpdates.get(agentId)?.push(update);
     if (update.sessionUpdate === "state_update") {
       if (this.replaying) return;
@@ -480,7 +505,9 @@ export class Workspace {
         this.finishTools(agentId);
         for (const [entryId, asked] of this.asking) if (asked.agentId === agentId) this.answer(entryId, "cancelled");
       }
-      if (agent && ["idle", "running", "requires_action"].includes(update.state)) this.onAgent({ ...agent, state: update.state });
+      if (agent && ["idle", "running", "requires_action"].includes(update.state)) this.onAgent({
+        ...agent, state: update.state, ...(update.state === "idle" && { currentTurnId: undefined }),
+      });
       return;
     }
     update = this.imageReferences(update);
@@ -523,7 +550,7 @@ export class Workspace {
       const id = `${sessionId}:question:${question.id}`;
       const prior = this.transcripts.get(agentId)?.find((e): e is Extract<Entry, { kind: "question" }> => e.id === id && e.kind === "question");
       const entry: Extract<Entry, { kind: "question" }> = { ...prior, id, kind: "question", questionId: question.id,
-        questions: question.questions ?? prior?.questions ?? [], state: question.state,
+        turnId: question.turnId ?? prior?.turnId, questions: question.questions ?? prior?.questions ?? [], state: question.state,
         ...(question.source ? { source: question.source } : {}), ...(question.delivery ? { delivery: question.delivery } : {}) };
       if (question.state === "open") {
         this.settle(agentId);
@@ -575,13 +602,13 @@ export class Workspace {
       }
       return;
     }
-    const failed = update.sessionUpdate === "session_info_update" ? (update._meta?.[TurnFailure.key] as { message: string; data?: unknown } | undefined) : undefined;
+    const failed = info?.[TurnFailure.key] as { turnId?: string; message: string; data?: unknown } | undefined;
     if (failed) {
       this.does(agentId, null);
       // A turn that a task or a message started failed: nobody else would hear of it.
       this.settle(agentId);
       const text = this.say(new RpcError(-32603, failed.message, failed.data));
-      this.put(agentId, { id: this.newId(), kind: "error", text });
+      this.put(agentId, { id: this.newId(), kind: "error", turnId: failed.turnId, text });
       if (this.live && !this.replaying) this.notify({ agentId, kind: "failed", detail: text });
       return;
     }
@@ -637,7 +664,7 @@ export class Workspace {
       const title = update.title ?? prior?.title ?? update.name ?? "";
       const status = update.status === undefined ? prior?.status ?? "running" : TOOL_STATUS[update.status] ?? "running";
       const toolKind = update.kind ?? prior?.toolKind;
-      this.put(agentId, { id, kind: "tool", title, status, toolKind, changes, savedFile, imagePath, name, input,
+      this.put(agentId, { id, kind: "tool", turnId: run ? run.turnId : prior?.turnId, title, status, toolKind, changes, savedFile, imagePath, name, input,
         output: update.output ?? update.rawOutput ?? update.content ?? prior?.output,
         terminalOutput: this.terminalViews.attach(id, sessionId, update.content) ?? prior?.terminalOutput,
       });
@@ -779,7 +806,7 @@ export class Workspace {
   /** Clear the agent's context: its model starts anew and sees nothing of what was said. The transcript keeps it. */
   async clear(agentId: string): Promise<void> {
     const sessionId = await this.mains.get(agentId);
-    if (sessionId) await this.conn.request(Boundaries.clear, { sessionId }).catch((e) => this.put(agentId, { id: this.newId(), kind: "error", text: this.why(e) }));
+    if (sessionId) await this.conn.request(Boundaries.clear, { sessionId }).catch((e) => this.put(agentId, { id: this.newId(), kind: "error", turnId: null, text: this.why(e) }));
   }
 
   /** Stop the running turn. Its open permission requests are void. */
@@ -798,6 +825,7 @@ export class Workspace {
     const entry = {
       id: this.newId(),
       kind: "permission" as const,
+      turnId: this.agents.get(agentId)?.currentTurnId,
       detail: request.title || request.subject?.toolCall?.title || request.subject?.toolCall?.toolCallId || "",
     };
     this.put(agentId, entry);
@@ -818,11 +846,12 @@ export class Workspace {
     const agentId = this.sessionAgent.get(request.sessionId);
     if (!agentId || this.hidden) throw RpcError.notFound(`session ${request.sessionId}`);
     const form = elicitationForm(request);
-    const questionId = (request._meta?.[Question.key] as { id?: string } | undefined)?.id;
+    const question = request._meta?.[Question.key] as Pick<Question, "id" | "turnId"> | undefined;
+    const questionId = question?.id;
     if (!questionId) throw RpcError.invalidParams("Missing question identity");
     if (this.nativeQuestions.has(questionId)) throw RpcError.invalidParams("Duplicate question identity");
     const id = `${request.sessionId}:question:${questionId}`;
-    const entry: Extract<Entry, { kind: "question" }> = { id, kind: "question", source: "acp", questionId, state: "open",
+    const entry: Extract<Entry, { kind: "question" }> = { id, kind: "question", source: "acp", questionId, turnId: question?.turnId, state: "open",
       answerable: true, questions: form.questions, ...((request._meta?.codex as any)?.delivery === "async" ? { delivery: "async" } : {}) };
     return new Promise((resolve) => {
       let settled = false;

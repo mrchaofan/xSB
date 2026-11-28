@@ -9,6 +9,7 @@ import { backendIcon, backendKind, backendMark } from "./backend-icons.js";
 import { createArtifactBrowser, artifactLabel, artifactNavigation } from "./artifacts.js";
 import { currentFlow, renderWorkflow, showTask, workflowPanelState, restoreWorkflowPanel } from "./workflow.js";
 import { contentView, createEditor, markdownView } from "./content.js";
+import { transcriptMarkers } from "./transcript-turns.js";
 import { dropPageAnnotations } from "./web-annotation.js";
 import { draftKey, loadDraft, moveDraft, saveDraft } from "./drafts.js";
 import { $, ICON, fill, h } from "./dom.js";
@@ -36,6 +37,7 @@ export const state = {
   tabOrder: [],         // 侧栏标签被拖出的顺序（标签 id）
   artifactTabs: [],     // { id, artifactId, mode }：每份打开的文件独立保留查看方式
   history: {},
+  partialTurnIds: {},
   transcripts: {},      // agentId -> Entry[]
   open: [],             // 当前打开的主会话。任务会话由工作流标签中的节点选择决定
   settings: null,      // 设置对话框开着时，其中的当前分类
@@ -182,6 +184,7 @@ function deliveredNote(as) {
 }
 
 const laneOf = (agentId) => document.querySelector(`.lane[data-agent="${agentId}"]`);
+const pinnedToBottom = scroller => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
 
 /** 主会话的标题：点击就地编辑，失焦或 Enter 保存；同步状态时不覆盖正在编辑的文字。 */
 function conversationTitle(agentId) {
@@ -340,7 +343,12 @@ function openLane(agentId, panel, readonly) {
   }
   (panel ?? $("#lanes")).append(lane);
   if (!panel) state.open.push(agentId);
-  lane.querySelector(".entries").append(...state.transcripts[agentId].map((entry) => entryNode(agentId, entry)));
+  const entries = lane.querySelector(".entries");
+  entries.append(...state.transcripts[agentId].map((entry) => entryNode(agentId, entry)));
+  lane.turnMarkers = transcriptMarkers(entries, () => ({
+    entries: state.transcripts[agentId], agent: agentOf(agentId), partialTurnIds: state.partialTurnIds[agentId],
+  }));
+  lane.turnMarkers.sync();
   syncAsk(agentId);
   syncLane(agentId);
   renderRail();
@@ -384,7 +392,9 @@ async function loadHistory(agentId) {
     const page = await xsb.history(agentId);
     state.transcripts[agentId] = page.entries;
     state.history[agentId] = page.cursor;
+    state.partialTurnIds[agentId] = page.partialTurnIds;
     lane.querySelector(".entries").replaceChildren(...page.entries.map((entry) => entryNode(agentId, entry)));
+    lane.turnMarkers.sync();
     button.hidden = page.cursor == null;
     scroller.scrollTop = top + scroller.scrollHeight - height;
   } catch (e) {
@@ -455,7 +465,7 @@ function upsertEntry(agentId, entry) {
   const lane = laneOf(agentId);
   if (!lane) return;
   const scroller = lane.querySelector(".transcript");
-  const pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+  const pinned = pinnedToBottom(scroller);
   const old = lane.querySelector(`.entry[data-id="${CSS.escape(entry.id)}"]`);
   const node = entryNode(agentId, entry);
   if (entry.kind === "tool" && old) {
@@ -464,6 +474,7 @@ function upsertEntry(agentId, entry) {
     if (current && prior?.open) current.open = true;
   }
   if (old) old.replaceWith(node); else lane.querySelector(".entries").append(node);
+  lane.turnMarkers.update(entry, old && node);
   if (entry.kind === "question") syncAsk(agentId);
   if (pinned) scroller.scrollTop = scroller.scrollHeight;
 }
@@ -486,9 +497,9 @@ function entryNode(agentId, entry) {
   if (entry.kind === "output") {
     const offTurn = entry.run?.turnId === null;
     const notification = entry.runOrigin === "task-notification" || entry.runOrigin?.kind === "task-notification";
-    return h("div", { ...base, "data-streaming": entry.streaming, "data-off-turn": offTurn },
+    return h("div", { ...base, "data-off-turn": offTurn },
       offTurn && h("div", { class: "run-label" }, t("entry.run.offTurn")),
-      contentView(entry.content, openLink, { streaming: entry.streaming }),
+      contentView(entry.content, openLink),
       offTurn && entry.stopReason && h("div", { class: "run-end" }, t(notification ? "entry.run.notification" : "entry.run.ended")));
   }
   if (entry.kind === "error") return h("div", base, entry.text);
@@ -925,6 +936,12 @@ export function onAgent(agent) {
     moveDraft(draftKey(state.workspace.id ?? state.workspace.path, previous), draftKey(state.workspace.id ?? state.workspace.path, agent));
   }
   state.transcripts[agent.id] ??= [];
+  if (lane && (previous?.state !== agent.state || previous?.currentTurnId !== agent.currentTurnId)) {
+    const scroller = lane.querySelector(".transcript");
+    const pinned = pinnedToBottom(scroller);
+    lane.turnMarkers.sync();
+    if (pinned) scroller.scrollTop = scroller.scrollHeight;
+  }
   renderRail();
   syncLane(agent.id);
 }
@@ -996,9 +1013,15 @@ xsb.on((event) => {
     if (event.activity) state.activities[event.agentId] = event.activity; else delete state.activities[event.agentId];
     syncActivity(event.agentId);
   }
+  else if (event.partialTurnIds) {
+    state.partialTurnIds[event.agentId] = event.partialTurnIds;
+    laneOf(event.agentId)?.turnMarkers.sync();
+  }
   else if (event.removedEntry) {
     state.transcripts[event.agentId] = state.transcripts[event.agentId].filter((e) => e.id !== event.removedEntry);
-    laneOf(event.agentId)?.querySelector(`.entry[data-id="${event.removedEntry}"]`)?.remove();
+    const lane = laneOf(event.agentId);
+    lane?.querySelector(`.entry[data-id="${CSS.escape(event.removedEntry)}"]`)?.remove();
+    lane?.turnMarkers.sync();
   }
   else if (event.entry) { upsert(state.transcripts[event.agentId] ??= [], event.entry); upsertEntry(event.agentId, event.entry); }
 });
@@ -1006,7 +1029,7 @@ xsb.on((event) => {
 /** 读一次快照并画出整个窗口。打开工作区之后再调用一次。 */
 export async function start() {
   rememberSide();
-  Object.assign(state, { activities: {}, workflows:{} }, await xsb.load(), { open: [], settings: null, listing: true, tab: null, workflowTab: false, catalogTab: false, tabOrder: [], artifactTabs: [] });
+  Object.assign(state, { activities: {}, workflows:{}, partialTurnIds: {} }, await xsb.load(), { open: [], settings: null, listing: true, tab: null, workflowTab: false, catalogTab: false, tabOrder: [], artifactTabs: [] });
   catalogScroll = 0;
   $("#artifact-body").scrollTop = 0;
   fileList = null;

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { Store } from "@xsb/store";
-import { Accepted, Connection, Discarded, History, OriginExt, PROTOCOL_VERSION, assistantOnly, text } from "@xsb/protocol";
+import { Accepted, Connection, Discarded, History, OriginExt, PROTOCOL_VERSION, Question, RunExt, TurnFailure, assistantOnly, text } from "@xsb/protocol";
 import type { HistoryPage, SessionUpdate } from "@xsb/protocol";
 import { Paths } from "../src/paths.ts";
 import { Workspace } from "../../desktop/src/workspace.ts";
@@ -77,6 +77,50 @@ test("history pagination counts visible inputs across runs of model-only deliver
   const older = historyPage(store, "a", "s", page.cursor!, 1);
   assert.deepEqual(older.updates.map(u => u.content.text), ["older user input"]);
   assert.equal(older.cursor, null);
+});
+
+test("history pages keep all inputs and runs of a turn together, including output before its first receipt", t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-history-turns-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = new Store(dir), file = Paths.transcript("a", "s");
+  const input = (messageId: string, turnId: string, steered = false) => ({ sessionUpdate: "user_message_chunk", messageId,
+    content: text(messageId), _meta: { [OriginExt.key]: { kind: "user", turnId, steered } } });
+  const run = (id: string, turnId: string, state = "running") => ({ [RunExt.key]: { id, turnId, state } });
+  const event = (_meta: object) => ({ sessionUpdate: "session_info_update", _meta });
+  const output = (body: string, _meta: object) => ({ sessionUpdate: "agent_message_chunk", content: text(body), _meta });
+  const accepted = (messageId: string) => event({ [Accepted.key]: { messageId, origin: { kind: "user" }, content: [text(messageId)] } });
+  const oldest = [input("zero", "t0")];
+  const older = [
+    event(run("r1", "t1")), accepted("two"), output("still in turn one", run("r1", "t1")), event(run("r1", "t1", "idle")),
+  ];
+  const recent = [
+    event(run("r2", "t2")), output("before the receipt", run("r2", "t2")), accepted("later"),
+    input("two", "t2"), input("steer", "t2", true), event(run("r2", "t2", "idle")),
+    event(run("r3", "t2")), input("batched", "t2"), input("batched", "t2"),
+    output("final", run("r3", "t2")), event(run("r3", "t2", "idle")),
+    event(run("r4", "t3")), event(run("r4", "t3", "idle")), // no visible input or output
+  ];
+  for (const update of [...oldest, ...older, ...recent]) store.append(file, { update }, false);
+  const page = historyPage(store, "a", "s", undefined, 1);
+  assert.deepEqual(page.updates, recent);
+  const previous = historyPage(store, "a", "s", page.cursor!, 1);
+  assert.deepEqual(previous.updates, older, "a turn with only visible output still counts");
+  assert.deepEqual(historyPage(store, "a", "s", previous.cursor!, 1), { updates: oldest, cursor: null });
+});
+
+test("legacy steered input stays on the page of its opening message", t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xsb-history-legacy-turns-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = new Store(dir), file = Paths.transcript("a", "s");
+  const input = (messageId: string, steered = false) => ({ sessionUpdate: "user_message_chunk", messageId,
+    content: text(messageId), _meta: { [OriginExt.key]: { kind: "user", steered } } });
+  const output = (body: string) => ({ sessionUpdate: "agent_message_chunk", content: text(body) });
+  const older = [input("older"), output("old reply"), input("old steer", true), output("old conclusion")];
+  const recent = [input("newer"), output("new reply"), input("new steer", true), output("new conclusion")];
+  for (const update of [...older, ...recent]) store.append(file, { update }, false);
+  const page = historyPage(store, "a", "s", undefined, 1);
+  assert.deepEqual(page.updates, recent);
+  assert.deepEqual(historyPage(store, "a", "s", page.cursor!, 1), { updates: older, cursor: null });
 });
 
 test("a plain ACP subscriber sees only the workflow assignment title live, on replay and in paged history", async t => {
@@ -216,21 +260,38 @@ test("desktop loads pages over a real hub connection and receives live images as
   try {
     const session = hub.createConversation("codex");
     session.save({ backend: "codex", backendSessionId: "existing-backend-session" });
-    for (let i = 0; i < 15; i++) {
-      session.emit({ sessionUpdate: "user_message_chunk", messageId: `m${i}`, content: { type: "text", text: `input ${i}` } });
-      session.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `output ${i}` } });
+    const run = (i: number, state: string) => ({ [RunExt.key]: { id: `r${i}`, turnId: `t${i}`, state } });
+    for (let i = 0; i < 25; i++) {
+      session.emit({ sessionUpdate: "user_message_chunk", messageId: `m${i}`, content: text(`input ${i}`),
+        _meta: { [OriginExt.key]: { kind: "user", turnId: `t${i}` } } });
+      session.emit({ sessionUpdate: "agent_message_chunk", content: text(`output ${i}`), _meta: run(i, "running") });
     }
+    session.emit({ sessionUpdate: "tool_call_update", toolCallId: "background", title: "Late background result", status: "completed", _meta: run(1, "idle") });
+    session.emit({ sessionUpdate: "agent_message_chunk", content: text("Late output"), _meta: run(2, "idle") });
+    session.emit({ sessionUpdate: "session_info_update", _meta: { [Question.key]: { id: "async", state: "answered", turnId: "t14", questions: [] } } });
+    session.emit({ sessionUpdate: "session_info_update", _meta: { [TurnFailure.key]: { turnId: "failed-to-start", message: "Failed to start" } } });
     await hub.start();
     const transcriptFile = path.join(paths.dir, Paths.transcript(session.agentId, session.id));
-    const originalTranscript = fs.readFileSync(transcriptFile);
     const originalSession = JSON.stringify(session.rec);
-    ws = await Workspace.open(paths, process.env, "en", String, () => {}, () => {});
+    const changes: string[][] = [];
+    ws = await Workspace.open(paths, process.env, "en", String, event => {
+      if ("partialTurnIds" in event) changes.push(event.partialTurnIds);
+    }, () => {});
     const loaded = await ws.load();
-    assert.equal(loaded.transcripts[session.agentId].filter(e => e.kind === "input").length, 10);
+    assert.equal(loaded.transcripts[session.agentId].filter(e => e.kind === "input").length, 9, "the failure-only turn fills the tenth slot");
     assert.notEqual(loaded.history[session.agentId], null);
+    assert.deepEqual(loaded.partialTurnIds[session.agentId], ["t1", "t2", "t14"]);
+    session.emit({ sessionUpdate: "agent_message_chunk", content: text("Another late update"), _meta: run(3, "idle") });
+    await ws.backends();
+    assert.deepEqual(changes.at(-1), ["t1", "t2", "t14", "t3"]);
+    const originalTranscript = fs.readFileSync(transcriptFile);
+    const middle = await ws.history(session.agentId);
+    assert.notEqual(middle.cursor, null);
+    assert.deepEqual(middle.partialTurnIds, ["t1", "t2", "t3"]);
     const older = await ws.history(session.agentId);
-    assert.equal(older.entries.filter(e => e.kind === "input").length, 15);
+    assert.equal(older.entries.filter(e => e.kind === "input").length, 25);
     assert.equal(older.cursor, null);
+    assert.deepEqual(older.partialTurnIds, []);
     assert.deepEqual(fs.readFileSync(transcriptFile), originalTranscript, "display paging never rewrites the model's transcript");
     assert.equal(JSON.stringify(session.rec), originalSession, "display paging never resumes or renews the backend session");
     assert.equal(session.rec.backendSessionId, "existing-backend-session");

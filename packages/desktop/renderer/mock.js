@@ -29,6 +29,7 @@
     workflowOwner: main.mainSessionId,
     workflowNode: "A",
     state: "running",
+    currentTurnId: "art-preview",
   };
   // 上一版里的 draft 节点被新版删掉了：它的对话只能查看。
   const dropped = { ...agent("draft", label("初稿", "Draft")), workflowOwner: main.mainSessionId, workflowNode: "draft", retired: true };
@@ -115,7 +116,7 @@
     workflows: { [main.mainSessionId]: flow },
     transcripts: {
       main: [entry("output", label("定妆图完成后开始审片。", "Review starts after the costume design."))],
-      art: [entry("output", label("正在画红外套的定妆图。", "Drawing the red coat."))],
+      art: [{ ...entry("output", label("正在画红外套的定妆图。", "Drawing the red coat.")), run: { id: "preview-run", turnId: worker.currentTurnId } }],
       draft: [entry("output", label("初稿已交付。", "The first draft is delivered."))],
     },
   };
@@ -253,18 +254,32 @@
     send: async (id, content) => {
       const a = get(id);
       // 先显示为尚未送达，片刻后"模型收到"，再回复：与真实中枢的插入回执顺序一致。
-      const sent = { id: "m" + ++sequence, kind: "input", origin: { kind: "user" }, content, pending: true };
+      const steered = !!a.currentTurnId;
+      const turnId = a.currentTurnId ??= "turn" + ++sequence;
+      a.state = "running";
+      emit({ agent: a });
+      const sent = { id: "m" + ++sequence, kind: "input", origin: { kind: "user", turnId, steered }, content, pending: true };
       put(id, sent);
       await new Promise((r) => setTimeout(r, 1200));
-      const inserted = { ...sent, pending: undefined };
+      const stopped = a.currentTurnId !== turnId;
+      const inserted = { ...sent, pending: undefined, ...(stopped && { discarded: true, reason: "stopped" }) };
       data.transcripts[id] = data.transcripts[id].map((e) => (e.id === sent.id ? inserted : e));
       emit({ agentId: id, entry: inserted });
-      put(id, entry("output", a.name + " · " + content.map((b) => b.text ?? b.type).join(" ")));
+      if (stopped) return;
+      put(id, { ...entry("output", a.name + " · " + content.map((b) => b.text ?? b.type).join(" ")), run: { id: "run-" + turnId, turnId } });
+      if (!data.transcripts[id].some(e => e.pending && e.origin.turnId === turnId)) {
+        delete a.currentTurnId;
+        a.state = "idle";
+        emit({ agent: a });
+      }
     },
     async cancel(id) {
       const a = get(id);
       const f = data.workflows[a.workflowOwner ?? a.mainSessionId];
       if (f) await this.stopWorkflow(f.sessionId, f.version, a.workflowNode);
+      delete a.currentTurnId;
+      a.state = "idle";
+      emit({ agent: a });
     },
     async stopWorkflow(id, version, node) {
       const f = data.workflows[id];
@@ -281,6 +296,7 @@
         n.status = n.agentId ? "suspended" : "paused";
         if (n.agentId) {
           const a = get(n.agentId);
+          delete a.currentTurnId;
           a.state = "idle";
           emit({ agent: a });
         }

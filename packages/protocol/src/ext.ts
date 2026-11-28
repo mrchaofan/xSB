@@ -420,7 +420,7 @@ export type QuestionItem = {
 };
 export type QuestionState = "open" | "answered" | "skipped" | "superseded" | "cancelled";
 /** `reply`: the user's message that closed it (answered, skipped or superseded). */
-export type Question = { id: string; state: QuestionState; questions?: QuestionItem[]; answers?: QuestionAnswer[]; reply?: string; source?: "acp"; delivery?: "async" };
+export type Question = { id: string; turnId?: string; state: QuestionState; questions?: QuestionItem[]; answers?: QuestionAnswer[]; reply?: string; source?: "acp"; delivery?: "async" };
 /** One answer per question, in order: an option or text for single and text, a list for multi. */
 export type QuestionAnswer = string | string[] | null;
 /** A desktop submission for an open form. The id selects the original live callback. */
@@ -436,6 +436,30 @@ export const History = {
 } as const;
 export type HistoryImage = { sessionId: string; offset: number; index: number };
 export type HistoryPage = { updates: SessionUpdate[]; cursor: number | null; state: "idle" | "running"; agent: AgentInfo };
+
+/**
+ * A "turn" record (insertion, opening question or failure) occurs within the logical turn; "run" marks an owned run
+ * starting. An "entry" alone can be a background tool, settled output or async answer received in a later turn.
+ */
+export function historyTurn(update: SessionUpdate): { id: string; record: "turn" | "run" | "entry" | "metadata" } | undefined {
+  const meta = update._meta;
+  if (update.sessionUpdate === "user_message_chunk") {
+    const id = (meta?.[OriginExt.key] as OriginMeta | undefined)?.turnId;
+    return id ? { id, record: "turn" } : undefined;
+  }
+  const info = update.sessionUpdate === "session_info_update";
+  if (info) {
+    const question = meta?.[Question.key] as Question | undefined;
+    if (question?.turnId) return { id: question.turnId, record: question.state === "open" ? "turn" : "entry" };
+    const failure = meta?.[TurnFailure.key] as { turnId?: string } | undefined;
+    if (failure?.turnId) return { id: failure.turnId, record: "turn" };
+  }
+  const run = meta?.[RunExt.key] as RunUpdate | undefined;
+  if (!run?.turnId) return;
+  if (info && run.state === "running") return { id: run.turnId, record: "run" };
+  const entry = update.sessionUpdate === "agent_message_chunk" || update.sessionUpdate === "tool_call_update" || update.sessionUpdate === "tool_call";
+  return { id: run.turnId, record: entry ? "entry" : "metadata" };
+}
 
 export const Boundaries = {
   key: `${NS}/boundary`,

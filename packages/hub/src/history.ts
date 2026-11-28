@@ -1,6 +1,6 @@
 import path from "node:path";
-import { Discarded, History, RpcError, fileChanges, fileEditInput, fileEditPath, userVisibleUpdate } from "@xsb/protocol";
-import type { ContentBlock, FileChange, HistoryImage, SessionUpdate, SupplementalInput } from "@xsb/protocol";
+import { Discarded, History, OriginExt, RpcError, fileChanges, fileEditInput, fileEditPath, historyTurn, userVisibleUpdate } from "@xsb/protocol";
+import type { ContentBlock, FileChange, HistoryImage, OriginMeta, SessionUpdate, SupplementalInput } from "@xsb/protocol";
 import type { Hub } from "./hub.ts";
 import type { LiveSession } from "./session.ts";
 import type { Store } from "@xsb/store";
@@ -134,25 +134,35 @@ export function historyFiles(hub: Hub, owner: string) {
   return { files: [...files].map(([path, agentId]) => ({ path, agentId })) };
 }
 
-/** Page boundaries fall before a complete input, so output and multi-block input stay together. */
+/** Page by logical turns. An owned run can start and produce output before its input receipt arrives. */
 export function historyPage(store: Store, agentId: string, sessionId: string, before?: number, turns = 10, supplementalOrigin?: SupplementalInput) {
   const reversed: SessionUpdate[] = [];
-  let cursor: number | null = null;
-  let inputs = 0;
-  let inputId: string | undefined;
+  const owners = new Set<string>();
+  const turnsWithEntries = new Set<string>();
+  let first: { offset: number; length: number } | undefined;
   for (const { offset, record } of store.readBackwardEntries(Paths.transcript(agentId, sessionId), before)) {
     const update = historyUpdate(record.update, sessionId, offset, supplementalOrigin);
-    if (!update) { cursor = offset; continue; }
-    if (inputs >= turns && !(update.sessionUpdate === "user_message_chunk" && update.messageId === inputId)) break;
-    if (update.sessionUpdate === "user_message_chunk" && update.messageId !== inputId) {
-      if (inputs >= turns) break;
-      inputId = update.messageId;
-      inputs++;
+    if (!update) continue;
+    const input = update.sessionUpdate === "user_message_chunk";
+    const origin = input ? update._meta?.[OriginExt.key] as OriginMeta | undefined : undefined;
+    const turn = historyTurn(update);
+    // Old transcripts only marked steered inputs. All blocks of an opening message share one key.
+    const owner = turn ? `turn:${turn.id}` : input && !origin?.steered ? `input:${update.messageId}` : undefined;
+    if (turn?.record === "entry") turnsWithEntries.add(turn.id);
+    // A turn whose input was model-only can still have visible output. Empty runs don't fill a page.
+    const runStarted = turn?.record === "run" && turnsWithEntries.has(turn.id);
+    if (owner && (input || turn?.record === "turn" || runStarted) && !owners.has(owner)) {
+      if (owners.size >= turns && first) {
+        return { updates: reversed.slice(0, first.length).reverse(), cursor: first.offset };
+      }
+      owners.add(owner);
     }
     reversed.push(update);
-    cursor = offset;
+    // Hold intervening records until their side of the boundary is known. This keeps queued acceptance
+    // and unrelated tool updates in chronological order, even with several runs or inputs per turn.
+    if (owner && owners.has(owner)) first = { offset, length: reversed.length };
   }
-  return { updates: reversed.reverse(), cursor: cursor === 0 || reversed.length === 0 ? null : cursor };
+  return { updates: reversed.reverse(), cursor: null };
 }
 
 export function historyImage(store: Store, agentId: string, ref: HistoryImage, supplementalOrigin?: SupplementalInput): ContentBlock {
