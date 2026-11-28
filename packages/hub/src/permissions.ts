@@ -11,7 +11,7 @@
  * with one exception: a turn that a client asked for and still waits on (a
  * script's `xsb send`) is not left hanging, and its request is declined.
  */
-import type { PermissionRequest, PermissionResponse } from "@xsb/protocol";
+import { TurnExt, type PermissionRequest, type PermissionResponse } from "@xsb/protocol";
 import type { Client } from "./acp-server.ts";
 import type { Hub } from "./hub.ts";
 import type { LiveSession } from "./session.ts";
@@ -22,6 +22,7 @@ type Pending = {
   session: LiveSession;
   params: PermissionRequest;
   answer: Deferred<PermissionResponse>;
+  clients: AbortController;
   asked: Set<Client>;
   /** Clients that were asked and could not answer, or left. */
   unable: Set<Client>;
@@ -40,19 +41,29 @@ export class Permissions {
     return this.pending.some((p) => p.session.agentId === agentId);
   }
 
-  request(session: LiveSession, request: PermissionRequest): Promise<PermissionResponse> {
+  request(session: LiveSession, request: PermissionRequest, signal?: AbortSignal): Promise<PermissionResponse> {
+    const turn = session.current!, bridgeToken = session.bridgeToken;
     const pending: Pending = {
       session,
       // The client knows the hub's session id, not the backend's.
-      params: { ...request, sessionId: session.id },
+      params: { ...request, sessionId: session.id, _meta: { ...request._meta, [TurnExt.key]: { id: turn.id } } },
       answer: deferred(),
+      clients: new AbortController(),
       asked: new Set(),
       unable: new Set(),
     };
     this.pending.push(pending);
-    this.route();
+    const cancel = () => this.settle(pending, { outcome: { outcome: "cancelled" } });
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
+    else this.route();
     this.hub.agentChanged(session.agentId);
-    return pending.answer.promise;
+    return pending.answer.promise.then(answer => {
+      signal?.removeEventListener("abort", cancel);
+      if (this.hub.stopping || signal?.aborted || session.current !== turn || session.bridgeToken !== bridgeToken ||
+          session.rec.backendSessionId !== request.sessionId || !session.acceptsTools) return { outcome: { outcome: "cancelled" } };
+      return answer;
+    });
   }
 
   /** Ask whoever can answer and has not been asked. Called when clients come, attach, or turn out unable to answer. */
@@ -64,9 +75,10 @@ export class Permissions {
       for (const client of targets) {
         if (pending.asked.has(client)) continue;
         pending.asked.add(client);
-        client.conn.request<PermissionResponse>("session/request_permission", pending.params).then(
+        client.conn.request<PermissionResponse>("session/request_permission", pending.params, { signal: pending.clients.signal, notify: "$/cancel_request" }).then(
           (answer) => this.settle(pending, answer),
           () => {
+            if (pending.clients.signal.aborted) return;
             pending.unable.add(client);
             this.route(); // another one may still answer
           },
@@ -88,6 +100,7 @@ export class Permissions {
     const index = this.pending.indexOf(pending);
     if (index < 0) return;
     this.pending.splice(index, 1);
+    pending.clients.abort();
     pending.answer.resolve(answer);
     this.hub.agentChanged(pending.session.agentId);
   }

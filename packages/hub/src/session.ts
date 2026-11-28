@@ -785,11 +785,12 @@ export class LiveSession {
     if (this.current?.started) this.end({ stopReason: "error", failure: new Error(`the agent program ${reason}`) });
   }
 
-  onBackendPermission(request: PermissionRequest): Promise<PermissionResponse> {
-    if (request.sessionId !== this.rec.backendSessionId || !this.current?.started || !this.acceptsTools ||
-      this.currentRun?.turnId !== this.current.id) return Promise.resolve({ outcome: { outcome: "cancelled" } });
+  onBackendPermission(request: PermissionRequest, signal?: AbortSignal): Promise<PermissionResponse> {
+    const target = (request._meta?.[TurnExt.key] as { id?: string } | undefined)?.id;
+    if (signal?.aborted || request.sessionId !== this.rec.backendSessionId || !this.current?.started || !this.acceptsTools ||
+      this.currentRun?.turnId !== this.current.id || target && target !== this.current.id) return Promise.resolve({ outcome: { outcome: "cancelled" } });
     this.observeExecution();
-    return this.hub.permissions.request(this, request);
+    return this.hub.permissions.request(this, request, signal);
   }
 
   onBackendElicitation(request: import("@xsb/protocol").FormElicitationRequest, signal: AbortSignal): Promise<ElicitationResponse> {
@@ -1640,6 +1641,7 @@ export class LiveSession {
       turn.cancelledBy = "hub";
       end = { ...end, stopReason: "cancelled" };
     }
+    this.hub.permissions.cancel(this);
     // Session-scoped async questions can still be answered in an idle main conversation.
     // Task attempts, stops, failures and backend replacement always retire their pending requests.
     if (this.hub.elicitations) {

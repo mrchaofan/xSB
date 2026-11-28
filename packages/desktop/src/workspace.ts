@@ -16,9 +16,9 @@ import path from "node:path";
 import { hubSocket, initProject } from "@xsb/hub";
 import type { Paths } from "@xsb/hub";
 import type { ComposerState, WorkflowView } from "@xsb/protocol";
-import { Question, RunExt, SessionControls, ToolServers, Workflow, Agents, fileChanges, fileEditPath, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry, historyTurn, userVisibleUpdate } from "@xsb/protocol";
+import { Question, RunExt, TurnExt, SessionControls, ToolServers, Workflow, Agents, fileChanges, fileEditPath, Backends, History, Boundaries, Connection, MessageDelivery, Accepted, DeliveredAs, Discarded, Ledger, Redelivered, TurnFailure, LanguageExt, OriginExt, PROTOCOL_VERSION, RpcError, Tasks, failure, isTerminal, elicitationForm, elicitationContent, conversationEntry, historyTurn, userVisibleUpdate } from "@xsb/protocol";
 import type { RunUpdate, HistoryImage, HistoryPage, AgentInfo, BackendInfo, Boundary, Language, OriginMeta, PermissionRequest, PermissionResponse, SessionUpdate, Task } from "@xsb/protocol";
-import type { Activity, Artifact, BackendView, Entry, Event, Snapshot } from "./bridge.ts";
+import type { Activity, Artifact, BackendView, Entry, Event, Snapshot, TranscriptPage } from "./bridge.ts";
 import type { Answer, ElicitationRequest, ElicitationResponse } from "@xsb/protocol";
 import { append } from "./content.ts";
 import type { Content } from "./content.ts";
@@ -36,10 +36,9 @@ type Emit = (event: Event) => void;
  * What the user is told of even when they are not looking (main.ts makes it a notification of the system):
  * the work they set going is over, or went wrong, or waits for them. `detail` is in the words it came in.
  */
-export type Notice = { agentId: string; name: string; kind: "done" | "failed" | "confirm" | "permission" | "question"; detail: string };
+export type Notice = { agentId: string; name: string; kind: "done" | "failed" | "cancelled" | "interrupted" | "workflow" | "confirm" | "permission" | "question"; detail: string; entryId?: string };
 type Notify = (notice: Notice) => void;
 type Tool = Extract<Entry, { kind: "tool" }>;
-type TranscriptPage = { entries: Entry[]; cursor: number | null; partialTurnIds: string[] };
 
 const TOOL_STATUS: Record<string, Tool["status"]> = { completed: "done", failed: "failed", cancelled: "failed" };
 
@@ -97,14 +96,6 @@ export class Workspace {
   private historyImages = new Set<string>();
   private notify: (notice: Omit<Notice, "name">) => void;
   /**
-   * Whether some agent was at work when last looked, and what happened since the workspace last went quiet: an
-   * agent asked the user something, or the user stopped one. Either way its going quiet is no news of its own.
-   */
-  private busy = false;
-  private asked = false;
-  private stopped = false;
-
-  /**
    * Open the project's workspace, making the folder a project first if it is none.
    * `language` is the one the user reads, and `say` words an error in it.
    */
@@ -130,7 +121,7 @@ export class Workspace {
     this.conn = conn;
     this.say = say;
     this.notify = (notice) => {
-      if (this.live) notify({ ...notice, name: this.agents.get(notice.agentId)?.name ?? notice.agentId });
+      if (!this.left && !this.replaying) notify({ ...notice, name: this.agents.get(notice.agentId)?.name ?? notice.agentId });
     };
     this.emit = (event) => {
       if (this.live && !this.replaying) emit(event);
@@ -145,15 +136,16 @@ export class Workspace {
     conn.onNotification(Agents.update, (p) => this.onAgent(p.agent));
     conn.onNotification(Agents.removed, (p) => this.onAgentRemoved(p.id));
     conn.onNotification(Workflow.update, ({ workflow }: { workflow: WorkflowView }) => {
-      this.workflows.set(workflow.sessionId,workflow);
+      const prior = this.workflows.get(workflow.sessionId);
+      this.workflows.set(workflow.sessionId, workflow);
       this.emit({workflow});
+      if (prior) this.workflowNotices(prior, workflow);
     });
     conn.onNotification(Tasks.update, (p) => this.onTask(p.task));
     conn.onNotification(Agents.asks, (p) => {
-      this.asked = true;
       this.notify({ agentId: p.agentId, kind: "confirm", detail: p.question });
     });
-    conn.onRequest("session/request_permission", (p) => this.onPermission(p));
+    conn.onRequest("session/request_permission", (p, ctx) => this.onPermission(p, ctx.signal));
     conn.onRequest("elicitation/create", (p: ElicitationRequest, ctx) => p.mode === "url"
       ? interactions.url?.(p, ctx.signal) ?? { action: "decline" }
       : this.onElicitation(p, ctx.signal));
@@ -187,7 +179,6 @@ export class Workspace {
 
   /** With the hub gone nothing runs: no agent is at work any more, and no question of theirs waits for an answer. */
   private onHubGone(emit: Emit): void {
-    this.stopped = true;
     this.backgroundTools.clear();
     this.markReady();
     for (const pending of this.nativeQuestions.values()) pending.answer({ action: "cancel" });
@@ -210,17 +201,6 @@ export class Workspace {
       if (!isTerminal(task.status) && this.agents.has(task.to.agentId)) busy.add(task.to.agentId);
     }
     return busy;
-  }
-
-  /**
-   * Whether the workspace went quiet: nobody at work and no task open. That is when what the user set going is
-   * done, however many agents it went through; `agentId` was the last to stop.
-   */
-  private watch(agentId: string): void {
-    const busy = this.atWork().size > 0;
-    if (busy && !this.busy) this.asked = this.stopped = false;
-    if (!busy && this.busy && !this.asked && !this.stopped) this.notify({ agentId, kind: "done", detail: "" });
-    this.busy = busy;
   }
 
   sessionOwner(agentId: string): string | undefined {
@@ -267,7 +247,6 @@ export class Workspace {
     for (const agentId of this.growing.keys()) this.settle(agentId);
     // What the replayed history ended on is what an agent that is still at work is doing.
     for (const agent of this.agents.values()) if (agent.state === "idle") this.does(agent.id, null);
-    this.busy = this.atWork().size > 0;
     this.live = true;
     this.markReady();
     return {
@@ -306,26 +285,50 @@ export class Workspace {
       this.does(agent.id, "waiting"); // a turn began: nothing has come back yet
     }
     this.emit({ agent });
-    this.watch(agent.id);
   }
 
   private onTask(task: Task): void {
     this.taskVersions.set(task.id, (this.taskVersions.get(task.id) ?? 0) + 1);
     const agentId = task.to.agentId;
-    if (task.status === "failed" && this.tasks.get(task.id)?.status !== "failed") this.notify({ agentId, kind: "failed", detail: task.title });
+    const previous = this.tasks.get(task.id);
     this.tasks.set(task.id, task);
     this.emit({ task });
-    this.watch(agentId);
+    if (previous && isTerminal(previous.status)) return;
+    const status = task.status;
+    if (status === "completed" || status === "failed" || status === "cancelled" || status === "interrupted")
+      this.notify({ agentId, kind: status === "completed" ? "done" : status, detail: task.title });
+  }
+
+  /** Workflow assignments publish accepted deliveries in the graph independently of the task ledger. */
+  private workflowNotices(prior: WorkflowView, workflow: WorkflowView): void {
+    const previousByAgent = new Map(prior.nodes.map(node => [node.agentId, node]));
+    for (const node of workflow.nodes) {
+      if (node.kind !== "task" || !node.agentId) continue;
+      const previous = previousByAgent.get(node.agentId);
+      if (!previous) continue;
+      const delivered = node.deliveryId ? node.deliveryId !== previous.deliveryId :
+        node.status === "completed" && (node.target !== previous.target || previous.status === "choosing");
+      if (delivered)
+        this.notify({ agentId: node.agentId, kind: "done", detail: node.name });
+      if (!node.additionalResults?.length) continue;
+      const known = new Set(previous.additionalResults?.map(result => result.id));
+      for (const result of node.additionalResults) if (!known.has(result.id))
+        this.notify({ agentId: node.agentId, kind: "done", detail: result.summary });
+    }
+    if (workflow.state === "completed" && prior.state !== "completed") {
+      const owner = this.sessionAgent.get(workflow.sessionId);
+      if (owner) this.notify({ agentId: owner, kind: "workflow", detail: "" });
+    }
   }
 
   private onAgentRemoved(id: string): void {
+    for (const [entryId, permission] of this.asking) if (permission.agentId === id) this.answer(entryId, "cancelled");
     for (const pending of this.nativeQuestions.values()) if (pending.agentId === id) pending.answer({ action: "cancel" });
     // Invalidate a pending history page too: it must not restore a removed agent.
     this.agentVersions.set(id, (this.agentVersions.get(id) ?? 0) + 1);
     for (const [sessionId, agentId] of this.sessionAgent) if (agentId === id) this.sessionAgent.delete(sessionId);
     for (const perAgent of [this.agents, this.transcripts, this.mains, this.growing, this.activities, this.tools, this.historyUpdates, this.historyCursors, this.historyTurns]) perAgent.delete(id);
     this.emit({ removedAgent: id });
-    this.busy = this.atWork().size > 0;
   }
 
   /** The agent's main session with this client attached, created if the agent has none. */
@@ -339,12 +342,16 @@ export class Workspace {
         this.historyUpdates.set(agent.id, []);
         const version = this.agentVersions.get(agent.id);
         session = Promise.resolve().then(() => this.conn.request<HistoryPage>(History.page, { sessionId: agent.mainSessionId })).then((page) => {
+          if (this.sessionAgent.get(agent.mainSessionId!) !== agent.id) return agent.mainSessionId!;
           this.historyUpdates.set(agent.id, [...page.updates, ...(this.historyUpdates.get(agent.id) ?? [])]);
           this.historyCursors.set(agent.id, page.cursor);
           this.rebuildHistory(agent.id);
-          const partialTurnIds = this.partialTurnIds(agent.id);
-          if (partialTurnIds.length) this.emit({ agentId: agent.id, partialTurnIds });
           if (this.agentVersions.get(agent.id) === version) this.onAgent(page.agent);
+          // A node can ask for attention before its first history page arrives.
+          // Publish the rebuilt conversation together with any live requests it now contains.
+          this.emit({ agentId: agent.id, transcript: {
+            entries: this.transcripts.get(agent.id)!, cursor: page.cursor, partialTurnIds: this.partialTurnIds(agent.id),
+          } });
           // The main chat may already show Files when a newly discovered task is attached.
           // Its earlier edits arrived through history, where individual refreshes are suppressed.
           this.emit({ filesChanged: agent.workflowOwner ?? agent.mainSessionId! });
@@ -379,6 +386,8 @@ export class Workspace {
   }
 
   private rebuildHistory(agentId: string): void {
+    // Permissions arrive on a separate RPC, even while a new node's first page is loading.
+    const permissions = this.transcripts.get(agentId)?.filter(entry => entry.kind === "permission") ?? [];
     this.transcripts.set(agentId, []);
     this.growing.delete(agentId);
     if (this.historyCursors.get(agentId) != null) this.historyTurns.set(agentId, new Map());
@@ -389,6 +398,7 @@ export class Workspace {
       if (sessionId) for (const update of this.historyUpdates.get(agentId) ?? []) this.onUpdate(sessionId, update);
       // A long-lived async form's opening record can precede the loaded history page.
       for (const pending of this.nativeQuestions.values()) if (pending.agentId === agentId) this.put(agentId, pending.entry);
+      for (const entry of permissions) this.put(agentId, entry);
       if (this.agents.get(agentId)?.state === "idle") {
         this.settle(agentId);
         this.finishTools(agentId);
@@ -406,11 +416,10 @@ export class Workspace {
     const loading = this.conn.request<HistoryPage>(History.page, { sessionId, before: cursor }).then((page) => {
       this.historyUpdates.set(agentId, [...page.updates, ...(this.historyUpdates.get(agentId) ?? [])]);
       this.historyCursors.set(agentId, page.cursor);
-      // What only this window knows of (a message xsb has not recorded yet, or never got) is kept across the rebuild.
-      const local = (entry: Entry): boolean => entry.kind === "input" && (entry.unsent || (!!entry.pending && this.pending.has(entry.id.slice(entry.id.indexOf(":") + 1))));
-      const pending = (this.transcripts.get(agentId) ?? []).filter((entry) => local(entry) || entry.kind === "permission");
+      const pending = (this.transcripts.get(agentId) ?? []).filter(entry => entry.kind === "input" &&
+        (entry.unsent || (entry.pending && this.pending.has(entry.id.slice(entry.id.indexOf(":") + 1)))));
       this.rebuildHistory(agentId);
-      pending.forEach((entry) => this.put(agentId, entry));
+      pending.forEach(entry => this.put(agentId, entry));
       return { entries: this.transcripts.get(agentId) ?? [], cursor: page.cursor, partialTurnIds: this.partialTurnIds(agentId) };
     }).finally(() => this.historyLoading.delete(agentId));
     this.historyLoading.set(agentId, loading);
@@ -554,7 +563,7 @@ export class Workspace {
         ...(question.source ? { source: question.source } : {}), ...(question.delivery ? { delivery: question.delivery } : {}) };
       if (question.state === "open") {
         this.settle(agentId);
-        if (this.live && !this.replaying) this.notify({ agentId, kind: "question", detail: question.questions?.[0]?.question ?? "" });
+        if (question.source !== "acp" && !prior) this.notify({ agentId, kind: "question", detail: entry.questions[0]?.question ?? "", entryId: id });
         return this.put(agentId, { ...entry, answerable: this.nativeQuestions.has(question.id) });
       }
       if (question.reply && question.state !== "superseded") {
@@ -609,7 +618,9 @@ export class Workspace {
       this.settle(agentId);
       const text = this.say(new RpcError(-32603, failed.message, failed.data));
       this.put(agentId, { id: this.newId(), kind: "error", turnId: failed.turnId, text });
-      if (this.live && !this.replaying) this.notify({ agentId, kind: "failed", detail: text });
+      // The hub settles this session's running ledger tasks immediately after reporting its turn failure.
+      if (!this.replaying && ![...this.tasks.values()].some(task => !task.tool && task.to.sessionId === sessionId && task.status === "running"))
+        this.notify({ agentId, kind: "failed", detail: text });
       return;
     }
     if (update.sessionUpdate === "agent_message_chunk") {
@@ -811,26 +822,35 @@ export class Workspace {
 
   /** Stop the running turn. Its open permission requests are void. */
   async cancel(agentId: string): Promise<void> {
-    this.stopped = true;
     for (const [entryId, asked] of this.asking) if (asked.agentId === agentId) this.answer(entryId, "cancelled");
     const sessionId = await this.mains.get(agentId);
     if (sessionId) this.conn.notify("session/cancel", { sessionId });
   }
 
-  private onPermission(request: PermissionRequest): Promise<PermissionResponse> {
+  private async onPermission(request: PermissionRequest, signal: AbortSignal): Promise<PermissionResponse> {
+    if (!this.live) await this.ready;
+    if (signal.aborted || this.left || this.conn.isClosed) return { outcome: { outcome: "cancelled" } };
     const agentId = this.sessionAgent.get(request.sessionId);
     // A session this window does not show, or no window at all: leave the question to a client that can show it.
     if (!agentId || this.hidden) throw RpcError.notFound(`session ${request.sessionId}`);
     this.settle(agentId);
     const entry = {
-      id: this.newId(),
+      id: `${request.sessionId}:permission:${randomUUID()}`,
       kind: "permission" as const,
-      turnId: this.agents.get(agentId)?.currentTurnId,
+      turnId: (request._meta?.[TurnExt.key] as { id?: string } | undefined)?.id ?? this.agents.get(agentId)?.currentTurnId,
       detail: request.title || request.subject?.toolCall?.title || request.subject?.toolCall?.toolCallId || "",
     };
-    this.put(agentId, entry);
-    this.notify({ agentId, kind: "permission", detail: entry.detail });
-    return new Promise((answer) => this.asking.set(entry.id, { agentId, entry, request, answer }));
+    return new Promise(resolve => {
+      const cancel = () => this.answer(entry.id, "cancelled");
+      const answer = (response: PermissionResponse) => {
+        signal.removeEventListener("abort", cancel);
+        resolve(response);
+      };
+      this.asking.set(entry.id, { agentId, entry, request, answer });
+      signal.addEventListener("abort", cancel, { once: true });
+      this.put(agentId, entry);
+      this.notify({ agentId, kind: "permission", detail: entry.detail, entryId: entry.id });
+    });
   }
 
   answerQuestion(agentId: string, answer: Answer): void {
@@ -866,6 +886,7 @@ export class Workspace {
       const cancel = () => answer({ action: "cancel" });
       this.nativeQuestions.set(questionId, { agentId, form, entry, answer });
       this.put(agentId, entry);
+      this.notify({ agentId, kind: "question", detail: form.questions[0]?.question ?? request.message, entryId: id });
       signal.addEventListener("abort", cancel, { once: true });
       if (signal.aborted) cancel();
     });

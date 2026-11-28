@@ -88,7 +88,10 @@ const TEXT: Record<Language, Words> = {
     agentControl: "An agent is controlling this page",
     notice: ({ kind, name, detail }) =>
       ({
-        done: { title: `${name} finished`, body: "All work is done. Nobody is working now." },
+        done: { title: `${name} completed a task`, body: detail },
+        cancelled: { title: `${name}’s task was cancelled`, body: detail },
+        interrupted: { title: `${name}’s task was interrupted`, body: detail },
+        workflow: { title: `${name}’s workflow finished`, body: detail },
         failed: { title: `${name}: something failed`, body: detail },
         confirm: { title: `${name} needs your decision`, body: detail },
         permission: { title: `${name} asks for permission`, body: detail },
@@ -112,7 +115,10 @@ const TEXT: Record<Language, Words> = {
     agentControl: "智能体正在控制网页",
     notice: ({ kind, name, detail }) =>
       ({
-        done: { title: `${name}完成了工作`, body: "工作已全部完成，现在没有智能体在工作。" },
+        done: { title: `${name}的任务已完成`, body: detail },
+        cancelled: { title: `${name}的任务已取消`, body: detail },
+        interrupted: { title: `${name}的任务已中断`, body: detail },
+        workflow: { title: `${name}的工作流已完成`, body: detail },
         failed: { title: `${name}：有工作失败了`, body: detail },
         confirm: { title: `${name}需要你确认`, body: detail },
         permission: { title: `${name}请求授权`, body: detail },
@@ -454,18 +460,20 @@ function connect(paths: Paths): Promise<Workspace> {
     const send = (event: Event): void => {
       for (const [id, shown] of windows) if (shown === project) webContents.fromId(id)?.send("xsb:event", event);
     };
-    // One notification, from the first window that shows the workspace: a click brings it to the agent.
+    // Resolve the destination again on click: the user can switch a window to another workspace.
     const notify = (n: Notice): void => {
-      const [id] = [...windows].find(([, shown]) => shown === project) ?? [];
-      const contents = id === undefined ? undefined : webContents.fromId(id);
-      const win = contents && BrowserWindow.fromWebContents(contents);
+      const win = windowShowing(project);
       if (!win) return;
       const { title, body } = TEXT[language()].notice(n);
-      notice(win, title, body, () => win.webContents.send("xsb:event", { showAgent: n.agentId } satisfies Event));
+      notice(win, title, body, () => {
+        const target = windowShowing(project);
+        if (!target) return;
+        bringForward(target);
+        target.webContents.send("xsb:event", { showAgent: n.agentId, entryId: n.entryId } satisfies Event);
+      });
     };
     const shownWindow = () => {
-      const [id] = [...windows].find(([, shown]) => shown === project) ?? [];
-      return id === undefined ? undefined : BrowserWindow.fromWebContents(webContents.fromId(id)!);
+      return windowShowing(project);
     };
     pending = Workspace.open(paths, clis.env(), language(), say, send, notify, {
       url: async (request, signal) => {

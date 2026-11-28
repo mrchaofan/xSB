@@ -319,6 +319,14 @@ body:not(.no-workspace) .welcome { display: none; }
 .permission code { font: var(--text-sm) var(--mono); background: var(--wash); padding: var(--space-1h) var(--space-2); border-radius: var(--radius-sm); white-space: pre-wrap; }
 .permission .actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 .permission[data-outcome] { border-color: var(--line); color: var(--ink-3); background: none; }
+.workflow-requests { align-self: center; width: calc(100% - 40px); max-width: 760px; max-height: min(24%, 160px); min-height: 0; overflow-y: auto; margin-bottom: var(--space-2); display: grid; gap: var(--space-1); }
+.workflow-request { display: flex; align-items: center; gap: var(--space-2); min-width: 0; padding: var(--space-1h) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); text-align: start; line-height: var(--leading-tight); }
+.workflow-request:hover { background: var(--wash); border-color: var(--ink-3); }
+.workflow-request:focus-visible { outline-offset: -2px; }
+.workflow-request-icon, .workflow-request-chevron { flex: none; display: grid; color: var(--ink-3); }
+.workflow-request-icon { color: var(--warn); }
+.workflow-request-text { flex: 1; min-width: 0; }
+.workflow-request strong, .workflow-request small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); }
 /* 智能体的提问（ask.js），仿 Codex：贴在输入框上方、同宽同对齐的面板，一题一页；选项是带编号的竖向列表，
    选中的行用选中底色、编号换成强调色。对话里只留一条问答记录。 */
 .ask-stack { flex: 0 1 auto; min-height: 0; max-height: 45%; overflow-y: auto; display: flex; flex-direction: column; }
@@ -954,6 +962,8 @@ body.artifact-focused .tabs > .side-close { display: grid; }
 .dag-node:enabled:hover { border-color: var(--ink-3); }
 .dag-node:disabled { cursor: default; border-style: dashed; color: var(--ink-3); }
 .dag-node[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-wash); }
+.dag-node:has(.dag-attention) { padding-right: var(--space-5); }
+.dag-attention { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
 #task-conversation { flex: 1; min-height: 0; display: flex; }
 #flow-contract[hidden], #task-conversation[hidden] { display: none; }
 #flow-contract { flex: 0 1 auto; max-height: 34%; overflow: auto; padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--line); }
