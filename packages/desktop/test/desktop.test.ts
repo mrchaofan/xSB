@@ -750,6 +750,10 @@ test("standard tool starts and split UTF-8 terminal bytes update a tool without 
   const ws = workspace(peer); await ws.load(); ws["sessionAgent"].set("s", "a");
   const emit = update => peer.emit("session/update", { sessionId: "s", update });
   emit({ sessionUpdate: "tool_call", toolCallId: "c", title: "Run command", status: "in_progress", content: [{ type: "terminal", terminalId: "terminal" }] });
+  const activity = ws["activities"].get("a");
+  assert.equal(activity?.detail, "Run command");
+  emit({ sessionUpdate: "user_message_chunk", messageId: "assignment", content: { type: "text", text: "Run the check" } });
+  assert.equal(ws["activities"].get("a"), activity, "a late insertion receipt preserves the running tool and its start time");
   const bytes = Buffer.from("输出");
   emit({ sessionUpdate: "terminal_output_chunk", terminalId: "terminal", data: bytes.subarray(0, 2).toString("base64") });
   emit({ sessionUpdate: "terminal_output_chunk", terminalId: "terminal", data: bytes.subarray(2).toString("base64") });

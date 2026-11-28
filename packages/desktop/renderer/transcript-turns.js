@@ -29,22 +29,23 @@ function transcriptTurns(entries) {
   return turns;
 }
 
-// Put the cursor on the final line of Markdown, or on its own line while waiting
-// for text (including after a tool, an input, or an attachment).
-function placeCursor(cursor, entriesNode, anchor) {
+// Place the cursor and activity together, either at the end of Markdown or after
+// the latest tool, input or attachment while the turn waits for another reply.
+function placeIndicator(indicator, entriesNode, anchor) {
   let last = anchor?.matches(".output") && anchor.querySelector(".content > .md:last-child")?.lastElementChild;
   while (last && !last.matches("p, h1, h2, h3, h4, h5, h6, li, code, td, th")) last = last.lastElementChild;
   if (last) {
-    if (cursor.parentElement !== last) last.append(cursor);
+    if (indicator.parentElement !== last) last.append(indicator);
   } else if (anchor) {
-    if (cursor.previousElementSibling !== anchor) anchor.after(cursor);
-  } else if (entriesNode.lastElementChild !== cursor) entriesNode.append(cursor);
+    if (indicator.previousElementSibling !== anchor) anchor.after(indicator);
+  } else if (entriesNode.lastElementChild !== indicator) entriesNode.append(indicator);
 }
 
 /** Keep one action per completed turn and one cursor for the foreground turn. */
 export function transcriptMarkers(entriesNode, getTranscript) {
   const buttons = new Map();
-  const cursor = h("span", { class: "turn-cursor", "aria-hidden": "true" });
+  const activity = h("span", { class: "turn-activity", role: "status", hidden: true });
+  const indicator = h("span", { class: "turn-indicator" }, h("span", { class: "turn-cursor", "aria-hidden": "true" }), activity);
   let cursorEntry;
   let turns;
 
@@ -84,15 +85,15 @@ export function transcriptMarkers(entriesNode, getTranscript) {
       if (button.previousElementSibling !== anchor) anchor.after(button);
     }
     cursorEntry = activeAnchor?.dataset.id;
-    if (active) placeCursor(cursor, entriesNode, activeAnchor);
-    else cursor.remove();
+    if (active) placeIndicator(indicator, entriesNode, activeAnchor);
+    else indicator.remove();
   }
 
-  return { sync, update(entry, replaced) {
+  return { sync, activity, update(entry, replaced) {
     // Streaming replaces the same Markdown node for each chunk. Only its cursor
     // needs moving; the completed turns and their copy actions stay in place.
     if (replaced && entry.kind === "output" && entry.streaming) {
-      if (entry.id === cursorEntry) placeCursor(cursor, entriesNode, replaced);
+      if (entry.id === cursorEntry) placeIndicator(indicator, entriesNode, replaced);
     } else sync();
   } };
 }

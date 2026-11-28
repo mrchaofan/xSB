@@ -324,7 +324,6 @@ function openLane(agentId, panel, readonly) {
     h("div", { class: "composer" },
       editor.tray, editor.el, editor.error,
       h("div", { class: "composer-row" },
-        h("span", { class: "hint", role: "status" }, h("i", { class: "state" }), h("span", {})),
         picker?.el, controls.el, controls.usage, h("button", { class: "send", onclick: press }))));
   lane.picker = picker;
   lane.editor = editor;
@@ -457,13 +456,14 @@ function syncLane(agentId) {
   lane.dataset.action = action;
   button.title = label;
   button.setAttribute("aria-label", label);
-  syncActivity(agentId);
+  syncActivity(lane);
 }
 
-/** 智能体此刻在做什么，以及做了多久。写在输入框下面；每秒重画一次。 */
-function syncActivity(agentId) {
-  const hint = laneOf(agentId)?.querySelector(".hint");
+/** 当前 turn 的状态跟随对话光标，主对话和节点对话分别计时。 */
+function syncActivity(lane) {
+  const hint = lane?.turnMarkers?.activity;
   if (!hint) return;
+  const agentId = lane.dataset.agent;
   const agent = agentOf(agentId), s = agent.state;
   const activity = state.activities[agentId];
   const kind = shownState(agent) === "asking" ? "asking" : s === "idle" ? null : s === "requires_action" ? "permission" : (activity?.kind ?? "waiting");
@@ -471,11 +471,14 @@ function syncActivity(agentId) {
   if (!kind) return;
   const seconds = activity && !["permission", "asking"].includes(kind) ? Math.max(0, Math.floor((Date.now() - Date.parse(activity.since)) / 1000)) : null;
   const elapsed = seconds === null ? "" : ` ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-  hint.dataset.activity = kind;
-  hint.querySelector(".state").dataset.state = kind === "permission" ? "requires_action" : kind === "asking" ? "asking" : "running";
-  hint.querySelector("span").textContent = t(`activity.${kind}`, { detail: activity?.detail ?? "" }) + elapsed;
+  const label = t(`activity.${kind}`, { detail: activity?.detail ?? "" });
+  if (hint.ariaLabel !== label) {
+    hint.ariaLabel = label;
+    hint.title = label;
+  }
+  hint.dataset.elapsed = elapsed;
 }
-setInterval(() => state.open.forEach(syncActivity), 1000);
+setInterval(() => document.querySelectorAll(".lane:has(.turn-indicator)").forEach(syncActivity), 1000);
 
 function upsertEntry(agentId, entry) {
   const lane = laneOf(agentId);
@@ -1064,7 +1067,7 @@ xsb.on((event) => {
   else if (event.workspaceChanged) { closeSettings(); start(); }
   else if ("activity" in event) {
     if (event.activity) state.activities[event.agentId] = event.activity; else delete state.activities[event.agentId];
-    syncActivity(event.agentId);
+    syncActivity(laneOf(event.agentId));
   }
   else if (event.transcript) showHistory(event.agentId, event.transcript);
   else if (event.partialTurnIds) {
