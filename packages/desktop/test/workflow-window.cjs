@@ -176,11 +176,51 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   const pendingStop = '#flow-contract [data-action="stop-node"]';
   const flowStop = '#flow-heading [data-action="stop"]';
   const visible = selector => js(q(selector) + "?.checkVisibility() ?? false");
-  await click(node("审阅"));
+  const mapHeight = () => js(q("#flow-map") + ".getBoundingClientRect().height");
+  const divider = '#flow-divider[role="separator"][aria-controls="flow-map"]';
+  const bound = name => js("Number(" + q(divider) + ".getAttribute('aria-value" + name + "'))");
+  const resizeKey = key => js(q(divider) + ".dispatchEvent(new KeyboardEvent('keydown', {key:" + JSON.stringify(key) + ", bubbles:true}))");
+  assert.ok(await visible(divider), "the workflow graph has a visible resize handle");
+  assert.equal(await js(q(divider) + ".tabIndex"), 0);
+  await resizeKey("End");
+  assert.ok(Math.abs(await mapHeight() - await bound("max")) <= 1, "End sizes the graph to its upper limit");
+  await resizeKey("Home");
+  const minimum = await mapHeight();
+  assert.ok(Math.abs(minimum - await bound("min")) <= 1, "Home sizes the graph to its lower limit");
+  assert.ok(await js(q("#flow-map") + ".scrollHeight > " + q("#flow-map") + ".clientHeight"), "a tall graph scrolls at the minimum height");
+  await resizeKey("ArrowDown");
+  const beforeDrag = await mapHeight();
+  assert.ok(beforeDrag > minimum, "the arrow key expands the graph");
+  const point = await js(`(() => {
+    const r = document.querySelector("#flow-divider").getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  })()`);
+  const mouse = win.webContents.debugger;
+  mouse.attach("1.3");
+  try {
+    await mouse.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", ...point, button: "left", buttons: 1, clickCount: 1 });
+    await mouse.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", ...point, y: point.y + 48, button: "left", buttons: 1 });
+    await mouse.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, y: point.y + 48, button: "left" });
+  } finally { mouse.detach(); }
+  const dragged = await mapHeight();
+  assert.ok(Math.abs(dragged - beforeDrag - 48) <= 1, "dragging moves the graph boundary by the pointer's distance");
+  await click("#flow-heading .flow-fold");
+  assert.equal(await visible(divider), false, "the folded graph has no resize handle");
+  await click("#flow-heading .flow-fold");
+  assert.equal(await mapHeight(), dragged, "unfolding restores the chosen graph height");
+  const inspectNode = async selector => {
+    await click(selector);
+    assert.ok(await visible("#flow-contract > summary"), "the selected node has a details toggle");
+    assert.equal(await has("#flow-contract[open]"), false, "a newly selected node starts collapsed");
+    await click("#flow-contract > summary");
+    assert.ok(await has("#flow-contract[open]"), "the user can expand the node details");
+  };
+  await inspectNode(node("审阅"));
   assert.equal(await has(panel), false);
   assert.ok(await visible(pendingStop), "a task can be stopped before it has an agent");
   await click(pendingStop);
   await until(() => has(node("审阅") + '[data-state="paused"]'), "undispatched task is paused");
+  assert.ok(await has("#flow-contract[open]"), "a status update preserves the user's expanded details");
   assert.ok(await has(node("起草") + '[data-state="running"]'), "its predecessor keeps working");
   assert.equal(await visible(pendingStop), false);
   await click(node("起草"));
@@ -239,6 +279,8 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   win.webContents.reload();
   await loaded;
   await until(() => has(panel + " .editor .file-ref"), "window reload restores task and file reference draft");
+  const restoredHeight = await mapHeight();
+  assert.ok(restoredHeight >= await bound("min") - 1 && restoredHeight <= await bound("max") + 1, "the restored graph is within its resize limits");
   assert.deepEqual(await startLines(), startsBeforeReload, "reloading the transcript preserves start messages once each");
   assert.doesNotMatch(await taskEntries(), /!waitForInput|!call finish|# Workflow task|# 工作流任务/);
   assert.equal(await js(q(main + " .editor") + ".textContent"), "main-only");
@@ -315,19 +357,23 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await until(() => has(".flow-plans button:last-child"), "candidate contract plan");
   await click(".flow-plans button:last-child");
   const bill = '.dag-node[data-node="Bill"]';
-  const rawContract = () => js("JSON.parse(" + q("#flow-contract .contract-raw pre") + ".textContent)");
-  await click(bill);
+  const rawContract = async () => {
+    if (!(await has(".contract-raw[open]"))) await click(".contract-raw > summary");
+    assert.ok(await visible(".contract-raw pre"));
+    return js("JSON.parse(" + q(".contract-raw pre") + ".textContent)");
+  };
+  await inspectNode(bill);
   const version = await js(q("#flow-contract") + ".dataset.version");
   assert.match(await js(q("#flow-contract .contract-source") + ".textContent"), /Calculate.*\/amount/);
   assert.deepEqual((await rawContract()).bindings[0].bind, { cents: "/amount" });
   assert.equal((await rawContract()).input, undefined, "planned input has no invented value");
-  await click('.dag-node[data-node="Calculate"]');
+  await inspectNode(node("Calculate"));
   assert.match(await js(q("#flow-contract .contract-field pre") + ".textContent"), /Free sample/);
   assert.match(await js(q('#flow-contract [data-part="expected"]') + ".innerText"), /amount/);
   await send(main, "!call execute {}");
   const atEnd = bill + '[data-state="completed"]';
   await until(() => has(atEnd), "end node publishes its bound input");
-  await click(atEnd);
+  await inspectNode(atEnd);
   const accepted = await rawContract();
   assert.deepEqual(accepted.input, { cents: 0 });
   assert.deepEqual(accepted.result, { cents: 0 });
@@ -342,13 +388,13 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await send(main, "!call execute " + graphArgs(missingAmount));
   const invalid = '.dag-node[data-node="Quote"][data-state="input_error"]';
   await until(() => has(invalid), "binding error is visible on the blocked node");
-  await click(invalid);
+  await inspectNode(invalid);
   const errorMessage = await js(q('#flow-contract [role="alert"]') + ".textContent");
   assert.ok(["ReadAmount", "/amount", "Quote", "cents"].every(field => errorMessage.includes(field)));
   assert.equal((await rawContract()).result, undefined);
   await untilJS(`[...document.querySelectorAll("#flow-heading select option")].some(o => o.value === ${JSON.stringify(version)})`, "contract snapshot kept in history");
   await js(`(() => { const select = document.querySelector("#flow-heading select"); select.value = ${JSON.stringify(version)}; select.dispatchEvent(new Event("change")); })()`);
-  await click(bill);
+  await inspectNode(bill);
   assert.deepEqual(await rawContract(), accepted, "history shows the same exact input, delivery and provenance");
 
   const markdown = [
@@ -363,22 +409,24 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await send(main, "!call plan " + graphArgs(markdown));
   await until(() => has(".flow-plans button:last-child"), "Markdown candidate");
   await click(".flow-plans button:last-child");
-  await click('.dag-node[data-node="Read"]');
+  await inspectNode(node("Read"));
   assert.match(await js(q(detail("entryInput")) + ".innerText"), /Visit two cities/);
   assert.match(await js(q(detail("candidates")) + ".innerText"), /Plan trip.*Two cities/s);
-  await click('.dag-node[data-node="Plan trip"]');
+  await inspectNode(node("Plan trip"));
   assert.equal(await has(detail("entryInput")), false);
   assert.equal(await has(detail("assignedInput")), false);
   assert.equal(await visible(flowStop), false);
   assert.equal(await visible(pendingStop), false);
   await send(main, "!call execute {}");
   await until(() => has('.dag-node[data-node="End of trip"][data-state="completed"]'), "Markdown result published");
-  await click('.dag-node[data-node="Read"]');
+  await inspectNode(node("Read"));
   assert.match(await js(q(detail("selectedTarget")) + ".innerText"), /Plan trip/);
   assert.ok(await has(".dag-surface path.chosen"));
-  await click('.dag-node[data-node="Plan trip"]');
+  await inspectNode(node("Plan trip"));
   assert.match(await js(q(detail("assignedInput")) + ".innerText"), /Travel brief/);
-  assert.match(await js(q(".input-sources") + ".textContent"), /Read/);
+  await click(".input-sources > summary");
+  assert.ok(await visible(".input-sources .contract-source"));
+  assert.match(await js(q(".input-sources .contract-source") + ".innerText"), /Read/);
   assert.equal(await js(q(detail("result") + " h1") + ".textContent"), "Travel route");
   assert.equal(await visible(flowStop), false);
   assert.equal(await visible(nodeStop), false);
@@ -387,12 +435,41 @@ require("./window-harness.cjs").windowTest(__filename, async ({ win, js, q, clic
   await send(main, '!call rollback {"nodes":["Plan trip"]}');
   await untilJS('[...document.querySelectorAll("#flow-heading option")].some(o=>o.value.startsWith("rollback"))', "main agent rollback creates a history snapshot");
   await js('(() => {const el = document.querySelector("#flow-heading select"); el.value = [...el.options].find(o=>o.value.startsWith("rollback")).value; el.dispatchEvent(new Event("change"));})()');
-  await click('.dag-node[data-node="Plan trip"]');
+  await inspectNode(node("Plan trip"));
   assert.match(await js(q(detail("result")) + ".innerText"), /Take the train/);
   assert.equal(await visible(flowStop), false);
   assert.equal(await visible(nodeStop), false);
   assert.equal(await has("#flow-contract [data-action=rollback-node]"), false);
   assert.equal(await has("#flow-heading [data-action=rollback]"), false);
+
+  await create();
+  const imageName = "角色设定.png";
+  fs.copyFileSync(path.join(__dirname, "../renderer/avatars/animal-cat.png"), path.join(workspace, imageName));
+  const illustration = [
+    { node: "角色与分镜样张", requirements: "!call finish " + JSON.stringify({ output: `[角色设定](./${imageName})` }) },
+    { node: "交付样张", kind: "end" }, { from: "角色与分镜样张", to: "交付样张" },
+  ];
+  await send(main, "!call plan " + graphArgs(illustration));
+  await until(() => has(node("角色与分镜样张")), "illustration workflow proposed");
+  await click('#tabs > button[aria-pressed]');
+  await click("#side-launcher .launcher-item:nth-of-type(2)");
+  await until(() => has("#artifact-body .artifact-browser .catalog-empty"), "Files is empty before delivery");
+  await send(main, "!call execute {}");
+  await until(() => listed(imageName), "the open Files list receives a workflow delivery without an ACP edit or link click");
+  assert.equal(await listed("costume.md"), false, "Files only includes the active conversation");
+  await click('#tabs .tab[data-id="workflow"] .tab-main');
+  await until(() => has(node("角色与分镜样张") + '[data-state="completed"]'), "illustration accepted");
+  await inspectNode(node("角色与分镜样张"));
+  assert.ok(await visible(detail("result") + " a"));
+  await click(detail("result") + " a");
+  await untilJS(q("#artifact-body figure img") + "?.naturalWidth > 0", "the delivered image opens from its node");
+  assert.equal(await js(q("#artifact-name") + ".textContent"), imageName);
+  await click("#artifact-list");
+  await until(() => listed(imageName), "Back from the preview shows the delivered image in Files");
+  const imageReload = new Promise(resolve => win.webContents.once("did-finish-load", resolve));
+  win.webContents.reload();
+  await imageReload;
+  await until(() => listed(imageName), "the workflow delivery remains in Files after reload");
   console.log(
     "Electron + real Hub/ACP: direct chat, DAG, task prompts, node and workflow stop, native files, web tabs, drafts, model/effort, usage, publication, node contracts, Markdown routing and agent-controlled resume/rollback passed",
   );

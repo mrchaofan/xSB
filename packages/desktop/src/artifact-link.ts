@@ -1,5 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { WorkflowView } from "@xsb/protocol";
+import { marked } from "marked";
 import type { Artifact } from "./bridge.ts";
 
 const PREVIEW_KINDS: Record<string, Artifact["kind"]> = {
@@ -46,4 +48,27 @@ export function artifactPath(href: string, baseDirectory: string): string {
   file = file.replace(/:\d+(?::\d+)?$/, "");
   if (!file || file.includes("\0")) throw new Error("invalid file path");
   return path.resolve(baseDirectory, file);
+}
+
+/** File links in the Markdown that task agents submitted, including additional work and saved versions. */
+export function workflowFileLinks(flow?: WorkflowView): { agentId: string; href: string }[] {
+  const links: { agentId: string; href: string }[] = [];
+  if (!flow) return links;
+  const seen = new Map<string, Set<string>>();
+  for (const version of [flow, ...(flow.history ?? [])]) {
+    for (const node of version.nodes) {
+      const { agentId, markdown } = node;
+      if (node.kind !== "task" || !agentId || !markdown) continue;
+      const outputs = seen.get(agentId) ?? new Set<string>();
+      seen.set(agentId, outputs);
+      for (const text of [markdown.output, ...(node.additionalResults ?? []).map(result => result.summary)]) {
+        if (!text || outputs.has(text)) continue;
+        outputs.add(text);
+        marked.walkTokens(marked.lexer(text), token => {
+          if (token.type === "link" || token.type === "image") links.push({ agentId, href: token.href });
+        });
+      }
+    }
+  }
+  return links;
 }

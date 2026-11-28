@@ -799,8 +799,8 @@ void app.whenReady().then(() => {
           return new Response(Buffer.from(image.data, "base64"), { headers: { "Content-Type": image.mimeType, "Cache-Control": "private, max-age=3600" } });
         } catch { return new Response(null, { status: 404 }); }
       }
-      const file = decodeURIComponent(new URL(request.url).pathname.slice(1));
-      const shown = [...projects.values()].some((w) => w.artifacts.has(file));
+      const file = decodeURIComponent(url.pathname.slice(1));
+      const shown = [...projects.values()].some((w) => w.canServeArtifact(file, url.searchParams.get("key")));
       return shown ? serveFile(file, request) : new Response(null, { status: 404 });
     });
   }

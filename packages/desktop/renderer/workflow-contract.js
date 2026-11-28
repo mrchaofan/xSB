@@ -89,7 +89,7 @@ export function renderContract(flow, version, node, edges, openLink, stopButton)
       : node.contract ? schemaDetails(node, edges, openLink, sameNode && panel.querySelector(".contract-raw")?.open)
       : h("p", {}, t("flow." + node.status)),
     stopButton);
-  if (!sameNode) panel.open = true;
+  if (!sameNode) panel.open = false;
   panel.dataset.version = version;
   panel.dataset.node = node.name;
   panel.workflow = flow;

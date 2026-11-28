@@ -22,7 +22,7 @@ import { migrateWorkspaceState, onPreferencesChanged, syncWindowColors } from ".
 import { confirmDialog, openDialog } from "./form.js";
 import { openNativeContextMenu } from "./menu.js";
 import { questionRecord, syncAskPanel } from "./ask.js";
-import { bindArtifactResize } from "./resize.js";
+import { bindArtifactResize, bindWorkflowResize } from "./resize.js";
 
 import { showWeb } from "./page-slot.js";
 
@@ -617,7 +617,7 @@ export function rememberPosition() {
   if (tab) tab.scroll = scroll;
 }
 const artifactBrowser = createArtifactBrowser(showArtifact, nameOf, referenceArtifact, referenceTitle);
-// The list is the Hub's projection of successful file edits across the main session and its task sessions.
+// The list includes successful file edits and the local files linked in workflow deliveries.
 let fileList = null;
 async function loadFileList(owner) {
   const previousFiles = fileList?.owner === owner ? fileList.files : null;
@@ -650,6 +650,8 @@ let artifactRender = 0;
 let artifactView = null;
 
 function browseArtifacts() {
+  // Linked deliveries can appear or disappear on disk without an ACP edit event.
+  if (fileList) fileList.dirty = true;
   revealArtifacts();
   selectTab("catalog");
 }
@@ -911,6 +913,7 @@ $("#artifact-modes").onclick = (e) => {
 };
 
 bindArtifactResize($("#divider"));
+bindWorkflowResize($("#flow-divider"), $("#flow-map"));
 
 // ⌘1…⌘9：打开并聚焦第 n 个 Agent 的输入框
 window.onkeydown = (e) => {
@@ -969,6 +972,7 @@ xsb.on((event) => {
   if (event.controls) laneOf(event.agentId)?.controls.update(event.controls);
   else if (event.workflow) {
     const flow = event.workflow, prior = state.workflows[flow.sessionId];
+    if (fileList?.owner === flow.sessionId) fileList.dirty = true;
     state.workflows[flow.sessionId] = flow;
     if (currentFlow() === flow) {
       if ((!prior?.version && !prior?.candidate) && (flow.version || flow.candidate)) { revealArtifacts(); selectTab("workflow"); }
