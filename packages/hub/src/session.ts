@@ -1716,7 +1716,7 @@ export class LiveSession {
     if (!this.hub.stopping) {
       if (end.failure) this.hub.log(`${this.agentId}/${this.id}: turn failed: ${errorMessage(end.failure)}`);
       // Its failure goes into the transcript, where the user sees it: the prompt that started it may have been answered long ago.
-      if (end.failure) this.emit({ sessionUpdate: "session_info_update", _meta: { [TurnFailure.key]: { message: errorMessage(end.failure), data: (end.failure as RpcError).data } } } as SessionUpdate);
+      if (end.failure) this.emit({ sessionUpdate: "session_info_update", _meta: { [TurnFailure.key]: { turnId: turn.id, message: errorMessage(end.failure), data: (end.failure as RpcError).data } } } as SessionUpdate);
       this.hub.state.atomic(() => {
         this.hub.state.afterCommit(() => this.lifecycle.emit("turn.ended", source, { stopReason: end.stopReason, failed: !!end.failure }));
         this.hub.state.afterCommit(() => this.hub.kernel.hooks.emit("acp.turn_ended", { agentId: this.agentId, sessionId: this.id, turnId: turn.id, stopReason: end.stopReason, failed: !!end.failure }));

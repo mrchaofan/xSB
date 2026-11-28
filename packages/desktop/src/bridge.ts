@@ -35,11 +35,11 @@ export type Entry = { id: string } & (
   | { kind: "output"; content: Content; streaming?: boolean; run?: BackendRun; stopReason?: string; runOrigin?: unknown }
   /** A source published this readable entry directly to the conversation. */
   | { kind: "publication"; source: ConversationEntry["source"]; markdown: string; withdrawn?: true }
-  | { kind: "tool"; title: string; status: "running" | "done" | "failed"; toolKind?: string; changes?: (FileChange & { uri: string })[]; imagePath?: string; savedFile?: { path: string; uri: string }; name?: string; input?: unknown; output?: unknown; terminalOutput?: string }
-  | { kind: "permission"; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
+  | { kind: "tool"; turnId?: string | null; title: string; status: "running" | "done" | "failed"; toolKind?: string; changes?: (FileChange & { uri: string })[]; imagePath?: string; savedFile?: { path: string; uri: string }; name?: string; input?: unknown; output?: unknown; terminalOutput?: string }
+  | { kind: "permission"; turnId?: string; detail: string; outcome?: "allowed" | "rejected" | "cancelled" }
   /** Historical questions can be read. Only the client holding a live ACP request can submit an answer. */
-  | { kind: "question"; questionId: string; questions: QuestionItem[]; state: QuestionState; answers?: QuestionAnswer[]; source?: "acp"; delivery?: "async"; answerable?: boolean }
-  | { kind: "error"; text: string }
+  | { kind: "question"; turnId?: string; questionId: string; questions: QuestionItem[]; state: QuestionState; answers?: QuestionAnswer[]; source?: "acp"; delivery?: "async"; answerable?: boolean }
+  | { kind: "error"; turnId?: string | null; text: string }
   /** Where what the model sees starts anew: before it, the model sees nothing (`cleared`) or only a handoff. */
   | { kind: "boundary"; boundary: Boundary }
 );
@@ -87,6 +87,8 @@ export type Snapshot = {
   artifacts: Artifact[];
   transcripts: Record<string, Entry[]>;
   history: Record<string, number | null>;
+  /** Turns with only late records on the loaded pages. */
+  partialTurnIds: Record<string, string[]>;
   /** Agent id -> what it is doing, for those with a turn running. */
   activities: Record<string, Activity>;
   /** The page tabs. */
@@ -126,4 +128,5 @@ export type Event =
   /** What the agent is doing now; `null` when its turn is over. */
   | { agentId: string; activity: Activity | null }
   | { agentId: string; entry: Entry }
+  | { agentId: string; partialTurnIds: string[] }
   | { agentId: string; removedEntry: string };

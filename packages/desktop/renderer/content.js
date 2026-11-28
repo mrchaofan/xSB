@@ -30,12 +30,12 @@ DOMPurify.addHook("beforeSanitizeAttributes", (node) => {
 export const markdownHtml = (text) => DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }));
 
 /** 复制源码而非按钮文字或渲染后的排版；失败时在按钮上反馈，允许重试。 */
-function copyButton(text, label, className = "") {
-  const button = h("button", { type: "button", class: `icon-btn copy ${className}`, title: t(label), "aria-label": t(label), html: ICON.copy });
+export function copyButton(readText, label) {
+  const button = h("button", { type: "button", class: "icon-btn copy", title: t(label), "aria-label": t(label), html: ICON.copy });
   let timer;
   button.onclick = async () => {
     try {
-      await xsb.copyText(text);
+      await xsb.copyText(await readText());
       button.innerHTML = ICON.check;
       button.title = t("content.copied");
     } catch {
@@ -52,8 +52,8 @@ function copyButton(text, label, className = "") {
   return button;
 }
 
-/** 对话和文档共用：链接交给侧栏，代码块有独立复制按钮。 */
-export function markdownView(text, openLink, className = "md") {
+/** 对话和文档共用；文档里的代码块可以单独复制。 */
+export function markdownView(text, openLink, className = "md", copyCode = true) {
   const el = h("div", { class: className, html: markdownHtml(text) });
   const followLink = (container) => (event) => {
     const link = event.target.closest("a");
@@ -82,9 +82,10 @@ export function markdownView(text, openLink, className = "md") {
   });
   el.querySelectorAll("pre > code").forEach((code) => {
     const pre = code.parentElement;
-    const toolbar = h("div", { class: "code-toolbar" },
-      h("span", {}, [...code.classList].find((c) => c.startsWith("language-"))?.slice(9) ?? ""),
-      copyButton(code.textContent, "content.copyCode"));
+    const language = [...code.classList].find((c) => c.startsWith("language-"))?.slice(9);
+    const toolbar = (language || copyCode) && h("div", { class: "code-toolbar" },
+      h("span", {}, language ?? ""),
+      copyCode && copyButton(() => code.textContent, "content.copyCode"));
     const wrapper = h("div", { class: "code-block" }, toolbar);
     pre.replaceWith(wrapper);
     wrapper.append(pre);
@@ -119,14 +120,12 @@ function partNode(block) {
 }
 
 /** 内容 → 对话里的样子：文本按 markdown 渲染，其余各占一块。 */
-export function contentView(content, openLink, { streaming = false } = {}) {
+export function contentView(content, openLink) {
   const el = h("div", { class: "content" }, ...content.map((block) => {
-    if (block.type === "text") return markdownView(block.text, openLink);
+    if (block.type === "text") return markdownView(block.text, openLink, "md", false);
     if (block.type === "resource_link") return h("button", { type: "button", class: "part chip file-ref", title: fileTitle(block.uri), html: ICON.file, onclick: () => openLink?.(block.uri, el) }, block.name);
     return partNode(block);
   }));
-  if (!streaming && content.some((block) => block.type === "text")) el.append(h("div", { class: "content-actions" },
-    copyButton(content.map((block) => block.type === "text" ? block.text : block.uri ?? "").filter(Boolean).join("\n\n"), "content.copyMessage")));
   return el;
 }
 

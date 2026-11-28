@@ -32,7 +32,7 @@ export class Elicitations {
     const pending: Pending = {
       session, id, turnId: session.current!.id, backendSessionId: request.sessionId, bridgeToken: session.bridgeToken,
       async: (request._meta?.codex as { delivery?: string } | undefined)?.delivery === "async",
-      params: { ...request, sessionId: session.id, _meta: { ...request._meta, [Question.key]: { id, source: "acp" } } },
+      params: { ...request, sessionId: session.id, _meta: { ...request._meta, [Question.key]: { id, turnId: session.current!.id, source: "acp" } } },
       form, validate: validator.compile(elicitationResponseSchema(request)), answer: deferred(), clients: new Map(), unable: new Set(),
       signal, onAbort: () => this.settle(pending, { action: "cancel" }),
     };
@@ -125,7 +125,7 @@ export class Elicitations {
 
   private record(p: Pending, state: QuestionState, response?: ElicitationResponse): void {
     p.session.emit({ sessionUpdate: "session_info_update", _meta: { [Question.key]: {
-      id: p.id, source: "acp", state,
+      id: p.id, turnId: p.turnId, source: "acp", state,
       ...((p.async || state === "open") ? { questions: p.form.questions } : {}),
       ...(p.async ? { delivery: "async" } : {}),
       ...(response?.action === "accept" ? { answers: elicitationAnswers(p.form, response.content ?? {}) } : {}),
