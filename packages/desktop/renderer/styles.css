@@ -292,7 +292,13 @@ body:not(.no-workspace) .welcome { display: none; }
 
 /* Keep the blink clock on the transcript while streaming replaces the last line. */
 .entries:has(.turn-cursor) { animation: cursor-blink 1s step-end infinite; }
-.turn-cursor { display: inline-block; align-self: flex-start; width: .5em; height: 1em; margin-inline-start: var(--space-0); vertical-align: -.1em; background: var(--accent); opacity: var(--turn-cursor-opacity, 1); }
+.turn-indicator { display: inline-flex; align-self: flex-start; align-items: center; gap: var(--space-1h); max-width: 100%; padding-inline-start: var(--space-0); vertical-align: -.1em; user-select: none; }
+.turn-cursor { flex: none; width: .5em; height: 1em; background: var(--accent); opacity: var(--turn-cursor-opacity, 1); }
+.turn-activity { display: inline-flex; min-width: 0; color: var(--ink-3); font: normal var(--text-sm)/1.2 var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.turn-activity[hidden] { display: none; }
+/* Keep the transient label and elapsed time out of the surrounding Markdown's text. */
+.turn-activity::before { content: attr(aria-label); overflow: hidden; text-overflow: ellipsis; }
+.turn-activity::after { content: attr(data-elapsed); flex: none; white-space: pre; }
 @keyframes cursor-blink { 0%, 100% { --turn-cursor-opacity: 1; } 50% { --turn-cursor-opacity: 0; } }
 .output[data-off-turn] { border: 1px dashed var(--line); border-radius: var(--radius); padding: var(--space-3); color: var(--ink-2); }
 .run-label, .run-end { font-size: var(--text-sm); color: var(--ink-3); }
@@ -372,11 +378,7 @@ body:not(.no-workspace) .welcome { display: none; }
 }
 .editor .part { margin: 0 var(--space-0); vertical-align: middle; user-select: all; }
 .editor img.part { height: 44px; border-radius: var(--radius-sm); border: 1px solid var(--line); }
-.composer-row { display: flex; align-items: center; gap: var(--space-1); margin-top: var(--space-2); min-height: var(--control-md); cursor: default; }
-.composer .hint { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-1h); font-size: var(--text-sm); color: var(--ink-3); white-space: nowrap; overflow: hidden; padding: var(--space-1); margin: calc(-1 * var(--space-1)); }
-.composer .hint[hidden] { display: flex; visibility: hidden; }
-.composer .hint span { overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
-.composer .hint .state { flex: none; }
+.composer-row { display: flex; justify-content: flex-end; align-items: center; gap: var(--space-1); margin-top: var(--space-2); min-height: var(--control-md); cursor: default; }
 .composer .send { width: var(--control-md); height: var(--control-md); border-radius: var(--radius-md); background: var(--accent); color: var(--on-accent); display: grid; place-items: center; flex: none; }
 .composer .send:hover { background: var(--accent-hover); }
 .composer .send svg { stroke-width: 1.8; }

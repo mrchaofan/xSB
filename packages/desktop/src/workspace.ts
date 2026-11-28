@@ -641,19 +641,13 @@ export class Workspace {
       const deliveredAs = update._meta?.[DeliveredAs.key] as DeliveredAs | undefined;
       // Its first block settles the waiting entry (`Accepted`) into the one the model has; the rest follow it.
       if (prior && !prior.pending && !prior.unsent && !prior.discarded) return this.put(agentId, { ...prior, content: append(prior.content, update.content) });
-      if (prior) {
-        this.settle(agentId);
-        this.does(agentId, "waiting");
-        this.pending.delete(update.messageId);
-        this.unsend(update.messageId);
-        return this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? prior.origin, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}), ...(this.replies.has(update.messageId) ? { reply: true } : {}) });
-      }
       // Input marks where a turn begins, or where a message entered the running one: what was said before is complete.
       this.settle(agentId);
-      this.does(agentId, "waiting"); // the model has it now, and has not answered yet
+      // An insertion receipt can arrive after its tool has started. Keep that tool's name and start time.
+      if (!this.tools.get(agentId)?.size) this.does(agentId, "waiting");
       this.pending.delete(update.messageId);
       this.unsend(update.messageId);
-      this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? { kind: "user" }, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}), ...(this.replies.has(update.messageId) ? { reply: true } : {}) });
+      this.put(agentId, { id, kind: "input", origin: (update._meta?.[OriginExt.key] as OriginMeta | undefined) ?? prior?.origin ?? { kind: "user" }, content: [update.content], ...(deliveredAs ? { deliveredAs } : {}), ...(this.replies.has(update.messageId) ? { reply: true } : {}) });
     } else if (update.sessionUpdate === "terminal_update" || update.sessionUpdate === "terminal_output_chunk") {
       for (const id of this.terminalViews.update(sessionId, update)) {
         const tool = this.transcripts.get(agentId)?.find((e): e is Tool & { id: string } => e.kind === "tool" && e.id === id);

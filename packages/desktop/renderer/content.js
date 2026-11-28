@@ -72,6 +72,7 @@ export function markdownView(text, openLink, className = "md", copyCode = true) 
   el.querySelectorAll("table").forEach((table) => {
     const expand = h("button", { class: "icon-btn", title: t("content.tableExpand"), "aria-label": t("content.tableExpand"), html: ICON.expand, onclick: () => {
       const view = h("div", { class: "md table-expanded" }, table.cloneNode(true));
+      view.querySelector(".turn-indicator")?.remove();
       view.onclick = followLink(view);
       const dialog = openDialog(t("content.table"), [view], [{ label: t("common.close") }]);
       dialog.classList.add("table-dialog");
